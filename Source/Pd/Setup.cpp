@@ -736,6 +736,7 @@ void stdout_setup();
 
 // cyclone objects functions declaration
 void cyclone_setup();
+void iemguts_setup();
 void accum_setup();
 void acos_setup();
 void acosh_setup();
@@ -1383,6 +1384,7 @@ void* Setup::createReceiver(void* ptr, char const* s,
 void Setup::initialisePdLua(char const* datadir, char* vers, int const vers_len, void (*register_class_callback)(char const*))
 {
     pdlua_setup(datadir, vers, vers_len, register_class_callback);
+    iemguts_setup();
 }
 
 void Setup::initialisePdInstance()
@@ -1452,6 +1454,11 @@ void Setup::parseArguments(char const** argv, size_t const argc, t_namelist** sy
     sys_argparse(argc, argv);
     // TODO: some args need to be parsed manually still!
     sys_unlock();
+}
+
+void Setup::initialiseIemguts()
+{
+    iemguts_setup();
 }
 
 void Setup::initialiseELSE()

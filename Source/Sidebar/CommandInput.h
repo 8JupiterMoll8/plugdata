@@ -555,6 +555,17 @@ public:
                 }
                 break;
             }
+            case hash("ai"): {
+                if (argv.size() < 2) {
+                    pd->logError("ai: No prompt provided. Usage: ai <prompt>");
+                    break;
+                }
+                // Forward the prompt to the MCP server via an internal message
+                String promptText = message.substring(message.indexOf("ai") + 2).trim();
+                pd->sendMessage("#plugdata_mcp_prompt", "agent_request", { pd->generateSymbol(promptText) });
+                pd->logMessage("AI: Thinking...");
+                break;
+            }
             case hash("man"): {
                 switch (hash(argv[1])) {
                 case hash("man"):
@@ -568,6 +579,10 @@ public:
 
                 case hash("script"):
                     pd->logMessage(argv[2] + ": Excute a Lua script from your search path. Usage: script <filename>");
+                    break;
+
+                case hash("ai"):
+                    pd->logMessage(argv[2] + ": Send a prompt to the Embedded Agent. Usage: " + argv[2] + " <prompt>");
                     break;
 
                 case hash("cnv"):
@@ -602,7 +617,8 @@ public:
                 case hash("search"):
                     pd->logMessage(argv[2] + ": Search object IDs on current canvas. Usage: " + argv[2] + " <id>.");
                     break;
-                default: break;
+                default:
+                    break;
                 }
             }
             case hash("?"):

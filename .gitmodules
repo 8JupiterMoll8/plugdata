@@ -56,3 +56,6 @@
 [submodule "Libraries/xz"]
 	path = Libraries/xz
 	url = https://github.com/tukaani-project/xz.git
+[submodule "Libraries/pd-iemguts"]
+	path = Libraries/pd-iemguts
+	url = https://github.com/iem-projects/pd-iemguts.git

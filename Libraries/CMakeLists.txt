@@ -231,6 +231,17 @@ file(GLOB ELSE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/pd-else/Source/Extra/Aliases/*.c
 )
 
+set(IEMGUTS_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/pd-iemguts/src/canvasdelete.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/pd-iemguts/src/canvasindex.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/pd-iemguts/src/canvasname.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/pd-iemguts/src/receivecanvas.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/pd-iemguts/src/sendcanvas.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/pd-iemguts/src/iemguts.c
+)
+list(APPEND ELSE_SOURCES ${IEMGUTS_SOURCES})
+
+
 if(NOT ENABLE_FFMPEG)
 list(REMOVE_ITEM ELSE_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/pd-else/Source/Audio/play.file~.c)
 list(REMOVE_ITEM ELSE_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/pd-else/Source/Control/sfload.c)
@@ -267,7 +278,7 @@ set(LUA_PATH "${PDLUA_PATH}/lua")
 set(LUA_INCLUDE_DIR ${LUA_PATH})
 
 add_library(lua STATIC ${LUA_PATH}/onelua.c)
-add_library(lua-multi STATIC ${PDLUA_PATH}/onelua_multi.c)
+add_library(lua-multi STATIC ${LUA_PATH}/onelua.c)
 
 if("${CMAKE_SYSTEM}" MATCHES "Linux")
 target_compile_definitions(lua PRIVATE MAKE_LIB=1 LUA_USE_LINUX=1)
@@ -447,7 +458,7 @@ unset(MESSAGE_QUIET)
 # TARGETS
 # ------------------------------------------------------------------------------#
 add_library(externals STATIC ${ELSE_SOURCES} ${CYCLONE_SOURCES} ${PDLUA_SOURCES})
-add_library(externals-multi STATIC ${ELSE_SOURCES} ${CYCLONE_SOURCES} ${PDLUA_SOURCES} ${})
+add_library(externals-multi STATIC ${ELSE_SOURCES} ${CYCLONE_SOURCES} ${PDLUA_SOURCES})
 
 # Hide deprecation warnings on externals, it's noise and are outside of our control
 if(MSVC)

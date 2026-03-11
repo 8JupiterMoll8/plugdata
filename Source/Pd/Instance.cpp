@@ -78,16 +78,38 @@ public:
     {
         std::function<void(SmallString const&)> const forwardMessage =
             [this, object](SmallString const& message) {
-                if (message.startsWith("error")) {
-                    logError(object, message.substring(7));
+                bool isError = false;
+                SmallString content = message;
+
+                if (message.startsWith("error") || message.toString().contains("couldn't create") || message.toString().contains("error:") || message.toString().contains("canvas: ...")) {
+                    isError = true;
+                    if (message.startsWith("error: ")) {
+                        content = message.substring(7);
+                    } else if (message.startsWith("error ")) {
+                        content = message.substring(6);
+                    }
+                    logError(object, content);
                 } else if (message.startsWith("verbose(0):") || message.startsWith("verbose(1):")) {
-                    logError(object, message.substring(12));
+                    isError = true;
+                    content = message.substring(12);
+                    logError(object, content);
                 } else {
                     if (message.startsWith("verbose(")) {
-                        logMessage(object, message.substring(12));
+                        content = message.substring(12);
+                        logMessage(object, content);
                     } else {
-                        logMessage(object, message);
+                        logMessage(object, content);
                     }
+                }
+
+                // Forward to PlugData receiver for MCP bridge
+                libpd_set_instance(static_cast<t_pdinstance*>(this->instance->instance));
+                auto* s = gensym("#plugdata_mcp_console");
+                if (s && s->s_thing) {
+                    t_atom atoms[2];
+                    SETFLOAT(&atoms[0], isError ? 1.0f : 0.0f);
+                    SETSYMBOL(&atoms[1], gensym(content.data()));
+                    pd_typedmess(s->s_thing, gensym("list"), 2, atoms);
                 }
             };
 
@@ -693,6 +715,7 @@ void Instance::initialisePd(String& pdlua_version)
 
         class_set_extern_dir(gensym(""));
         set_class_prefix(nullptr);
+        pd::Setup::initialiseIemguts();
         initialised = true;
 
         clear_class_loadsym();
