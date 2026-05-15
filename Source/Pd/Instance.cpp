@@ -143,6 +143,24 @@ public:
         }
     }
 
+    void processSelection(String const& selector, SmallArray<pd::Atom> const& list)
+    {
+        libpd_set_instance(static_cast<t_pdinstance*>(this->instance->instance));
+        t_symbol* s = gensym("#plugdata_mcp_ui");
+        if (s && s->s_thing) {
+            std::vector<t_atom> atoms(list.size());
+            for (int i = 0; i < list.size(); ++i) {
+                if (list[i].isFloat()) {
+                    SETFLOAT(&atoms[i], list[i].getFloat());
+                } else if (list[i].isSymbol()) {
+                    SETSYMBOL(&atoms[i], list[i].getSymbol());
+                }
+            }
+            // Send as a typed message (selector first) so [route] works natively
+            pd_typedmess(s->s_thing, gensym(selector.toRawUTF8()), static_cast<int>(atoms.size()), atoms.data());
+        }
+    }
+
     std::deque<std::tuple<void*, String, int, int, int>> consoleMessages;
     std::deque<std::tuple<void*, String, int, int, int>> consoleHistory;
 
@@ -1231,6 +1249,11 @@ void Instance::registerLuaClass(char const* className)
 bool Instance::isLuaClass(hash32 const objectNameHash)
 {
     return luaClasses.contains(objectNameHash);
+}
+
+void Instance::sendSelectionTelemetry(String const& selector, SmallArray<pd::Atom> const& list)
+{
+    consoleMessageHandler->processSelection(selector, list);
 }
 
 } // namespace pd
