@@ -1832,6 +1832,69 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
         }
         break;
     }
+    case hash("mcp_selection_gate"): {
+        String msgStr(selector.toString());
+        if (msgStr.trim().toLowerCase() == "mcp_selection_gate") {
+            logMessage("MCP_DEBUG: Global Selection Query Received (Indestructible)");
+            for (auto* editor : getEditors()) {
+                // Priority 1: Current Active Canvas (User Focus)
+                auto* currentCanvas = editor->getCurrentCanvas();
+                if (currentCanvas && currentCanvas->patch.getRawPointer() != nullptr) {
+                    auto selectedObjects = currentCanvas->getSelectionOfType<Object>();
+                    if (!selectedObjects.empty()) {
+                        logMessage("MCP_DEBUG: Found selection in ACTIVE: " + currentCanvas->patch.getTitle() + " (count: " + String(selectedObjects.size()) + ")");
+                        SmallArray<pd::Atom> atoms;
+                        auto titleAtoms = pd::Atom::atomsFromString(currentCanvas->patch.getTitle());
+                        if (!titleAtoms.empty())
+                            atoms.add(titleAtoms[0]);
+
+                        for (auto* obj : selectedObjects) {
+                            for (int i = 0; i < currentCanvas->objects.size(); ++i) {
+                                if (currentCanvas->objects[i] == obj) {
+                                    atoms.add(pd::Atom((float)i));
+                                    break;
+                                }
+                            }
+                        }
+                        sendMessage("mcp_telemetry_reply", "/mcp/telemetry/selected", atoms);
+                        logMessage("MCP_DEBUG: Dispatched to Pd: mcp_telemetry_reply");
+                        sendMessagesFromQueue();
+                        return; // Focus found, we are done!
+                    }
+                }
+
+                // Priority 2: X-Ray Scan (Background Patches)
+                auto canvases = editor->getCanvases();
+                for (int c = canvases.size() - 1; c >= 0; --c) {
+                    auto* canvas = canvases[c];
+                    if (canvas == currentCanvas) continue; // Already checked
+
+                    auto selectedObjects = canvas->getSelectionOfType<Object>();
+                    if (!selectedObjects.empty()) {
+                        logMessage("MCP_DEBUG: Found selection in X-RAY: " + canvas->patch.getTitle() + " (count: " + String(selectedObjects.size()) + ")");
+                        SmallArray<pd::Atom> atoms;
+                        auto titleAtoms = pd::Atom::atomsFromString(canvas->patch.getTitle());
+                        if (!titleAtoms.empty())
+                            atoms.add(titleAtoms[0]);
+
+                        for (auto* obj : selectedObjects) {
+                            for (int i = 0; i < canvas->objects.size(); ++i) {
+                                if (canvas->objects[i] == obj) {
+                                    atoms.add(pd::Atom((float)i));
+                                    break;
+                                }
+                            }
+                        }
+                        sendMessage("mcp_telemetry_reply", "/mcp/telemetry/selected", atoms);
+                        logMessage("MCP_DEBUG: Dispatched to Pd: mcp_telemetry_reply");
+                        sendMessagesFromQueue();
+                        return;
+                    }
+                }
+            }
+        }
+        break;
+    }
     case hash("quit"):
     case hash("verifyquit"): {
         if (ProjectInfo::isStandalone) {
