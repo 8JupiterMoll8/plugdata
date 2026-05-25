@@ -5,6 +5,7 @@
 */
 
 #pragma once
+#include <unordered_map>
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_audio_devices/juce_audio_devices.h>
 #include <juce_dsp/juce_dsp.h>
@@ -286,5 +287,8 @@ private:
     TimedCallback backupRunLoop = TimedCallback([this] { runBackupLoop(); });
     CriticalSection backupLoopLock;
     std::atomic<bool> isProcessingAudio;
+    t_gobj* resolveStableId(const String& canvasName, const String& objectId);
+    std::unordered_map<std::string, std::unordered_map<std::string, t_gobj*>> mcpStableObjectMap;
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PluginProcessor)
 };

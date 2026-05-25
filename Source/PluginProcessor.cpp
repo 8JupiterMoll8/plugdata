@@ -1735,6 +1735,38 @@ void PluginProcessor::receiveMidiByte(int const channel, int const byte)
     }
 }
 
+static int getObjectIndex(t_canvas* canvas, t_gobj* obj) {
+    int index = 0;
+    for (t_gobj* y_obj = canvas->gl_list; y_obj; y_obj = y_obj->g_next) {
+        if (y_obj == obj) {
+            return index;
+        }
+        index++;
+    }
+    return -1;
+}
+
+t_gobj* PluginProcessor::resolveStableId(const String& canvasName, const String& objectId)
+{
+    auto canvasStr = canvasName.toStdString();
+    auto idStr = objectId.toStdString();
+    
+    auto& canvasMap = mcpStableObjectMap[canvasStr];
+    auto it = canvasMap.find(idStr);
+    if (it != canvasMap.end()) {
+        t_canvas* canvas = (t_canvas*)pd_findbyclass(gensym(canvasName.toRawUTF8()), canvas_class);
+        if (canvas) {
+            for (t_gobj* y_obj = canvas->gl_list; y_obj; y_obj = y_obj->g_next) {
+                if (y_obj == it->second) {
+                    return it->second;
+                }
+            }
+        }
+        canvasMap.erase(it);
+    }
+    return nullptr;
+}
+
 void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<pd::Atom> const& list)
 {
     switch (hash(selector)) {
@@ -1973,6 +2005,228 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
             SmallArray<pd::Atom> atoms;
             atoms.add(pd::Atom((float)movedCount));
             sendMessage("mcp_telemetry_reply", String("/pd/move_batch/reply/" + correlation_id).toRawUTF8(), atoms);
+            sendMessagesFromQueue();
+        }
+        break;
+    }
+    case hash("mcp_clear_ids"): {
+        if (list.size() >= 2) {
+            auto canvas_symbol = list[0].toString();
+            auto correlation_id = list[1].toString();
+
+            auto canvasStr = canvas_symbol.toStdString();
+            mcpStableObjectMap.erase(canvasStr);
+
+            SmallArray<pd::Atom> atoms;
+            atoms.add(pd::Atom(1.0f));
+            sendMessage("mcp_telemetry_reply", String("/pd/mcp_clear_ids/reply/" + correlation_id).toRawUTF8(), atoms);
+            sendMessagesFromQueue();
+        }
+        break;
+    }
+    case hash("mcp_register_id"): {
+        if (list.size() >= 4) {
+            auto canvas_symbol = list[0].toString();
+            auto correlation_id = list[1].toString();
+            int object_index = (int)list[2].getFloat();
+            auto object_id = list[3].toString();
+
+            sys_lock();
+            t_canvas* canvas = (t_canvas*)pd_findbyclass(gensym(canvas_symbol.toRawUTF8()), canvas_class);
+            bool success = false;
+            if (canvas) {
+                t_gobj* targetObj = nullptr;
+                if (object_index == -1) {
+                    targetObj = pd::Interface::getNewest(canvas);
+                } else {
+                    int currentIndex = 0;
+                    for (t_gobj* y_obj = canvas->gl_list; y_obj; y_obj = y_obj->g_next) {
+                        if (currentIndex == object_index) {
+                            targetObj = y_obj;
+                            break;
+                        }
+                        currentIndex++;
+                    }
+                }
+
+                if (targetObj) {
+                    mcpStableObjectMap[canvas_symbol.toStdString()][object_id.toStdString()] = targetObj;
+                    success = true;
+                }
+            }
+            sys_unlock();
+
+            SmallArray<pd::Atom> atoms;
+            atoms.add(pd::Atom(success ? 1.0f : 0.0f));
+            sendMessage("mcp_telemetry_reply", String("/pd/mcp_register_id/reply/" + correlation_id).toRawUTF8(), atoms);
+            sendMessagesFromQueue();
+        }
+        break;
+    }
+    case hash("mcp_connect_id"): {
+        if (list.size() >= 6) {
+            auto canvas_symbol = list[0].toString();
+            auto correlation_id = list[1].toString();
+            auto src_id = list[2].toString();
+            int src_out = (int)list[3].getFloat();
+            auto dest_id = list[4].toString();
+            int dest_in = (int)list[5].getFloat();
+
+            sys_lock();
+            t_canvas* canvas = (t_canvas*)pd_findbyclass(gensym(canvas_symbol.toRawUTF8()), canvas_class);
+            bool success = false;
+            if (canvas) {
+                t_gobj* srcObj = resolveStableId(canvas_symbol, src_id);
+                t_gobj* destObj = resolveStableId(canvas_symbol, dest_id);
+                t_object* srcText = pd::Interface::checkObject(srcObj);
+                t_object* destText = pd::Interface::checkObject(destObj);
+
+                if (srcText && destText) {
+                    t_outconnect* oc = pd::Interface::createConnection(canvas, srcText, src_out, destText, dest_in);
+                    if (oc) {
+                        canvas_dirty(canvas, 1);
+                        success = true;
+                    }
+                }
+            }
+            sys_unlock();
+
+            SmallArray<pd::Atom> atoms;
+            atoms.add(pd::Atom(success ? 1.0f : 0.0f));
+            sendMessage("mcp_telemetry_reply", String("/pd/mcp_connect_id/reply/" + correlation_id).toRawUTF8(), atoms);
+            sendMessagesFromQueue();
+        }
+        break;
+    }
+    case hash("mcp_disconnect_id"): {
+        if (list.size() >= 6) {
+            auto canvas_symbol = list[0].toString();
+            auto correlation_id = list[1].toString();
+            auto src_id = list[2].toString();
+            int src_out = (int)list[3].getFloat();
+            auto dest_id = list[4].toString();
+            int dest_in = (int)list[5].getFloat();
+
+            sys_lock();
+            t_canvas* canvas = (t_canvas*)pd_findbyclass(gensym(canvas_symbol.toRawUTF8()), canvas_class);
+            bool success = false;
+            if (canvas) {
+                t_gobj* srcObj = resolveStableId(canvas_symbol, src_id);
+                t_gobj* destObj = resolveStableId(canvas_symbol, dest_id);
+                t_object* srcText = pd::Interface::checkObject(srcObj);
+                t_object* destText = pd::Interface::checkObject(destObj);
+
+                if (srcText && destText) {
+                    pd::Interface::removeConnection(canvas, srcText, src_out, destText, dest_in, nullptr);
+                    canvas_dirty(canvas, 1);
+                    success = true;
+                }
+            }
+            sys_unlock();
+
+            SmallArray<pd::Atom> atoms;
+            atoms.add(pd::Atom(success ? 1.0f : 0.0f));
+            sendMessage("mcp_telemetry_reply", String("/pd/mcp_disconnect_id/reply/" + correlation_id).toRawUTF8(), atoms);
+            sendMessagesFromQueue();
+        }
+        break;
+    }
+    case hash("mcp_delete_id"): {
+        if (list.size() >= 3) {
+            auto canvas_symbol = list[0].toString();
+            auto correlation_id = list[1].toString();
+            auto object_id = list[2].toString();
+
+            sys_lock();
+            t_canvas* canvas = (t_canvas*)pd_findbyclass(gensym(canvas_symbol.toRawUTF8()), canvas_class);
+            bool success = false;
+            if (canvas) {
+                t_gobj* targetObj = resolveStableId(canvas_symbol, object_id);
+                if (targetObj) {
+                    SmallArray<t_gobj*> objectsToDelete;
+                    objectsToDelete.add(targetObj);
+                    pd::Interface::removeObjects(canvas, objectsToDelete);
+                    mcpStableObjectMap[canvas_symbol.toStdString()].erase(object_id.toStdString());
+                    success = true;
+                }
+            }
+            sys_unlock();
+
+            SmallArray<pd::Atom> atoms;
+            atoms.add(pd::Atom(success ? 1.0f : 0.0f));
+            sendMessage("mcp_telemetry_reply", String("/pd/mcp_delete_id/reply/" + correlation_id).toRawUTF8(), atoms);
+            sendMessagesFromQueue();
+        }
+        break;
+    }
+    case hash("mcp_move_id"): {
+        if (list.size() >= 5) {
+            auto canvas_symbol = list[0].toString();
+            auto correlation_id = list[1].toString();
+            auto object_id = list[2].toString();
+            int x = (int)list[3].getFloat();
+            int y = (int)list[4].getFloat();
+
+            sys_lock();
+            t_canvas* canvas = (t_canvas*)pd_findbyclass(gensym(canvas_symbol.toRawUTF8()), canvas_class);
+            bool success = false;
+            if (canvas) {
+                t_gobj* targetObj = resolveStableId(canvas_symbol, object_id);
+                if (targetObj) {
+                    pd::Interface::moveObject(canvas, targetObj, x, y);
+                    canvas_dirty(canvas, 1);
+                    success = true;
+                }
+            }
+            sys_unlock();
+
+            SmallArray<pd::Atom> syncAtoms;
+            syncAtoms.add(pd::Atom(-1.0f));
+            syncAtoms.add(pd::Atom(-1.0f));
+            syncAtoms.add(pd::Atom(-1.0f));
+            syncAtoms.add(pd::Atom(-1.0f));
+            sendMessage(canvas_symbol.toRawUTF8(), "disconnect", syncAtoms);
+
+            SmallArray<pd::Atom> atoms;
+            atoms.add(pd::Atom(success ? 1.0f : 0.0f));
+            sendMessage("mcp_telemetry_reply", String("/pd/mcp_move_id/reply/" + correlation_id).toRawUTF8(), atoms);
+            sendMessagesFromQueue();
+        }
+        break;
+    }
+    case hash("mcp_edit_id"): {
+        if (list.size() >= 4) {
+            auto canvas_symbol = list[0].toString();
+            auto correlation_id = list[1].toString();
+            auto object_id = list[2].toString();
+            auto new_text = list[3].toString();
+
+            sys_lock();
+            t_canvas* canvas = (t_canvas*)pd_findbyclass(gensym(canvas_symbol.toRawUTF8()), canvas_class);
+            bool success = false;
+            if (canvas) {
+                t_gobj* targetObj = resolveStableId(canvas_symbol, object_id);
+                if (targetObj) {
+                    pd::Interface::renameObject(canvas, targetObj, new_text.toRawUTF8(), new_text.getNumBytesAsUTF8());
+                    t_gobj* newObj = pd::Interface::getNewest(canvas);
+                    if (newObj) {
+                        mcpStableObjectMap[canvas_symbol.toStdString()][object_id.toStdString()] = newObj;
+                        success = true;
+                    }
+                }
+            }
+            sys_unlock();
+
+            SmallArray<pd::Atom> syncAtoms;
+            syncAtoms.add(pd::Atom(-1.0f));
+            syncAtoms.add(pd::Atom(-1.0f));
+            syncAtoms.add(pd::Atom(-1.0f));
+            syncAtoms.add(pd::Atom(-1.0f));
+            sendMessage(canvas_symbol.toRawUTF8(), "disconnect", syncAtoms);
+
+            SmallArray<pd::Atom> atoms;
+            atoms.add(pd::Atom(success ? 1.0f : 0.0f));
+            sendMessage("mcp_telemetry_reply", String("/pd/mcp_edit_id/reply/" + correlation_id).toRawUTF8(), atoms);
             sendMessagesFromQueue();
         }
         break;
