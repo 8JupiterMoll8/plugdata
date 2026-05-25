@@ -1895,6 +1895,88 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
         }
         break;
     }
+    case hash("mcp_move"): {
+        if (list.size() >= 4) {
+            auto canvas_symbol = list[0].toString();
+            int object_index = (int)list[1].getFloat();
+            int x = (int)list[2].getFloat();
+            int y = (int)list[3].getFloat();
+
+            sys_lock();
+            t_canvas* canvas = (t_canvas*)pd_findbyclass(gensym(canvas_symbol.toRawUTF8()), canvas_class);
+            if (canvas) {
+                t_gobj* targetObj = nullptr;
+                int currentIndex = 0;
+                for (t_gobj* y_obj = canvas->gl_list; y_obj; y_obj = y_obj->g_next) {
+                    if (currentIndex == object_index) {
+                        targetObj = y_obj;
+                        break;
+                    }
+                    currentIndex++;
+                }
+
+                if (targetObj) {
+                    pd::Interface::moveObject(canvas, targetObj, x, y);
+                    canvas_dirty(canvas, 1);
+                }
+            }
+            sys_unlock();
+
+            SmallArray<pd::Atom> syncAtoms;
+            syncAtoms.add(pd::Atom(-1.0f));
+            syncAtoms.add(pd::Atom(-1.0f));
+            syncAtoms.add(pd::Atom(-1.0f));
+            syncAtoms.add(pd::Atom(-1.0f));
+            sendMessage(canvas_symbol.toRawUTF8(), "disconnect", syncAtoms);
+            sendMessagesFromQueue();
+        }
+        break;
+    }
+    case hash("mcp_move_batch"): {
+        if (list.size() >= 2) {
+            auto canvas_symbol = list[0].toString();
+            auto correlation_id = list[1].toString();
+
+            int movedCount = 0;
+            sys_lock();
+            t_canvas* canvas = (t_canvas*)pd_findbyclass(gensym(canvas_symbol.toRawUTF8()), canvas_class);
+            if (canvas) {
+                std::vector<t_gobj*> objects;
+                for (t_gobj* y_obj = canvas->gl_list; y_obj; y_obj = y_obj->g_next) {
+                    objects.push_back(y_obj);
+                }
+
+                for (int i = 2; i + 2 < list.size(); i += 3) {
+                    int object_index = (int)list[i].getFloat();
+                    int x = (int)list[i+1].getFloat();
+                    int y = (int)list[i+2].getFloat();
+
+                    if (object_index >= 0 && object_index < objects.size()) {
+                        t_gobj* targetObj = objects[object_index];
+                        pd::Interface::moveObject(canvas, targetObj, x, y);
+                        movedCount++;
+                    }
+                }
+                if (movedCount > 0) {
+                    canvas_dirty(canvas, 1);
+                }
+            }
+            sys_unlock();
+
+            SmallArray<pd::Atom> syncAtoms;
+            syncAtoms.add(pd::Atom(-1.0f));
+            syncAtoms.add(pd::Atom(-1.0f));
+            syncAtoms.add(pd::Atom(-1.0f));
+            syncAtoms.add(pd::Atom(-1.0f));
+            sendMessage(canvas_symbol.toRawUTF8(), "disconnect", syncAtoms);
+
+            SmallArray<pd::Atom> atoms;
+            atoms.add(pd::Atom((float)movedCount));
+            sendMessage("mcp_telemetry_reply", String("/pd/move_batch/reply/" + correlation_id).toRawUTF8(), atoms);
+            sendMessagesFromQueue();
+        }
+        break;
+    }
     case hash("quit"):
     case hash("verifyquit"): {
         if (ProjectInfo::isStandalone) {

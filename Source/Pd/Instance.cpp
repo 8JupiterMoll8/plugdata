@@ -309,6 +309,7 @@ Instance::~Instance()
     objectImplementations.reset(nullptr); // Make sure it gets deallocated before pd instance gets deleted
 
     libpd_set_instance(static_cast<t_pdinstance*>(instance));
+    pd_free(static_cast<t_pd*>(mcpReceiver));
     pd_free(static_cast<t_pd*>(messageReceiver));
     pd_free(static_cast<t_pd*>(midiReceiver));
     gensym("#plugdata_print")->s_thing = nullptr; // In case any object tries to print during shutdown
@@ -357,6 +358,9 @@ void Instance::initialisePd(String& pdlua_version)
     midiReceiver = pd::Setup::createMIDIHook(this, reinterpret_cast<t_plugdata_noteonhook>(internal::instance_multi_noteon), reinterpret_cast<t_plugdata_controlchangehook>(internal::instance_multi_controlchange), reinterpret_cast<t_plugdata_programchangehook>(internal::instance_multi_programchange),
         reinterpret_cast<t_plugdata_pitchbendhook>(internal::instance_multi_pitchbend), reinterpret_cast<t_plugdata_aftertouchhook>(internal::instance_multi_aftertouch), reinterpret_cast<t_plugdata_polyaftertouchhook>(internal::instance_multi_polyaftertouch),
         reinterpret_cast<t_plugdata_midibytehook>(internal::instance_multi_midibyte));
+
+    mcpReceiver = pd::Setup::createReceiver(this, "mcp_host", reinterpret_cast<t_plugdata_banghook>(internal::instance_multi_bang), reinterpret_cast<t_plugdata_floathook>(internal::instance_multi_float), reinterpret_cast<t_plugdata_symbolhook>(internal::instance_multi_symbol),
+        reinterpret_cast<t_plugdata_listhook>(internal::instance_multi_list), reinterpret_cast<t_plugdata_messagehook>(internal::instance_multi_message));
 
     messageReceiver = pd::Setup::createReceiver(this, "pd", reinterpret_cast<t_plugdata_banghook>(internal::instance_multi_bang), reinterpret_cast<t_plugdata_floathook>(internal::instance_multi_float), reinterpret_cast<t_plugdata_symbolhook>(internal::instance_multi_symbol),
         reinterpret_cast<t_plugdata_listhook>(internal::instance_multi_list), reinterpret_cast<t_plugdata_messagehook>(internal::instance_multi_message));
@@ -1033,6 +1037,7 @@ void Instance::handleAsyncUpdate()
 
         switch (hash(mess.destination)) {
         case hash("pd"):
+        case hash("mcp_host"):
             receiveSysMessage(mess.selector, mess.list);
             break;
         case hash("__latency_compensation"):

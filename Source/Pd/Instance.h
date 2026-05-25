@@ -282,6 +282,7 @@ public:
     static bool loadLibrary(String const& library);
 
     void* instance = nullptr;
+    void* mcpReceiver = nullptr;
     void* messageReceiver = nullptr;
     void* parameterReceiver = nullptr;
     void* pluginLatencyReceiver = nullptr;
