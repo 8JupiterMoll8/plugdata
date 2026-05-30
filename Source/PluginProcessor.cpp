@@ -2083,8 +2083,10 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
                     success = true;
                     if (pd_class(&targetObj->g_pd) == canvas_class) {
                         t_canvas* subcanvas = reinterpret_cast<t_canvas*>(targetObj);
-                        pd_typedmess(reinterpret_cast<t_pd*>(subcanvas), gensym("clear"), 0, nullptr);
-                        pd_typedmess(reinterpret_cast<t_pd*>(subcanvas), gensym("loadbang"), 0, nullptr);
+                        if (!canvas_isabstraction(subcanvas)) {
+                            pd_typedmess(reinterpret_cast<t_pd*>(subcanvas), gensym("clear"), 0, nullptr);
+                            pd_typedmess(reinterpret_cast<t_pd*>(subcanvas), gensym("loadbang"), 0, nullptr);
+                        }
                     }
                 }
             }
