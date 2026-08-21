@@ -1983,6 +1983,14 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
         }
         break;
     }
+    case hash("mcp_clear_selection"): {
+        for (auto* editor : getEditors()) {
+            if (auto* cnv = editor->getCurrentCanvas()) {
+                cnv->deselectAll();
+            }
+        }
+        break;
+    }
     case hash("mcp_move_batch"): {
         if (list.size() >= 2) {
             auto canvas_symbol = list[0].toString();
@@ -2081,6 +2089,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
                     mcpStableObjectMap[canvas_symbol.toStdString()][object_id.toStdString()] = targetObj;
                     mcpStableSerialMap[targetObj] = mcpSerialCounter++;
                     success = true;
+                    canvas_dirty(canvas, 1);
                     if (pd_class(&targetObj->g_pd) == canvas_class) {
                         t_canvas* subcanvas = reinterpret_cast<t_canvas*>(targetObj);
                         if (!canvas_isabstraction(subcanvas)) {
@@ -2091,6 +2100,16 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
                 }
             }
             sys_unlock();
+
+            // Force full GUI repaint (matches mcp_move_id / mcp_edit_id pattern)
+            {
+                SmallArray<pd::Atom> syncAtoms;
+                syncAtoms.add(pd::Atom(-1.0f));
+                syncAtoms.add(pd::Atom(-1.0f));
+                syncAtoms.add(pd::Atom(-1.0f));
+                syncAtoms.add(pd::Atom(-1.0f));
+                sendMessage(canvas_symbol.toRawUTF8(), "disconnect", syncAtoms);
+            }
 
             SmallArray<pd::Atom> atoms;
             atoms.add(pd::Atom(success ? 1.0f : 0.0f));
@@ -2225,9 +2244,20 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
                     mcpStableObjectMap[canvas_symbol.toStdString()].erase(object_id.toStdString());
                     mcpStableSerialMap.erase(targetObj);
                     success = true;
+                    canvas_dirty(canvas, 1);
                 }
             }
             sys_unlock();
+
+            // Force full GUI repaint (matches mcp_move_id / mcp_edit_id pattern)
+            {
+                SmallArray<pd::Atom> syncAtoms;
+                syncAtoms.add(pd::Atom(-1.0f));
+                syncAtoms.add(pd::Atom(-1.0f));
+                syncAtoms.add(pd::Atom(-1.0f));
+                syncAtoms.add(pd::Atom(-1.0f));
+                sendMessage(canvas_symbol.toRawUTF8(), "disconnect", syncAtoms);
+            }
 
             SmallArray<pd::Atom> atoms;
             atoms.add(pd::Atom(success ? 1.0f : 0.0f));
