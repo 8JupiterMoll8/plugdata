@@ -2052,6 +2052,86 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
         }
         break;
     }
+    case hash("mcp_suspend_dsp"): {
+        sys_lock();
+        mcpSuspendedDspState = canvas_suspend_dsp();
+        sys_unlock();
+        break;
+    }
+    case hash("mcp_resume_dsp"): {
+        sys_lock();
+        canvas_resume_dsp(mcpSuspendedDspState);
+        sys_unlock();
+        break;
+    }
+    case hash("mcp_create_batch_id"): {
+        if (list.size() >= 3) {
+            auto canvas_symbol = list[0].toString();
+            auto correlation_id = list[1].toString();
+            int count = (int)list[2].getFloat();
+            int cursor = 3;
+            int created = 0;
+
+            sys_lock();
+            t_canvas* canvas = (t_canvas*)pd_findbyclass(gensym(canvas_symbol.toRawUTF8()), canvas_class);
+            if (canvas) {
+                int const dspstate = canvas_suspend_dsp();
+                pd::Patch patchWrapper(pd::WeakReference(canvas, this), this, false);
+                for (int o = 0; o < count; o++) {
+                    if (cursor + 5 >= (int)list.size()) break;
+                    auto object_id = list[cursor].toString(); cursor++;
+                    int x = (int)list[cursor].getFloat(); cursor++;
+                    int y = (int)list[cursor].getFloat(); cursor++;
+                    auto kind = list[cursor].toString(); cursor++;
+                    auto objtype = list[cursor].toString(); cursor++;
+                    int nargs = (int)list[cursor].getFloat(); cursor++;
+
+                    StringArray tokens;
+                    tokens.add(objtype);
+                    for (int a = 0; a < nargs && cursor < (int)list.size(); a++) {
+                        tokens.add(list[cursor].toString());
+                        cursor++;
+                    }
+
+                    String objectText;
+                    if (kind == "msg") {
+                        objectText = "msg " + tokens.joinIntoString(" ");
+                    } else if (kind == "text" || kind == "comment") {
+                        objectText = "comment " + tokens.joinIntoString(" ");
+                    } else if (kind == "floatatom" || kind == "floatbox") {
+                        objectText = "floatbox " + tokens.joinIntoString(" ");
+                    } else if (kind == "symbolatom" || kind == "symbolbox") {
+                        objectText = "symbolbox " + tokens.joinIntoString(" ");
+                    } else {
+                        objectText = tokens.joinIntoString(" ");
+                    }
+
+                    t_gobj* targetObj = patchWrapper.createObject(x, y, objectText);
+                    if (targetObj) {
+                        mcpStableObjectMap[canvas_symbol.toStdString()][object_id.toStdString()] = targetObj;
+                        mcpStableSerialMap[targetObj] = mcpSerialCounter++;
+                        created++;
+                        if (pd_class(&targetObj->g_pd) == canvas_class) {
+                            t_canvas* subcanvas = reinterpret_cast<t_canvas*>(targetObj);
+                            if (!canvas_isabstraction(subcanvas)) {
+                                pd_typedmess(reinterpret_cast<t_pd*>(subcanvas), gensym("clear"), 0, nullptr);
+                                pd_typedmess(reinterpret_cast<t_pd*>(subcanvas), gensym("loadbang"), 0, nullptr);
+                            }
+                        }
+                    }
+                }
+                canvas_resume_dsp(dspstate);
+                canvas_dirty(canvas, 1);
+            }
+            sys_unlock();
+
+            SmallArray<pd::Atom> atoms;
+            atoms.add(pd::Atom((float)created));
+            sendMessage("mcp_telemetry_reply", String("/pd/create_batch_id/reply/" + correlation_id).toRawUTF8(), atoms);
+            sendMessagesFromQueue();
+        }
+        break;
+    }
     case hash("mcp_create_id"): {
         if (list.size() >= 6) {
             auto canvas_symbol = list[0].toString();
@@ -2100,16 +2180,6 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
                 }
             }
             sys_unlock();
-
-            // Force full GUI repaint (matches mcp_move_id / mcp_edit_id pattern)
-            {
-                SmallArray<pd::Atom> syncAtoms;
-                syncAtoms.add(pd::Atom(-1.0f));
-                syncAtoms.add(pd::Atom(-1.0f));
-                syncAtoms.add(pd::Atom(-1.0f));
-                syncAtoms.add(pd::Atom(-1.0f));
-                sendMessage(canvas_symbol.toRawUTF8(), "disconnect", syncAtoms);
-            }
 
             SmallArray<pd::Atom> atoms;
             atoms.add(pd::Atom(success ? 1.0f : 0.0f));

@@ -291,6 +291,7 @@ private:
     std::unordered_map<std::string, std::unordered_map<std::string, t_gobj*>> mcpStableObjectMap;
     std::unordered_map<t_gobj*, uint64_t> mcpStableSerialMap;
     uint64_t mcpSerialCounter = 1;
+    int mcpSuspendedDspState = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PluginProcessor)
 };
