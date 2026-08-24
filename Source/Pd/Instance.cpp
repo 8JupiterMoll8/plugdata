@@ -111,6 +111,7 @@ public:
                     SETSYMBOL(&atoms[1], gensym(content.data()));
                     pd_typedmess(s->s_thing, gensym("list"), 2, atoms);
                 }
+                this->instance->onConsoleMessage(String::fromUTF8(content.data()), isError);
             };
 
         static int length = 0;
@@ -159,6 +160,7 @@ public:
             // Send as a typed message (selector first) so [route] works natively
             pd_typedmess(s->s_thing, gensym(selector.toRawUTF8()), static_cast<int>(atoms.size()), atoms.data());
         }
+        this->instance->onSelectionChanged(selector, list);
     }
 
     std::deque<std::tuple<void*, String, int, int, int>> consoleMessages;

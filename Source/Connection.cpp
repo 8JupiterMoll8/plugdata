@@ -90,6 +90,7 @@ Connection::Connection(Canvas* parent, Iolet* s, Iolet* e, t_outconnect* oc)
 
     setAccessible(false); // TODO: implement accessibility. We disable default, since it makes stuff slow on macOS
     lookAndFeelChanged();
+    updatePath();
 }
 
 Connection::~Connection()

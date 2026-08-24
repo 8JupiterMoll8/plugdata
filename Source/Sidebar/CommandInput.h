@@ -17,6 +17,7 @@ extern "C" {
 #include "PluginEditor.h"
 #include "Objects/ObjectBase.h"
 #include "Sidebar/Sidebar.h"
+#include "Pd/MCPBridge.h"
 #include "Components/MarkupDisplay.h"
 #include "Utility/CachedStringWidth.h"
 
@@ -563,6 +564,11 @@ public:
                 // Forward the prompt to the MCP server via an internal message
                 String promptText = message.substring(message.indexOf("ai") + 2).trim();
                 pd->sendMessage("#plugdata_mcp_prompt", "agent_request", { pd->generateSymbol(promptText) });
+                if (auto* proc = dynamic_cast<PluginProcessor*>(pd)) {
+                    if (auto* bridge = proc->getMCPBridge()) {
+                        bridge->sendPrompt(promptText);
+                    }
+                }
                 pd->logMessage("AI: Thinking...");
                 break;
             }

@@ -24,6 +24,8 @@
 #include "Pd/Instance.h"
 #include "Pd/Patch.h"
 
+class MCPBridge;
+
 namespace pd {
 class Library;
 }
@@ -44,6 +46,9 @@ public:
     PluginProcessor();
 
     ~PluginProcessor() override;
+
+    MCPBridge* getMCPBridge() const { return mcpBridge.get(); }
+    void sendMCPReply(const String& replyAddr, const SmallArray<pd::Atom>& atoms);
 
     static AudioProcessor::BusesProperties buildBusesProperties();
 
@@ -107,6 +112,8 @@ public:
     bool isTextEditorDialogShown(uint64_t ptr) override;
 
     void updateConsole(int numMessages, bool newWarning) override;
+    void onSelectionChanged(String const& selector, SmallArray<pd::Atom> const& list) override;
+    void onConsoleMessage(String const& message, bool isError) override;
 
     void reloadAbstractions(File changedPatch, t_glist* except) override;
 
@@ -127,6 +134,8 @@ public:
     }
 
     void settingsFileReloaded() override;
+    t_canvas* getCanvasBySymbol(const String& canvas_symbol);
+    void synchroniseCanvases();
 
     static bool initialiseFilesystem();
 #if JUCE_IOS
@@ -292,6 +301,7 @@ private:
     std::unordered_map<t_gobj*, uint64_t> mcpStableSerialMap;
     uint64_t mcpSerialCounter = 1;
     int mcpSuspendedDspState = 0;
+    std::unique_ptr<MCPBridge> mcpBridge;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PluginProcessor)
 };

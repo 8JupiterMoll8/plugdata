@@ -1236,6 +1236,10 @@ void Canvas::performSynchronise()
         }
     }
 
+    for (auto* c : connections) {
+        c->updatePath();
+    }
+
     if (!isGraph) {
         setTransform(AffineTransform().scaled(getValue<float>(zoomScale)));
     }

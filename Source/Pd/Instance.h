@@ -210,6 +210,8 @@ public:
     virtual bool isTextEditorDialogShown(uint64_t ptr) = 0;
     
     void sendSelectionTelemetry(String const& selector, SmallArray<pd::Atom> const& list);
+    virtual void onSelectionChanged(String const& selector, SmallArray<pd::Atom> const& list) {}
+    virtual void onConsoleMessage(String const& message, bool isError) {}
 
     virtual void receiveSysMessage(SmallString const& selector, SmallArray<pd::Atom> const& list) = 0;
 

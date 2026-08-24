@@ -13,6 +13,7 @@
 
 #include "PluginProcessor.h"
 #include "Pd/Library.h"
+#include "Pd/MCPBridge.h"
 
 #include "Utility/Config.h"
 #include "Utility/Fonts.h"
@@ -190,6 +191,8 @@ PluginProcessor::PluginProcessor()
     updateSearchPaths();
 
     objectLibrary = std::make_unique<pd::Library>(this);
+
+    mcpBridge = std::make_unique<MCPBridge>(this, 9000, 19010);
 
     setLatencySamples(pd::Instance::getBlockSize());
     settingsFile->startChangeListener();
@@ -1746,6 +1749,55 @@ static int getObjectIndex(t_canvas* canvas, t_gobj* obj) {
     return -1;
 }
 
+t_canvas* PluginProcessor::getCanvasBySymbol(const String& canvas_symbol)
+{
+    if (canvas_symbol == "pd-main" || canvas_symbol == "main" || canvas_symbol.isEmpty()) {
+        for (auto* editor : getEditors()) {
+            if (editor) {
+                if (auto* cnv = editor->getCurrentCanvas()) {
+                    auto* ptr = cnv->patch.getRawPointer();
+                    if (ptr) return ptr;
+                }
+            }
+        }
+    }
+
+    t_canvas* canvas = (t_canvas*)pd_findbyclass(gensym(canvas_symbol.toRawUTF8()), canvas_class);
+    if (!canvas && !canvas_symbol.startsWith("pd-")) {
+        canvas = (t_canvas*)pd_findbyclass(gensym(String("pd-" + canvas_symbol).toRawUTF8()), canvas_class);
+    }
+    if (!canvas) {
+        canvas = pd_this->pd_canvaslist;
+    }
+    return canvas;
+}
+
+void PluginProcessor::synchroniseCanvases()
+{
+    if (auto* mm = juce::MessageManager::getInstanceWithoutCreating()) {
+        if (!mm->isThisTheMessageThread()) {
+            mm->callAsync([this] { synchroniseCanvases(); });
+            return;
+        }
+    } else {
+        return;
+    }
+
+    for (auto* editor : getEditors()) {
+        if (!editor) continue;
+        SmallArray<Component::SafePointer<Canvas>> canvases;
+        for (auto* canvas : editor->getCanvases()) {
+            if (canvas) canvases.add(canvas);
+        }
+        for (auto& cnv : canvases) {
+            if (cnv.getComponent()) {
+                cnv->synchronise();
+                cnv->handleUpdateNowIfNeeded();
+            }
+        }
+    }
+}
+
 t_gobj* PluginProcessor::resolveStableId(const String& canvasName, const String& objectId)
 {
     auto canvasStr = canvasName.toStdString();
@@ -1754,7 +1806,7 @@ t_gobj* PluginProcessor::resolveStableId(const String& canvasName, const String&
     auto& canvasMap = mcpStableObjectMap[canvasStr];
     auto it = canvasMap.find(idStr);
     if (it != canvasMap.end()) {
-        t_canvas* canvas = (t_canvas*)pd_findbyclass(gensym(canvasName.toRawUTF8()), canvas_class);
+        t_canvas* canvas = getCanvasBySymbol(canvasName);
         if (canvas) {
             uint64_t expectedSerial = 0;
             auto serialIt = mcpStableSerialMap.find(it->second);
@@ -1960,7 +2012,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
             int y = (int)list[3].getFloat();
 
             sys_lock();
-            t_canvas* canvas = (t_canvas*)pd_findbyclass(gensym(canvas_symbol.toRawUTF8()), canvas_class);
+            t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
             if (canvas) {
                 t_gobj* targetObj = nullptr;
                 int currentIndex = 0;
@@ -1998,7 +2050,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
 
             int movedCount = 0;
             sys_lock();
-            t_canvas* canvas = (t_canvas*)pd_findbyclass(gensym(canvas_symbol.toRawUTF8()), canvas_class);
+            t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
             if (canvas) {
                 std::vector<t_gobj*> objects;
                 for (t_gobj* y_obj = canvas->gl_list; y_obj; y_obj = y_obj->g_next) {
@@ -2025,7 +2077,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
 
             SmallArray<pd::Atom> atoms;
             atoms.add(pd::Atom((float)movedCount));
-            sendMessage("mcp_telemetry_reply", String("/pd/move_batch/reply/" + correlation_id).toRawUTF8(), atoms);
+            sendMCPReply(String("/pd/move_batch/reply/" + correlation_id), atoms);
             sendMessagesFromQueue();
         }
         break;
@@ -2047,7 +2099,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
 
             SmallArray<pd::Atom> atoms;
             atoms.add(pd::Atom(1.0f));
-            sendMessage("mcp_telemetry_reply", String("/pd/mcp_clear_ids/reply/" + correlation_id).toRawUTF8(), atoms);
+            sendMCPReply(String("/pd/mcp_clear_ids/reply/" + correlation_id), atoms);
             sendMessagesFromQueue();
         }
         break;
@@ -2073,7 +2125,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
             int created = 0;
 
             sys_lock();
-            t_canvas* canvas = (t_canvas*)pd_findbyclass(gensym(canvas_symbol.toRawUTF8()), canvas_class);
+            t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
             if (canvas) {
                 int const dspstate = canvas_suspend_dsp();
                 pd::Patch patchWrapper(pd::WeakReference(canvas, this), this, false);
@@ -2127,8 +2179,9 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
 
             SmallArray<pd::Atom> atoms;
             atoms.add(pd::Atom((float)created));
-            sendMessage("mcp_telemetry_reply", String("/pd/create_batch_id/reply/" + correlation_id).toRawUTF8(), atoms);
+            sendMCPReply(String("/pd/create_batch_id/reply/" + correlation_id), atoms);
             sendMessagesFromQueue();
+            enqueueFunctionAsync([this] { synchroniseCanvases(); });
         }
         break;
     }
@@ -2160,7 +2213,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
             }
 
             sys_lock();
-            t_canvas* canvas = (t_canvas*)pd_findbyclass(gensym(canvas_symbol.toRawUTF8()), canvas_class);
+            t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
             bool success = false;
             if (canvas) {
                 pd::Patch patchWrapper(pd::WeakReference(canvas, this), this, false);
@@ -2183,8 +2236,9 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
 
             SmallArray<pd::Atom> atoms;
             atoms.add(pd::Atom(success ? 1.0f : 0.0f));
-            sendMessage("mcp_telemetry_reply", String("/pd/mcp_create_id/reply/" + correlation_id).toRawUTF8(), atoms);
+            sendMCPReply(String("/pd/mcp_create_id/reply/" + correlation_id), atoms);
             sendMessagesFromQueue();
+            enqueueFunctionAsync([this] { synchroniseCanvases(); });
         }
         break;
     }
@@ -2196,7 +2250,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
             auto object_id = list[3].toString();
 
             sys_lock();
-            t_canvas* canvas = (t_canvas*)pd_findbyclass(gensym(canvas_symbol.toRawUTF8()), canvas_class);
+            t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
             bool success = false;
             if (canvas) {
                 t_gobj* targetObj = nullptr;
@@ -2223,7 +2277,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
 
             SmallArray<pd::Atom> atoms;
             atoms.add(pd::Atom(success ? 1.0f : 0.0f));
-            sendMessage("mcp_telemetry_reply", String("/pd/mcp_register_id/reply/" + correlation_id).toRawUTF8(), atoms);
+            sendMCPReply(String("/pd/mcp_register_id/reply/" + correlation_id), atoms);
             sendMessagesFromQueue();
         }
         break;
@@ -2238,17 +2292,22 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
             int dest_in = (int)list[5].getFloat();
 
             sys_lock();
-            t_canvas* canvas = (t_canvas*)pd_findbyclass(gensym(canvas_symbol.toRawUTF8()), canvas_class);
+            t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
             bool success = false;
             if (canvas) {
                 t_gobj* srcObj = resolveStableId(canvas_symbol, src_id);
                 t_gobj* destObj = resolveStableId(canvas_symbol, dest_id);
-                t_object* srcText = pd::Interface::checkObject(srcObj);
-                t_object* destText = pd::Interface::checkObject(destObj);
 
-                if (srcText && destText) {
-                    t_outconnect* oc = pd::Interface::createConnection(canvas, srcText, src_out, destText, dest_in);
-                    if (oc) {
+                if (srcObj && destObj) {
+                    int srcIdx = glist_getindex(canvas, srcObj);
+                    int destIdx = glist_getindex(canvas, destObj);
+                    if (srcIdx >= 0 && destIdx >= 0) {
+                        t_atom cArgs[4];
+                        SETFLOAT(&cArgs[0], static_cast<float>(srcIdx));
+                        SETFLOAT(&cArgs[1], static_cast<float>(src_out));
+                        SETFLOAT(&cArgs[2], static_cast<float>(destIdx));
+                        SETFLOAT(&cArgs[3], static_cast<float>(dest_in));
+                        pd_typedmess(reinterpret_cast<t_pd*>(canvas), gensym("connect"), 4, cArgs);
                         canvas_dirty(canvas, 1);
                         success = true;
                     }
@@ -2258,8 +2317,9 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
 
             SmallArray<pd::Atom> atoms;
             atoms.add(pd::Atom(success ? 1.0f : 0.0f));
-            sendMessage("mcp_telemetry_reply", String("/pd/mcp_connect_id/reply/" + correlation_id).toRawUTF8(), atoms);
+            sendMCPReply(String("/pd/mcp_connect_id/reply/" + correlation_id), atoms);
             sendMessagesFromQueue();
+            enqueueFunctionAsync([this] { synchroniseCanvases(); });
         }
         break;
     }
@@ -2273,7 +2333,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
             int dest_in = (int)list[5].getFloat();
 
             sys_lock();
-            t_canvas* canvas = (t_canvas*)pd_findbyclass(gensym(canvas_symbol.toRawUTF8()), canvas_class);
+            t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
             bool success = false;
             if (canvas) {
                 t_gobj* srcObj = resolveStableId(canvas_symbol, src_id);
@@ -2291,8 +2351,9 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
 
             SmallArray<pd::Atom> atoms;
             atoms.add(pd::Atom(success ? 1.0f : 0.0f));
-            sendMessage("mcp_telemetry_reply", String("/pd/mcp_disconnect_id/reply/" + correlation_id).toRawUTF8(), atoms);
+            sendMCPReply(String("/pd/mcp_disconnect_id/reply/" + correlation_id), atoms);
             sendMessagesFromQueue();
+            enqueueFunctionAsync([this] { synchroniseCanvases(); });
         }
         break;
     }
@@ -2303,7 +2364,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
             auto object_id = list[2].toString();
 
             sys_lock();
-            t_canvas* canvas = (t_canvas*)pd_findbyclass(gensym(canvas_symbol.toRawUTF8()), canvas_class);
+            t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
             bool success = false;
             if (canvas) {
                 t_gobj* targetObj = resolveStableId(canvas_symbol, object_id);
@@ -2331,8 +2392,9 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
 
             SmallArray<pd::Atom> atoms;
             atoms.add(pd::Atom(success ? 1.0f : 0.0f));
-            sendMessage("mcp_telemetry_reply", String("/pd/mcp_delete_id/reply/" + correlation_id).toRawUTF8(), atoms);
+            sendMCPReply(String("/pd/mcp_delete_id/reply/" + correlation_id), atoms);
             sendMessagesFromQueue();
+            enqueueFunctionAsync([this] { synchroniseCanvases(); });
         }
         break;
     }
@@ -2356,7 +2418,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
 
             SmallArray<pd::Atom> atoms;
             atoms.add(pd::Atom(success ? 1.0f : 0.0f));
-            sendMessage("mcp_telemetry_reply", String("/pd/mcp_rename_id/reply/" + correlation_id).toRawUTF8(), atoms);
+            sendMCPReply(String("/pd/mcp_rename_id/reply/" + correlation_id), atoms);
             sendMessagesFromQueue();
         }
         break;
@@ -2370,7 +2432,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
             int y = (int)list[4].getFloat();
 
             sys_lock();
-            t_canvas* canvas = (t_canvas*)pd_findbyclass(gensym(canvas_symbol.toRawUTF8()), canvas_class);
+            t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
             bool success = false;
             if (canvas) {
                 t_gobj* targetObj = resolveStableId(canvas_symbol, object_id);
@@ -2385,7 +2447,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
 
             SmallArray<pd::Atom> atoms;
             atoms.add(pd::Atom(success ? 1.0f : 0.0f));
-            sendMessage("mcp_telemetry_reply", String("/pd/mcp_move_id/reply/" + correlation_id).toRawUTF8(), atoms);
+            sendMCPReply(String("/pd/mcp_move_id/reply/" + correlation_id), atoms);
             sendMessagesFromQueue();
         }
         break;
@@ -2406,7 +2468,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
             }
 
             sys_lock();
-            t_canvas* canvas = (t_canvas*)pd_findbyclass(gensym(canvas_symbol.toRawUTF8()), canvas_class);
+            t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
             bool success = false;
             if (canvas) {
                 t_gobj* targetObj = resolveStableId(canvas_symbol, object_id);
@@ -2444,7 +2506,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
 
             SmallArray<pd::Atom> atoms;
             atoms.add(pd::Atom(success ? 1.0f : 0.0f));
-            sendMessage("mcp_telemetry_reply", String("/pd/mcp_edit_id/reply/" + correlation_id).toRawUTF8(), atoms);
+            sendMCPReply(String("/pd/mcp_edit_id/reply/" + correlation_id), atoms);
             sendMessagesFromQueue();
         }
         break;
@@ -2455,7 +2517,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
             auto correlation_id = list[1].toString();
 
             sys_lock();
-            t_canvas* canvas = (t_canvas*)pd_findbyclass(gensym(canvas_symbol.toRawUTF8()), canvas_class);
+            t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
             SmallArray<pd::Atom> atoms;
             if (canvas) {
                 auto& canvasMap = mcpStableObjectMap[canvas_symbol.toStdString()];
@@ -2477,7 +2539,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
             }
             sys_unlock();
 
-            sendMessage("mcp_telemetry_reply", String("/pd/mcp_get_mappings/reply/" + correlation_id).toRawUTF8(), atoms);
+            sendMCPReply(String("/pd/mcp_get_mappings/reply/" + correlation_id), atoms);
             sendMessagesFromQueue();
         }
         break;
@@ -2489,7 +2551,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
 
             int movedCount = 0;
             sys_lock();
-            t_canvas* canvas = (t_canvas*)pd_findbyclass(gensym(canvas_symbol.toRawUTF8()), canvas_class);
+            t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
             if (canvas) {
                 for (int i = 2; i + 2 < list.size(); i += 3) {
                     auto object_id = list[i].toString();
@@ -2511,8 +2573,9 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
 
             SmallArray<pd::Atom> atoms;
             atoms.add(pd::Atom((float)movedCount));
-            sendMessage("mcp_telemetry_reply", String("/pd/mcp_move_batch_id/reply/" + correlation_id).toRawUTF8(), atoms);
+            sendMCPReply(String("/pd/mcp_move_batch_id/reply/" + correlation_id), atoms);
             sendMessagesFromQueue();
+            enqueueFunctionAsync([this] { synchroniseCanvases(); });
         }
         break;
     }
@@ -2523,7 +2586,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
 
             int connectedCount = 0;
             sys_lock();
-            t_canvas* canvas = (t_canvas*)pd_findbyclass(gensym(canvas_symbol.toRawUTF8()), canvas_class);
+            t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
             if (canvas) {
                 for (int i = 2; i + 3 < list.size(); i += 4) {
                     auto src_id = list[i].toString();
@@ -2533,12 +2596,17 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
 
                     t_gobj* srcObj = resolveStableId(canvas_symbol, src_id);
                     t_gobj* destObj = resolveStableId(canvas_symbol, dest_id);
-                    t_object* srcText = pd::Interface::checkObject(srcObj);
-                    t_object* destText = pd::Interface::checkObject(destObj);
 
-                    if (srcText && destText) {
-                        t_outconnect* oc = pd::Interface::createConnection(canvas, srcText, src_out, destText, dest_in);
-                        if (oc) {
+                    if (srcObj && destObj) {
+                        int srcIdx = glist_getindex(canvas, srcObj);
+                        int destIdx = glist_getindex(canvas, destObj);
+                        if (srcIdx >= 0 && destIdx >= 0) {
+                            t_atom cArgs[4];
+                            SETFLOAT(&cArgs[0], static_cast<float>(srcIdx));
+                            SETFLOAT(&cArgs[1], static_cast<float>(src_out));
+                            SETFLOAT(&cArgs[2], static_cast<float>(destIdx));
+                            SETFLOAT(&cArgs[3], static_cast<float>(dest_in));
+                            pd_typedmess(reinterpret_cast<t_pd*>(canvas), gensym("connect"), 4, cArgs);
                             connectedCount++;
                         }
                     }
@@ -2551,8 +2619,9 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
 
             SmallArray<pd::Atom> atoms;
             atoms.add(pd::Atom((float)connectedCount));
-            sendMessage("mcp_telemetry_reply", String("/pd/mcp_connect_batch_id/reply/" + correlation_id).toRawUTF8(), atoms);
+            sendMCPReply(String("/pd/mcp_connect_batch_id/reply/" + correlation_id), atoms);
             sendMessagesFromQueue();
+            enqueueFunctionAsync([this] { synchroniseCanvases(); });
         }
         break;
     }
@@ -2563,7 +2632,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
 
             int disconnectedCount = 0;
             sys_lock();
-            t_canvas* canvas = (t_canvas*)pd_findbyclass(gensym(canvas_symbol.toRawUTF8()), canvas_class);
+            t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
             if (canvas) {
                 for (int i = 2; i + 3 < list.size(); i += 4) {
                     auto src_id = list[i].toString();
@@ -2589,8 +2658,9 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
 
             SmallArray<pd::Atom> atoms;
             atoms.add(pd::Atom((float)disconnectedCount));
-            sendMessage("mcp_telemetry_reply", String("/pd/mcp_disconnect_batch_id/reply/" + correlation_id).toRawUTF8(), atoms);
+            sendMCPReply(String("/pd/mcp_disconnect_batch_id/reply/" + correlation_id), atoms);
             sendMessagesFromQueue();
+            enqueueFunctionAsync([this] { synchroniseCanvases(); });
         }
         break;
     }
@@ -2997,6 +3067,28 @@ void PluginProcessor::titleChanged()
 {
     for (auto* editor : getEditors()) {
         editor->getTabComponent().repaint();
+    }
+}
+
+void PluginProcessor::onSelectionChanged(String const& selector, SmallArray<pd::Atom> const& list)
+{
+    if (mcpBridge) {
+        mcpBridge->sendSelectionTelemetry(selector, list);
+    }
+}
+
+void PluginProcessor::onConsoleMessage(String const& message, bool isError)
+{
+    if (mcpBridge) {
+        mcpBridge->sendConsoleLog(message, isError);
+    }
+}
+
+void PluginProcessor::sendMCPReply(const String& replyAddr, const SmallArray<pd::Atom>& atoms)
+{
+    sendMessage("mcp_telemetry_reply", replyAddr.toRawUTF8(), atoms);
+    if (mcpBridge) {
+        mcpBridge->sendSelectionTelemetry(replyAddr, atoms);
     }
 }
 
