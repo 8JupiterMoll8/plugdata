@@ -143,9 +143,62 @@ public:
         patchDownwardsOnly = settingsFile->getPropertyAsValue("patch_downwards_only");
         otherProperties.add(new PropertiesPanel::BoolComponent("Patch downwards only", patchDownwardsOnly, { "No", "Yes" }));
 
+        class McpStatusComponent final : public PropertiesPanelProperty
+            , public Timer {
+        public:
+            McpStatusComponent(String const& name, PluginProcessor* proc)
+                : PropertiesPanelProperty(name)
+                , processor(proc)
+            {
+                statusLabel.setJustificationType(Justification::centredRight);
+                statusLabel.setFont(statusLabel.getFont().withHeight(14.5f));
+                addAndMakeVisible(statusLabel);
+                startTimer(500);
+                timerCallback();
+            }
+
+            void timerCallback() override
+            {
+                auto const status = processor ? processor->getMcpBridgeStatus() : String("unavailable");
+                auto const colour = status == "connected"         ? Colours::green
+                                    : status == "waiting for server" ? Colours::orange
+                                                                     : Colours::red;
+                statusLabel.setText(status, dontSendNotification);
+                statusLabel.setColour(Label::textColourId, colour);
+            }
+
+            PropertiesPanelProperty* createCopy() override
+            {
+                return new McpStatusComponent(getName(), processor);
+            }
+
+            void resized() override
+            {
+                statusLabel.setBounds(getLocalBounds().removeFromRight(getWidth() / (2 - hideLabel)));
+            }
+
+            PluginProcessor* processor;
+            Label statusLabel;
+        };
+
+        // MCP bridge (native C++ in-process bridge)
+        PropertiesArray mcpProperties;
+        mcpBridgeEnabled.referTo(settingsFile->getPropertyAsValue("mcp_bridge_enabled"));
+        mcpBridgeEnabled.addListener(this);
+        mcpProperties.add(new PropertiesPanel::BoolComponent("Enable MCP bridge", mcpBridgeEnabled, { "Off", "On" }));
+
+        mcpListenPort.referTo(settingsFile->getPropertyAsValue("mcp_bridge_listen_port"));
+        mcpProperties.add(new PropertiesPanel::EditableComponent<int>("Listen port", mcpListenPort, true, 1024, 65535));
+
+        mcpSendPort.referTo(settingsFile->getPropertyAsValue("mcp_bridge_send_port"));
+        mcpProperties.add(new PropertiesPanel::EditableComponent<int>("Send port", mcpSendPort, true, 1024, 65535));
+
+        mcpProperties.add(new McpStatusComponent("Status", dynamic_cast<PluginEditor*>(editor)->pd));
+
         propertiesPanel.addSection("Interface", interfaceProperties);
         propertiesPanel.addSection("Autosave", autosaveProperties);
         propertiesPanel.addSection("Other", otherProperties);
+        propertiesPanel.addSection("MCP bridge", mcpProperties);
 
         addAndMakeVisible(propertiesPanel);
     }
@@ -204,6 +257,10 @@ public:
     Value commandClickSwitchesModeValue;
 
     Value patchDownwardsOnly;
+
+    Value mcpBridgeEnabled;
+    Value mcpListenPort;
+    Value mcpSendPort;
 
     PropertiesPanel propertiesPanel;
 

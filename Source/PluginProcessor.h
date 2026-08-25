@@ -48,6 +48,7 @@ public:
     ~PluginProcessor() override;
 
     MCPBridge* getMCPBridge() const { return mcpBridge.get(); }
+    juce::String getMcpBridgeStatus() const;
     void sendMCPReply(const String& replyAddr, const SmallArray<pd::Atom>& atoms);
 
     static AudioProcessor::BusesProperties buildBusesProperties();
@@ -134,6 +135,7 @@ public:
     }
 
     void settingsFileReloaded() override;
+    void settingsChanged(String const& name, var const& value) override;
     t_canvas* getCanvasBySymbol(const String& canvas_symbol);
     void synchroniseCanvases();
 

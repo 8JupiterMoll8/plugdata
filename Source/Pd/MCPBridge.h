@@ -26,6 +26,16 @@ public:
     void stop();
     bool isConnected() const;
 
+    // Status for the GUI / console. Returns a short human-readable state:
+    // "connected" | "listening" | "stopped" | "error: <detail>".
+    juce::String getStatus() const;
+    int getListenPort() const { return listenPort; }
+    int getSendPort() const { return sendPort; }
+
+    // Mark server activity (called on any inbound OSC message) so the
+    // bridge can distinguish "listening" from "server connected".
+    void noteServerActivity();
+
     // OSC Inbound Callbacks
     void oscMessageReceived(const juce::OSCMessage& message) override;
     void oscBundleReceived(const juce::OSCBundle& bundle) override;
@@ -74,6 +84,11 @@ private:
     juce::OSCReceiver receiver;
     juce::OSCSender sender;
     std::atomic<bool> active { false };
+
+    std::atomic<juce::int64> lastServerActivity { 0 };
+    mutable bool reportedConnected = false;
+    mutable bool reportedLost = false;
+    juce::String statusMessage;
 
     std::vector<MorphJob> morphJobs;
     juce::CriticalSection morphLock;

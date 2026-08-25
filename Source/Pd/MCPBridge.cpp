@@ -34,6 +34,17 @@ bool MCPBridge::start()
     if (recvOk) {
         receiver.addListener(this);
         active.store(true);
+        reportedConnected = false;
+        reportedLost = false;
+        statusMessage = {};
+        if (processor) {
+            processor->logMessage("MCP bridge listening on UDP " + juce::String(listenPort));
+        }
+    } else {
+        statusMessage = "port " + juce::String(listenPort) + " in use";
+        if (processor) {
+            processor->logError("MCP bridge: could not bind UDP " + juce::String(listenPort) + " (port in use?)");
+        }
     }
 
     sender.connect("127.0.0.1", sendPort);
@@ -50,11 +61,49 @@ void MCPBridge::stop()
     receiver.disconnect();
     sender.disconnect();
     active.store(false);
+    reportedConnected = false;
+    reportedLost = false;
+    statusMessage = {};
+    if (processor) {
+        processor->logMessage("MCP bridge stopped");
+    }
 }
 
 bool MCPBridge::isConnected() const
 {
     return active.load();
+}
+
+juce::String MCPBridge::getStatus() const
+{
+    if (!active.load()) return statusMessage.isNotEmpty() ? ("error: " + statusMessage) : juce::String("disabled");
+
+    auto const last = lastServerActivity.load();
+    if (last == 0) return "waiting for server";
+
+    auto const elapsed = juce::Time::getMillisecondCounter() - last;
+    if (elapsed > 15000) {
+        // Server went quiet. Emit once (lazily — the Advanced panel polls
+        // getStatus(), which is where an artist would look).
+        if (!reportedLost && processor) {
+            processor->logError("MCP server connection lost");
+            reportedLost = true;
+        }
+        return "disconnected";
+    }
+
+    return "connected";
+}
+
+void MCPBridge::noteServerActivity()
+{
+    bool const first = (lastServerActivity.load() == 0);
+    lastServerActivity.store(juce::Time::getMillisecondCounter());
+    if (first && !reportedConnected && processor) {
+        processor->logMessage("MCP server connected");
+        reportedConnected = true;
+    }
+    reportedLost = false;
 }
 
 juce::String MCPBridge::normalizeCanvas(const juce::String& name)
@@ -99,6 +148,9 @@ void MCPBridge::oscMessageReceived(const juce::OSCMessage& message)
     parts.removeEmptyStrings();
 
     if (parts.isEmpty()) return;
+
+    // Any inbound message means the MCP server is alive and talking to us.
+    noteServerActivity();
 
     auto const domain = parts[0];
 

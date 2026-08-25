@@ -192,7 +192,13 @@ PluginProcessor::PluginProcessor()
 
     objectLibrary = std::make_unique<pd::Library>(this);
 
-    mcpBridge = std::make_unique<MCPBridge>(this, 9000, 19010);
+    auto const mcpEnabled = settingsFile->getProperty<bool>("mcp_bridge_enabled");
+    auto const mcpListen = settingsFile->getProperty<int>("mcp_bridge_listen_port");
+    auto const mcpSend = settingsFile->getProperty<int>("mcp_bridge_send_port");
+    mcpBridge = std::make_unique<MCPBridge>(this, mcpListen, mcpSend);
+    if (!mcpEnabled) {
+        mcpBridge->stop();
+    }
 
     setLatencySamples(pd::Instance::getBlockSize());
     settingsFile->startChangeListener();
@@ -825,6 +831,34 @@ void PluginProcessor::settingsFileReloaded()
     updateSearchPaths();
     if (objectLibrary)
         objectLibrary->updateLibrary();
+}
+
+juce::String PluginProcessor::getMcpBridgeStatus() const
+{
+    return mcpBridge ? mcpBridge->getStatus() : juce::String("unavailable");
+}
+
+void PluginProcessor::settingsChanged(String const& name, var const& value)
+{
+    if (!mcpBridge) return;
+
+    if (name == "mcp_bridge_enabled") {
+        if (static_cast<bool>(value)) {
+            mcpBridge->start();
+        } else {
+            mcpBridge->stop();
+        }
+    } else if (name == "mcp_bridge_listen_port" || name == "mcp_bridge_send_port") {
+        // Recreate the bridge socket with the new ports. Applies immediately;
+        // the MCP server must be configured to match the listen port.
+        auto const enabled = settingsFile->getProperty<bool>("mcp_bridge_enabled");
+        auto const listen = settingsFile->getProperty<int>("mcp_bridge_listen_port");
+        auto const send = settingsFile->getProperty<int>("mcp_bridge_send_port");
+        mcpBridge->stop();
+        mcpBridge.reset(new MCPBridge(this, listen, send));
+        if (!enabled) mcpBridge->stop();
+        logMessage("MCP bridge ports updated (listen " + String(listen) + ", send " + String(send) + ")");
+    }
 }
 
 void PluginProcessor::processBlockBypassed(AudioBuffer<float>& buffer, MidiBuffer& midiBuffer)

@@ -163,6 +163,10 @@ private:
         { "open_patches_in_window", var(false) },
         { "cmd_click_switches_mode", var(true) },
         { "show_minimap", var(2) },
+        // MCP bridge (native C++ in-process bridge)
+        { "mcp_bridge_enabled", var(true) },
+        { "mcp_bridge_listen_port", var(9000) },
+        { "mcp_bridge_send_port", var(19010) },
     };
 
     StringArray childTrees {
