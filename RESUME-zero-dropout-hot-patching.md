@@ -3,10 +3,39 @@
 > Handoff note to resume this feature in a new session. Read this first.
 
 ## Branches (both based on `feat/native-cpp-bridge`)
-- `plugdata-core` → **`feat/zero-dropout-hot-patching`**
-- `mcp-server`   → **`feat/zero-dropout-hot-patching`**
+- `plugdata-core` → **`feat/zero-dropout-hot-patching`** (pushed to `myfork`)
+- `mcp-server`   → **`feat/zero-dropout-hot-patching`** (pushed to `origin`)
 
-(Neither is pushed yet; push when ready.)
+Base (the verified working state) is `feat/native-cpp-bridge` in both repos
+(also pushed). All bridge/settings/heartbeat work lives there.
+
+## ⚠️ If this feature fails — go back here
+The safe, known-good state is **`feat/native-cpp-bridge`**. If the hot-patching
+work doesn't pan out, do NOT debug it in place — switch back and abandon the
+feature branch:
+
+```bash
+cd /home/alphi/Desktop/plugdata/plugdata-core
+git checkout feat/native-cpp-bridge
+
+cd /home/alphi/Desktop/plugdata/mcp-server
+git checkout feat/native-cpp-bridge
+```
+
+This restores the exact verified state (bridge fixes, settings/status,
+heartbeat) with zero loss. The feature branch stays around for another attempt,
+or delete it entirely:
+
+```bash
+git branch -D feat/zero-dropout-hot-patching   # in BOTH repos
+```
+
+Deleting the branch only removes its commits (here: the resume doc). Everything
+on `feat/native-cpp-bridge` is untouched.
+
+Caveat: uncommitted working-tree files (`recordings/`, `state/checkpoints`,
+submodule changes) are not branch-specific — they follow you across checkouts.
+The *committed* work is always safe.
 
 ## What this feature is
 When the AI (or an artist) adds/removes/rewires signal objects (`~`) during
