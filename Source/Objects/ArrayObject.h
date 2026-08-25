@@ -353,6 +353,15 @@ public:
             });
             break;
         }
+        case hash("redraw"): {
+            MessageManager::callAsync([_this = SafePointer(this)] {
+                if (_this) {
+                    _this->read(_this->vec);
+                    _this->updateArrayPath();
+                }
+            });
+            break;
+        }
         default: break;
         }
     }

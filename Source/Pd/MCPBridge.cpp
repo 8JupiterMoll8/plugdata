@@ -69,6 +69,28 @@ juce::String MCPBridge::normalizeCanvas(const juce::String& name)
 static juce::String getArgString(const juce::OSCArgument& arg);
 static float getArgFloat(const juce::OSCArgument& arg);
 
+// The plugdata fork does not expose glist_nth; walk the glist ourselves.
+static t_gobj* glistObjectAt(t_canvas* cnv, int index)
+{
+    if (!cnv || index < 0) return nullptr;
+    int i = 0;
+    for (t_gobj* y = cnv->gl_list; y; y = y->g_next) {
+        if (i++ == index) return y;
+    }
+    return nullptr;
+}
+
+// Build the textual object representation PlugData's GUI expects, applying
+// the same kind mapping used by mcp_create_batch_id in PluginProcessor.
+static juce::String buildObjectText(const juce::String& kind, const juce::StringArray& tokens)
+{
+    if (kind == "msg") return "msg " + tokens.joinIntoString(" ");
+    if (kind == "text" || kind == "comment") return "comment " + tokens.joinIntoString(" ");
+    if (kind == "floatatom" || kind == "floatbox") return "floatbox " + tokens.joinIntoString(" ");
+    if (kind == "symbolatom" || kind == "symbolbox") return "symbolbox " + tokens.joinIntoString(" ");
+    return tokens.joinIntoString(" ");
+}
+
 void MCPBridge::oscMessageReceived(const juce::OSCMessage& message)
 {
     auto addr = message.getAddressPattern().toString();
@@ -153,6 +175,16 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 else processor->releaseDSP();
             }
         }
+        return;
+    }
+
+    if (action == "update_dsp") {
+        // Full DSP graph recompile (stop+start). Needed after bulk
+        // reconstruct operations (load/undo/redo) which create/connect
+        // objects while the graph was compiled against an empty canvas.
+        sys_lock();
+        canvas_update_dsp();
+        sys_unlock();
         return;
     }
 
@@ -304,30 +336,26 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
     }
 
     if (action == "create") {
-        if (msg.size() >= 4 && processor) {
+        if (msg.size() >= 5 && processor) {
             auto canvasName = normalizeCanvas(getArgString(msg[0]));
             auto kind = getArgString(msg[1]);
             float x = getArgFloat(msg[2]);
             float y = getArgFloat(msg[3]);
 
+            juce::StringArray tokens;
+            for (int i = 4; i < msg.size(); ++i) {
+                tokens.add(getArgString(msg[i]));
+            }
+
             sys_lock();
-            t_symbol* cnvSym = gensym(canvasName.toRawUTF8());
-            if (cnvSym && cnvSym->s_thing) {
-                std::vector<t_atom> atoms;
-                atoms.resize(2 + (msg.size() - 4));
-                SETFLOAT(&atoms[0], x);
-                SETFLOAT(&atoms[1], y);
-                for (int i = 4; i < msg.size(); ++i) {
-                    auto const& arg = msg[i];
-                    if (arg.isFloat32() || arg.isInt32()) {
-                        SETFLOAT(&atoms[2 + i - 4], getArgFloat(arg));
-                    } else {
-                        SETSYMBOL(&atoms[2 + i - 4], gensym(getArgString(arg).toRawUTF8()));
-                    }
-                }
-                pd_typedmess(cnvSym->s_thing, gensym(kind.toRawUTF8()), static_cast<int>(atoms.size()), atoms.data());
+            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            if (cnv) {
+                pd::Patch patchWrapper(pd::WeakReference(cnv, processor), processor, false);
+                patchWrapper.createObject(static_cast<int>(x), static_cast<int>(y), buildObjectText(kind, tokens));
             }
             sys_unlock();
+
+            processor->enqueueFunctionAsync([p = processor] { p->synchroniseCanvases(); });
         }
         return;
     }
@@ -343,28 +371,21 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             sys_lock();
             t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
             if (cnv) {
+                pd::Patch patchWrapper(pd::WeakReference(cnv, processor), processor, false);
                 for (int o = 0; o < count && cursor < msg.size(); o++) {
                     auto kind = getArgString(msg[cursor++]);
                     float x = getArgFloat(msg[cursor++]);
                     float y = getArgFloat(msg[cursor++]);
                     int nargs = static_cast<int>(getArgFloat(msg[cursor++]));
 
-                    std::vector<t_atom> atoms;
-                    atoms.resize(2 + nargs);
-                    SETFLOAT(&atoms[0], x);
-                    SETFLOAT(&atoms[1], y);
-
+                    juce::StringArray tokens;
                     for (int a = 0; a < nargs && cursor < msg.size(); a++) {
-                        auto const& arg = msg[cursor++];
-                        if (arg.isFloat32() || arg.isInt32()) {
-                            SETFLOAT(&atoms[2 + a], getArgFloat(arg));
-                        } else {
-                            SETSYMBOL(&atoms[2 + a], gensym(getArgString(arg).toRawUTF8()));
-                        }
+                        tokens.add(getArgString(msg[cursor++]));
                     }
 
-                    pd_typedmess(reinterpret_cast<t_pd*>(cnv), gensym(kind.toRawUTF8()), static_cast<int>(atoms.size()), atoms.data());
-                    created++;
+                    if (patchWrapper.createObject(static_cast<int>(x), static_cast<int>(y), buildObjectText(kind, tokens))) {
+                        created++;
+                    }
                 }
             }
             sys_unlock();
@@ -508,12 +529,12 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             sys_lock();
             t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
             if (cnv) {
-                t_atom dArgs[4];
-                SETFLOAT(&dArgs[0], static_cast<float>(srcIdx));
-                SETFLOAT(&dArgs[1], static_cast<float>(srcOut));
-                SETFLOAT(&dArgs[2], static_cast<float>(destIdx));
-                SETFLOAT(&dArgs[3], static_cast<float>(destIn));
-                pd_typedmess(reinterpret_cast<t_pd*>(cnv), gensym("disconnect"), 4, dArgs);
+                t_object* src = pd::Interface::checkObject(glistObjectAt(cnv, srcIdx));
+                t_object* dest = pd::Interface::checkObject(glistObjectAt(cnv, destIdx));
+                if (src && dest) {
+                    pd::Interface::removeConnection(cnv, src, srcOut, dest, destIn, nullptr);
+                    canvas_dirty(cnv, 1);
+                }
             }
             sys_unlock();
 
@@ -539,14 +560,14 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     int destIdx = static_cast<int>(getArgFloat(msg[cursor++]));
                     int destIn = static_cast<int>(getArgFloat(msg[cursor++]));
 
-                    t_atom dArgs[4];
-                    SETFLOAT(&dArgs[0], static_cast<float>(srcIdx));
-                    SETFLOAT(&dArgs[1], static_cast<float>(srcOut));
-                    SETFLOAT(&dArgs[2], static_cast<float>(destIdx));
-                    SETFLOAT(&dArgs[3], static_cast<float>(destIn));
-                    pd_typedmess(reinterpret_cast<t_pd*>(cnv), gensym("disconnect"), 4, dArgs);
-                    done++;
+                    t_object* src = pd::Interface::checkObject(glistObjectAt(cnv, srcIdx));
+                    t_object* dest = pd::Interface::checkObject(glistObjectAt(cnv, destIdx));
+                    if (src && dest) {
+                        pd::Interface::removeConnection(cnv, src, srcOut, dest, destIn, nullptr);
+                        done++;
+                    }
                 }
+                if (done > 0) canvas_dirty(cnv, 1);
             }
             sys_unlock();
 
@@ -614,10 +635,14 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             sys_lock();
             t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
             if (cnv) {
+                SmallArray<t_gobj*> toDelete;
                 for (int idx : indices) {
-                    t_atom a;
-                    SETFLOAT(&a, static_cast<float>(idx));
-                    pd_typedmess(reinterpret_cast<t_pd*>(cnv), gensym("delete"), 1, &a);
+                    t_gobj* obj = glistObjectAt(cnv, idx);
+                    if (obj) toDelete.add(obj);
+                }
+                if (toDelete.size() > 0) {
+                    pd::Interface::removeObjects(cnv, toDelete);
+                    canvas_dirty(cnv, 1);
                 }
             }
             sys_unlock();
@@ -637,9 +662,13 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             sys_lock();
             t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
             if (cnv) {
-                t_atom a;
-                SETFLOAT(&a, static_cast<float>(index));
-                pd_typedmess(reinterpret_cast<t_pd*>(cnv), gensym("delete"), 1, &a);
+                t_gobj* obj = glistObjectAt(cnv, index);
+                if (obj) {
+                    SmallArray<t_gobj*> toDelete;
+                    toDelete.add(obj);
+                    pd::Interface::removeObjects(cnv, toDelete);
+                    canvas_dirty(cnv, 1);
+                }
             }
             sys_unlock();
 
@@ -821,9 +850,13 @@ void MCPBridge::handleTelemetryDomain(const juce::String& /*telAction*/, const j
             sys_lock();
             t_canvas* canvas = processor->getCanvasBySymbol(canvasName);
             if (canvas) {
-                t_atom a;
-                SETFLOAT(&a, static_cast<float>(idx));
-                pd_typedmess(reinterpret_cast<t_pd*>(canvas), gensym("delete"), 1, &a);
+                t_gobj* obj = glistObjectAt(canvas, idx);
+                if (obj) {
+                    SmallArray<t_gobj*> toDelete;
+                    toDelete.add(obj);
+                    pd::Interface::removeObjects(canvas, toDelete);
+                    canvas_dirty(canvas, 1);
+                }
             }
             sys_unlock();
         }
@@ -842,6 +875,37 @@ void MCPBridge::handleArrayDomain(const juce::String& arrayAction, const juce::O
 
     sys_lock();
     t_garray* garray = reinterpret_cast<t_garray*>(pd_findbyclass(gensym(arrayName.toRawUTF8()), garray_class));
+
+    // PlugData instantiates arrays through the GUI; arrays created via the
+    // MCP text-object path may never bind their garray. If a write targets a
+    // missing array, create it as a graph-on-parent via paste (the same
+    // mechanism pd::Patch::createObject uses for arrays).
+    if (!garray && arrayAction == "write" && msg.size() >= 5) {
+        int chunkIndex = static_cast<int>(getArgFloat(msg[3]));
+        int dataCount = msg.size() - 5;
+        int size = std::max(64, chunkIndex * 128 + dataCount);
+
+        t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+        if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
+        if (cnv) {
+            // Stagger each auto-created array so they don't stack on top of
+            // each other in the top-left corner.
+            int nobj = 0;
+            for (t_gobj* y = cnv->gl_list; y; y = y->g_next) nobj++;
+            int stagger = (nobj * 14) % 420;
+            juce::String pasta = "#N canvas 0 0 450 300 (subpatch) 0;\n#X array "
+                + arrayName + " " + juce::String(size) + " float 2;\n#X coords 0 1 "
+                + juce::String(size > 1 ? size - 1 : 1) + " -1 200 140 1 0 0;\n#X restore "
+                + juce::String(60 + stagger) + " " + juce::String(60 + stagger) + " graph;";
+            pd::Interface::paste(cnv, pasta.toRawUTF8());
+            garray = reinterpret_cast<t_garray*>(pd_findbyclass(gensym(arrayName.toRawUTF8()), garray_class));
+            if (garray) {
+                canvas_dirty(cnv, 1);
+                processor->enqueueFunctionAsync([p = processor] { p->synchroniseCanvases(); });
+            }
+        }
+    }
+
     if (!garray) {
         sys_unlock();
         return;
