@@ -89,6 +89,10 @@ private:
     mutable bool reportedConnected = false;
     mutable bool reportedLost = false;
     juce::String statusMessage;
+    // Unique per-process boot token. The MCP server compares it across
+    // capability handshakes to detect a PlugData restart and clear its stale
+    // identity cache (tempId -> index mappings from the previous session).
+    juce::String bootToken;
 
     std::vector<MorphJob> morphJobs;
     juce::CriticalSection morphLock;

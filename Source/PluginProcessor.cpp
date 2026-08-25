@@ -1786,11 +1786,20 @@ static int getObjectIndex(t_canvas* canvas, t_gobj* obj) {
 t_canvas* PluginProcessor::getCanvasBySymbol(const String& canvas_symbol)
 {
     if (canvas_symbol == "pd-main" || canvas_symbol == "main" || canvas_symbol.isEmpty()) {
+        // "main" must ALWAYS resolve to the true top-level patch. The editor's
+        // current canvas can be a subpatch OR an abstraction tab the artist has
+        // navigated into — automating against that would silently target the
+        // voice's internals instead of the patch (phantom "receive->canvas
+        // connection failed", census listing internals as top-level, silent
+        // recalls). Walk gl_owner all the way up (past abstractions too, unlike
+        // canvas_getrootfor which stops at them) so MCP operations always land
+        // on the actual root patch.
         for (auto* editor : getEditors()) {
             if (editor) {
                 if (auto* cnv = editor->getCurrentCanvas()) {
-                    auto* ptr = cnv->patch.getRawPointer();
-                    if (ptr) return ptr;
+                    auto* glist = reinterpret_cast<t_glist*>(cnv->patch.getRawPointer());
+                    while (glist && glist->gl_owner) glist = glist->gl_owner;
+                    if (glist) return reinterpret_cast<t_canvas*>(glist);
                 }
             }
         }
