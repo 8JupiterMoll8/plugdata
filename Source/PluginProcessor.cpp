@@ -2190,12 +2190,16 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
 
                     String objectText;
                     if (kind == "msg") {
+                        if (!tokens.isEmpty() && tokens[0] == "msg") tokens.remove(0);
                         objectText = "msg " + tokens.joinIntoString(" ");
                     } else if (kind == "text" || kind == "comment") {
+                        if (!tokens.isEmpty() && (tokens[0] == "text" || tokens[0] == "comment")) tokens.remove(0);
                         objectText = "comment " + tokens.joinIntoString(" ");
                     } else if (kind == "floatatom" || kind == "floatbox") {
+                        if (!tokens.isEmpty() && (tokens[0] == "floatatom" || tokens[0] == "floatbox")) tokens.remove(0);
                         objectText = "floatbox " + tokens.joinIntoString(" ");
                     } else if (kind == "symbolatom" || kind == "symbolbox") {
+                        if (!tokens.isEmpty() && (tokens[0] == "symbolatom" || tokens[0] == "symbolbox")) tokens.remove(0);
                         objectText = "symbolbox " + tokens.joinIntoString(" ");
                     } else {
                         objectText = tokens.joinIntoString(" ");
@@ -2244,12 +2248,16 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
 
             String objectText;
             if (kind == "msg") {
+                if (!tokens.isEmpty() && tokens[0] == "msg") tokens.remove(0);
                 objectText = "msg " + tokens.joinIntoString(" ");
             } else if (kind == "text" || kind == "comment") {
+                if (!tokens.isEmpty() && (tokens[0] == "text" || tokens[0] == "comment")) tokens.remove(0);
                 objectText = "comment " + tokens.joinIntoString(" ");
             } else if (kind == "floatatom" || kind == "floatbox") {
+                if (!tokens.isEmpty() && (tokens[0] == "floatatom" || tokens[0] == "floatbox")) tokens.remove(0);
                 objectText = "floatbox " + tokens.joinIntoString(" ");
             } else if (kind == "symbolatom" || kind == "symbolbox") {
+                if (!tokens.isEmpty() && (tokens[0] == "symbolatom" || tokens[0] == "symbolbox")) tokens.remove(0);
                 objectText = "symbolbox " + tokens.joinIntoString(" ");
             } else {
                 objectText = tokens.joinIntoString(" ");
@@ -2340,8 +2348,10 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
             if (canvas) {
                 t_gobj* srcObj = resolveStableId(canvas_symbol, src_id);
                 t_gobj* destObj = resolveStableId(canvas_symbol, dest_id);
+                t_object* srcText = pd::Interface::checkObject(srcObj);
+                t_object* destText = pd::Interface::checkObject(destObj);
 
-                if (srcObj && destObj) {
+                if (srcText && destText && pd::Interface::canConnect(canvas, srcText, src_out, destText, dest_in)) {
                     int srcIdx = glist_getindex(canvas, srcObj);
                     int destIdx = glist_getindex(canvas, destObj);
                     if (srcIdx >= 0 && destIdx >= 0) {
@@ -2384,7 +2394,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
                 t_object* srcText = pd::Interface::checkObject(srcObj);
                 t_object* destText = pd::Interface::checkObject(destObj);
 
-                if (srcText && destText) {
+                if (srcText && destText && pd::Interface::hasConnection(canvas, srcText, src_out, destText, dest_in)) {
                     pd::Interface::removeConnection(canvas, srcText, src_out, destText, dest_in, nullptr);
                     canvas_dirty(canvas, 1);
                     success = true;
@@ -2639,8 +2649,10 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
 
                     t_gobj* srcObj = resolveStableId(canvas_symbol, src_id);
                     t_gobj* destObj = resolveStableId(canvas_symbol, dest_id);
+                    t_object* srcText = pd::Interface::checkObject(srcObj);
+                    t_object* destText = pd::Interface::checkObject(destObj);
 
-                    if (srcObj && destObj) {
+                    if (srcText && destText && pd::Interface::canConnect(canvas, srcText, src_out, destText, dest_in)) {
                         int srcIdx = glist_getindex(canvas, srcObj);
                         int destIdx = glist_getindex(canvas, destObj);
                         if (srcIdx >= 0 && destIdx >= 0) {
@@ -2688,7 +2700,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
                     t_object* srcText = pd::Interface::checkObject(srcObj);
                     t_object* destText = pd::Interface::checkObject(destObj);
 
-                    if (srcText && destText) {
+                    if (srcText && destText && pd::Interface::hasConnection(canvas, srcText, src_out, destText, dest_in)) {
                         pd::Interface::removeConnection(canvas, srcText, src_out, destText, dest_in, nullptr);
                         disconnectedCount++;
                     }

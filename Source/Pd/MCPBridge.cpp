@@ -135,11 +135,24 @@ static t_gobj* glistObjectAt(t_canvas* cnv, int index)
 // the same kind mapping used by mcp_create_batch_id in PluginProcessor.
 static juce::String buildObjectText(const juce::String& kind, const juce::StringArray& tokens)
 {
-    if (kind == "msg") return "msg " + tokens.joinIntoString(" ");
-    if (kind == "text" || kind == "comment") return "comment " + tokens.joinIntoString(" ");
-    if (kind == "floatatom" || kind == "floatbox") return "floatbox " + tokens.joinIntoString(" ");
-    if (kind == "symbolatom" || kind == "symbolbox") return "symbolbox " + tokens.joinIntoString(" ");
-    return tokens.joinIntoString(" ");
+    juce::StringArray t = tokens;
+    if (kind == "msg") {
+        if (!t.isEmpty() && t[0] == "msg") t.remove(0);
+        return "msg " + t.joinIntoString(" ");
+    }
+    if (kind == "text" || kind == "comment") {
+        if (!t.isEmpty() && (t[0] == "text" || t[0] == "comment")) t.remove(0);
+        return "comment " + t.joinIntoString(" ");
+    }
+    if (kind == "floatatom" || kind == "floatbox") {
+        if (!t.isEmpty() && (t[0] == "floatatom" || t[0] == "floatbox")) t.remove(0);
+        return "floatbox " + t.joinIntoString(" ");
+    }
+    if (kind == "symbolatom" || kind == "symbolbox") {
+        if (!t.isEmpty() && (t[0] == "symbolatom" || t[0] == "symbolbox")) t.remove(0);
+        return "symbolbox " + t.joinIntoString(" ");
+    }
+    return t.joinIntoString(" ");
 }
 
 void MCPBridge::oscMessageReceived(const juce::OSCMessage& message)
