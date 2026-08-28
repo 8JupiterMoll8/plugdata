@@ -1128,6 +1128,7 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
         reply.addArgument(juce::String("delete_batch_id"));
         reply.addArgument(juce::String("meter"));
         reply.addArgument(juce::String("meter_query"));
+        reply.addArgument(juce::String("inline_mappings"));
         reply.addArgument(juce::String("boot:" + bootToken));
         sender.send(reply);
     }

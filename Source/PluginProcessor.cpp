@@ -2173,6 +2173,9 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
             int cursor = 3;
             int created = 0;
 
+            std::vector<std::string> createdIds;
+            std::vector<t_gobj*> createdPtrs;
+
             sys_lock();
             t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
             if (canvas) {
@@ -2215,6 +2218,8 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
                     if (targetObj) {
                         mcpStableObjectMap[canvas_symbol.toStdString()][object_id.toStdString()] = targetObj;
                         mcpStableSerialMap[targetObj] = mcpSerialCounter++;
+                        createdIds.push_back(object_id.toStdString());
+                        createdPtrs.push_back(targetObj);
                         created++;
                         if (pd_class(&targetObj->g_pd) == canvas_class) {
                             t_canvas* subcanvas = reinterpret_cast<t_canvas*>(targetObj);
@@ -2228,10 +2233,23 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
                 canvas_resume_dsp(dspstate);
                 canvas_dirty(canvas, 1);
             }
-            sys_unlock();
 
             SmallArray<pd::Atom> atoms;
             atoms.add(pd::Atom((float)created));
+
+            // Append inline identity mappings: [tempId, index, tempId, index, ...]
+            // sys_lock is still held here, so getObjectIndex is thread-safe.
+            if (canvas) {
+                for (size_t o = 0; o < createdIds.size(); o++) {
+                    int index = getObjectIndex(canvas, createdPtrs[o]);
+                    if (index >= 0) {
+                        atoms.add(pd::Atom(generateSymbol(String(createdIds[o]))));
+                        atoms.add(pd::Atom((float)index));
+                    }
+                }
+            }
+            sys_unlock();
+
             sendMCPReply(String("/pd/create_batch_id/reply/" + correlation_id), atoms);
             sendMessagesFromQueue();
             enqueueFunctionAsync([this] { synchroniseCanvases(); });
