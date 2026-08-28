@@ -960,10 +960,17 @@ void MCPBridge::handleArrayDomain(const juce::String& arrayAction, const juce::O
     // MCP text-object path may never bind their garray. If a write targets a
     // missing array, create it as a graph-on-parent via paste (the same
     // mechanism pd::Patch::createObject uses for arrays).
-    if (!garray && arrayAction == "write" && msg.size() >= 5) {
-        int chunkIndex = static_cast<int>(getArgFloat(msg[3]));
-        int dataCount = msg.size() - 5;
-        int size = std::max(64, chunkIndex * 128 + dataCount);
+    if (!garray && (arrayAction == "write" || arrayAction == "write_bulk") && msg.size() >= 4) {
+        int reqSize = 64;
+        if (arrayAction == "write" && msg.size() >= 5) {
+            int chunkIndex = static_cast<int>(getArgFloat(msg[3]));
+            int dataCount = msg.size() - 5;
+            reqSize = std::max(64, chunkIndex * 128 + dataCount);
+        } else if (arrayAction == "write_bulk" && msg.size() >= 4) {
+            int offset = static_cast<int>(getArgFloat(msg[3]));
+            int dataCount = msg.size() - 4;
+            reqSize = std::max(64, offset + dataCount);
+        }
 
         t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
         if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
@@ -974,8 +981,8 @@ void MCPBridge::handleArrayDomain(const juce::String& arrayAction, const juce::O
             for (t_gobj* y = cnv->gl_list; y; y = y->g_next) nobj++;
             int stagger = (nobj * 14) % 420;
             juce::String pasta = "#N canvas 0 0 450 300 (subpatch) 0;\n#X array "
-                + arrayName + " " + juce::String(size) + " float 2;\n#X coords 0 1 "
-                + juce::String(size > 1 ? size - 1 : 1) + " -1 200 140 1 0 0;\n#X restore "
+                + arrayName + " " + juce::String(reqSize) + " float 2;\n#X coords 0 1 "
+                + juce::String(reqSize > 1 ? reqSize - 1 : 1) + " -1 200 140 1 0 0;\n#X restore "
                 + juce::String(60 + stagger) + " " + juce::String(60 + stagger) + " graph;";
             pd::Interface::paste(cnv, pasta.toRawUTF8());
             garray = reinterpret_cast<t_garray*>(pd_findbyclass(gensym(arrayName.toRawUTF8()), garray_class));
@@ -998,7 +1005,63 @@ void MCPBridge::handleArrayDomain(const juce::String& arrayAction, const juce::O
         return;
     }
 
-    if (arrayAction == "write" && msg.size() >= 5) {
+    if (arrayAction == "write_bulk" && msg.size() >= 4) {
+        // [name, subpatch, corrId, offset, data...]
+        auto correlationId = getArgString(msg[2]);
+        int offset = static_cast<int>(getArgFloat(msg[3]));
+        int dataStart = 4;
+        int dataCount = msg.size() - dataStart;
+
+        int requiredSize = offset + dataCount;
+        if (requiredSize > size) {
+            garray_resize_long(garray, requiredSize);
+            if (!garray_getfloatwords(garray, &size, &vec) || !vec) {
+                sys_unlock();
+                juce::OSCMessage errReply { juce::OSCAddressPattern("/array/write_bulk/reply/" + correlationId) };
+                errReply.addArgument(static_cast<int32>(-1));
+                errReply.addArgument(static_cast<int32>(0));
+                sender.send(errReply);
+                return;
+            }
+        }
+
+        int written = 0;
+        for (int i = dataStart; i < msg.size() && (offset + written) < size; ++i) {
+            vec[offset + written].w_float = getArgFloat(msg[i]);
+            written++;
+        }
+        garray_redraw(garray);
+        sys_unlock();
+
+        juce::OSCMessage reply { juce::OSCAddressPattern("/array/write_bulk/reply/" + correlationId) };
+        reply.addArgument(static_cast<int32>(written));
+        reply.addArgument(static_cast<int32>(size));
+        sender.send(reply);
+        return;
+    } else if (arrayAction == "read_bulk") {
+        // Format: [arrayName, subpatch, correlationId, offset, limit]
+        auto correlationId = msg.size() > 2 ? getArgString(msg[2]) : "0";
+        int offset = msg.size() > 3 ? static_cast<int>(getArgFloat(msg[3])) : 0;
+        int limit = msg.size() > 4 ? static_cast<int>(getArgFloat(msg[4])) : size;
+
+        int readStart = std::max(0, std::min(offset, size - 1));
+        int readCount = std::min(limit, size - readStart);
+
+        // Cap at 8192 samples per single reply (32KB OSC payload)
+        readCount = std::min(readCount, 8192);
+
+        juce::OSCMessage reply { juce::OSCAddressPattern("/array/read_bulk/reply/" + correlationId) };
+        reply.addArgument(arrayName);
+        reply.addArgument(static_cast<int32>(size));         // total array size
+        reply.addArgument(static_cast<int32>(readStart));    // actual start
+        reply.addArgument(static_cast<int32>(readCount));    // actual count
+        for (int i = readStart; i < readStart + readCount; ++i) {
+            reply.addArgument(vec[i].w_float);
+        }
+        sys_unlock();
+        sender.send(reply);
+        return;
+    } else if (arrayAction == "write" && msg.size() >= 5) {
         // [name, subpatch, corrId, chunkIndex, totalChunks, data...]
         auto correlationId = getArgString(msg[2]);
         int chunkIndex = static_cast<int>(getArgFloat(msg[3]));
@@ -1021,7 +1084,7 @@ void MCPBridge::handleArrayDomain(const juce::String& arrayAction, const juce::O
         int readStart = std::max(0, std::min(offset, size - 1));
         int readCount = std::min(limit, size - readStart);
 
-        int const CHUNK = 128;
+        int const CHUNK = 4096;
         int totalChunks = (readCount + CHUNK - 1) / CHUNK;
 
         for (int c = 0; c < totalChunks; ++c) {
@@ -1129,6 +1192,7 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
         reply.addArgument(juce::String("meter"));
         reply.addArgument(juce::String("meter_query"));
         reply.addArgument(juce::String("inline_mappings"));
+        reply.addArgument(juce::String("array_bulk"));
         reply.addArgument(juce::String("boot:" + bootToken));
         sender.send(reply);
     }

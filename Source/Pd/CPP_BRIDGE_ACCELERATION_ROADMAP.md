@@ -12,22 +12,13 @@
 |---|---------|---------|------|
 | M1 | Native zero-dropout signal meter/probe | 400x | 2026-08-28 |
 | P1 | Inline Identity Mappings (Kill Polling Loop) | 50-100x | 2026-08-28 |
+| P2 | Instant Array/Sample Access (array_bulk) | 40-70x | 2026-08-28 |
 
 ---
 
 ## Roadmap (Ordered by Value)
 
-### NEXT: Phase 2 — Instant Array/Sample Access
-
-**Feature:** Direct memory read/write for Pd arrays  
-**Why it's #2:** Loading a 1-second sample currently takes 3.45 SECONDS because of 10ms delays between 345 tiny OSC chunks. Writing waveforms, recording loops, buffer mutations — all painfully slow.  
-**What to build:** `/array/write_direct` that accepts a large data blob and does `memcpy` into `t_word*`. `/array/read_direct` that returns all samples in one reply (or fast sequential chunks with zero delay).  
-**Artist impact:** Sample loading, loop recording, buffer mangling all become instant. Granular, tape loops, wavetables — all usable in real-time.  
-**Effort:** Medium (need to handle large OSC messages or binary blob protocol)
-
----
-
-### Phase 3 — Native Canvas Census
+### NEXT: Phase 3 — Native Canvas Census
 
 **Feature:** Direct JSON canvas state via `/pd/census`  
 **Why it's #3:** Right now, to "see" the patch, the server tells C++ to write a file, waits for the file, reads it, then parses Pd text format with regex. This happens constantly.  
