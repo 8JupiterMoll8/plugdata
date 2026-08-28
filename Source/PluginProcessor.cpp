@@ -2621,6 +2621,173 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
         }
         break;
     }
+    case hash("mcp_census"): {
+        if (list.size() >= 2) {
+            auto canvas_symbol = list[0].toString();
+            auto correlation_id = list[1].toString();
+
+            String jsonString;
+            sys_lock();
+            t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
+            if (!canvas && canvas_symbol == "pd-main") {
+                canvas = pd_this->pd_canvaslist;
+            }
+
+            if (canvas) {
+                auto* rootObj = new DynamicObject();
+                rootObj->setProperty("canvas", canvas_symbol);
+
+                // Build reverse map of gobj* -> tempId
+                std::unordered_map<t_gobj*, String> ptrToId;
+                if (mcpStableObjectMap.count(canvas_symbol.toStdString())) {
+                    for (auto const& [id, ptr] : mcpStableObjectMap[canvas_symbol.toStdString()]) {
+                        if (ptr) ptrToId[ptr] = String(id);
+                    }
+                }
+
+                Array<var> objArray;
+                int objectIndex = 0;
+                for (t_gobj* y_obj = canvas->gl_list; y_obj; y_obj = y_obj->g_next, ++objectIndex) {
+                    auto* o = new DynamicObject();
+                    o->setProperty("index", objectIndex);
+
+                    String tempId = ptrToId.count(y_obj) ? ptrToId[y_obj] : String();
+                    o->setProperty("id", tempId);
+
+                    t_class* cl = pd_class(&y_obj->g_pd);
+                    const char* clName = class_getname(cl);
+                    String className = clName ? String::fromUTF8(clName) : String("unknown");
+
+                    t_object* ob = pd_checkobject(&y_obj->g_pd);
+                    int ninlets = ob ? obj_ninlets(ob) : 0;
+                    int noutlets = ob ? obj_noutlets(ob) : 0;
+                    o->setProperty("inlets", ninlets);
+                    o->setProperty("outlets", noutlets);
+
+                    int x = 0, y = 0, w = 0, h = 0;
+                    pd::Interface::getObjectBounds(canvas, y_obj, &x, &y, &w, &h);
+                    o->setProperty("x", x);
+                    o->setProperty("y", y);
+                    o->setProperty("width", w);
+                    o->setProperty("height", h);
+
+                    String kind = "obj";
+                    String type = className;
+                    Array<var> argsList;
+
+                    if (cl == canvas_class) {
+                        kind = "canvas";
+                        t_canvas* sub = reinterpret_cast<t_canvas*>(y_obj);
+                        type = "pd";
+                        if (sub->gl_name) {
+                            argsList.add(String::fromUTF8(sub->gl_name->s_name));
+                        }
+                    } else if (cl == garray_class) {
+                        kind = "table";
+                        type = "table";
+                        t_garray* ga = reinterpret_cast<t_garray*>(y_obj);
+                        t_symbol* arrayName = nullptr;
+                        if (garray_getname(ga, &arrayName) && arrayName) {
+                            argsList.add(String::fromUTF8(arrayName->s_name));
+                        }
+                        int arraySize = 0;
+                        t_word* vec = nullptr;
+                        if (garray_getfloatwords(ga, &arraySize, &vec)) {
+                            argsList.add(arraySize);
+                        }
+                    } else if (pd::Interface::isTextObject(y_obj)) {
+                        t_text* textObj = reinterpret_cast<t_text*>(y_obj);
+                        if (textObj->te_type == T_MESSAGE) {
+                            kind = "msg";
+                            type = "msg";
+                        } else if (textObj->te_type == T_ATOM) {
+                            kind = (className.containsIgnoreCase("symbol") ? "symbolatom" : "floatatom");
+                            type = kind;
+                        } else if (textObj->te_type == T_TEXT) {
+                            kind = "text";
+                            type = "text";
+                        }
+
+                        char* textBuf = nullptr;
+                        int textSize = 0;
+                        binbuf_gettext(textObj->te_binbuf, &textBuf, &textSize);
+                        if (textBuf && textSize > 0) {
+                            String fullText = String::fromUTF8(textBuf, textSize).trim();
+                            StringArray tokens;
+                            tokens.addTokens(fullText, " \t\r\n", "\"");
+                            if (tokens.size() > 0) {
+                                if (kind == "obj") {
+                                    type = tokens[0];
+                                    for (int tIdx = 1; tIdx < tokens.size(); ++tIdx) {
+                                        argsList.add(tokens[tIdx]);
+                                    }
+                                } else {
+                                    for (auto const& tok : tokens) {
+                                        argsList.add(tok);
+                                    }
+                                }
+                            }
+                            freebytes(textBuf, textSize);
+                        }
+                    } else {
+                        // IEM GUI or custom widget
+                        kind = "gui";
+                        type = className;
+                    }
+
+                    o->setProperty("kind", kind);
+                    o->setProperty("type", type);
+                    o->setProperty("args", argsList);
+
+                    objArray.add(var(o));
+                }
+                rootObj->setProperty("objectCount", objectIndex);
+                rootObj->setProperty("objects", objArray);
+
+                Array<var> connArray;
+                int connCount = 0;
+                t_linetraverser t;
+                t_outconnect *oc = nullptr;
+                linetraverser_start(&t, canvas);
+                while ((oc = linetraverser_next_nosize(&t))) {
+                    int srcIndex = getObjectIndex(canvas, &t.tr_ob->ob_g);
+                    int sinkIndex = getObjectIndex(canvas, &t.tr_ob2->ob_g);
+                    int srcOut = t.tr_outno;
+                    int destIn = t.tr_inno;
+
+                    auto* c = new DynamicObject();
+                    c->setProperty("srcIndex", srcIndex);
+                    c->setProperty("srcOut", srcOut);
+                    c->setProperty("destIndex", sinkIndex);
+                    c->setProperty("destIn", destIn);
+
+                    t_gobj* srcGobj = &t.tr_ob->ob_g;
+                    t_gobj* sinkGobj = &t.tr_ob2->ob_g;
+                    c->setProperty("srcId", ptrToId.count(srcGobj) ? ptrToId[srcGobj] : String());
+                    c->setProperty("destId", ptrToId.count(sinkGobj) ? ptrToId[sinkGobj] : String());
+
+                    connArray.add(var(c));
+                    connCount++;
+                }
+                rootObj->setProperty("connectionCount", connCount);
+                rootObj->setProperty("connections", connArray);
+
+                jsonString = JSON::toString(var(rootObj), true);
+            } else {
+                auto* errObj = new DynamicObject();
+                errObj->setProperty("error", "Canvas not found");
+                errObj->setProperty("canvas", canvas_symbol);
+                jsonString = JSON::toString(var(errObj), true);
+            }
+            sys_unlock();
+
+            SmallArray<pd::Atom> atoms;
+            atoms.add(pd::Atom(gensym(jsonString.toRawUTF8())));
+            sendMCPReply(String("/pd/census/reply/" + correlation_id), atoms);
+            sendMessagesFromQueue();
+        }
+        break;
+    }
     case hash("mcp_move_batch_id"): {
         if (list.size() >= 2) {
             auto canvas_symbol = list[0].toString();

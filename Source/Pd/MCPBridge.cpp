@@ -284,6 +284,18 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         return;
     }
 
+    if (action == "census") {
+        if (msg.size() >= 1 && processor) {
+            SmallArray<pd::Atom> atoms;
+            auto canvasName = normalizeCanvas(getArgString(msg[0]));
+            auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : "0";
+            atoms.add(pd::Atom(processor->generateSymbol(canvasName)));
+            atoms.add(pd::Atom(processor->generateSymbol(correlationId)));
+            processor->receiveSysMessage("mcp_census", atoms);
+        }
+        return;
+    }
+
     if (action == "dump") {
         if (msg.size() >= 3) {
             auto canvasName = normalizeCanvas(getArgString(msg[0]));
@@ -1193,6 +1205,7 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
         reply.addArgument(juce::String("meter_query"));
         reply.addArgument(juce::String("inline_mappings"));
         reply.addArgument(juce::String("array_bulk"));
+        reply.addArgument(juce::String("census"));
         reply.addArgument(juce::String("boot:" + bootToken));
         sender.send(reply);
     }

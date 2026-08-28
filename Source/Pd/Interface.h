@@ -17,6 +17,7 @@ extern "C" {
 #include <z_libpd.h>
 
 extern int glist_getindex(t_glist* cnv, t_gobj* y);
+extern int garray_getname(t_garray* x, t_symbol** namep);
 extern void canvas_savedeclarationsto(t_canvas* x, t_binbuf* b);
 extern void canvas_savetemplatesto(t_canvas* x, t_binbuf* b, int wholething);
 extern void canvas_saveto(t_canvas* x, t_binbuf* b);

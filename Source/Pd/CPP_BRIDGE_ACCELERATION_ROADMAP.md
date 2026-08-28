@@ -13,12 +13,13 @@
 | M1 | Native zero-dropout signal meter/probe | 400x | 2026-08-28 |
 | P1 | Inline Identity Mappings (Kill Polling Loop) | 50-100x | 2026-08-28 |
 | P2 | Instant Array/Sample Access (array_bulk) | 40-70x | 2026-08-28 |
+| P3 | Native In-Memory Canvas Census (/pd/census) | 40-100x | 2026-08-28 |
 
 ---
 
 ## Roadmap (Ordered by Value)
 
-### NEXT: Phase 3 — Native Canvas Census
+### NEXT: Phase 4 — Lightweight Object Inspection
 
 **Feature:** Direct JSON canvas state via `/pd/census`  
 **Why it's #3:** Right now, to "see" the patch, the server tells C++ to write a file, waits for the file, reads it, then parses Pd text format with regex. This happens constantly.  
