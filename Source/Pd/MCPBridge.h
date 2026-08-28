@@ -10,10 +10,66 @@
 #include <juce_osc/juce_osc.h>
 #include <juce_core/juce_core.h>
 #include <juce_events/juce_events.h>
+#include <readerwriterqueue.h>
+#include <array>
 #include "Utility/Config.h"
 #include "Pd/Instance.h"
 
 class PluginProcessor;
+class MCPBridge;
+
+struct ProbeResult {
+    uint32_t probeId = 0;
+    float rms = 0.0f;
+    float peak = 0.0f;
+    int blockSize = 0;
+};
+
+static constexpr int PROBE_RING_SIZE = 1024;
+static constexpr int MAX_PROBES = 16;
+
+struct ActiveProbe {
+    std::atomic<bool> active { false };
+    std::atomic<t_outconnect*> outconnect { nullptr };
+    uint32_t probeId = 0;
+    juce::String correlationId;
+    juce::String canvasName;
+    juce::String tempId;
+    int outletIndex = 0;
+    int durationMs = 500;
+    juce::int64 startTimeMs = 0;
+
+    moodycamel::ReaderWriterQueue<ProbeResult> resultQueue { 256 };
+
+    std::array<float, PROBE_RING_SIZE> ringBuffer {};
+    std::atomic<int> ringWritePos { 0 };
+
+    float accRms = 0.0f;
+    float accPeak = 0.0f;
+    int accBlocks = 0;
+};
+
+class ProbeManager {
+public:
+    explicit ProbeManager(MCPBridge* owner);
+
+    void audioTick();
+    int startProbe(t_outconnect* oc, const juce::String& canvasName, const juce::String& tempId, int outletIndex, const juce::String& correlationId, int durationMs);
+    void stopProbe(uint32_t probeId, const juce::String& correlationId = {});
+    void stopAllProbes(const juce::String& correlationId = {});
+    void collectResults();
+
+    int getActiveProbeCount() const;
+    bool isDebugEnabledByUs() const { return debugWasEnabledByUs; }
+    void setDebugEnabledByUs(bool v) { debugWasEnabledByUs = v; }
+
+    ActiveProbe probes[MAX_PROBES];
+
+private:
+    MCPBridge* bridge = nullptr;
+    std::atomic<uint32_t> nextProbeId { 1 };
+    bool debugWasEnabledByUs = false;
+};
 
 class MCPBridge final : public juce::OSCReceiver::Listener<juce::OSCReceiver::RealtimeCallback>
                       , private juce::Timer
@@ -40,6 +96,10 @@ public:
     void oscMessageReceived(const juce::OSCMessage& message) override;
     void oscBundleReceived(const juce::OSCBundle& bundle) override;
 
+    // Audio thread hook for zero-dropout passive signal metering
+    void audioTick();
+    ProbeManager& getProbeManager() { return probeManager; }
+
     // Native Telemetry Dispatch (Port 19010)
     void sendSelectionTelemetry(const juce::String& selector, const SmallArray<pd::Atom>& list);
     void sendConsoleLog(const juce::String& message, bool isError);
@@ -52,6 +112,8 @@ public:
     // Canvas & Table Helpers
     static juce::String normalizeCanvas(const juce::String& name);
 
+    friend class ProbeManager;
+
 private:
     void handlePdDomain(const juce::String& action, const juce::OSCMessage& msg);
     void handleParamDomain(const juce::String& paramName, const juce::OSCMessage& msg);
@@ -60,6 +122,10 @@ private:
     void handleArrayDomain(const juce::String& arrayAction, const juce::OSCMessage& msg);
     void handleBridgeDomain(const juce::String& bridgeAction, const juce::OSCMessage& msg);
     void handleMorphDomain(const juce::String& morphAction, const juce::OSCMessage& msg);
+    void handleMeterDomain(const juce::String& meterAction, const juce::OSCMessage& msg);
+
+    t_outconnect* resolveProbeTarget(const juce::String& canvasName, const juce::String& targetId, int outletIndex, juce::String& errorOut);
+    bool activateProbing();
 
     void timerCallback() override;
 
@@ -97,5 +163,8 @@ private:
     std::vector<MorphJob> morphJobs;
     juce::CriticalSection morphLock;
 
+    ProbeManager probeManager;
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MCPBridge)
 };
+

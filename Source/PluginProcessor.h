@@ -305,5 +305,7 @@ private:
     int mcpSuspendedDspState = 0;
     std::unique_ptr<MCPBridge> mcpBridge;
 
+    friend class MCPBridge;
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PluginProcessor)
 };

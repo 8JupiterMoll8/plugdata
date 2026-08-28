@@ -11,12 +11,22 @@
 extern "C" {
 #include <m_pd.h>
 #include <g_canvas.h>
+#include <s_inter.h>
+
+struct _outlet
+{
+    t_object *o_owner;
+    struct _outlet *o_next;
+    t_outconnect *o_connections;
+    t_symbol *o_sym;
+};
 }
 
 MCPBridge::MCPBridge(PluginProcessor* proc, int inPort, int outPort)
     : processor(proc)
     , listenPort(inPort)
     , sendPort(outPort)
+    , probeManager(this)
 {
     bootToken = juce::String(juce::Time::getMillisecondCounter()) + "-"
         + juce::String::toHexString(juce::Random::getSystemRandom().nextInt());
@@ -191,6 +201,9 @@ void MCPBridge::oscMessageReceived(const juce::OSCMessage& message)
     } else if (domain == "morph") {
         auto morphAction = parts.size() > 1 ? parts[1] : (message.size() > 0 ? getArgString(message[0]) : "");
         handleMorphDomain(morphAction, message);
+    } else if (domain == "meter") {
+        auto meterAction = parts.size() > 1 ? parts[1] : (message.size() > 0 ? getArgString(message[0]) : "");
+        handleMeterDomain(meterAction, message);
     }
 }
 
@@ -1113,6 +1126,8 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
         reply.addArgument(juce::String("disconnect_batch_id"));
         reply.addArgument(juce::String("create_batch_id"));
         reply.addArgument(juce::String("delete_batch_id"));
+        reply.addArgument(juce::String("meter"));
+        reply.addArgument(juce::String("meter_query"));
         reply.addArgument(juce::String("boot:" + bootToken));
         sender.send(reply);
     }
@@ -1155,8 +1170,468 @@ void MCPBridge::handleMorphDomain(const juce::String& morphAction, const juce::O
     }
 }
 
+void MCPBridge::audioTick()
+{
+    probeManager.audioTick();
+}
+
+static float estimateFrequency(const float* buf, int n, float sampleRate)
+{
+    if (!buf || n < 128 || sampleRate <= 0.0f) return 0.0f;
+
+    int minLag = std::max(2, static_cast<int>(sampleRate / 4000.0f));  // max freq 4kHz
+    int maxLag = std::min(n / 2, static_cast<int>(sampleRate / 40.0f));  // min freq 40Hz
+
+    if (minLag >= maxLag) return 0.0f;
+
+    std::vector<float> corrs(maxLag + 1, 0.0f);
+
+    for (int lag = minLag; lag <= maxLag; lag++) {
+        float sumCross = 0.0f;
+        float sumSq0 = 0.0f;
+        float sumSqLag = 0.0f;
+        int count = n - lag;
+        for (int i = 0; i < count; i++) {
+            float a = buf[i];
+            float b = buf[i + lag];
+            sumCross += a * b;
+            sumSq0 += a * a;
+            sumSqLag += b * b;
+        }
+        float denom = std::sqrt(sumSq0 * sumSqLag);
+        if (denom > 1e-6f) {
+            corrs[lag] = sumCross / denom;
+        }
+    }
+
+    int peakLag = 0;
+    for (int lag = minLag + 1; lag < maxLag; lag++) {
+        if (corrs[lag] > 0.75f && corrs[lag] >= corrs[lag - 1] && corrs[lag] >= corrs[lag + 1]) {
+            peakLag = lag;
+            break;
+        }
+    }
+
+    if (peakLag > 0) {
+        float alpha = corrs[peakLag - 1];
+        float beta = corrs[peakLag];
+        float gamma = corrs[peakLag + 1];
+        float denom = (alpha - 2.0f * beta + gamma);
+        float delta = (std::abs(denom) > 1e-9f) ? (0.5f * (alpha - gamma) / denom) : 0.0f;
+        float trueLag = static_cast<float>(peakLag) + delta;
+        return (trueLag > 0.0f) ? (sampleRate / trueLag) : 0.0f;
+    }
+
+    return 0.0f;
+}
+
+ProbeManager::ProbeManager(MCPBridge* owner)
+    : bridge(owner)
+{
+}
+
+void ProbeManager::audioTick()
+{
+    for (auto& probe : probes) {
+        if (!probe.active.load(std::memory_order_relaxed)) continue;
+
+        auto* oc = probe.outconnect.load(std::memory_order_acquire);
+        if (!oc) continue;
+
+        auto* signal = outconnect_get_signal(oc);
+        if (!signal || !signal->s_vec) continue;
+
+        int n = signal->s_n;
+        if (n <= 0) continue;
+        float* vec = signal->s_vec;
+
+        float sumSq = 0.0f, peak = 0.0f;
+        for (int i = 0; i < n; i++) {
+            float s = vec[i];
+            float abs_s = std::abs(s);
+            sumSq += s * s;
+            if (abs_s > peak) peak = abs_s;
+        }
+        float rms = std::sqrt(sumSq / static_cast<float>(n));
+
+        ProbeResult result { probe.probeId, rms, peak, n };
+        probe.resultQueue.try_enqueue(result);
+
+        int writePos = probe.ringWritePos.load(std::memory_order_relaxed);
+        for (int i = 0; i < n; i++) {
+            probe.ringBuffer[(writePos + i) % PROBE_RING_SIZE] = vec[i];
+        }
+        probe.ringWritePos.store((writePos + n) % PROBE_RING_SIZE, std::memory_order_release);
+    }
+}
+
+int ProbeManager::startProbe(t_outconnect* oc, const juce::String& canvasName, const juce::String& tempId, int outletIndex, const juce::String& correlationId, int durationMs)
+{
+    for (auto& probe : probes) {
+        if (!probe.active.load(std::memory_order_relaxed)) {
+            ProbeResult discard;
+            while (probe.resultQueue.try_dequeue(discard)) {}
+
+            probe.probeId = nextProbeId.fetch_add(1);
+            if (probe.probeId == 0) probe.probeId = nextProbeId.fetch_add(1);
+            probe.correlationId = correlationId;
+            probe.canvasName = canvasName;
+            probe.tempId = tempId;
+            probe.outletIndex = outletIndex;
+            probe.durationMs = std::max(20, durationMs);
+            probe.startTimeMs = juce::Time::getMillisecondCounter();
+            probe.accRms = 0.0f;
+            probe.accPeak = 0.0f;
+            probe.accBlocks = 0;
+            probe.ringWritePos.store(0, std::memory_order_relaxed);
+            probe.ringBuffer.fill(0.0f);
+            probe.outconnect.store(oc, std::memory_order_release);
+            probe.active.store(true, std::memory_order_release);
+            return static_cast<int>(probe.probeId);
+        }
+    }
+    return -1;
+}
+
+void ProbeManager::stopProbe(uint32_t probeId, const juce::String& correlationId)
+{
+    for (auto& probe : probes) {
+        if (probe.active.load(std::memory_order_relaxed) && probe.probeId == probeId) {
+            ProbeResult item;
+            while (probe.resultQueue.try_dequeue(item)) {
+                probe.accRms += item.rms * item.rms;
+                if (item.peak > probe.accPeak) probe.accPeak = item.peak;
+                probe.accBlocks++;
+            }
+
+            float meanRms = (probe.accBlocks > 0) ? std::sqrt(probe.accRms / static_cast<float>(probe.accBlocks)) : 0.0f;
+            float peakVal = probe.accPeak;
+            float rmsDb = (meanRms > 1e-7f) ? (20.0f * std::log10(meanRms)) : -100.0f;
+            float peakDb = (peakVal > 1e-7f) ? (20.0f * std::log10(peakVal)) : -100.0f;
+
+            float sampleRate = 44100.0f;
+            if (bridge && bridge->processor) {
+                sampleRate = static_cast<float>(bridge->processor->getSampleRate());
+            }
+            float freq = estimateFrequency(probe.ringBuffer.data(), PROBE_RING_SIZE, sampleRate);
+
+            auto corr = correlationId.isNotEmpty() ? correlationId : probe.correlationId;
+            if (corr.isNotEmpty() && bridge) {
+                juce::OSCMessage rep { juce::OSCAddressPattern("/meter/result/" + corr) };
+                rep.addArgument(rmsDb);
+                rep.addArgument(peakDb);
+                rep.addArgument(freq);
+                rep.addArgument(static_cast<int32>(probe.accBlocks));
+                bridge->sender.send(rep);
+            }
+
+            probe.active.store(false, std::memory_order_release);
+            probe.outconnect.store(nullptr, std::memory_order_release);
+            return;
+        }
+    }
+}
+
+void ProbeManager::stopAllProbes(const juce::String& correlationId)
+{
+    for (auto& probe : probes) {
+        if (probe.active.load(std::memory_order_relaxed)) {
+            probe.active.store(false, std::memory_order_release);
+            probe.outconnect.store(nullptr, std::memory_order_release);
+            if (probe.correlationId.isNotEmpty() && bridge) {
+                bridge->sendReply("/meter/error/" + probe.correlationId, "Probe cancelled");
+            }
+        }
+    }
+    if (correlationId.isNotEmpty() && bridge) {
+        bridge->sendRawReply("/meter/stop_all/reply/" + correlationId);
+    }
+}
+
+void ProbeManager::collectResults()
+{
+    auto now = juce::Time::getMillisecondCounter();
+    float sampleRate = 44100.0f;
+    if (bridge && bridge->processor) {
+        sampleRate = static_cast<float>(bridge->processor->getSampleRate());
+    }
+
+    for (auto& probe : probes) {
+        if (!probe.active.load(std::memory_order_relaxed)) continue;
+
+        ProbeResult item;
+        while (probe.resultQueue.try_dequeue(item)) {
+            probe.accRms += item.rms * item.rms;
+            if (item.peak > probe.accPeak) probe.accPeak = item.peak;
+            probe.accBlocks++;
+        }
+
+        if (now - probe.startTimeMs >= static_cast<juce::int64>(probe.durationMs)) {
+            if (probe.accBlocks == 0) {
+                juce::String errCorr = probe.correlationId;
+                probe.active.store(false, std::memory_order_release);
+                probe.outconnect.store(nullptr, std::memory_order_release);
+                if (bridge) {
+                    bridge->sendReply("/meter/error/" + errCorr, "Timeout: No audio blocks processed (is DSP running?)");
+                }
+                continue;
+            }
+
+            float meanRms = std::sqrt(probe.accRms / static_cast<float>(probe.accBlocks));
+            float peakVal = probe.accPeak;
+            float rmsDb = (meanRms > 1e-7f) ? (20.0f * std::log10(meanRms)) : -100.0f;
+            float peakDb = (peakVal > 1e-7f) ? (20.0f * std::log10(peakVal)) : -100.0f;
+            std::array<float, PROBE_RING_SIZE> linearBuf;
+            int wPos = probe.ringWritePos.load(std::memory_order_acquire);
+            for (int i = 0; i < PROBE_RING_SIZE; i++) {
+                linearBuf[i] = probe.ringBuffer[(wPos + i) % PROBE_RING_SIZE];
+            }
+            float freq = estimateFrequency(linearBuf.data(), PROBE_RING_SIZE, sampleRate);
+
+            if (bridge) {
+                juce::OSCMessage rep { juce::OSCAddressPattern("/meter/result/" + probe.correlationId) };
+                rep.addArgument(rmsDb);
+                rep.addArgument(peakDb);
+                rep.addArgument(freq);
+                rep.addArgument(static_cast<int32>(probe.accBlocks));
+                bridge->sender.send(rep);
+            }
+
+            probe.active.store(false, std::memory_order_release);
+            probe.outconnect.store(nullptr, std::memory_order_release);
+        }
+    }
+}
+
+int ProbeManager::getActiveProbeCount() const
+{
+    int count = 0;
+    for (auto const& probe : probes) {
+        if (probe.active.load(std::memory_order_relaxed)) {
+            count++;
+        }
+    }
+    return count;
+}
+
+bool MCPBridge::activateProbing()
+{
+    if (!plugdata_debugging_enabled()) {
+        set_plugdata_debugging_enabled(1);
+        sys_lock();
+        canvas_update_dsp();
+        sys_unlock();
+        probeManager.setDebugEnabledByUs(true);
+        return true;
+    }
+    return false;
+}
+
+t_outconnect* MCPBridge::resolveProbeTarget(const juce::String& canvasName, const juce::String& targetId, int outletIndex, juce::String& errorOut)
+{
+    if (!processor) {
+        errorOut = "Processor unavailable";
+        return nullptr;
+    }
+
+    t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+    if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
+    if (!cnv) {
+        errorOut = "Canvas not found: " + canvasName;
+        return nullptr;
+    }
+
+    t_gobj* gobj = processor->resolveStableId(canvasName, targetId);
+
+    if (!gobj) {
+        bool isNumber = targetId.isNotEmpty();
+        for (int i = (targetId.startsWith("-") ? 1 : 0); i < targetId.length(); ++i) {
+            if (!juce::CharacterFunctions::isDigit(targetId[i])) {
+                isNumber = false;
+                break;
+            }
+        }
+        if (isNumber) {
+            int idx = targetId.getIntValue();
+            gobj = glistObjectAt(cnv, idx);
+        }
+    }
+
+    if (!gobj) {
+        errorOut = "Object not found: " + targetId;
+        return nullptr;
+    }
+
+    t_object* obj = pd::Interface::checkObject(gobj);
+    if (!obj) {
+        errorOut = "Target is not a valid Pd object: " + targetId;
+        return nullptr;
+    }
+
+    t_outlet* outlet = obj->ob_outlet;
+    for (int i = 0; i < outletIndex && outlet; i++) {
+        outlet = outlet->o_next;
+    }
+    if (!outlet) {
+        errorOut = "Outlet " + juce::String(outletIndex) + " not found on object " + targetId;
+        return nullptr;
+    }
+
+    if (outlet->o_sym != gensym("signal")) {
+        errorOut = "Outlet " + juce::String(outletIndex) + " is not a signal outlet (control rate)";
+        return nullptr;
+    }
+
+    if (!outlet->o_connections) {
+        errorOut = "Signal outlet has no connections";
+        return nullptr;
+    }
+
+    return outlet->o_connections;
+}
+
+void MCPBridge::handleMeterDomain(const juce::String& meterAction, const juce::OSCMessage& msg)
+{
+    if (!processor) return;
+
+    if (meterAction == "start") {
+        if (msg.size() < 2) return;
+        auto canvasName = normalizeCanvas(getArgString(msg[0]));
+        auto tempId = getArgString(msg[1]);
+        int outletIndex = 0;
+        int durationMs = 500;
+        juce::String correlationId = "0";
+
+        if (msg.size() == 3) {
+            correlationId = getArgString(msg[2]);
+        } else if (msg.size() == 4) {
+            outletIndex = static_cast<int>(getArgFloat(msg[2]));
+            correlationId = getArgString(msg[3]);
+        } else if (msg.size() >= 5) {
+            outletIndex = static_cast<int>(getArgFloat(msg[2]));
+            durationMs = static_cast<int>(getArgFloat(msg[3]));
+            correlationId = getArgString(msg[4]);
+        }
+
+        activateProbing();
+
+        sys_lock();
+        juce::String errorOut;
+        t_outconnect* oc = resolveProbeTarget(canvasName, tempId, outletIndex, errorOut);
+        sys_unlock();
+
+        if (!oc) {
+            sendReply("/meter/error/" + correlationId, errorOut);
+            return;
+        }
+
+        int probeId = probeManager.startProbe(oc, canvasName, tempId, outletIndex, correlationId, durationMs);
+        if (probeId <= 0) {
+            sendReply("/meter/error/" + correlationId, "Max active probes exceeded (limit: " + juce::String(MAX_PROBES) + ")");
+            return;
+        }
+
+        if (!isTimerRunning()) {
+            startTimer(15);
+        }
+
+        juce::OSCMessage rep { juce::OSCAddressPattern("/meter/start/reply/" + correlationId) };
+        rep.addArgument(static_cast<int32>(probeId));
+        sender.send(rep);
+        return;
+    }
+
+    if (meterAction == "stop") {
+        if (msg.size() < 1) return;
+        uint32_t probeId = static_cast<uint32_t>(getArgFloat(msg[0]));
+        juce::String correlationId = msg.size() > 1 ? getArgString(msg[1]) : "";
+        probeManager.stopProbe(probeId, correlationId);
+        return;
+    }
+
+    if (meterAction == "stop_all") {
+        juce::String correlationId = msg.size() > 0 ? getArgString(msg[0]) : "";
+        probeManager.stopAllProbes(correlationId);
+        return;
+    }
+
+    if (meterAction == "query") {
+        if (msg.size() < 2) return;
+        auto canvasName = normalizeCanvas(getArgString(msg[0]));
+        auto tempId = getArgString(msg[1]);
+        int outletIndex = 0;
+        juce::String correlationId = "0";
+
+        if (msg.size() == 3) {
+            correlationId = getArgString(msg[2]);
+        } else if (msg.size() >= 4) {
+            outletIndex = static_cast<int>(getArgFloat(msg[2]));
+            correlationId = getArgString(msg[3]);
+        }
+
+        bool justActivated = activateProbing();
+        if (justActivated) {
+            juce::Thread::sleep(5);
+        }
+
+        sys_lock();
+        juce::String errorOut;
+        t_outconnect* oc = resolveProbeTarget(canvasName, tempId, outletIndex, errorOut);
+        if (!oc) {
+            sys_unlock();
+            sendReply("/meter/error/" + correlationId, errorOut);
+            return;
+        }
+
+        t_signal* signal = outconnect_get_signal(oc);
+        if (!signal || !signal->s_vec) {
+            sys_unlock();
+            sendReply("/meter/error/" + correlationId, "Signal not ready (is DSP running?)");
+            return;
+        }
+
+        int n = signal->s_n;
+        int nchans = signal->s_nchans;
+        float* vec = signal->s_vec;
+        float sumSq = 0.0f, peak = 0.0f;
+        for (int i = 0; i < n; i++) {
+            float s = vec[i];
+            float abs_s = std::abs(s);
+            sumSq += s * s;
+            if (abs_s > peak) peak = abs_s;
+        }
+        sys_unlock();
+
+        float rms = (n > 0) ? std::sqrt(sumSq / static_cast<float>(n)) : 0.0f;
+        float rmsDb = (rms > 1e-7f) ? (20.0f * std::log10(rms)) : -100.0f;
+        float peakDb = (peak > 1e-7f) ? (20.0f * std::log10(peak)) : -100.0f;
+
+        juce::OSCMessage rep { juce::OSCAddressPattern("/meter/query/reply/" + correlationId) };
+        rep.addArgument(rmsDb);
+        rep.addArgument(peakDb);
+        rep.addArgument(static_cast<int32>(nchans));
+        rep.addArgument(static_cast<int32>(n));
+        sender.send(rep);
+        return;
+    }
+
+    if (meterAction == "status") {
+        juce::String correlationId = msg.size() > 0 ? getArgString(msg[0]) : "0";
+        int activeCount = probeManager.getActiveProbeCount();
+        int debugEnabled = plugdata_debugging_enabled();
+
+        juce::OSCMessage rep { juce::OSCAddressPattern("/meter/status/reply/" + correlationId) };
+        rep.addArgument(static_cast<int32>(activeCount));
+        rep.addArgument(static_cast<int32>(debugEnabled));
+        sender.send(rep);
+        return;
+    }
+}
+
 void MCPBridge::timerCallback()
 {
+    probeManager.collectResults();
+
     std::vector<MorphJob> activeJobs;
     std::vector<juce::String> completedIds;
 
@@ -1181,13 +1656,17 @@ void MCPBridge::timerCallback()
             }
         }
         morphJobs = activeJobs;
-        if (morphJobs.empty()) {
-            stopTimer();
-        }
     }
 
     for (auto const& id : completedIds) {
         sendRawReply("/morph/run/done/" + id);
+    }
+
+    {
+        const juce::ScopedLock sl(morphLock);
+        if (morphJobs.empty() && probeManager.getActiveProbeCount() == 0) {
+            stopTimer();
+        }
     }
 }
 

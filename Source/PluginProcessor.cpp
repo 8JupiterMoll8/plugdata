@@ -1025,6 +1025,9 @@ void PluginProcessor::processConstant(dsp::AudioBlock<float> buffer)
         if (connectionListener && plugdata_debugging_enabled())
             connectionListener.load()->updateSignalData();
 
+        if (mcpBridge)
+            mcpBridge->audioTick();
+
         for (int ch = 0; ch < buffer.getNumChannels(); ch++) {
             // Use FloatVectorOperations to copy the vector data into the audioBuffer
             juce::FloatVectorOperations::copy(
@@ -1085,6 +1088,9 @@ void PluginProcessor::processVariable(dsp::AudioBlock<float> buffer, MidiBuffer&
 
         if (connectionListener && plugdata_debugging_enabled())
             connectionListener.load()->updateSignalData();
+
+        if (mcpBridge)
+            mcpBridge->audioTick();
 
         for (int channel = 0; channel < numChannels; channel++) {
             // Use FloatVectorOperations to copy the vector data into the audioBuffer
