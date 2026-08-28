@@ -955,6 +955,25 @@ void MCPBridge::handleTelemetryDomain(const juce::String& /*telAction*/, const j
     }
 }
 
+static t_garray* findGArrayInCanvas(t_canvas* cnv, t_symbol* nameSym)
+{
+    if (!cnv) return nullptr;
+    for (t_gobj* y = cnv->gl_list; y; y = y->g_next) {
+        if (pd_class(&y->g_pd) == garray_class) {
+            t_garray* ga = reinterpret_cast<t_garray*>(y);
+            t_symbol* sym = nullptr;
+            if (garray_getname(ga, &sym) && sym == nameSym) {
+                return ga;
+            }
+        } else if (pd_class(&y->g_pd) == canvas_class) {
+            t_canvas* sub = reinterpret_cast<t_canvas*>(y);
+            t_garray* ga = findGArrayInCanvas(sub, nameSym);
+            if (ga) return ga;
+        }
+    }
+    return nullptr;
+}
+
 void MCPBridge::handleArrayDomain(const juce::String& arrayAction, const juce::OSCMessage& msg)
 {
     if (!processor || msg.size() < 2) return;
@@ -966,22 +985,29 @@ void MCPBridge::handleArrayDomain(const juce::String& arrayAction, const juce::O
     auto canvasName = normalizeCanvas(getArgString(msg[1]));
 
     sys_lock();
-    t_garray* garray = reinterpret_cast<t_garray*>(pd_findbyclass(gensym(arrayName.toRawUTF8()), garray_class));
+    auto nameSym = gensym(arrayName.toRawUTF8());
+    t_garray* garray = reinterpret_cast<t_garray*>(pd_findbyclass(nameSym, garray_class));
+    if (!garray) {
+        for (t_canvas* c = pd_this->pd_canvaslist; c; c = c->gl_next) {
+            garray = findGArrayInCanvas(c, nameSym);
+            if (garray) break;
+        }
+    }
 
     // PlugData instantiates arrays through the GUI; arrays created via the
     // MCP text-object path may never bind their garray. If a write targets a
     // missing array, create it as a graph-on-parent via paste (the same
     // mechanism pd::Patch::createObject uses for arrays).
     if (!garray && (arrayAction == "write" || arrayAction == "write_bulk") && msg.size() >= 4) {
-        int reqSize = 64;
+        int reqSize = 2048;
         if (arrayAction == "write" && msg.size() >= 5) {
             int chunkIndex = static_cast<int>(getArgFloat(msg[3]));
             int dataCount = msg.size() - 5;
-            reqSize = std::max(64, chunkIndex * 128 + dataCount);
+            reqSize = std::max(2048, chunkIndex * 128 + dataCount);
         } else if (arrayAction == "write_bulk" && msg.size() >= 4) {
             int offset = static_cast<int>(getArgFloat(msg[3]));
             int dataCount = msg.size() - 4;
-            reqSize = std::max(64, offset + dataCount);
+            reqSize = std::max(2048, offset + dataCount);
         }
 
         t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
@@ -997,7 +1023,13 @@ void MCPBridge::handleArrayDomain(const juce::String& arrayAction, const juce::O
                 + juce::String(reqSize > 1 ? reqSize - 1 : 1) + " -1 200 140 1 0 0;\n#X restore "
                 + juce::String(60 + stagger) + " " + juce::String(60 + stagger) + " graph;";
             pd::Interface::paste(cnv, pasta.toRawUTF8());
-            garray = reinterpret_cast<t_garray*>(pd_findbyclass(gensym(arrayName.toRawUTF8()), garray_class));
+            garray = reinterpret_cast<t_garray*>(pd_findbyclass(nameSym, garray_class));
+            if (!garray) {
+                for (t_canvas* c = pd_this->pd_canvaslist; c; c = c->gl_next) {
+                    garray = findGArrayInCanvas(c, nameSym);
+                    if (garray) break;
+                }
+            }
             if (garray) {
                 canvas_dirty(cnv, 1);
                 processor->enqueueFunctionAsync([p = processor] { p->synchroniseCanvases(); });
