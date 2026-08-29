@@ -302,6 +302,10 @@ private:
     std::unordered_map<std::string, std::unordered_map<std::string, t_gobj*>> mcpStableObjectMap;
     std::unordered_map<t_gobj*, uint64_t> mcpStableSerialMap;
     uint64_t mcpSerialCounter = 1;
+    // Monotonic version counter — incremented on every identity mutation
+    // (create, delete, rename, register, clear). Node.js can poll this cheaply
+    // to decide whether a full snapshot fetch is needed.
+    std::atomic<uint64_t> mcpIdentityVersion { 0 };
     int mcpSuspendedDspState = 0;
     std::unique_ptr<MCPBridge> mcpBridge;
 

@@ -38,6 +38,7 @@ struct ActiveProbe {
     int outletIndex = 0;
     int durationMs = 500;
     juce::int64 startTimeMs = 0;
+    bool spectral = false; // If true, run FFT on completion instead of simple RMS/peak
 
     moodycamel::ReaderWriterQueue<ProbeResult> resultQueue { 256 };
 

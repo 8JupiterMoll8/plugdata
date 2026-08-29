@@ -7,6 +7,7 @@
 #include "MCPBridge.h"
 #include "PluginProcessor.h"
 #include "Pd/Interface.h"
+#include "../../Libraries/fftw3/api/fftw3.h"
 
 extern "C" {
 #include <m_pd.h>
@@ -292,6 +293,521 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             atoms.add(pd::Atom(processor->generateSymbol(canvasName)));
             atoms.add(pd::Atom(processor->generateSymbol(correlationId)));
             processor->receiveSysMessage("mcp_census", atoms);
+        }
+        return;
+    }
+
+    if (action == "typeof") {
+        // /pd/typeof <canvasName> <tempId_or_index> <correlationId>
+        // Returns: /pd/typeof/reply/<corrId> <className> <objectText>
+        // Reads the object's class name and binbuf text directly from structs.
+        if (msg.size() >= 3 && processor) {
+            auto canvasName = normalizeCanvas(getArgString(msg[0]));
+            auto targetId = getArgString(msg[1]);
+            auto correlationId = getArgString(msg[2]);
+
+            sys_lock();
+            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
+
+            if (!cnv) {
+                sys_unlock();
+                sendReply("/pd/typeof/error/" + correlationId, "Canvas not found: " + canvasName);
+                return;
+            }
+
+            // Resolve by stableId first, fallback to numeric index
+            t_gobj* gobj = processor->resolveStableId(canvasName, targetId);
+            if (!gobj) {
+                bool isNumber = targetId.isNotEmpty();
+                for (int i = (targetId.startsWith("-") ? 1 : 0); i < targetId.length(); ++i) {
+                    if (!juce::CharacterFunctions::isDigit(targetId[i])) {
+                        isNumber = false;
+                        break;
+                    }
+                }
+                if (isNumber) {
+                    gobj = glistObjectAt(cnv, targetId.getIntValue());
+                }
+            }
+
+            if (!gobj) {
+                sys_unlock();
+                sendReply("/pd/typeof/error/" + correlationId, "Object not found: " + targetId);
+                return;
+            }
+
+            // Get class name from the object's pd struct
+            juce::String className = juce::String::fromUTF8(class_getname(pd_class(&gobj->g_pd)));
+
+            // Get object text from binbuf (e.g. "osc~ 440", "vcf~ 1200 5")
+            juce::String objectText;
+            t_object* obj = pd::Interface::checkObject(gobj);
+            if (obj) {
+                char* text = nullptr;
+                int len = 0;
+                pd::Interface::getObjectText(obj, &text, &len);
+                if (text && len > 0) {
+                    objectText = juce::String::fromUTF8(text, len);
+                    freebytes(text, len);
+                }
+            }
+
+            // Get position
+            int x = 0, y = 0, w = 0, h = 0;
+            pd::Interface::getObjectBounds(cnv, gobj, &x, &y, &w, &h);
+
+            sys_unlock();
+
+            juce::OSCMessage reply { juce::OSCAddressPattern("/pd/typeof/reply/" + correlationId) };
+            reply.addArgument(className);
+            reply.addArgument(objectText);
+            reply.addArgument(static_cast<int32>(x));
+            reply.addArgument(static_cast<int32>(y));
+            reply.addArgument(static_cast<int32>(w));
+            reply.addArgument(static_cast<int32>(h));
+            sender.send(reply);
+        }
+        return;
+    }
+
+    if (action == "ports") {
+        // /pd/ports <canvasName> <tempId_or_index> <correlationId>
+        // Returns: /pd/ports/reply/<corrId> <numInlets> <numOutlets> <inletTypes...> <outletTypes...>
+        // inletTypes/outletTypes: "s" for signal, "c" for control
+        if (msg.size() >= 3 && processor) {
+            auto canvasName = normalizeCanvas(getArgString(msg[0]));
+            auto targetId = getArgString(msg[1]);
+            auto correlationId = getArgString(msg[2]);
+
+            sys_lock();
+            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
+
+            if (!cnv) {
+                sys_unlock();
+                sendReply("/pd/ports/error/" + correlationId, "Canvas not found: " + canvasName);
+                return;
+            }
+
+            // Resolve by stableId first, fallback to numeric index
+            t_gobj* gobj = processor->resolveStableId(canvasName, targetId);
+            if (!gobj) {
+                bool isNumber = targetId.isNotEmpty();
+                for (int i = (targetId.startsWith("-") ? 1 : 0); i < targetId.length(); ++i) {
+                    if (!juce::CharacterFunctions::isDigit(targetId[i])) {
+                        isNumber = false;
+                        break;
+                    }
+                }
+                if (isNumber) {
+                    gobj = glistObjectAt(cnv, targetId.getIntValue());
+                }
+            }
+
+            if (!gobj) {
+                sys_unlock();
+                sendReply("/pd/ports/error/" + correlationId, "Object not found: " + targetId);
+                return;
+            }
+
+            t_object* obj = pd::Interface::checkObject(gobj);
+            if (!obj) {
+                sys_unlock();
+                sendReply("/pd/ports/error/" + correlationId, "Target is not a valid Pd object: " + targetId);
+                return;
+            }
+
+            int numInlets = obj_ninlets(obj);
+            int numOutlets = obj_noutlets(obj);
+
+            // Build type strings: "s" = signal, "c" = control
+            juce::String inletTypes;
+            for (int i = 0; i < numInlets; i++) {
+                inletTypes += obj_issignalinlet(obj, i) ? "s" : "c";
+            }
+
+            juce::String outletTypes;
+            for (int i = 0; i < numOutlets; i++) {
+                outletTypes += obj_issignaloutlet(obj, i) ? "s" : "c";
+            }
+
+            sys_unlock();
+
+            juce::OSCMessage reply { juce::OSCAddressPattern("/pd/ports/reply/" + correlationId) };
+            reply.addArgument(static_cast<int32>(numInlets));
+            reply.addArgument(static_cast<int32>(numOutlets));
+            reply.addArgument(inletTypes);
+            reply.addArgument(outletTypes);
+            sender.send(reply);
+        }
+        return;
+    }
+
+    if (action == "identity_snapshot") {
+        // /pd/identity_snapshot <canvasName> <correlationId>
+        // Returns a JSON string with the complete identity state:
+        // { "version": N, "canvas": "pd-main", "entries": [
+        //   { "id": "fm_carrier", "index": 3, "type": "osc~", "text": "osc~ 440" },
+        //   ...
+        // ]}
+        // Single O(n) walk of gl_list builds a reverse pointer→index map, then
+        // iterates the stable map. No per-entry O(n) scan. Total: O(n+m).
+        if (msg.size() >= 2 && processor) {
+            auto canvasName = normalizeCanvas(getArgString(msg[0]));
+            auto correlationId = getArgString(msg[1]);
+
+            sys_lock();
+            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
+
+            if (!cnv) {
+                sys_unlock();
+                sendReply("/pd/identity_snapshot/error/" + correlationId, "Canvas not found: " + canvasName);
+                return;
+            }
+
+            // Step 1: Build pointer→index map with ONE walk of gl_list (O(n))
+            std::unordered_map<t_gobj*, int> ptrToIndex;
+            int idx = 0;
+            for (t_gobj* y = cnv->gl_list; y; y = y->g_next) {
+                ptrToIndex[y] = idx++;
+            }
+            int totalObjects = idx;
+
+            // Step 2: Walk the identity map and validate each entry (O(m))
+            auto canvasStr = canvasName.toStdString();
+            auto& canvasMap = processor->mcpStableObjectMap[canvasStr];
+            uint64_t version = processor->mcpIdentityVersion.load(std::memory_order_relaxed);
+
+            auto* rootObj = new juce::DynamicObject();
+            rootObj->setProperty("version", static_cast<juce::int64>(version));
+            rootObj->setProperty("canvas", canvasName);
+            rootObj->setProperty("totalObjects", totalObjects);
+
+            juce::Array<juce::var> entries;
+
+            std::vector<std::string> toEvict;
+            for (auto& [tempId, ptr] : canvasMap) {
+                auto ptrIt = ptrToIndex.find(ptr);
+                if (ptrIt == ptrToIndex.end()) {
+                    // Object no longer on canvas — mark for eviction
+                    toEvict.push_back(tempId);
+                    continue;
+                }
+
+                // Serial verification (UAF defense)
+                auto serialIt = processor->mcpStableSerialMap.find(ptr);
+                if (serialIt == processor->mcpStableSerialMap.end()) {
+                    toEvict.push_back(tempId);
+                    continue;
+                }
+
+                auto* entry = new juce::DynamicObject();
+                entry->setProperty("id", juce::String(tempId));
+                entry->setProperty("index", ptrIt->second);
+
+                // Read class name
+                juce::String className = juce::String::fromUTF8(class_getname(pd_class(&ptr->g_pd)));
+                entry->setProperty("class", className);
+
+                // Read object text (type + args)
+                t_object* obj = pd::Interface::checkObject(ptr);
+                if (obj) {
+                    char* text = nullptr;
+                    int len = 0;
+                    pd::Interface::getObjectText(obj, &text, &len);
+                    if (text && len > 0) {
+                        entry->setProperty("text", juce::String::fromUTF8(text, len));
+                        freebytes(text, len);
+                    }
+                    entry->setProperty("inlets", obj_ninlets(obj));
+                    entry->setProperty("outlets", obj_noutlets(obj));
+                }
+
+                entries.add(juce::var(entry));
+            }
+
+            // Evict stale entries
+            for (auto& staleId : toEvict) {
+                auto staleIt = canvasMap.find(staleId);
+                if (staleIt != canvasMap.end()) {
+                    processor->mcpStableSerialMap.erase(staleIt->second);
+                    canvasMap.erase(staleIt);
+                }
+            }
+            if (!toEvict.empty()) {
+                processor->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+                version = processor->mcpIdentityVersion.load(std::memory_order_relaxed);
+                rootObj->setProperty("version", static_cast<juce::int64>(version));
+                rootObj->setProperty("evicted", static_cast<int>(toEvict.size()));
+            }
+
+            rootObj->setProperty("entryCount", entries.size());
+            rootObj->setProperty("entries", entries);
+
+            juce::String jsonString = juce::JSON::toString(juce::var(rootObj), true);
+            sys_unlock();
+
+            juce::OSCMessage reply { juce::OSCAddressPattern("/pd/identity_snapshot/reply/" + correlationId) };
+            reply.addArgument(jsonString);
+            sender.send(reply);
+        }
+        return;
+    }
+
+    if (action == "identity_version") {
+        // /pd/identity_version <correlationId>
+        // Returns the current identity version counter.
+        // Ultra-cheap: one atomic read, no locks, no canvas walk.
+        // Node.js uses this to decide if a full snapshot fetch is needed.
+        if (msg.size() >= 1 && processor) {
+            auto correlationId = getArgString(msg[0]);
+            uint64_t version = processor->mcpIdentityVersion.load(std::memory_order_relaxed);
+
+            juce::OSCMessage reply { juce::OSCAddressPattern("/pd/identity_version/reply/" + correlationId) };
+            reply.addArgument(static_cast<int32>(static_cast<int>(version & 0x7FFFFFFF)));
+            sender.send(reply);
+        }
+        return;
+    }
+
+    if (action == "batch_atomic") {
+        // /pd/batch_atomic <canvas> <corrId> <createCount> <connectCount> <editCount> [data...]
+        // Performs create + connect + edit in ONE sys_lock with exactly ONE DSP recompile.
+        // Protocol:
+        //   Creates: [tempId, x, y, kind, type, nargs, arg1..argN] * createCount
+        //   Connects: [srcId, srcOut, destId, destIn] * connectCount
+        //   Edits: [tempId, newType, nargs, arg1..argN] * editCount
+        // Reply: /pd/batch_atomic/reply/<corrId> <createdCount> <connectedCount> <editedCount> [inline mappings...]
+        if (msg.size() >= 5 && processor) {
+            auto canvasName = normalizeCanvas(getArgString(msg[0]));
+            auto correlationId = getArgString(msg[1]);
+            int createCount = static_cast<int>(getArgFloat(msg[2]));
+            int connectCount = static_cast<int>(getArgFloat(msg[3]));
+            int editCount = static_cast<int>(getArgFloat(msg[4]));
+            int cursor = 5;
+
+            int created = 0, connected = 0, edited = 0;
+            std::vector<std::string> createdIds;
+            std::vector<t_gobj*> createdPtrs;
+
+            sys_lock();
+            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
+
+            if (cnv) {
+                int const dspstate = canvas_suspend_dsp();
+                pd::Patch patchWrapper(pd::WeakReference(cnv, processor), processor, false);
+
+                // === CREATE PHASE ===
+                for (int o = 0; o < createCount && cursor < msg.size(); o++) {
+                    auto objectId = getArgString(msg[cursor++]);
+                    float x = (cursor < msg.size()) ? getArgFloat(msg[cursor++]) : 0;
+                    float y = (cursor < msg.size()) ? getArgFloat(msg[cursor++]) : 0;
+                    auto kind = (cursor < msg.size()) ? getArgString(msg[cursor++]) : juce::String();
+                    auto objType = (cursor < msg.size()) ? getArgString(msg[cursor++]) : juce::String();
+                    int nargs = (cursor < msg.size()) ? static_cast<int>(getArgFloat(msg[cursor++])) : 0;
+
+                    juce::StringArray tokens;
+                    tokens.add(objType);
+                    for (int a = 0; a < nargs && cursor < msg.size(); a++) {
+                        tokens.add(getArgString(msg[cursor++]));
+                    }
+
+                    auto objectText = buildObjectText(kind, tokens);
+                    t_gobj* targetObj = patchWrapper.createObject(static_cast<int>(x), static_cast<int>(y), objectText);
+                    if (targetObj) {
+                        processor->mcpStableObjectMap[canvasName.toStdString()][objectId.toStdString()] = targetObj;
+                        processor->mcpStableSerialMap[targetObj] = processor->mcpSerialCounter++;
+                        processor->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+                        createdIds.push_back(objectId.toStdString());
+                        createdPtrs.push_back(targetObj);
+                        created++;
+                    }
+                }
+
+                // === CONNECT PHASE ===
+                for (int c = 0; c < connectCount && cursor + 3 < msg.size(); c++) {
+                    auto srcId = getArgString(msg[cursor++]);
+                    int srcOut = static_cast<int>(getArgFloat(msg[cursor++]));
+                    auto destId = getArgString(msg[cursor++]);
+                    int destIn = static_cast<int>(getArgFloat(msg[cursor++]));
+
+                    // Resolve source
+                    t_gobj* srcGobj = processor->resolveStableId(canvasName, srcId);
+                    t_gobj* destGobj = processor->resolveStableId(canvasName, destId);
+
+                    if (srcGobj && destGobj) {
+                        t_object* srcObj = pd::Interface::checkObject(srcGobj);
+                        t_object* destObj = pd::Interface::checkObject(destGobj);
+                        if (srcObj && destObj) {
+                            int srcIdx = 0, destIdx = 0, idx = 0;
+                            for (t_gobj* y = cnv->gl_list; y; y = y->g_next, idx++) {
+                                if (y == srcGobj) srcIdx = idx;
+                                if (y == destGobj) destIdx = idx;
+                            }
+                            t_atom cArgs[4];
+                            SETFLOAT(&cArgs[0], static_cast<float>(srcIdx));
+                            SETFLOAT(&cArgs[1], static_cast<float>(srcOut));
+                            SETFLOAT(&cArgs[2], static_cast<float>(destIdx));
+                            SETFLOAT(&cArgs[3], static_cast<float>(destIn));
+                            pd_typedmess(reinterpret_cast<t_pd*>(cnv), gensym("connect"), 4, cArgs);
+                            connected++;
+                        }
+                    }
+                }
+
+                // === EDIT PHASE ===
+                for (int e = 0; e < editCount && cursor < msg.size(); e++) {
+                    auto objectId = getArgString(msg[cursor++]);
+                    auto newType = (cursor < msg.size()) ? getArgString(msg[cursor++]) : juce::String();
+                    int nargs = (cursor < msg.size()) ? static_cast<int>(getArgFloat(msg[cursor++])) : 0;
+
+                    juce::StringArray tokens;
+                    tokens.add(newType);
+                    for (int a = 0; a < nargs && cursor < msg.size(); a++) {
+                        tokens.add(getArgString(msg[cursor++]));
+                    }
+
+                    t_gobj* targetObj = processor->resolveStableId(canvasName, objectId);
+                    if (targetObj) {
+                        t_object* obj = pd::Interface::checkObject(targetObj);
+                        if (obj) {
+                            auto newText = tokens.joinIntoString(" ");
+                            pd::Interface::renameObject(cnv, targetObj, newText.toRawUTF8(), newText.length());
+
+                            // Re-resolve after rename (edit = delete+recreate in Pd)
+                            t_gobj* newObj = nullptr;
+                            bool stillExists = false;
+                            for (t_gobj* y = cnv->gl_list; y; y = y->g_next) {
+                                if (y == targetObj) { stillExists = true; break; }
+                            }
+                            newObj = stillExists ? targetObj : pd::Interface::getNewest(cnv);
+                            if (newObj) {
+                                processor->mcpStableObjectMap[canvasName.toStdString()][objectId.toStdString()] = newObj;
+                                if (newObj != targetObj) processor->mcpStableSerialMap.erase(targetObj);
+                                processor->mcpStableSerialMap[newObj] = processor->mcpSerialCounter++;
+                                processor->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+                                edited++;
+                            }
+                        }
+                    }
+                }
+
+                canvas_resume_dsp(dspstate);
+                canvas_dirty(cnv, 1);
+
+                // Single DSP recompile for the entire batch
+                canvas_update_dsp();
+            }
+            sys_unlock();
+
+            processor->enqueueFunctionAsync([p = processor] { p->synchroniseCanvases(); });
+
+            // Build reply with inline identity mappings
+            juce::OSCMessage reply { juce::OSCAddressPattern("/pd/batch_atomic/reply/" + correlationId) };
+            reply.addArgument(static_cast<int32>(created));
+            reply.addArgument(static_cast<int32>(connected));
+            reply.addArgument(static_cast<int32>(edited));
+
+            // Append inline mappings [tempId, index, ...]
+            if (cnv) {
+                sys_lock();
+                for (size_t i = 0; i < createdIds.size(); i++) {
+                    int index = -1, idx = 0;
+                    for (t_gobj* y = cnv->gl_list; y; y = y->g_next, idx++) {
+                        if (y == createdPtrs[i]) { index = idx; break; }
+                    }
+                    if (index >= 0) {
+                        reply.addArgument(juce::String(createdIds[i]));
+                        reply.addArgument(static_cast<int32>(index));
+                    }
+                }
+                sys_unlock();
+            }
+            sender.send(reply);
+        }
+        return;
+    }
+
+    if (action == "connections") {
+        // /pd/connections <canvasName> <correlationId>
+        // Returns JSON array of all connections on the canvas.
+        // Uses linetraverser + single O(n) ptr→index map. No file dump.
+        // Response: /pd/connections/reply/<corrId> <jsonString>
+        // JSON: { "canvas":"pd-main", "count": N, "connections": [
+        //   { "srcIndex":0, "srcOut":0, "destIndex":1, "destIn":0, "srcId":"osc", "destId":"dac" }, ...
+        // ]}
+        if (msg.size() >= 2 && processor) {
+            auto canvasName = normalizeCanvas(getArgString(msg[0]));
+            auto correlationId = getArgString(msg[1]);
+
+            sys_lock();
+            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
+
+            if (!cnv) {
+                sys_unlock();
+                sendReply("/pd/connections/error/" + correlationId, "Canvas not found: " + canvasName);
+                return;
+            }
+
+            // Build ptr→index map with single O(n) walk
+            std::unordered_map<t_gobj*, int> ptrToIndex;
+            int idx = 0;
+            for (t_gobj* y = cnv->gl_list; y; y = y->g_next) {
+                ptrToIndex[y] = idx++;
+            }
+
+            // Build reverse identity map (ptr → tempId)
+            auto canvasStr = canvasName.toStdString();
+            std::unordered_map<t_gobj*, juce::String> ptrToId;
+            if (processor->mcpStableObjectMap.count(canvasStr)) {
+                for (auto const& [id, ptr] : processor->mcpStableObjectMap[canvasStr]) {
+                    if (ptr) ptrToId[ptr] = juce::String(id);
+                }
+            }
+
+            // Walk connections with linetraverser
+            auto* rootObj = new juce::DynamicObject();
+            rootObj->setProperty("canvas", canvasName);
+
+            juce::Array<juce::var> connArray;
+            int connCount = 0;
+
+            t_linetraverser t;
+            linetraverser_start(&t, cnv);
+            t_outconnect* oc = nullptr;
+            while ((oc = linetraverser_next_nosize(&t))) {
+                t_gobj* srcGobj = &t.tr_ob->ob_g;
+                t_gobj* destGobj = &t.tr_ob2->ob_g;
+
+                auto srcIt = ptrToIndex.find(srcGobj);
+                auto destIt = ptrToIndex.find(destGobj);
+                if (srcIt == ptrToIndex.end() || destIt == ptrToIndex.end()) continue;
+
+                auto* c = new juce::DynamicObject();
+                c->setProperty("srcIndex", srcIt->second);
+                c->setProperty("srcOut", t.tr_outno);
+                c->setProperty("destIndex", destIt->second);
+                c->setProperty("destIn", t.tr_inno);
+                c->setProperty("srcId", ptrToId.count(srcGobj) ? ptrToId[srcGobj] : juce::String());
+                c->setProperty("destId", ptrToId.count(destGobj) ? ptrToId[destGobj] : juce::String());
+
+                connArray.add(juce::var(c));
+                connCount++;
+            }
+
+            rootObj->setProperty("count", connCount);
+            rootObj->setProperty("connections", connArray);
+
+            juce::String jsonString = juce::JSON::toString(juce::var(rootObj), true);
+            sys_unlock();
+
+            juce::OSCMessage reply { juce::OSCAddressPattern("/pd/connections/reply/" + correlationId) };
+            reply.addArgument(jsonString);
+            sender.send(reply);
         }
         return;
     }
@@ -1238,6 +1754,13 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
         reply.addArgument(juce::String("inline_mappings"));
         reply.addArgument(juce::String("array_bulk"));
         reply.addArgument(juce::String("census"));
+        reply.addArgument(juce::String("typeof"));
+        reply.addArgument(juce::String("ports"));
+        reply.addArgument(juce::String("identity_snapshot"));
+        reply.addArgument(juce::String("identity_version"));
+        reply.addArgument(juce::String("connections"));
+        reply.addArgument(juce::String("spectral"));
+        reply.addArgument(juce::String("batch_atomic"));
         reply.addArgument(juce::String("boot:" + bootToken));
         sender.send(reply);
     }
@@ -1479,10 +2002,13 @@ void ProbeManager::collectResults()
         if (now - probe.startTimeMs >= static_cast<juce::int64>(probe.durationMs)) {
             if (probe.accBlocks == 0) {
                 juce::String errCorr = probe.correlationId;
+                bool wasSpectral = probe.spectral;
+                probe.spectral = false;
                 probe.active.store(false, std::memory_order_release);
                 probe.outconnect.store(nullptr, std::memory_order_release);
                 if (bridge) {
-                    bridge->sendReply("/meter/error/" + errCorr, "Timeout: No audio blocks processed (is DSP running?)");
+                    juce::String errAddr = wasSpectral ? "/meter/spectral/error/" : "/meter/error/";
+                    bridge->sendReply(errAddr + errCorr, "Timeout: No audio blocks processed (is DSP running?)");
                 }
                 continue;
             }
@@ -1498,7 +2024,133 @@ void ProbeManager::collectResults()
             }
             float freq = estimateFrequency(linearBuf.data(), PROBE_RING_SIZE, sampleRate);
 
-            if (bridge) {
+            if (probe.spectral && bridge) {
+                // === SPECTRAL ANALYSIS (Phase 7) ===
+                // Apply Hann window
+                constexpr int N = PROBE_RING_SIZE;
+                std::array<float, N> windowed;
+                for (int i = 0; i < N; i++) {
+                    float w = 0.5f * (1.0f - std::cos(2.0f * juce::MathConstants<float>::pi * static_cast<float>(i) / static_cast<float>(N - 1)));
+                    windowed[i] = linearBuf[i] * w;
+                }
+
+                // Run real FFT via FFTW3
+                constexpr int NBINS = N / 2 + 1;
+                std::array<float, N> fftInput;
+                std::copy(windowed.begin(), windowed.end(), fftInput.begin());
+
+                // Use fftwf (single precision)
+                std::array<fftwf_complex, NBINS> fftOutput;
+                fftwf_plan plan = fftwf_plan_dft_r2c_1d(N, fftInput.data(),
+                    reinterpret_cast<fftwf_complex*>(fftOutput.data()), FFTW_ESTIMATE);
+                fftwf_execute(plan);
+                fftwf_destroy_plan(plan);
+
+                // Compute magnitude spectrum (dB)
+                std::array<float, NBINS> magnitudes;
+                float binHz = sampleRate / static_cast<float>(N);
+                float sumMag = 0.0f;
+                float sumWeightedFreq = 0.0f;
+                float sumLogMag = 0.0f;
+                float maxMag = 0.0f;
+                int maxBin = 0;
+
+                for (int i = 0; i < NBINS; i++) {
+                    float re = fftOutput[i][0];
+                    float im = fftOutput[i][1];
+                    float mag = std::sqrt(re * re + im * im) / static_cast<float>(N);
+                    magnitudes[i] = mag;
+
+                    if (i > 0) { // Skip DC bin for spectral features
+                        sumMag += mag;
+                        sumWeightedFreq += mag * (static_cast<float>(i) * binHz);
+                        if (mag > 1e-10f) sumLogMag += std::log(mag);
+                        else sumLogMag += std::log(1e-10f);
+                        if (mag > maxMag) { maxMag = mag; maxBin = i; }
+                    }
+                }
+
+                // Spectral centroid (Hz)
+                float spectralCentroid = (sumMag > 1e-10f) ? (sumWeightedFreq / sumMag) : 0.0f;
+
+                // Spectral flatness (0 = tonal, 1 = noise)
+                int numBins = NBINS - 1; // exclude DC
+                float geometricMean = std::exp(sumLogMag / static_cast<float>(numBins));
+                float arithmeticMean = sumMag / static_cast<float>(numBins);
+                float spectralFlatness = (arithmeticMean > 1e-10f) ? (geometricMean / arithmeticMean) : 0.0f;
+                spectralFlatness = std::min(1.0f, std::max(0.0f, spectralFlatness));
+
+                // Crest factor (peak / RMS)
+                float crestFactor = (meanRms > 1e-7f) ? (peakVal / meanRms) : 0.0f;
+
+                // Peak frequency bin
+                float peakFreq = static_cast<float>(maxBin) * binHz;
+
+                // Spectral rolloff (frequency below which 85% of energy lives)
+                float totalEnergy = 0.0f;
+                for (int i = 1; i < NBINS; i++) totalEnergy += magnitudes[i] * magnitudes[i];
+                float rolloffThreshold = totalEnergy * 0.85f;
+                float accumEnergy = 0.0f;
+                float rolloffFreq = 0.0f;
+                for (int i = 1; i < NBINS; i++) {
+                    accumEnergy += magnitudes[i] * magnitudes[i];
+                    if (accumEnergy >= rolloffThreshold) {
+                        rolloffFreq = static_cast<float>(i) * binHz;
+                        break;
+                    }
+                }
+
+                // Top 8 frequency peaks (for harmonic analysis)
+                struct FreqPeak { float freq; float magDb; };
+                std::array<FreqPeak, 8> topPeaks {};
+                std::array<float, NBINS> magCopy;
+                std::copy(magnitudes.begin(), magnitudes.end(), magCopy.begin());
+                for (int p = 0; p < 8; p++) {
+                    int best = 1;
+                    for (int i = 2; i < NBINS - 1; i++) {
+                        if (magCopy[i] > magCopy[best]) best = i;
+                    }
+                    if (magCopy[best] < 1e-10f) break;
+                    topPeaks[p].freq = static_cast<float>(best) * binHz;
+                    topPeaks[p].magDb = 20.0f * std::log10(magCopy[best]);
+                    // Zero out neighborhood to find next peak
+                    for (int k = std::max(1, best - 3); k <= std::min(NBINS - 1, best + 3); k++) {
+                        magCopy[k] = 0.0f;
+                    }
+                }
+
+                // Build JSON response
+                auto* rootObj = new juce::DynamicObject();
+                rootObj->setProperty("rmsDb", rmsDb);
+                rootObj->setProperty("peakDb", peakDb);
+                rootObj->setProperty("fundamental", freq);
+                rootObj->setProperty("spectralCentroid", spectralCentroid);
+                rootObj->setProperty("spectralFlatness", spectralFlatness);
+                rootObj->setProperty("spectralRolloff", rolloffFreq);
+                rootObj->setProperty("crestFactor", crestFactor);
+                rootObj->setProperty("peakFrequency", peakFreq);
+                rootObj->setProperty("sampleRate", sampleRate);
+                rootObj->setProperty("fftSize", N);
+                rootObj->setProperty("binHz", binHz);
+                rootObj->setProperty("blocks", probe.accBlocks);
+
+                juce::Array<juce::var> peaksArray;
+                for (int p = 0; p < 8 && topPeaks[p].freq > 0.0f; p++) {
+                    auto* pk = new juce::DynamicObject();
+                    pk->setProperty("freq", topPeaks[p].freq);
+                    pk->setProperty("dB", topPeaks[p].magDb);
+                    peaksArray.add(juce::var(pk));
+                }
+                rootObj->setProperty("peaks", peaksArray);
+
+                juce::String jsonString = juce::JSON::toString(juce::var(rootObj), true);
+
+                juce::OSCMessage rep { juce::OSCAddressPattern("/meter/spectral/result/" + probe.correlationId) };
+                rep.addArgument(jsonString);
+                bridge->sender.send(rep);
+
+                probe.spectral = false;
+            } else if (bridge) {
                 juce::OSCMessage rep { juce::OSCAddressPattern("/meter/result/" + probe.correlationId) };
                 rep.addArgument(rmsDb);
                 rep.addArgument(peakDb);
@@ -1721,6 +2373,68 @@ void MCPBridge::handleMeterDomain(const juce::String& meterAction, const juce::O
         rep.addArgument(peakDb);
         rep.addArgument(static_cast<int32>(nchans));
         rep.addArgument(static_cast<int32>(n));
+        sender.send(rep);
+        return;
+    }
+
+    if (meterAction == "spectral") {
+        // /meter/spectral <canvasName> <tempId> [outletIndex] [durationMs] <correlationId>
+        // Starts a probe that captures audio into the ring buffer, then runs FFT
+        // on completion. Returns spectral centroid, flatness, RMS, peak, fundamental,
+        // crest factor, and top frequency bins.
+        if (msg.size() < 2) return;
+        auto canvasName = normalizeCanvas(getArgString(msg[0]));
+        auto tempId = getArgString(msg[1]);
+        int outletIndex = 0;
+        int durationMs = 200; // ~4400 samples at 44.1kHz, fills ring buffer multiple times
+        juce::String correlationId = "0";
+
+        if (msg.size() == 3) {
+            correlationId = getArgString(msg[2]);
+        } else if (msg.size() == 4) {
+            outletIndex = static_cast<int>(getArgFloat(msg[2]));
+            correlationId = getArgString(msg[3]);
+        } else if (msg.size() >= 5) {
+            outletIndex = static_cast<int>(getArgFloat(msg[2]));
+            durationMs = static_cast<int>(getArgFloat(msg[3]));
+            correlationId = getArgString(msg[4]);
+        }
+
+        if (durationMs < 50) durationMs = 50;
+        if (durationMs > 2000) durationMs = 2000;
+
+        activateProbing();
+
+        sys_lock();
+        juce::String errorOut;
+        t_outconnect* oc = resolveProbeTarget(canvasName, tempId, outletIndex, errorOut);
+        sys_unlock();
+
+        if (!oc) {
+            sendReply("/meter/spectral/error/" + correlationId, errorOut);
+            return;
+        }
+
+        int probeId = probeManager.startProbe(oc, canvasName, tempId, outletIndex, correlationId, durationMs);
+        if (probeId <= 0) {
+            sendReply("/meter/spectral/error/" + correlationId, "Max active probes exceeded");
+            return;
+        }
+
+        // Mark this probe as spectral so collectResults runs FFT
+        for (auto& probe : probeManager.probes) {
+            if (probe.probeId == static_cast<uint32_t>(probeId)) {
+                probe.spectral = true;
+                break;
+            }
+        }
+
+        if (!isTimerRunning()) {
+            startTimer(15);
+        }
+
+        juce::OSCMessage rep { juce::OSCAddressPattern("/meter/spectral/started/" + correlationId) };
+        rep.addArgument(static_cast<int32>(probeId));
         sender.send(rep);
         return;
     }

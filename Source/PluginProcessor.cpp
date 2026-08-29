@@ -2144,6 +2144,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
                     mcpStableSerialMap.erase(kv.second);
                 }
                 mcpStableObjectMap.erase(it);
+                mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
             }
 
             SmallArray<pd::Atom> atoms;
@@ -2218,6 +2219,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
                     if (targetObj) {
                         mcpStableObjectMap[canvas_symbol.toStdString()][object_id.toStdString()] = targetObj;
                         mcpStableSerialMap[targetObj] = mcpSerialCounter++;
+                        mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
                         createdIds.push_back(object_id.toStdString());
                         createdPtrs.push_back(targetObj);
                         created++;
@@ -2296,6 +2298,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
                 if (targetObj) {
                     mcpStableObjectMap[canvas_symbol.toStdString()][object_id.toStdString()] = targetObj;
                     mcpStableSerialMap[targetObj] = mcpSerialCounter++;
+                    mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
                     success = true;
                     canvas_dirty(canvas, 1);
                     if (pd_class(&targetObj->g_pd) == canvas_class) {
@@ -2345,6 +2348,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
                 if (targetObj) {
                     mcpStableObjectMap[canvas_symbol.toStdString()][object_id.toStdString()] = targetObj;
                     mcpStableSerialMap[targetObj] = mcpSerialCounter++;
+                    mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
                     success = true;
                 }
             }
@@ -2451,6 +2455,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
                     pd::Interface::removeObjects(canvas, objectsToDelete);
                     mcpStableObjectMap[canvas_symbol.toStdString()].erase(object_id.toStdString());
                     mcpStableSerialMap.erase(targetObj);
+                    mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
                     success = true;
                     canvas_dirty(canvas, 1);
                 }
@@ -2489,6 +2494,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
             if (it != map.end()) {
                 map[new_id.toStdString()] = it->second;
                 map.erase(it);
+                mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
                 success = true;
             }
             sys_unlock();
@@ -2574,6 +2580,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
                             mcpStableSerialMap.erase(targetObj);
                         }
                         mcpStableSerialMap[newObj] = mcpSerialCounter++;
+                        mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
                         success = true;
                     }
                 }
