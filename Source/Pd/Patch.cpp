@@ -312,6 +312,59 @@ t_gobj* Patch::createObject(int const x, int const y, String const& name)
     return nullptr;
 }
 
+t_gobj* Patch::createObjectFast(int const x, int const y, String const& name)
+{
+    StringArray tokens;
+    tokens.addTokens(name.replace("\\ ", "__%SPACE%__"), true);
+    ObjectThemeManager::get()->formatObject(tokens);
+
+    t_symbol* typesymbol = instance->generateSymbol("obj");
+    if (tokens[0] == "msg") {
+        typesymbol = instance->generateSymbol("msg");
+        tokens.remove(0);
+    } else if (tokens[0] == "comment") {
+        typesymbol = instance->generateSymbol("text");
+        tokens.remove(0);
+    } else if (tokens[0] == "floatbox") {
+        typesymbol = instance->generateSymbol("floatatom");
+        tokens.remove(0);
+    } else if (tokens[0] == "listbox") {
+        typesymbol = instance->generateSymbol("listbox");
+        tokens.remove(0);
+    } else if (tokens[0] == "symbolbox") {
+        typesymbol = instance->generateSymbol("symbolatom");
+        tokens.remove(0);
+    }
+    if (tokens[0] == "+") {
+        tokens.set(0, "\\+");
+    }
+    tokens.removeEmptyStrings();
+
+    int const argc = tokens.size() + 2;
+    auto argv = SmallArray<t_atom>(argc);
+    SETFLOAT(argv.data(), static_cast<float>(x));
+    SETFLOAT(argv.data() + 1, static_cast<float>(y));
+
+    for (int i = 0; i < tokens.size(); i++) {
+        auto token = tokens[i].replace("__%SPACE%__", "\\ ");
+        auto charptr = token.getCharPointer();
+        auto ptr = charptr;
+        CharacterFunctions::readDoubleValue(ptr);
+        if (ptr - charptr == token.getNumBytesAsUTF8()) {
+            SETFLOAT(argv.data() + i + 2, token.getFloatValue());
+        } else {
+            SETSYMBOL(argv.data() + i + 2, instance->generateSymbol(token));
+        }
+    }
+
+    if (auto patch = ptr.get<t_glist>()) {
+        setCurrent();
+        return pd::Interface::createObjectFast(patch.get(), typesymbol, argc, argv.data());
+    }
+
+    return nullptr;
+}
+
 t_gobj* Patch::renameObject(t_object* obj, String const& name)
 {
     StringArray tokens;

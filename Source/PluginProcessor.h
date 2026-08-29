@@ -138,6 +138,7 @@ public:
     void settingsChanged(String const& name, var const& value) override;
     t_canvas* getCanvasBySymbol(const String& canvas_symbol);
     void synchroniseCanvases();
+    bool getIsProcessingAudio() const noexcept { return isProcessingAudio.load(std::memory_order_relaxed); }
 
     static bool initialiseFilesystem();
 #if JUCE_IOS

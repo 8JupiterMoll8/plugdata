@@ -612,6 +612,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
 
             if (cnv) {
+                int const dspstate = canvas_suspend_dsp();
                 pd::Patch patchWrapper(pd::WeakReference(cnv, processor), processor, false);
 
                 // === PHASE 1: DELETE ===
@@ -712,7 +713,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     }
 
                     auto objectText = buildObjectText(kind, tokens);
-                    t_gobj* targetObj = patchWrapper.createObject(static_cast<int>(x), static_cast<int>(y), objectText);
+                    t_gobj* targetObj = patchWrapper.createObjectFast(static_cast<int>(x), static_cast<int>(y), objectText);
                     if (targetObj) {
                         processor->mcpStableObjectMap[canvasName.toStdString()][objectId.toStdString()] = targetObj;
                         processor->mcpStableSerialMap[targetObj] = processor->mcpSerialCounter++;
@@ -738,18 +739,9 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         t_object* srcObj = pd::Interface::checkObject(srcGobj);
                         t_object* destObj = pd::Interface::checkObject(destGobj);
                         if (srcObj && destObj) {
-                            int srcIdx = 0, destIdx = 0, idx = 0;
-                            for (t_gobj* y = cnv->gl_list; y; y = y->g_next, idx++) {
-                                if (y == srcGobj) srcIdx = idx;
-                                if (y == destGobj) destIdx = idx;
+                            if (obj_connect(srcObj, srcOut, destObj, destIn)) {
+                                connected++;
                             }
-                            t_atom cArgs[4];
-                            SETFLOAT(&cArgs[0], static_cast<float>(srcIdx));
-                            SETFLOAT(&cArgs[1], static_cast<float>(srcOut));
-                            SETFLOAT(&cArgs[2], static_cast<float>(destIdx));
-                            SETFLOAT(&cArgs[3], static_cast<float>(destIn));
-                            pd_typedmess(reinterpret_cast<t_pd*>(cnv), gensym("connect"), 4, cArgs);
-                            connected++;
                         }
                     }
                 }
@@ -758,7 +750,9 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
                 // Zero-Dropout: exactly ONE single atomic DSP recompile if topology changed
                 if (created > 0 || disconnected > 0 || connected > 0 || deleted > 0 || edited > 0) {
-                    canvas_update_dsp();
+                    canvas_resume_dsp(dspstate);
+                } else {
+                    canvas_resume_dsp(dspstate);
                 }
             }
             sys_unlock();

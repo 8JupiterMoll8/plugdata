@@ -37,6 +37,7 @@ public:
     Rectangle<int> getGraphBounds() const;
 
     t_gobj* createObject(int x, int y, String const& name);
+    t_gobj* createObjectFast(int x, int y, String const& name);
     t_gobj* renameObject(t_object* obj, String const& name);
 
     void moveObjects(SmallArray<t_gobj*> const&, int x, int y);

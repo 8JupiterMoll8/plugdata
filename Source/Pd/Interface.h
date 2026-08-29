@@ -519,6 +519,22 @@ struct Interface {
         binbuf_free(b);
     }
 
+    static t_gobj* createObjectFast(t_canvas* cnv, t_symbol* s, int const argc, t_atom* argv)
+    {
+        canvas_setcurrent(cnv);
+        pd_typedmess(reinterpret_cast<t_pd*>(cnv), s, argc, argv);
+        t_gobj* new_object = getNewest(cnv);
+        if (new_object) {
+            if (pd_class(&new_object->g_pd) == canvas_class)
+                canvas_loadbang(reinterpret_cast<t_canvas*>(new_object));
+            else if (zgetfn(&new_object->g_pd, gensym("loadbang")))
+                vmess(&new_object->g_pd, gensym("loadbang"), "f", LB_LOAD);
+        }
+        canvas_unsetcurrent(cnv);
+        canvas_dirty(cnv, 1);
+        return new_object;
+    }
+
     static t_gobj* createObject(t_canvas* cnv, t_symbol* s, int const argc, t_atom* argv)
     {
         canvas_setcurrent(cnv);

@@ -1841,7 +1841,6 @@ void PluginProcessor::synchroniseCanvases()
         for (auto& cnv : canvases) {
             if (cnv.getComponent()) {
                 cnv->synchronise();
-                cnv->handleUpdateNowIfNeeded();
             }
         }
     }
