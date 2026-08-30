@@ -1,0 +1,18 @@
+diff --git a/Libraries/pd-else b/Libraries/pd-else
+--- a/Libraries/pd-else
++++ b/Libraries/pd-else
+@@ -1 +1 @@
+-Subproject commit 27f148979f145b2a381343a7ecc4c6f796ad5922
++Subproject commit 27f148979f145b2a381343a7ecc4c6f796ad5922-dirty
+diff --git a/Libraries/pd-lua b/Libraries/pd-lua
+--- a/Libraries/pd-lua
++++ b/Libraries/pd-lua
+@@ -1 +1 @@
+-Subproject commit 2bd1efb69532cca3dc7a7e2b465adf4e8ce2c695
++Subproject commit 2bd1efb69532cca3dc7a7e2b465adf4e8ce2c695-dirty
+diff --git a/Libraries/pure-data b/Libraries/pure-data
+--- a/Libraries/pure-data
++++ b/Libraries/pure-data
+@@ -1 +1 @@
+-Subproject commit e6d3f833be7b87552d3f440756791f7529be698f
++Subproject commit e6d3f833be7b87552d3f440756791f7529be698f-dirty

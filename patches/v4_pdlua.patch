@@ -1,0 +1,44 @@
+diff --git a/pdlua.c b/pdlua.c
+index 182b142..410b78d 100644
+--- a/pdlua.c
++++ b/pdlua.c
+@@ -2061,16 +2061,9 @@ static t_atom *pdlua_popatomtable
+         *count = lua_rawlen(L, -1);
+ #endif // LUA_VERSION_NUM	< 502
+         if (*count > 0) atoms = malloc(*count * sizeof(t_atom));
+-        i = 0;
+-        lua_pushnil(L);
+-        while (lua_next(L, -2) != 0)
++        for (i = 0; i < *count; i++)
+         {
+-            if (i == *count)
+-            {
+-                pd_error(o, "lua: error: too many table elements");
+-                ok = 0;
+-                break;
+-            }
++            lua_rawgeti(L, -1, i + 1);
+             switch (lua_type(L, -1))
+             {
+                 case (LUA_TNUMBER):
+@@ -2100,7 +2093,7 @@ static t_atom *pdlua_popatomtable
+                     break;
+             }
+             lua_pop(L, 1);
+-            ++i;
++            if (!ok) break;
+         }
+         if (i != *count)
+         {
+@@ -2229,7 +2222,10 @@ static int pdlua_send(lua_State *L)
+                     if (strlen(selname) != selnamel) pd_error(NULL, "%s: warning: selector symbol munged (contains \\0 in body) [send %s]", src_info(L, msg), receivename);
+                     lua_pushvalue(L, 3);
+                     atoms = pdlua_popatomtable(L, &count, NULL);
+-                    if ((count == 0 || atoms) && (receivesym->s_thing)) typedmess(receivesym->s_thing, selsym, count, atoms);
++                    if (count == 0 || atoms)
++                    {
++                        if (receivesym->s_thing) typedmess(receivesym->s_thing, selsym, count, atoms);
++                    }
+                     else pd_error(NULL, "%s: error: %s atoms table [send %s]", src_info(L, msg), lua_isnoneornil(L, 3)?"missing":"invalid", receivename);
+                     if (atoms) 
+                     {

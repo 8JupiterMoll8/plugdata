@@ -1,0 +1,32 @@
+diff --git a/src/m_obj.c b/src/m_obj.c
+index 5baf38b..0743533 100644
+--- a/src/m_obj.c
++++ b/src/m_obj.c
+@@ -27,6 +27,9 @@ int is_reference_valid(void* ptr);
+ int plugdata_debugging_or_activity_enabled();
+ void signal_makereusable(t_signal *sig);
+ 
++/* MCP hot-patching: when > 0, defer per-wire canvas_update_dsp() calls */
++int dsp_update_deferred = 0;
++
+ union inletunion
+ {
+     t_symbol *iu_symto;
+@@ -730,7 +733,7 @@ doit:
+         oc2->oc_next = oc;
+     }
+     else *ochead = oc;
+-    if (o->o_sym == &s_signal) canvas_update_dsp();
++    if (o->o_sym == &s_signal && !dsp_update_deferred) canvas_update_dsp();
+ 
+     return (oc);
+ }
+@@ -782,7 +785,7 @@ doit:
+         oc = oc2;
+     }
+ done:
+-    if (o->o_sym == &s_signal) canvas_update_dsp();
++    if (o->o_sym == &s_signal && !dsp_update_deferred) canvas_update_dsp();
+ }
+ 
+ /* ------ traversal routines for code that can't see our structures ------ */
