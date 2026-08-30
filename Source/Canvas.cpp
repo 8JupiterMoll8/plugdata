@@ -2096,7 +2096,7 @@ void Canvas::triggerizeSelection()
     }
 }
 
-void Canvas::encapsulateSelection()
+void Canvas::encapsulateSelection(String const& subpatchName)
 {
     auto selectedObjects = getSelectionOfType<Object>();
 
@@ -2181,7 +2181,8 @@ void Canvas::encapsulateSelection()
     }
     auto centre = bounds.getCentre() - canvasOrigin;
 
-    auto copypasta = String("#N canvas 733 172 450 300 0 1;\n") + "$$_COPY_HERE_$$" + newEdgeObjects + newInternalConnections + "#X restore " + String(centre.x) + " " + String(centre.y) + " pd;\n";
+    auto nameToken = (subpatchName.isEmpty() || subpatchName == "pd") ? "pd" : ("pd " + subpatchName);
+    auto copypasta = String("#N canvas 733 172 450 300 0 1;\n") + "$$_COPY_HERE_$$" + newEdgeObjects + newInternalConnections + "#X restore " + String(centre.x) + " " + String(centre.y) + " " + nameToken + ";\n";
 
     // Apply the changed on Pd's thread
     if (auto patchPtr = patch.getPointer()) {

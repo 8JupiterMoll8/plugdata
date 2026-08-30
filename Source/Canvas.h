@@ -134,7 +134,7 @@ public:
     void pasteSelection();
     void duplicateSelection();
 
-    void encapsulateSelection();
+    void encapsulateSelection(String const& subpatchName = "pd");
     void triggerizeSelection();
     void cycleSelection();
     void connectSelection();

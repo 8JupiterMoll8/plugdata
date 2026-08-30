@@ -6,6 +6,9 @@
 
 #include "MCPBridge.h"
 #include "PluginProcessor.h"
+#include "PluginEditor.h"
+#include "Canvas.h"
+#include "Objects/ObjectBase.h"
 #include "Pd/Interface.h"
 #include "../../Libraries/fftw3/api/fftw3.h"
 
@@ -216,30 +219,32 @@ static juce::String formatAsPdLine(const juce::String& kind,
 {
     juce::StringArray t = tokens;
 
-    if (kind == "msg") {
-        if (!t.isEmpty() && t[0] == "msg") t.remove(0);
+    if (kind == "msg" || kind == "message" || (!t.isEmpty() && t[0] == "msg")) {
+        if (!t.isEmpty() && (t[0] == "msg" || t[0] == "message")) t.remove(0);
+        while (!t.isEmpty() && t[0].isEmpty()) t.remove(0);
         return "#X msg " + juce::String(x) + " " + juce::String(y)
-               + " " + escapePdText(t.joinIntoString(" ")) + ";";
+               + " " + escapePdText(t.joinIntoString(" ").trim()) + ";";
     }
-    if (kind == "text" || kind == "comment") {
+    if (kind == "text" || kind == "comment" || (!t.isEmpty() && (t[0] == "text" || t[0] == "comment"))) {
         if (!t.isEmpty() && (t[0] == "text" || t[0] == "comment")) t.remove(0);
+        while (!t.isEmpty() && t[0].isEmpty()) t.remove(0);
         return "#X text " + juce::String(x) + " " + juce::String(y)
-               + " " + escapePdText(t.joinIntoString(" ")) + ";";
+               + " " + escapePdText(t.joinIntoString(" ").trim()) + ";";
     }
     if (kind == "floatatom" || kind == "floatbox") {
         if (!t.isEmpty() && (t[0] == "floatatom" || t[0] == "floatbox")) t.remove(0);
         return "#X floatatom " + juce::String(x) + " " + juce::String(y)
-               + " " + t.joinIntoString(" ") + ";";
+               + " " + t.joinIntoString(" ").trim() + ";";
     }
     if (kind == "symbolatom" || kind == "symbolbox") {
         if (!t.isEmpty() && (t[0] == "symbolatom" || t[0] == "symbolbox")) t.remove(0);
         return "#X symbolatom " + juce::String(x) + " " + juce::String(y)
-               + " " + t.joinIntoString(" ") + ";";
+               + " " + t.joinIntoString(" ").trim() + ";";
     }
 
     if (!t.isEmpty() && t[0] == "+") t.set(0, "\\+");
     return "#X obj " + juce::String(x) + " " + juce::String(y)
-           + " " + t.joinIntoString(" ") + ";";
+           + " " + t.joinIntoString(" ").trim() + ";";
 }
 
 void MCPBridge::oscMessageReceived(const juce::OSCMessage& message)
@@ -721,7 +726,8 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 auto kind = (cursor < msg.size()) ? getArgString(msg[cursor++]) : juce::String();
                 auto ot = (cursor < msg.size()) ? getArgString(msg[cursor++]) : juce::String();
                 int na = (cursor < msg.size()) ? static_cast<int>(getArgFloat(msg[cursor++])) : 0;
-                juce::StringArray tk; tk.add(ot);
+                juce::StringArray tk;
+                if (ot.isNotEmpty()) tk.add(ot);
                 for (int a = 0; a < na && cursor < msg.size(); a++) tk.add(getArgString(msg[cursor++]));
                 pastaBuffer += formatAsPdLine(kind, tk, static_cast<int>(px), static_cast<int>(py)) + "\n";
                 pendingCreates.push_back({ oid, o });
@@ -1571,6 +1577,254 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             atoms.add(pd::Atom(processor->generateSymbol(objectId)));
 
             processor->receiveSysMessage("mcp_register_id", atoms);
+        }
+        return;
+    }
+
+    if (action == "encapsulate") {
+        if (msg.size() >= 3 && processor) {
+            auto canvasName = normalizeCanvas(getArgString(msg[0]));
+            auto subpatchName = getArgString(msg[1]);
+            int count = static_cast<int>(getArgFloat(msg[2]));
+            std::vector<juce::String> targetIds;
+            int cursor = 3;
+            for (int i = 0; i < count && cursor < msg.size(); i++) {
+                targetIds.push_back(getArgString(msg[cursor++]));
+            }
+            auto correlationId = (cursor < msg.size()) ? getArgString(msg[cursor]) : "0";
+
+            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
+
+            if (cnv) {
+                juce::MessageManager::callAsync([proc = processor, cnv, canvasName, subpatchName, targetIds, correlationId, bridge = this]() {
+                    Canvas* canvasComp = nullptr;
+                    for (auto* editor : proc->getEditors()) {
+                        if (!editor) continue;
+                        for (auto* c : editor->getCanvases()) {
+                            if (c && c->patch.getUncheckedPointer() == cnv) {
+                                canvasComp = c;
+                                break;
+                            }
+                        }
+                        if (canvasComp) break;
+                    }
+
+                    if (!canvasComp) {
+                        bridge->sendReply("/pd/encapsulate/reply/" + correlationId, 0.0f);
+                        return;
+                    }
+
+                    canvasComp->patch.deselectAll();
+                    for (const auto& id : targetIds) {
+                        t_gobj* g = proc->resolveStableId(canvasName, id);
+                        if (g) {
+                            for (auto* objComp : canvasComp->objects) {
+                                if (objComp && objComp->getPointer() == g) {
+                                    canvasComp->setSelected(objComp, true);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    canvasComp->encapsulateSelection(subpatchName);
+
+                    t_gobj* newestObj = pd::Interface::getNewest(cnv);
+                    if (newestObj) {
+                        proc->mcpStableObjectMap[canvasName.toStdString()][subpatchName.toStdString()] = newestObj;
+                        proc->mcpStableSerialMap[newestObj] = proc->mcpSerialCounter++;
+                        proc->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+                    }
+
+                    bridge->sendReply("/pd/encapsulate/reply/" + correlationId, 1.0f);
+                });
+            } else {
+                sendReply("/pd/encapsulate/reply/" + correlationId, 0.0f);
+            }
+        }
+        return;
+    }
+
+    if (action == "tidy") {
+        if (msg.size() >= 2 && processor) {
+            auto canvasName = normalizeCanvas(getArgString(msg[0]));
+            int count = static_cast<int>(getArgFloat(msg[1]));
+            std::vector<juce::String> targetIds;
+            int cursor = 2;
+            for (int i = 0; i < count && cursor < msg.size(); i++) {
+                targetIds.push_back(getArgString(msg[cursor++]));
+            }
+            auto correlationId = (cursor < msg.size()) ? getArgString(msg[cursor]) : "0";
+
+            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
+
+            if (cnv) {
+                SmallArray<t_gobj*> targetObjs;
+                if (!targetIds.empty()) {
+                    for (const auto& id : targetIds) {
+                        t_gobj* g = processor->resolveStableId(canvasName, id);
+                        if (g) targetObjs.add(g);
+                    }
+                } else {
+                    for (t_gobj* y = cnv->gl_list; y; y = y->g_next) {
+                        targetObjs.add(y);
+                    }
+                }
+
+                if (!targetObjs.empty()) {
+                    pd::Interface::tidy(cnv, targetObjs);
+                    processor->synchroniseCanvases();
+                }
+                sendReply("/pd/tidy/reply/" + correlationId, 1.0f);
+            } else {
+                sendReply("/pd/tidy/reply/" + correlationId, 0.0f);
+            }
+        }
+        return;
+    }
+
+    if (action == "align") {
+        if (msg.size() >= 3 && processor) {
+            auto canvasName = normalizeCanvas(getArgString(msg[0]));
+            auto alignStr = getArgString(msg[1]).toLowerCase();
+            int count = static_cast<int>(getArgFloat(msg[2]));
+            std::vector<juce::String> targetIds;
+            int cursor = 3;
+            for (int i = 0; i < count && cursor < msg.size(); i++) {
+                targetIds.push_back(getArgString(msg[cursor++]));
+            }
+            auto correlationId = (cursor < msg.size()) ? getArgString(msg[cursor]) : "0";
+
+            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
+
+            if (cnv) {
+                juce::MessageManager::callAsync([proc = processor, cnv, canvasName, alignStr, targetIds, correlationId, bridge = this]() {
+                    Canvas* canvasComp = nullptr;
+                    for (auto* editor : proc->getEditors()) {
+                        if (!editor) continue;
+                        for (auto* c : editor->getCanvases()) {
+                            if (c && c->patch.getUncheckedPointer() == cnv) {
+                                canvasComp = c;
+                                break;
+                            }
+                        }
+                        if (canvasComp) break;
+                    }
+
+                    if (!canvasComp) {
+                        bridge->sendReply("/pd/align/reply/" + correlationId, 0.0f);
+                        return;
+                    }
+
+                    if (!targetIds.empty()) {
+                        canvasComp->patch.deselectAll();
+                        for (const auto& id : targetIds) {
+                            t_gobj* g = proc->resolveStableId(canvasName, id);
+                            if (g) {
+                                for (auto* objComp : canvasComp->objects) {
+                                    if (objComp && objComp->getPointer() == g) {
+                                        canvasComp->setSelected(objComp, true);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Align alignMode = Align::Left;
+                    if (alignStr == "right") alignMode = Align::Right;
+                    else if (alignStr == "hcentre" || alignStr == "hcenter") alignMode = Align::HCentre;
+                    else if (alignStr == "hdistribute") alignMode = Align::HDistribute;
+                    else if (alignStr == "top") alignMode = Align::Top;
+                    else if (alignStr == "bottom") alignMode = Align::Bottom;
+                    else if (alignStr == "vcentre" || alignStr == "vcenter") alignMode = Align::VCentre;
+                    else if (alignStr == "vdistribute") alignMode = Align::VDistribute;
+
+                    canvasComp->alignObjects(alignMode);
+                    bridge->sendReply("/pd/align/reply/" + correlationId, 1.0f);
+                });
+            } else {
+                sendReply("/pd/align/reply/" + correlationId, 0.0f);
+            }
+        }
+        return;
+    }
+
+    if (action == "undo") {
+        if (msg.size() >= 1 && processor) {
+            auto canvasName = normalizeCanvas(getArgString(msg[0]));
+            auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : "0";
+
+            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
+
+            if (cnv) {
+                juce::MessageManager::callAsync([proc = processor, cnv, correlationId, bridge = this]() {
+                    Canvas* canvasComp = nullptr;
+                    for (auto* editor : proc->getEditors()) {
+                        if (!editor) continue;
+                        for (auto* c : editor->getCanvases()) {
+                            if (c && c->patch.getUncheckedPointer() == cnv) {
+                                canvasComp = c;
+                                break;
+                            }
+                        }
+                        if (canvasComp) break;
+                    }
+
+                    if (canvasComp) {
+                        canvasComp->undo();
+                        bridge->sendReply("/pd/undo/reply/" + correlationId, 1.0f);
+                    } else {
+                        pd::Interface::undo(cnv);
+                        proc->synchroniseCanvases();
+                        bridge->sendReply("/pd/undo/reply/" + correlationId, 1.0f);
+                    }
+                });
+            } else {
+                sendReply("/pd/undo/reply/" + correlationId, 0.0f);
+            }
+        }
+        return;
+    }
+
+    if (action == "redo") {
+        if (msg.size() >= 1 && processor) {
+            auto canvasName = normalizeCanvas(getArgString(msg[0]));
+            auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : "0";
+
+            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
+
+            if (cnv) {
+                juce::MessageManager::callAsync([proc = processor, cnv, correlationId, bridge = this]() {
+                    Canvas* canvasComp = nullptr;
+                    for (auto* editor : proc->getEditors()) {
+                        if (!editor) continue;
+                        for (auto* c : editor->getCanvases()) {
+                            if (c && c->patch.getUncheckedPointer() == cnv) {
+                                canvasComp = c;
+                                break;
+                            }
+                        }
+                        if (canvasComp) break;
+                    }
+
+                    if (canvasComp) {
+                        canvasComp->redo();
+                        bridge->sendReply("/pd/redo/reply/" + correlationId, 1.0f);
+                    } else {
+                        pd::Interface::redo(cnv);
+                        proc->synchroniseCanvases();
+                        bridge->sendReply("/pd/redo/reply/" + correlationId, 1.0f);
+                    }
+                });
+            } else {
+                sendReply("/pd/redo/reply/" + correlationId, 0.0f);
+            }
         }
         return;
     }

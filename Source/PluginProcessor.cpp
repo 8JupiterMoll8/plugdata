@@ -1889,6 +1889,20 @@ t_gobj* PluginProcessor::resolveStableId(const String& canvasName, const String&
             mcpStableSerialMap.erase(it->second);
         }
     }
+
+    // Index-based fallback: "0", "1", "obj_0", "obj_1", etc.
+    if (objectId.startsWith("obj_") || objectId.containsOnly("0123456789")) {
+        int idx = objectId.startsWith("obj_") ? objectId.substring(4).getIntValue() : objectId.getIntValue();
+        t_canvas* canvas = getCanvasBySymbol(canvasName);
+        if (!canvas && canvasName == "pd-main") canvas = pd_this->pd_canvaslist;
+        if (canvas) {
+            int cur = 0;
+            for (t_gobj* y_obj = canvas->gl_list; y_obj; y_obj = y_obj->g_next, cur++) {
+                if (cur == idx) return y_obj;
+            }
+        }
+    }
+
     return nullptr;
 }
 
