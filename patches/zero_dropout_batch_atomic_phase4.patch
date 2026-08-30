@@ -1,0 +1,471 @@
+diff --git a/Source/Pd/MCPBridge.cpp b/Source/Pd/MCPBridge.cpp
+index 48d858fed..4e7472e4c 100644
+--- a/Source/Pd/MCPBridge.cpp
++++ b/Source/Pd/MCPBridge.cpp
+@@ -9,6 +9,9 @@
+ #include "Pd/Interface.h"
+ #include "../../Libraries/fftw3/api/fftw3.h"
+ 
++#include <set>
++#include <unordered_map>
++
+ extern "C" {
+ #include <m_pd.h>
+ #include <g_canvas.h>
+@@ -166,6 +169,79 @@ static juce::String buildObjectText(const juce::String& kind, const juce::String
+     return t.joinIntoString(" ");
+ }
+ 
++// =========================================================================
++// Zero-Dropout Paste Helpers
++// =========================================================================
++
++// Direct binbuf_eval paste — bypasses canvas_dopaste entirely.
++// Skips: undo serialization, object selection, editmode switch,
++// and the inner canvas_suspend_dsp/canvas_resume_dsp cycle.
++static void pasteDirect(t_canvas* cnv, char const* buf)
++{
++    size_t const len = strlen(buf);
++    t_binbuf* b = binbuf_new();
++    binbuf_text(b, buf, len);
++
++    t_symbol* sym_X = gensym("#X");
++    t_symbol* sym_N = gensym("#N");
++    t_symbol* sym_A = gensym("#A");
++
++    t_pd* saved_X = sym_X->s_thing;
++    t_pd* saved_N = sym_N->s_thing;
++    t_pd* saved_A = sym_A->s_thing;
++
++    sym_A->s_thing = nullptr;
++    sym_X->s_thing = &cnv->gl_pd;
++    sym_N->s_thing = &pd_canvasmaker;
++
++    binbuf_eval(b, 0, 0, 0);
++
++    sym_A->s_thing = saved_A;
++    sym_X->s_thing = saved_X;
++    sym_N->s_thing = saved_N;
++
++    binbuf_free(b);
++}
++
++// Escape semicolons for Pd paste buffer format
++static juce::String escapePdText(const juce::String& text)
++{
++    return text.replace(";", " \\;");
++}
++
++// Convert MCP kind + tokens to Pd paste-format line
++static juce::String formatAsPdLine(const juce::String& kind,
++                                    const juce::StringArray& tokens,
++                                    int x, int y)
++{
++    juce::StringArray t = tokens;
++
++    if (kind == "msg") {
++        if (!t.isEmpty() && t[0] == "msg") t.remove(0);
++        return "#X msg " + juce::String(x) + " " + juce::String(y)
++               + " " + escapePdText(t.joinIntoString(" ")) + ";";
++    }
++    if (kind == "text" || kind == "comment") {
++        if (!t.isEmpty() && (t[0] == "text" || t[0] == "comment")) t.remove(0);
++        return "#X text " + juce::String(x) + " " + juce::String(y)
++               + " " + escapePdText(t.joinIntoString(" ")) + ";";
++    }
++    if (kind == "floatatom" || kind == "floatbox") {
++        if (!t.isEmpty() && (t[0] == "floatatom" || t[0] == "floatbox")) t.remove(0);
++        return "#X floatatom " + juce::String(x) + " " + juce::String(y)
++               + " " + t.joinIntoString(" ") + ";";
++    }
++    if (kind == "symbolatom" || kind == "symbolbox") {
++        if (!t.isEmpty() && (t[0] == "symbolatom" || t[0] == "symbolbox")) t.remove(0);
++        return "#X symbolatom " + juce::String(x) + " " + juce::String(y)
++               + " " + t.joinIntoString(" ") + ";";
++    }
++
++    if (!t.isEmpty() && t[0] == "+") t.set(0, "\\+");
++    return "#X obj " + juce::String(x) + " " + juce::String(y)
++           + " " + t.joinIntoString(" ") + ";";
++}
++
+ void MCPBridge::oscMessageReceived(const juce::OSCMessage& message)
+ {
+     auto addr = message.getAddressPattern().toString();
+@@ -607,155 +683,205 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
+             std::vector<std::string> createdIds;
+             std::vector<t_gobj*> createdPtrs;
+ 
+-            sys_lock();
+-            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+-            if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
+-
+-            if (cnv) {
+-                int const dspstate = canvas_suspend_dsp();
+-                pd::Patch patchWrapper(pd::WeakReference(cnv, processor), processor, false);
+-
+-                // === PHASE 1: DELETE ===
+-                for (int d = 0; d < deleteCount && cursor < msg.size(); d++) {
+-                    auto objectId = getArgString(msg[cursor++]);
+-                    t_gobj* targetObj = processor->resolveStableId(canvasName, objectId);
+-                    if (targetObj) {
+-                        processor->mcpStableObjectMap[canvasName.toStdString()].erase(objectId.toStdString());
+-                        processor->mcpStableSerialMap.erase(targetObj);
+-                        processor->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+-                        SmallArray<t_gobj*> toDelete;
+-                        toDelete.add(targetObj);
+-                        pd::Interface::removeObjects(cnv, toDelete);
+-                        deleted++;
++            // =========================================================================
++            // PHASE 0: PRE-PARSE outside audio thread — zero contention
++            // =========================================================================
++            struct PreDelete { juce::String objectId; };
++            std::vector<PreDelete> preDeletes;
++            for (int d = 0; d < deleteCount && cursor < msg.size(); d++)
++                preDeletes.push_back({ getArgString(msg[cursor++]) });
++
++            struct PreDisconnect { juce::String srcId; int srcOut; juce::String destId; int destIn; };
++            std::vector<PreDisconnect> preDisconnects;
++            for (int dc = 0; dc < disconnectCount && cursor + 3 < msg.size(); dc++) {
++                auto s = getArgString(msg[cursor++]); int so = static_cast<int>(getArgFloat(msg[cursor++]));
++                auto d2 = getArgString(msg[cursor++]); int di = static_cast<int>(getArgFloat(msg[cursor++]));
++                preDisconnects.push_back({ s, so, d2, di });
++            }
++
++            struct PreEdit { juce::String objectId; juce::String newText; };
++            std::vector<PreEdit> preEdits;
++            for (int e = 0; e < editCount && cursor < msg.size(); e++) {
++                auto oid = getArgString(msg[cursor++]);
++                auto nt = (cursor < msg.size()) ? getArgString(msg[cursor++]) : juce::String();
++                int na = (cursor < msg.size()) ? static_cast<int>(getArgFloat(msg[cursor++])) : 0;
++                juce::StringArray tk; tk.add(nt);
++                for (int a = 0; a < na && cursor < msg.size(); a++) tk.add(getArgString(msg[cursor++]));
++                preEdits.push_back({ oid, tk.joinIntoString(" ") });
++            }
++
++            struct PendingCreate { juce::String tempId; int localIndex; };
++            std::vector<PendingCreate> pendingCreates;
++            juce::String pastaBuffer;
++            for (int o = 0; o < createCount && cursor < msg.size(); o++) {
++                auto oid = getArgString(msg[cursor++]);
++                float px = (cursor < msg.size()) ? getArgFloat(msg[cursor++]) : 0;
++                float py = (cursor < msg.size()) ? getArgFloat(msg[cursor++]) : 0;
++                auto kind = (cursor < msg.size()) ? getArgString(msg[cursor++]) : juce::String();
++                auto ot = (cursor < msg.size()) ? getArgString(msg[cursor++]) : juce::String();
++                int na = (cursor < msg.size()) ? static_cast<int>(getArgFloat(msg[cursor++])) : 0;
++                juce::StringArray tk; tk.add(ot);
++                for (int a = 0; a < na && cursor < msg.size(); a++) tk.add(getArgString(msg[cursor++]));
++                pastaBuffer += formatAsPdLine(kind, tk, static_cast<int>(px), static_cast<int>(py)) + "\n";
++                pendingCreates.push_back({ oid, o });
++            }
++
++            // ALL connections go through obj_connect after paste (no #X connect in buffer)
++            struct CrossConn { juce::String srcId; int srcOut; juce::String destId; int destIn; };
++            std::vector<CrossConn> allConns;
++            for (int c = 0; c < connectCount && cursor + 3 < msg.size(); c++) {
++                auto s = getArgString(msg[cursor++]); int so = static_cast<int>(getArgFloat(msg[cursor++]));
++                auto d2 = getArgString(msg[cursor++]); int di = static_cast<int>(getArgFloat(msg[cursor++]));
++                allConns.push_back({ s, so, d2, di });
++            }
++
++            // =========================================================================
++            // EXECUTE ON AUDIO THREAD — zero lock contention, zero dropout
++            // =========================================================================
++            // Manual GUI patching has zero dropout because it enqueues mutations into
++            // functionQueue, which runs on the audio thread during sendMessagesFromQueue()
++            // BEFORE performDSP(). We do exactly the same thing here.
++
++            extern int dsp_update_deferred;  // defined in m_obj.c
++            juce::WaitableEvent done;
++            t_canvas* cnv = nullptr;
++
++            processor->enqueueFunctionAsync([&]() {
++                auto tLambdaStart = std::chrono::high_resolution_clock::now();
++                cnv = processor->getCanvasBySymbol(canvasName);
++                if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
++
++                if (cnv) {
++                    dsp_update_deferred = 1;
++
++                    // PHASE 1: DELETE
++                    for (auto& pd : preDeletes) {
++                        t_gobj* obj = processor->resolveStableId(canvasName, pd.objectId);
++                        if (obj) {
++                            processor->mcpStableObjectMap[canvasName.toStdString()].erase(pd.objectId.toStdString());
++                            processor->mcpStableSerialMap.erase(obj);
++                            processor->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
++                            SmallArray<t_gobj*> toDelete; toDelete.add(obj);
++                            pd::Interface::removeObjects(cnv, toDelete);
++                            deleted++;
++                        }
+                     }
+-                }
+-
+-                // === PHASE 2: DISCONNECT ===
+-                for (int dc = 0; dc < disconnectCount && cursor + 3 < msg.size(); dc++) {
+-                    auto srcId = getArgString(msg[cursor++]);
+-                    int srcOut = static_cast<int>(getArgFloat(msg[cursor++]));
+-                    auto destId = getArgString(msg[cursor++]);
+-                    int destIn = static_cast<int>(getArgFloat(msg[cursor++]));
+ 
+-                    t_gobj* srcGobj = processor->resolveStableId(canvasName, srcId);
+-                    t_gobj* destGobj = processor->resolveStableId(canvasName, destId);
+-
+-                    if (srcGobj && destGobj) {
+-                        t_object* srcObj = pd::Interface::checkObject(srcGobj);
+-                        t_object* destObj = pd::Interface::checkObject(destGobj);
+-                        if (srcObj && destObj) {
+-                            int srcIdx = 0, destIdx = 0, idx = 0;
+-                            for (t_gobj* y = cnv->gl_list; y; y = y->g_next, idx++) {
+-                                if (y == srcGobj) srcIdx = idx;
+-                                if (y == destGobj) destIdx = idx;
++                    // PHASE 2: DISCONNECT
++                    for (auto& pdc : preDisconnects) {
++                        t_gobj* sg = processor->resolveStableId(canvasName, pdc.srcId);
++                        t_gobj* dg = processor->resolveStableId(canvasName, pdc.destId);
++                        if (sg && dg) {
++                            t_object* so = pd::Interface::checkObject(sg);
++                            t_object* d_o = pd::Interface::checkObject(dg);
++                            if (so && d_o) {
++                                int si = 0, di2 = 0, idx = 0;
++                                for (t_gobj* y = cnv->gl_list; y; y = y->g_next, idx++) {
++                                    if (y == sg) si = idx; if (y == dg) di2 = idx;
++                                }
++                                t_atom ca[4];
++                                SETFLOAT(&ca[0], static_cast<float>(si));
++                                SETFLOAT(&ca[1], static_cast<float>(pdc.srcOut));
++                                SETFLOAT(&ca[2], static_cast<float>(di2));
++                                SETFLOAT(&ca[3], static_cast<float>(pdc.destIn));
++                                pd_typedmess(reinterpret_cast<t_pd*>(cnv), gensym("disconnect"), 4, ca);
++                                disconnected++;
+                             }
+-                            t_atom cArgs[4];
+-                            SETFLOAT(&cArgs[0], static_cast<float>(srcIdx));
+-                            SETFLOAT(&cArgs[1], static_cast<float>(srcOut));
+-                            SETFLOAT(&cArgs[2], static_cast<float>(destIdx));
+-                            SETFLOAT(&cArgs[3], static_cast<float>(destIn));
+-                            pd_typedmess(reinterpret_cast<t_pd*>(cnv), gensym("disconnect"), 4, cArgs);
+-                            disconnected++;
+                         }
+                     }
+-                }
+-
+-                // === PHASE 3: EDIT ===
+-                for (int e = 0; e < editCount && cursor < msg.size(); e++) {
+-                    auto objectId = getArgString(msg[cursor++]);
+-                    auto newType = (cursor < msg.size()) ? getArgString(msg[cursor++]) : juce::String();
+-                    int nargs = (cursor < msg.size()) ? static_cast<int>(getArgFloat(msg[cursor++])) : 0;
+-
+-                    juce::StringArray tokens;
+-                    tokens.add(newType);
+-                    for (int a = 0; a < nargs && cursor < msg.size(); a++) {
+-                        tokens.add(getArgString(msg[cursor++]));
+-                    }
+ 
+-                    t_gobj* targetObj = processor->resolveStableId(canvasName, objectId);
+-                    if (targetObj) {
+-                        t_object* obj = pd::Interface::checkObject(targetObj);
++                    // PHASE 3: EDIT
++                    for (auto& pe : preEdits) {
++                        t_gobj* obj = processor->resolveStableId(canvasName, pe.objectId);
+                         if (obj) {
+-                            auto newText = tokens.joinIntoString(" ");
+-                            pd::Interface::renameObject(cnv, targetObj, newText.toRawUTF8(), newText.length());
+-
+-                            // Re-resolve after rename (edit = delete+recreate in Pd)
+-                            t_gobj* newObj = nullptr;
+-                            bool stillExists = false;
+-                            for (t_gobj* y = cnv->gl_list; y; y = y->g_next) {
+-                                if (y == targetObj) { stillExists = true; break; }
+-                            }
+-                            newObj = stillExists ? targetObj : pd::Interface::getNewest(cnv);
+-                            if (newObj) {
+-                                processor->mcpStableObjectMap[canvasName.toStdString()][objectId.toStdString()] = newObj;
+-                                if (newObj != targetObj) processor->mcpStableSerialMap.erase(targetObj);
+-                                processor->mcpStableSerialMap[newObj] = processor->mcpSerialCounter++;
+-                                processor->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+-                                edited++;
++                            t_object* o = pd::Interface::checkObject(obj);
++                            if (o) {
++                                pd::Interface::renameObject(cnv, obj, pe.newText.toRawUTF8(), pe.newText.length());
++                                t_gobj* newObj = nullptr; bool still = false;
++                                for (t_gobj* y = cnv->gl_list; y; y = y->g_next)
++                                    if (y == obj) { still = true; break; }
++                                newObj = still ? obj : pd::Interface::getNewest(cnv);
++                                if (newObj) {
++                                    processor->mcpStableObjectMap[canvasName.toStdString()][pe.objectId.toStdString()] = newObj;
++                                    if (newObj != obj) processor->mcpStableSerialMap.erase(obj);
++                                    processor->mcpStableSerialMap[newObj] = processor->mcpSerialCounter++;
++                                    processor->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
++                                    edited++;
++                                }
+                             }
+                         }
+                     }
+-                }
+ 
+-                // === PHASE 4: CREATE ===
+-                for (int o = 0; o < createCount && cursor < msg.size(); o++) {
+-                    auto objectId = getArgString(msg[cursor++]);
+-                    float x = (cursor < msg.size()) ? getArgFloat(msg[cursor++]) : 0;
+-                    float y = (cursor < msg.size()) ? getArgFloat(msg[cursor++]) : 0;
+-                    auto kind = (cursor < msg.size()) ? getArgString(msg[cursor++]) : juce::String();
+-                    auto objType = (cursor < msg.size()) ? getArgString(msg[cursor++]) : juce::String();
+-                    int nargs = (cursor < msg.size()) ? static_cast<int>(getArgFloat(msg[cursor++])) : 0;
+-
+-                    juce::StringArray tokens;
+-                    tokens.add(objType);
+-                    for (int a = 0; a < nargs && cursor < msg.size(); a++) {
+-                        tokens.add(getArgString(msg[cursor++]));
++                    // PHASE 4: CREATE via pasteDirect
++                    int preCreateCount = 0;
++                    for (t_gobj* g = cnv->gl_list; g; g = g->g_next) preCreateCount++;
++
++                    if (createCount > 0 && pastaBuffer.isNotEmpty()) {
++                        pasteDirect(cnv, pastaBuffer.toRawUTF8());
++
++                        std::vector<t_gobj*> allObjects;
++                        for (t_gobj* g = cnv->gl_list; g; g = g->g_next)
++                            allObjects.push_back(g);
++                        int newCount = static_cast<int>(allObjects.size()) - preCreateCount;
++                        for (int i = 0; i < newCount && i < static_cast<int>(pendingCreates.size()); i++) {
++                            t_gobj* newObj = allObjects[preCreateCount + i];
++                            auto& pc = pendingCreates[i];
++                            processor->mcpStableObjectMap[canvasName.toStdString()][pc.tempId.toStdString()] = newObj;
++                            processor->mcpStableSerialMap[newObj] = processor->mcpSerialCounter++;
++                            processor->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
++                            createdIds.push_back(pc.tempId.toStdString());
++                            createdPtrs.push_back(newObj);
++                            created++;
++                        }
+                     }
+ 
+-                    auto objectText = buildObjectText(kind, tokens);
+-                    t_gobj* targetObj = patchWrapper.createObjectFast(static_cast<int>(x), static_cast<int>(y), objectText);
+-                    if (targetObj) {
+-                        processor->mcpStableObjectMap[canvasName.toStdString()][objectId.toStdString()] = targetObj;
+-                        processor->mcpStableSerialMap[targetObj] = processor->mcpSerialCounter++;
+-                        processor->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+-                        createdIds.push_back(objectId.toStdString());
+-                        createdPtrs.push_back(targetObj);
+-                        created++;
++                    // PHASE 5: CONNECT via obj_connect
++                    for (auto& cc : allConns) {
++                        t_gobj* sg = processor->resolveStableId(canvasName, cc.srcId);
++                        t_gobj* dg = processor->resolveStableId(canvasName, cc.destId);
++                        if (sg && dg) {
++                            t_object* so = pd::Interface::checkObject(sg);
++                            t_object* d_o = pd::Interface::checkObject(dg);
++                            if (so && d_o) {
++                                if (obj_connect(so, cc.srcOut, d_o, cc.destIn))
++                                    connected++;
++                            }
++                        }
+                     }
+-                }
+ 
+-                // === PHASE 5: CONNECT ===
+-                for (int c = 0; c < connectCount && cursor + 3 < msg.size(); c++) {
+-                    auto srcId = getArgString(msg[cursor++]);
+-                    int srcOut = static_cast<int>(getArgFloat(msg[cursor++]));
+-                    auto destId = getArgString(msg[cursor++]);
+-                    int destIn = static_cast<int>(getArgFloat(msg[cursor++]));
++                    canvas_dirty(cnv, 1);
++                    dsp_update_deferred = 0;
+ 
+-                    // Resolve source & dest
+-                    t_gobj* srcGobj = processor->resolveStableId(canvasName, srcId);
+-                    t_gobj* destGobj = processor->resolveStableId(canvasName, destId);
++                    auto t0 = std::chrono::high_resolution_clock::now();
++                    canvas_update_dsp();
++                    auto t1 = std::chrono::high_resolution_clock::now();
++                    auto us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
++                    post("batch_atomic: canvas_update_dsp took %lld us", (long long)us);
++                }
+ 
+-                    if (srcGobj && destGobj) {
+-                        t_object* srcObj = pd::Interface::checkObject(srcGobj);
+-                        t_object* destObj = pd::Interface::checkObject(destGobj);
+-                        if (srcObj && destObj) {
+-                            if (obj_connect(srcObj, srcOut, destObj, destIn)) {
+-                                connected++;
+-                            }
+-                        }
++                // Fire loadbangs
++                for (auto* g : createdPtrs) {
++                    if (g) {
++                        if (pd_class(&g->g_pd) == canvas_class)
++                            canvas_loadbang(reinterpret_cast<t_canvas*>(g));
++                        else if (zgetfn(&g->g_pd, gensym("loadbang")))
++                            vmess(&g->g_pd, gensym("loadbang"), "f", LB_LOAD);
+                     }
+                 }
+ 
+-                canvas_dirty(cnv, 1);
++                auto tLambdaEnd = std::chrono::high_resolution_clock::now();
++                auto totalUs = std::chrono::duration_cast<std::chrono::microseconds>(tLambdaEnd - tLambdaStart).count();
++                post("batch_atomic: TOTAL lambda took %lld us", (long long)totalUs);
+ 
+-                // Zero-Dropout: exactly ONE single atomic DSP recompile if topology changed
+-                if (created > 0 || disconnected > 0 || connected > 0 || deleted > 0 || edited > 0) {
+-                    canvas_resume_dsp(dspstate);
+-                } else {
+-                    canvas_resume_dsp(dspstate);
+-                }
+-            }
+-            sys_unlock();
++                done.signal();
++            }); // end enqueueFunctionAsync lambda
++
++            // Wait for audio thread to complete (max 2000ms)
++            auto tWaitStart = std::chrono::high_resolution_clock::now();
++            done.wait(2000);
++            auto tWaitEnd = std::chrono::high_resolution_clock::now();
++            auto waitUs = std::chrono::duration_cast<std::chrono::microseconds>(tWaitEnd - tWaitStart).count();
++            post("batch_atomic: done.wait() took %lld us (%.1f ms)", (long long)waitUs, waitUs / 1000.0f);
+ 
+             // Decoupled UI viewport sync - non-blocking async idle dispatch
+             juce::MessageManager::callAsync([p = processor] {
+@@ -770,20 +896,30 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
+             reply.addArgument(static_cast<int32>(deleted));
+             reply.addArgument(static_cast<int32>(disconnected));
+ 
+-            // Append inline mappings [tempId, index, ...]
+-            if (cnv) {
+-                sys_lock();
+-                for (size_t i = 0; i < createdIds.size(); i++) {
+-                    int index = -1, idx = 0;
+-                    for (t_gobj* y = cnv->gl_list; y; y = y->g_next, idx++) {
+-                        if (y == createdPtrs[i]) { index = idx; break; }
+-                    }
+-                    if (index >= 0) {
+-                        reply.addArgument(juce::String(createdIds[i]));
+-                        reply.addArgument(static_cast<int32>(index));
++            // Append inline mappings — built from data collected in lambda
++            // The identity mapping was already done inside the lambda (createdIds/createdPtrs).
++            // We just need the index. Enqueue a quick lookup on audio thread.
++            std::vector<int32> mappingIndices(createdIds.size(), -1);
++            if (cnv && !createdIds.empty()) {
++                juce::WaitableEvent mapDone;
++                processor->enqueueFunctionAsync([&]() {
++                    std::unordered_map<t_gobj*, int> ptrToIdx;
++                    int idx = 0;
++                    for (t_gobj* y = cnv->gl_list; y; y = y->g_next, idx++)
++                        ptrToIdx[y] = idx;
++                    for (size_t i = 0; i < createdPtrs.size(); i++) {
++                        auto it = ptrToIdx.find(createdPtrs[i]);
++                        if (it != ptrToIdx.end()) mappingIndices[i] = it->second;
+                     }
++                    mapDone.signal();
++                });
++                mapDone.wait(500);
++            }
++            for (size_t i = 0; i < createdIds.size(); i++) {
++                if (mappingIndices[i] >= 0) {
++                    reply.addArgument(juce::String(createdIds[i]));
++                    reply.addArgument(static_cast<int32>(mappingIndices[i]));
+                 }
+-                sys_unlock();
+             }
+             sender.send(reply);
+         }
