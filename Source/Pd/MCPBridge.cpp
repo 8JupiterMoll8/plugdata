@@ -718,7 +718,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 preEdits.push_back({ oid, tk.joinIntoString(" ") });
             }
 
-            struct PendingCreate { juce::String tempId; int localIndex; };
+            struct PendingCreate { juce::String tempId; juce::String objType; float initValue; bool seedInit; };
             std::vector<PendingCreate> pendingCreates;
             juce::String pastaBuffer;
             for (int o = 0; o < createCount && cursor < msg.size(); o++) {
@@ -731,8 +731,28 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 juce::StringArray tk;
                 if (ot.isNotEmpty()) tk.add(ot);
                 for (int a = 0; a < na && cursor < msg.size(); a++) tk.add(getArgString(msg[cursor++]));
+
+                // line~ in this fork takes NO creation arguments (line_tilde_new(void)),
+                // so `[line~ 0.057]` is silently created at 0. Capture a numeric init
+                // arg here and re-seed it onto the object right after paste, so
+                // `[r x] -> [line~ 440] -> [osc~]` actually starts at 440 instead of 0.
+                bool seedInit = false;
+                float initValue = 0.0f;
+                if ((ot == "line~" || ot == "vline~") && na >= 1 && tk.size() >= 2) {
+                    juce::String firstArg = tk[1];
+                    if (firstArg.isNotEmpty()) {
+                        auto charptr = firstArg.getCharPointer();
+                        auto ptr = charptr;
+                        juce::CharacterFunctions::readDoubleValue(ptr);
+                        if (ptr - charptr == firstArg.getNumBytesAsUTF8()) {
+                            initValue = firstArg.getFloatValue();
+                            seedInit = true;
+                        }
+                    }
+                }
+
                 pastaBuffer += formatAsPdLine(kind, tk, static_cast<int>(px), static_cast<int>(py)) + "\n";
-                pendingCreates.push_back({ oid, o });
+                pendingCreates.push_back({ oid, ot, initValue, seedInit });
             }
 
             // ALL connections go through obj_connect after paste (no #X connect in buffer)
@@ -949,6 +969,17 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                             processor->mcpStableObjectMap[canvasName.toStdString()][pc.tempId.toStdString()] = newObj;
                             processor->mcpStableSerialMap[newObj] = processor->mcpSerialCounter++;
                             processor->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+
+                            // Auto-seed line~/vline~ init value (fork ignores creation args).
+                            if (pc.seedInit) {
+                                t_object* so = pd::Interface::checkObject(newObj);
+                                if (so) {
+                                    t_atom sa;
+                                    SETFLOAT(&sa, pc.initValue);
+                                    pd_typedmess(reinterpret_cast<t_pd*>(so), gensym("float"), 1, &sa);
+                                }
+                            }
+
                             createdIds.push_back(pc.tempId.toStdString());
                             createdPtrs.push_back(newObj);
                             created++;
