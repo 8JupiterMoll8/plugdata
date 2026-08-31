@@ -125,6 +125,9 @@ private:
     void handleMorphDomain(const juce::String& morphAction, const juce::OSCMessage& msg);
     void handleMeterDomain(const juce::String& meterAction, const juce::OSCMessage& msg);
     void handleTransportDomain(const juce::String& action, const juce::OSCMessage& msg);
+    void handleSeqDomain(const juce::String& action, const juce::OSCMessage& msg);
+    void advanceSequencer(int blockSize);
+    void enqueueSeqFire(bool isBang, const juce::String& name, float value);
 
     t_outconnect* resolveProbeTarget(const juce::String& canvasName, const juce::String& targetId, int outletIndex, juce::String& errorOut);
     bool activateProbing();
@@ -159,6 +162,32 @@ private:
         std::atomic<double> anchorBeat { 0.0 };  // beat position at last tempo anchor
     };
 
+    // One track of a native sequencer job. `steps` holds per-step values:
+    // bang track: 0 = rest, 1/number = hit (velocity); param track: raw float.
+    struct SeqTrack {
+        juce::String name;
+        bool isBang = true;
+        std::vector<float> steps;
+    };
+
+    // Native sample-accurate drum/note sequencer. Scheduling state is advanced in
+    // audioTick(); fires are deferred to sendMessagesFromQueue() (the message phase
+    // before performDSP) via enqueueFunctionAsync — zero UDP round-trips, block-accurate.
+    struct SeqJob {
+        juce::String jobId;
+        std::vector<SeqTrack> tracks;
+        float bpm = 120.0f;
+        int subdivision = 4;
+        float swing = 0.0f;
+        bool syncToClock = true;
+        float drift = 0.0f;
+        int patternLength = 0;
+        int stepIndex = 0;
+        int64_t nextStepSample = 0;
+        int64_t jobSampleCounter = 0;
+        bool active = false;  // guarded by seqLock
+    };
+
     PluginProcessor* processor = nullptr;
     int listenPort = 9000;
     int sendPort = 19010;
@@ -180,6 +209,9 @@ private:
     juce::CriticalSection morphLock;
 
     TransportState transport;
+
+    std::vector<SeqJob> seqJobs;
+    juce::CriticalSection seqLock;
 
     ProbeManager probeManager;
 

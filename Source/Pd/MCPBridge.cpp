@@ -290,6 +290,9 @@ void MCPBridge::oscMessageReceived(const juce::OSCMessage& message)
     } else if (domain == "transport") {
         auto action = parts.size() > 1 ? parts[1] : (message.size() > 0 ? getArgString(message[0]) : "");
         handleTransportDomain(action, message);
+    } else if (domain == "seq") {
+        auto action = parts.size() > 1 ? parts[1] : (message.size() > 0 ? getArgString(message[0]) : "");
+        handleSeqDomain(action, message);
     }
 }
 
@@ -318,6 +321,47 @@ static float getArgFloat(const juce::OSCArgument& arg)
     if (arg.isInt32()) return static_cast<float>(arg.getInt32());
     if (arg.isString()) return arg.getString().getFloatValue();
     return 0.0f;
+}
+
+// ─── Native sequencer helpers ────────────────────────────────────────────
+
+static bool isPureDrumName(const juce::String& name)
+{
+    auto const lower = name.toLowerCase();
+    static const char* const names[] = {
+        "kick", "bd", "snare", "sd", "hh", "hat", "hihat", "openhat", "closedhat",
+        "clap", "cp", "tom", "rim", "shaker", "cowbell", "cymbal", "crash", "ride", "perc"
+    };
+    for (auto const* nm : names) if (lower == nm) return true;
+    return false;
+}
+
+static bool isBangTrack(const juce::String& name)
+{
+    if (!isPureDrumName(name)) return false;
+    if (name.contains("_") || name.containsIgnoreCase("gate") || name.containsIgnoreCase("freq")
+        || name.containsIgnoreCase("pitch") || name.containsIgnoreCase("cut")) return false;
+    return true;
+}
+
+static float varToFloat(const juce::var& v, float def)
+{
+    if (v.isVoid() || v.isUndefined()) return def;
+    if (v.isBool()) return v.toString().equalsIgnoreCase("true") ? 1.0f : 0.0f;
+    return (float)(double)v;
+}
+
+static int varToInt(const juce::var& v, int def)
+{
+    if (v.isVoid() || v.isUndefined()) return def;
+    return (int)(double)v;
+}
+
+static bool varToBool(const juce::var& v, bool def)
+{
+    if (v.isVoid() || v.isUndefined()) return def;
+    if (v.isBool()) return v.toString().equalsIgnoreCase("true");
+    return (double)v != 0.0;
 }
 
 void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessage& msg)
@@ -2873,6 +2917,7 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
         reply.addArgument(juce::String("spectral"));
         reply.addArgument(juce::String("batch_atomic"));
         reply.addArgument(juce::String("transport"));
+        reply.addArgument(juce::String("seq"));
         reply.addArgument(juce::String("boot:" + bootToken));
         sender.send(reply);
     }
@@ -2973,6 +3018,134 @@ void MCPBridge::handleTransportDomain(const juce::String& action, const juce::OS
     }
 }
 
+void MCPBridge::handleSeqDomain(const juce::String& action, const juce::OSCMessage& msg)
+{
+    // /seq/start <jobId> <corrId> <json>
+    // /seq/stop  <jobId>
+    if (action == "start") {
+        auto const jobId = msg.size() > 0 ? getArgString(msg[0]) : juce::String();
+        auto const correlationId = msg.size() > 1 ? getArgString(msg[1]) : "0";
+        auto const jsonStr = msg.size() > 2 ? getArgString(msg[2]) : juce::String();
+        juce::String const replyAddr = "/seq/start/reply/" + correlationId;
+
+        if (jobId.isEmpty() || jsonStr.isEmpty()) { sendReply(replyAddr, 0.0f); return; }
+
+        juce::var const parsed = juce::JSON::parse(jsonStr);
+        if (parsed.isVoid()) { sendReply(replyAddr, 0.0f); return; }
+
+        SeqJob job;
+        job.jobId = jobId;
+        job.bpm = varToFloat(parsed.getProperty("bpm", 120.0), 120.0f);
+        job.subdivision = varToInt(parsed.getProperty("subdivision", 4.0), 4);
+        job.swing = varToFloat(parsed.getProperty("swing", 0.0), 0.0f);
+        job.syncToClock = varToBool(parsed.getProperty("syncToClock", true), true);
+        job.drift = varToFloat(parsed.getProperty("drift", 0.0), 0.0f);
+        job.nextStepSample = -1;  // sentinel: anchor to current position on first tick
+        job.jobSampleCounter = 0;
+        job.stepIndex = 0;
+        job.active = true;
+
+        if (auto* tracksObj = parsed.getProperty("tracks", juce::var()).getDynamicObject()) {
+            int maxLen = 0;
+            for (auto const& kv : tracksObj->getProperties()) {
+                juce::String const name = kv.name.toString();
+                SeqTrack track;
+                track.name = name;
+                track.isBang = isBangTrack(name);
+                if (auto* arr = kv.value.getArray()) {
+                    for (auto const& stepVar : *arr) {
+                        if (stepVar.isBool()) track.steps.push_back(stepVar.toString().equalsIgnoreCase("true") ? 1.0f : 0.0f);
+                        else track.steps.push_back(varToFloat(stepVar, 0.0f));
+                    }
+                }
+                maxLen = std::max(maxLen, (int)track.steps.size());
+                job.tracks.push_back(track);
+            }
+            job.patternLength = maxLen;
+        }
+
+        if (job.patternLength <= 0 || job.tracks.empty()) { sendReply(replyAddr, 0.0f); return; }
+
+        {
+            juce::ScopedLock sl(seqLock);
+            for (auto& existing : seqJobs) {
+                if (existing.jobId == jobId) {
+                    existing.active = false;
+                    existing = job;
+                    sendReply(replyAddr, 1.0f);
+                    return;
+                }
+            }
+            seqJobs.push_back(job);
+        }
+        sendReply(replyAddr, 1.0f);
+        return;
+    }
+
+    if (action == "stop") {
+        auto const jobId = msg.size() > 0 ? getArgString(msg[0]) : juce::String();
+        juce::ScopedLock sl(seqLock);
+        for (auto& job : seqJobs)
+            if (job.jobId == jobId || jobId.isEmpty())
+                job.active = false;
+        if (jobId.isEmpty()) seqJobs.clear();
+        return;
+    }
+}
+
+void MCPBridge::advanceSequencer(int blockSize)
+{
+    double const sampleRate = (processor && processor->getSampleRate() > 0.0) ? processor->getSampleRate() : 44100.0;
+
+    juce::ScopedLock sl(seqLock);
+    for (auto& job : seqJobs) {
+        if (!job.active) continue;
+
+        // Free jobs advance their own sample counter; locked jobs read the transport.
+        job.jobSampleCounter += blockSize;
+        int64_t const pos = job.syncToClock
+            ? transport.sampleCounter.load(std::memory_order_relaxed)
+            : job.jobSampleCounter;
+
+        if (job.nextStepSample < 0)
+            job.nextStepSample = pos;  // first tick: anchor to now
+
+        double const effBpm = job.bpm * (1.0 + job.drift / 100.0);
+        double const stepSamples = sampleRate * 60.0 / (effBpm * job.subdivision);
+
+        int guard = 0;
+        while (job.nextStepSample <= pos && guard++ < 64) {
+            // Fire every non-rest step value across all tracks for this step.
+            for (auto const& track : job.tracks) {
+                if (track.steps.empty()) continue;
+                int const ti = job.stepIndex % (int)track.steps.size();
+                float const val = track.steps[ti];
+                if (val == 0.0f) continue;
+                enqueueSeqFire(track.isBang, track.name, val);
+            }
+
+            job.stepIndex = (job.stepIndex + 1) % job.patternLength;
+
+            double len = stepSamples;
+            if (job.swing > 0.0f && (job.stepIndex % 2) == 1)
+                len += stepSamples * job.swing * 0.5;
+            job.nextStepSample += (int64_t)len;
+        }
+    }
+}
+
+void MCPBridge::enqueueSeqFire(bool isBang, const juce::String& name, float value)
+{
+    PluginProcessor* p = processor;
+    std::string const n = name.toStdString();
+    // Defer the actual libpd dispatch to the message phase (sendMessagesFromQueue)
+    // before the next block's performDSP — safe + block-accurate, zero UDP.
+    p->enqueueFunctionAsync([p, isBang, n, value] {
+        if (isBang) p->sendBang(n.c_str());
+        else p->sendFloat(n.c_str(), value);
+    });
+}
+
 void MCPBridge::handleMorphDomain(const juce::String& morphAction, const juce::OSCMessage& msg)
 {
     if (morphAction == "run" && msg.size() >= 5) {
@@ -3016,10 +3189,11 @@ void MCPBridge::audioTick()
 
     // Advance the native transport clock — one PD block per call, so the running
     // sample counter gives sample-accurate bar/beat/step position.
-    if (transport.running.load(std::memory_order_relaxed)) {
-        int const blockSize = pd::Instance::getBlockSize();
-        if (blockSize > 0)
+    int const blockSize = pd::Instance::getBlockSize();
+    if (blockSize > 0) {
+        if (transport.running.load(std::memory_order_relaxed))
             transport.sampleCounter.fetch_add(blockSize, std::memory_order_relaxed);
+        advanceSequencer(blockSize);
     }
 }
 
