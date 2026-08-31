@@ -1040,6 +1040,9 @@ void PluginProcessor::processConstant(dsp::AudioBlock<float> buffer)
     }
 
     audioAdvancement = 0;
+
+    // MCP zero-dropout recorder tap — capture the full constant-path output block.
+    writeRecorderTap(buffer);
 }
 
 void PluginProcessor::processVariable(dsp::AudioBlock<float> buffer, MidiBuffer& midiBuffer)
@@ -1106,6 +1109,58 @@ void PluginProcessor::processVariable(dsp::AudioBlock<float> buffer, MidiBuffer&
 
     midiBuffer.clear();
     outputFifo->readAudioAndMidi(buffer, midiBuffer);
+
+    // MCP zero-dropout recorder tap — runs after output is ready.
+    // Taps the final output buffer directly, no canvas objects needed.
+    writeRecorderTap(buffer);
+}
+
+void PluginProcessor::writeRecorderTap(dsp::AudioBlock<float> const& buffer)
+{
+    if (!mcpRecording.load(std::memory_order_relaxed))
+        return;
+
+    const ScopedTryLock sl(mcpRecorderLock);
+    if (!sl.isLocked())
+        return;
+
+    // Lazily create the WAV writer on the first tap so its channel count matches
+    // the actual output buffer (getTotalNumOutputChannels can report a larger bus layout).
+    if (!mcpWavWriter) {
+        juce::File destFile(mcpRecorderPath);
+        juce::WavAudioFormat wavFormat;
+        auto outStream = std::unique_ptr<juce::FileOutputStream>(destFile.createOutputStream());
+        if (!outStream) {
+            post("MCP record: could not create output stream for %s", mcpRecorderPath.toRawUTF8());
+            mcpRecording.store(false, std::memory_order_release);
+            return;
+        }
+
+        double sampleRate = getSampleRate();
+        if (sampleRate <= 0) sampleRate = 44100.0;
+
+        // Cap at stereo (2ch) so the file is playable everywhere — PlugData's
+        // output bus can be 32+ channels, but the audible mix is on channels 0-1.
+        int numCh = jmin(2, (int)buffer.getNumChannels());
+        if (numCh <= 0) numCh = 2;
+
+        // 16-bit PCM = maximum player compatibility.
+        mcpWavWriter.reset(wavFormat.createWriterFor(outStream.get(), sampleRate, numCh, 16, {}, 0));
+        if (!mcpWavWriter) {
+            post("MCP record: createWriterFor failed (sr=%.0f ch=%d)", sampleRate, numCh);
+            mcpRecording.store(false, std::memory_order_release);
+            return;
+        }
+        outStream.release(); // writer owns the stream now
+        post("MCP record: writer created sr=%.0f ch=%d path=%s", sampleRate, numCh, mcpRecorderPath.toRawUTF8());
+    }
+
+    int recCh = (int)mcpWavWriter->getNumChannels();
+    int numSamples = (int)buffer.getNumSamples();
+    juce::AudioBuffer<float> tmpBuf(recCh, numSamples);
+    for (int ch = 0; ch < recCh; ++ch)
+        tmpBuf.copyFrom(ch, 0, buffer.getChannelPointer(ch), numSamples);
+    mcpWavWriter->writeFromAudioSampleBuffer(tmpBuf, 0, numSamples);
 }
 
 void PluginProcessor::sendPlayhead()

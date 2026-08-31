@@ -1236,7 +1236,57 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         return;
     }
 
-     // /pd/load_content <canvasName> <srcFilePath> [correlationId]
+     // /pd/record_start <filePath> [corrId]
+    // Zero-dropout WAV recorder — taps processBlock output buffer directly.
+    // No canvas objects created, no DSP recompile, no audio dropout.
+    // The WAV writer is created lazily on the audio thread (first tap) so its
+    // channel count always matches the real output buffer — getTotalNumOutputChannels()
+    // can report a bus layout (e.g. 32ch) that differs from the actual buffer (e.g. 2ch).
+    // Reply: /pd/record_start/reply/<corrId>  1.0=ok, 0.0=failed
+    if (action == "record_start") {
+        if (msg.size() >= 1 && processor) {
+            auto filePath      = getArgString(msg[0]);
+            auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : "0";
+            juce::String replyAddr = "/pd/record_start/reply/" + correlationId;
+
+            // Fail fast if we can't create the parent directory.
+            juce::File destFile(filePath);
+            auto parent = destFile.getParentDirectory();
+            if (!parent.createDirectory().wasOk()) {
+                post("MCP record_start: could not create directory %s", parent.getFullPathName().toRawUTF8());
+                sendReply(replyAddr, 0.0f);
+                return;
+            }
+
+            {
+                const juce::ScopedLock sl(processor->mcpRecorderLock);
+                processor->mcpWavWriter.reset();      // drop any stale writer
+                processor->mcpRecorderPath = filePath;
+                processor->mcpRecording.store(true, std::memory_order_release);
+            }
+            post("MCP record_start: armed (lazy writer) path=%s", filePath.toRawUTF8());
+            sendReply(replyAddr, 1.0f);
+        }
+        return;
+    }
+
+    // /pd/record_stop [corrId]
+    // Stop the zero-dropout WAV recorder and flush/close the file.
+    // Reply: /pd/record_stop/reply/<corrId>  1.0=ok
+    if (action == "record_stop") {
+        auto correlationId = msg.size() > 0 ? getArgString(msg[0]) : "0";
+        if (processor) {
+            processor->mcpRecording.store(false, std::memory_order_release);
+            {
+                const juce::ScopedLock sl(processor->mcpRecorderLock);
+                processor->mcpWavWriter.reset(); // flushes and closes the file
+            }
+        }
+        sendReply("/pd/record_stop/reply/" + correlationId, 1.0f);
+        return;
+    }
+
+    // /pd/load_content <canvasName> <srcFilePath> [correlationId]
     // Clears the canvas and reconstructs it atomically from a .pd file using
     // binbuf_read + binbuf_eval — Pd's native file loader. Handles the full
     // .pd format (including #N canvas header) correctly.
@@ -2414,6 +2464,90 @@ void MCPBridge::handleArrayDomain(const juce::String& arrayAction, const juce::O
     auto arrayName = arrayAction == "stats" ? getArgString(msg[1]) : getArgString(msg[0]);
     auto canvasName = normalizeCanvas(getArgString(msg[1]));
 
+    // /array/load <name> <subpatch> <filePath> <corrId>
+    // Loads a WAV/AIFF from disk into the array natively (JUCE AudioFormatReader).
+    // One message, no [soundfiler] object, no bang-and-wait dance. The disk read
+    // happens OUTSIDE sys_lock; only resize+fill run under sys_lock. Reply arg0 = size,
+    // or a negative error code.
+    if (arrayAction == "load") {
+        auto filePath      = msg.size() > 2 ? getArgString(msg[2]) : "";
+        auto correlationId = msg.size() > 3 ? getArgString(msg[3]) : "0";
+        juce::String replyAddr = "/array/load/reply/" + correlationId;
+
+        juce::File file(filePath);
+        if (!file.existsAsFile()) { sendReply(replyAddr, -2.0f); return; }
+
+        juce::AudioFormatManager formatManager;
+        formatManager.registerBasicFormats();
+        std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(file));
+        if (!reader) { sendReply(replyAddr, -3.0f); return; }
+
+        int const numChannels = static_cast<int>(reader->numChannels);
+        int const numSamples  = static_cast<int>(reader->lengthInSamples);
+        if (numChannels <= 0 || numSamples <= 0) { sendReply(replyAddr, -4.0f); return; }
+
+        // Mono downmix (JUCE downmixes stereo→mono when the destination is 1ch).
+        juce::AudioBuffer<float> fileBuf(1, numSamples);
+        if (!reader->read(&fileBuf, 0, numSamples, 0, true, true)) { sendReply(replyAddr, -5.0f); return; }
+        const float* src = fileBuf.getReadPointer(0);
+
+        sys_lock();
+        auto nameSym = gensym(arrayName.toRawUTF8());
+        t_garray* garray = reinterpret_cast<t_garray*>(pd_findbyclass(nameSym, garray_class));
+        if (!garray) {
+            for (t_canvas* c = pd_this->pd_canvaslist; c; c = c->gl_next) {
+                garray = findGArrayInCanvas(c, nameSym);
+                if (garray) break;
+            }
+        }
+
+        // Auto-create the array if it doesn't exist yet.
+        if (!garray) {
+            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
+            if (cnv) {
+                int nobj = 0;
+                for (t_gobj* y = cnv->gl_list; y; y = y->g_next) nobj++;
+                int stagger = (nobj * 14) % 420;
+                juce::String pasta = "#N canvas 0 0 450 300 (subpatch) 0;\n#X array "
+                    + arrayName + " " + juce::String(numSamples) + " float 2;\n#X coords 0 1 "
+                    + juce::String(numSamples > 1 ? numSamples - 1 : 1) + " -1 200 140 1 0 0;\n#X restore "
+                    + juce::String(60 + stagger) + " " + juce::String(60 + stagger) + " graph;";
+                pd::Interface::paste(cnv, pasta.toRawUTF8());
+                garray = reinterpret_cast<t_garray*>(pd_findbyclass(nameSym, garray_class));
+                if (!garray) {
+                    for (t_canvas* c = pd_this->pd_canvaslist; c; c = c->gl_next) {
+                        garray = findGArrayInCanvas(c, nameSym);
+                        if (garray) break;
+                    }
+                }
+                if (garray) {
+                    canvas_dirty(cnv, 1);
+                    processor->enqueueFunctionAsync([p = processor] { p->synchroniseCanvases(); });
+                }
+            }
+        }
+
+        if (!garray) { sys_unlock(); sendReply(replyAddr, -6.0f); return; }
+
+        garray_resize_long(garray, numSamples);
+        int size = 0;
+        t_word* vec = nullptr;
+        if (!garray_getfloatwords(garray, &size, &vec) || !vec) {
+            sys_unlock();
+            sendReply(replyAddr, -7.0f);
+            return;
+        }
+
+        int const copy = size < numSamples ? size : numSamples;
+        for (int i = 0; i < copy; ++i) vec[i].w_float = src[i];
+        garray_redraw(garray);
+        sys_unlock();
+
+        sendReply(replyAddr, static_cast<float>(copy));
+        return;
+    }
+
     sys_lock();
     auto nameSym = gensym(arrayName.toRawUTF8());
     t_garray* garray = reinterpret_cast<t_garray*>(pd_findbyclass(nameSym, garray_class));
@@ -2618,6 +2752,35 @@ void MCPBridge::handleArrayDomain(const juce::String& arrayAction, const juce::O
         reply.addArgument(static_cast<int32>(zeroCrossings));
         reply.addArgument(estimatedPitch);
         sender.send(reply);
+    } else if (arrayAction == "mutate") {
+        // /array/mutate <name> <subpatch> <corrId> <reverse|invert|crush>
+        // In-place array mutation under a single sys_lock — zero OSC data round-trip,
+        // so it never floods the bridge queue (the cause of live audio drops when
+        // the TS server shuttles 427k floats through ~150 chunked messages).
+        auto correlationId = msg.size() > 2 ? getArgString(msg[2]) : "0";
+        auto op = msg.size() > 3 ? getArgString(msg[3]) : "reverse";
+
+        if (op == "reverse") {
+            for (int i = 0; i < size / 2; ++i) {
+                float tmp = vec[i].w_float;
+                vec[i].w_float = vec[size - 1 - i].w_float;
+                vec[size - 1 - i].w_float = tmp;
+            }
+        } else if (op == "invert") {
+            for (int i = 0; i < size; ++i) vec[i].w_float = -vec[i].w_float;
+        } else if (op == "crush") {
+            int const bits = 8;
+            float const q = 1.0f / static_cast<float>(1 << (bits - 1));
+            for (int i = 0; i < size; ++i) {
+                float v = vec[i].w_float;
+                vec[i].w_float = std::round(v / q) * q;
+            }
+        }
+
+        garray_redraw(garray);
+        sys_unlock();
+        sendReply("/array/mutate/reply/" + correlationId, static_cast<float>(size));
+        return;
     } else {
         sys_unlock();
     }

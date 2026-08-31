@@ -310,6 +310,17 @@ private:
     int mcpSuspendedDspState = 0;
     std::unique_ptr<MCPBridge> mcpBridge;
 
+    // MCP zero-dropout WAV recorder — taps outputFifo directly in processBlock.
+    // No canvas objects created, no DSP recompile, zero audio dropout.
+    CriticalSection mcpRecorderLock;
+    std::unique_ptr<juce::AudioFormatWriter> mcpWavWriter;
+    std::atomic<bool> mcpRecording { false };
+    juce::String mcpRecorderPath;
+
+    // Writes the current output block into the active WAV writer, if recording.
+    // Must be called from the audio thread on the final output buffer.
+    void writeRecorderTap(dsp::AudioBlock<float> const& buffer);
+
     friend class MCPBridge;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PluginProcessor)
