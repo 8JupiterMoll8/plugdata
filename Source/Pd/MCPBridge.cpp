@@ -1199,15 +1199,6 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             }
             sys_unlock();
 
-            // Wipe undo history OUTSIDE sys_lock — canvas_undo_free calls
-            // canvas_suspend_dsp internally which would deadlock under sys_lock.
-            // Enqueue on the audio thread where DSP suspend is safe.
-            processor->enqueueFunctionAsync([p = processor, canvasName]() {
-                t_canvas* c = p->getCanvasBySymbol(canvasName);
-                if (!c && canvasName == "pd-main") c = pd_this->pd_canvaslist;
-                if (c) canvas_undo_free(c);
-            });
-
             SmallArray<pd::Atom> atoms;
             atoms.add(pd::Atom(processor->generateSymbol(canvasName)));
             atoms.add(pd::Atom(processor->generateSymbol("0")));
@@ -1222,10 +1213,11 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
     if (action == "clear_undo") {
         // /pd/clear_undo <canvasName>
-        // Wipes undo/redo stack. Enqueued on audio thread — safe from DSP deadlock.
+        // Must be called via MessageManager (GUI thread) — canvas_undo_free
+        // calls canvas_suspend_dsp which is GUI-thread-safe, not audio-thread-safe.
         if (msg.size() >= 1 && processor) {
             auto canvasName = normalizeCanvas(getArgString(msg[0]));
-            processor->enqueueFunctionAsync([p = processor, canvasName]() {
+            juce::MessageManager::callAsync([p = processor, canvasName]() {
                 t_canvas* c = p->getCanvasBySymbol(canvasName);
                 if (!c && canvasName == "pd-main") c = pd_this->pd_canvaslist;
                 if (c) canvas_undo_free(c);
