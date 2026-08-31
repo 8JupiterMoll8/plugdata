@@ -1213,15 +1213,14 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
     if (action == "clear_undo") {
         // /pd/clear_undo <canvasName>
-        // Must be called via MessageManager (GUI thread) — canvas_undo_free
-        // calls canvas_suspend_dsp which is GUI-thread-safe, not audio-thread-safe.
+        // Routes through receiveSysMessage → mcp_clear_undo case which runs
+        // on the Pd scheduler thread — the only thread where canvas_undo_free
+        // (calls canvas_suspend_dsp internally) is safe to call.
         if (msg.size() >= 1 && processor) {
             auto canvasName = normalizeCanvas(getArgString(msg[0]));
-            juce::MessageManager::callAsync([p = processor, canvasName]() {
-                t_canvas* c = p->getCanvasBySymbol(canvasName);
-                if (!c && canvasName == "pd-main") c = pd_this->pd_canvaslist;
-                if (c) canvas_undo_free(c);
-            });
+            SmallArray<pd::Atom> atoms;
+            atoms.add(pd::Atom(processor->generateSymbol(canvasName)));
+            processor->receiveSysMessage("mcp_clear_undo", atoms);
             sendRawReply("/pd/clear_undo/reply");
         }
         return;

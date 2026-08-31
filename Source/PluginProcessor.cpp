@@ -2167,6 +2167,18 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
         }
         break;
     }
+    case hash("mcp_clear_undo"): {
+        // Called from /pd/clear_undo handler via receiveSysMessage.
+        // Runs on the Pd scheduler thread — the only thread where
+        // canvas_undo_free (which calls canvas_suspend_dsp) is safe.
+        if (list.size() >= 1) {
+            auto canvas_symbol = list[0].toString();
+            t_canvas* cnv = getCanvasBySymbol(canvas_symbol);
+            if (!cnv && (canvas_symbol == "pd-main")) cnv = pd_this->pd_canvaslist;
+            if (cnv) canvas_undo_free(cnv);
+        }
+        break;
+    }
     case hash("mcp_suspend_dsp"): {
         sys_lock();
         mcpSuspendedDspState = canvas_suspend_dsp();
