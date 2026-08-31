@@ -1196,6 +1196,10 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
             if (cnv) {
                 pd_typedmess(reinterpret_cast<t_pd*>(cnv), gensym("clear"), 0, nullptr);
+                // Wipe undo history — after a full canvas clear the old undo
+                // stack is meaningless and dangerous (can restore ghost objects
+                // from previous builds during live performance).
+                canvas_undo_free(cnv);
             }
             sys_unlock();
 
@@ -1207,6 +1211,23 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             processor->enqueueFunctionAsync([p = processor] { p->synchroniseCanvases(); });
 
             sendRawReply("/pd/cleared");
+        }
+        return;
+    }
+
+    if (action == "clear_undo") {
+        // /pd/clear_undo <canvasName>
+        // Wipes the entire undo/redo stack for a canvas.
+        // Call before a major rebuild to prevent accidental undo restoring
+        // ghost objects from previous patch states during live performance.
+        if (msg.size() >= 1 && processor) {
+            auto canvasName = normalizeCanvas(getArgString(msg[0]));
+            sys_lock();
+            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
+            if (cnv) canvas_undo_free(cnv);
+            sys_unlock();
+            sendRawReply("/pd/clear_undo/reply");
         }
         return;
     }
