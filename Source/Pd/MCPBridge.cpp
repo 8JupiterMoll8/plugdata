@@ -14,6 +14,7 @@
 
 #include <set>
 #include <unordered_map>
+#include <unordered_set>
 
 extern "C" {
 #include <m_pd.h>
@@ -685,6 +686,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             }
 
             int deleted = 0, disconnected = 0, edited = 0, created = 0, connected = 0;
+            int reconcileEvicted = 0, reconcileAdopted = 0;
             std::vector<std::string> createdIds;
             std::vector<t_gobj*> createdPtrs;
 
@@ -745,6 +747,10 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             // =========================================================================
             // EXECUTE ON AUDIO THREAD — zero lock contention, zero dropout
             // =========================================================================
+
+            // Storage for PHASE 0 reconcile results (filled inside lambda, read outside)
+            struct DetectedConn { std::string srcId; int srcOut; std::string destId; int destIn; };
+            std::vector<DetectedConn> detectedConnections;
             // Manual GUI patching has zero dropout because it enqueues mutations into
             // functionQueue, which runs on the audio thread during sendMessagesFromQueue()
             // BEFORE performDSP(). We do exactly the same thing here.
@@ -760,6 +766,91 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
                 if (cnv) {
                     dsp_update_deferred = 1;
+
+                    // PHASE 0: PRE-FLIGHT AUTO-RECONCILE
+                    // Single walk of gl_list to sync identity map with live canvas.
+                    // Detects manual GUI edits (user created/deleted objects) and
+                    // fixes the map BEFORE any mutation — zero extra OSC round-trips,
+                    // zero audio dropout (runs inside the same audio-thread lambda).
+                    {
+                        auto canvasStr = canvasName.toStdString();
+                        auto& canvasMap = processor->mcpStableObjectMap[canvasStr];
+
+                        // Step A: Build set of all live pointers from gl_list (O(n))
+                        std::unordered_set<t_gobj*> livePointers;
+                        for (t_gobj* y = cnv->gl_list; y; y = y->g_next)
+                            livePointers.insert(y);
+
+                        // Step B: Evict stale entries — user deleted objects via GUI
+                        std::vector<std::string> toEvict;
+                        for (auto& [tempId, ptr] : canvasMap) {
+                            if (livePointers.find(ptr) == livePointers.end()) {
+                                toEvict.push_back(tempId);
+                                processor->mcpStableSerialMap.erase(ptr);
+                            }
+                        }
+                        for (auto& id : toEvict) {
+                            canvasMap.erase(id);
+                            processor->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+                            reconcileEvicted++;
+                        }
+
+                        // Step C: Adopt untracked objects — user created via GUI
+                        // Build reverse set of tracked pointers for O(1) lookup
+                        std::unordered_set<t_gobj*> trackedPointers;
+                        for (auto& [_, ptr] : canvasMap)
+                            trackedPointers.insert(ptr);
+
+                        int adoptIdx = 0;
+                        for (t_gobj* y = cnv->gl_list; y; y = y->g_next) {
+                            if (trackedPointers.find(y) == trackedPointers.end()) {
+                                // Untracked object — auto-assign a tempId
+                                // Read class name for a meaningful prefix
+                                juce::String className = juce::String::fromUTF8(
+                                    class_getname(pd_class(&y->g_pd)));
+                                // Sanitize: replace ~ with _t for valid identifier
+                                className = className.replace("~", "_t");
+                                std::string autoId = ("gui_" + className + "_"
+                                    + juce::String(adoptIdx++)).toStdString();
+                                // Avoid collisions with existing tempIds
+                                while (canvasMap.count(autoId))
+                                    autoId = ("gui_" + className + "_"
+                                        + juce::String(adoptIdx++)).toStdString();
+                                canvasMap[autoId] = y;
+                                processor->mcpStableSerialMap[y] = processor->mcpSerialCounter++;
+                                processor->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+                                reconcileAdopted++;
+                            }
+                        }
+
+                        // Step D: Connection scan — detect wires drawn manually by user.
+                        // linetraverser walks every wire on the canvas in O(wires).
+                        // Both endpoints already have tempIds after Steps B+C above.
+                        // We build a compact flat list: [srcId, srcOut, destId, destIn, ...]
+                        // appended to the batch_atomic reply so TS gets the full picture
+                        // in one shot — zero extra OSC round-trips.
+                        // Build reverse ptr→tempId map (O(m))
+                        std::unordered_map<t_gobj*, std::string> ptrToTempId;
+                        for (auto& [tid, ptr] : canvasMap)
+                            if (ptr) ptrToTempId[ptr] = tid;
+
+                        t_linetraverser lt;
+                        linetraverser_start(&lt, cnv);
+                        t_outconnect* ltOc = nullptr;
+                        while ((ltOc = linetraverser_next_nosize(&lt))) {
+                            t_gobj* sg = &lt.tr_ob->ob_g;
+                            t_gobj* dg = &lt.tr_ob2->ob_g;
+                            auto sIt = ptrToTempId.find(sg);
+                            auto dIt = ptrToTempId.find(dg);
+                            if (sIt == ptrToTempId.end() || dIt == ptrToTempId.end()) continue;
+                            detectedConnections.push_back({
+                                sIt->second,
+                                static_cast<int>(lt.tr_outno),
+                                dIt->second,
+                                static_cast<int>(lt.tr_inno)
+                            });
+                        }
+                    }
 
                     // PHASE 1: DELETE
                     for (auto& pd : preDeletes) {
@@ -902,6 +993,9 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             reply.addArgument(static_cast<int32>(edited));
             reply.addArgument(static_cast<int32>(deleted));
             reply.addArgument(static_cast<int32>(disconnected));
+            // PHASE 0 reconcile counts (appended — backward compatible)
+            reply.addArgument(static_cast<int32>(reconcileEvicted));
+            reply.addArgument(static_cast<int32>(reconcileAdopted));
 
             // Append inline mappings — built from data collected in lambda
             // The identity mapping was already done inside the lambda (createdIds/createdPtrs).
@@ -928,6 +1022,24 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     reply.addArgument(static_cast<int32>(mappingIndices[i]));
                 }
             }
+
+            // Append PHASE 0 detected connections as a compact JSON string.
+            // Format: [{"s":"srcId","so":0,"d":"destId","di":0}, ...]
+            // Sent as a single OSC string arg — backward compatible (TS ignores if absent).
+            if (!detectedConnections.empty()) {
+                juce::String dcJson = "[";
+                for (size_t i = 0; i < detectedConnections.size(); i++) {
+                    auto& dc = detectedConnections[i];
+                    if (i > 0) dcJson += ",";
+                    dcJson += "{\"s\":\"" + juce::String(dc.srcId)
+                           + "\",\"so\":" + juce::String(dc.srcOut)
+                           + ",\"d\":\"" + juce::String(dc.destId)
+                           + "\",\"di\":" + juce::String(dc.destIn) + "}";
+                }
+                dcJson += "]";
+                reply.addArgument(dcJson);
+            }
+
             sender.send(reply);
         }
         return;
