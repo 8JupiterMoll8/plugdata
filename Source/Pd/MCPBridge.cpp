@@ -1189,6 +1189,160 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         return;
     }
 
+    // /pd/save_content <canvasName> <destFilePath> [correlationId]
+    // Serialises the live canvas to a .pd file using getCanvasContent() — pure
+    // in-memory path, no binbuf_write overhead. Faster than /pd/dump and does
+    // not require a separate dumpDir argument.
+    // Reply: /pd/save_content/reply/<corrId>  arg0=destFilePath  (or error string)
+    if (action == "save_content") {
+        if (msg.size() >= 2 && processor) {
+            auto canvasName    = normalizeCanvas(getArgString(msg[0]));
+            auto destFilePath  = getArgString(msg[1]);
+            auto correlationId = msg.size() > 2 ? getArgString(msg[2]) : "";
+
+            juce::String content;
+            sys_lock();
+            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
+            if (cnv) {
+                char* buf = nullptr;
+                int   bufsize = 0;
+                pd::Interface::getCanvasContent(cnv, &buf, &bufsize);
+                if (buf) {
+                    content = juce::String::fromUTF8(buf, static_cast<size_t>(bufsize));
+                    freebytes(buf, static_cast<size_t>(bufsize) * sizeof(char));
+                }
+            }
+            sys_unlock();
+
+            juce::String replyAddr = correlationId.isNotEmpty()
+                ? "/pd/save_content/reply/" + correlationId
+                : "/pd/save_content/reply";
+
+            if (content.isEmpty()) {
+                sendReply(replyAddr, juce::String("error: canvas not found or empty"));
+                return;
+            }
+
+            // Write content to destination path provided by TS
+            juce::File destFile(destFilePath);
+            if (!destFile.replaceWithText(content)) {
+                sendReply(replyAddr, juce::String("error: could not write to " + destFilePath));
+                return;
+            }
+
+            sendReply(replyAddr, destFilePath);
+        }
+        return;
+    }
+
+     // /pd/load_content <canvasName> <srcFilePath> [correlationId]
+    // Clears the canvas and reconstructs it atomically from a .pd file using
+    // binbuf_read + binbuf_eval — Pd's native file loader. Handles the full
+    // .pd format (including #N canvas header) correctly.
+    // DSP recompiles once at the end. Disk read is outside sys_lock.
+    // Reply: /pd/load_content/reply/<corrId>  arg0=objectCount (float)
+    if (action == "load_content") {
+        if (msg.size() >= 2 && processor) {
+            auto canvasName    = normalizeCanvas(getArgString(msg[0]));
+            auto srcFilePath   = getArgString(msg[1]);
+            auto correlationId = msg.size() > 2 ? getArgString(msg[2]) : "";
+
+            juce::String replyAddr = correlationId.isNotEmpty()
+                ? "/pd/load_content/reply/" + correlationId
+                : "/pd/load_content/reply";
+
+            juce::File srcFile(srcFilePath);
+            if (!srcFile.existsAsFile()) {
+                sendReply(replyAddr, -1.0f);
+                return;
+            }
+
+            // Split into dir + filename for binbuf_read
+            auto fileDir  = srcFile.getParentDirectory().getFullPathName();
+            auto fileName = srcFile.getFileName();
+
+            int objectCount = 0;
+
+            // Stop all active probes before clearing — they hold t_outconnect*
+            // pointers that become dangling after canvas clear.
+            probeManager.stopAllProbes("load_content_reset");
+
+            sys_lock();
+            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
+            if (cnv) {
+                // 1. Clear existing objects
+                pd_typedmess(reinterpret_cast<t_pd*>(cnv), gensym("clear"), 0, nullptr);
+
+                // 2. Load .pd file — strip the #N canvas header line then
+                //    use pasteDirect() which correctly handles both #X obj
+                //    and #X connect lines via binbuf_eval with sym_X bound
+                //    to the canvas. This is the same path batch_atomic uses.
+                t_binbuf* b = binbuf_new();
+                if (binbuf_read(b, fileName.toRawUTF8(), fileDir.toRawUTF8(), 0) == 0) {
+                    // Find the end of the first statement (#N canvas ... ;)
+                    // and build a new binbuf from the rest (#X lines only).
+                    int natom = binbuf_getnatom(b);
+                    t_atom* vec = binbuf_getvec(b);
+                    int startIdx = 0;
+                    for (int i = 0; i < natom; i++) {
+                        if (vec[i].a_type == A_SEMI) { startIdx = i + 1; break; }
+                    }
+                    if (startIdx < natom) {
+                        // Serialise remaining atoms back to text for pasteDirect
+                        t_binbuf* body = binbuf_new();
+                        binbuf_add(body, natom - startIdx, vec + startIdx);
+                        char* textBuf = nullptr;
+                        int   textLen = 0;
+                        binbuf_gettext(body, &textBuf, &textLen);
+                        if (textBuf && textLen > 0) {
+                            // pasteDirect binds sym_X to canvas — handles both
+                            // #X obj and #X connect correctly
+                            pasteDirect(cnv, juce::String::fromUTF8(textBuf, textLen).toRawUTF8());
+                            freebytes(textBuf, textLen);
+                        }
+                        binbuf_free(body);
+                    }
+                }
+                binbuf_free(b);
+
+                // 3. Fire loadbangs on any newly created subpatches
+                for (t_gobj* g = cnv->gl_list; g; g = g->g_next) {
+                    if (pd_class(&g->g_pd) == canvas_class)
+                         canvas_loadbang(reinterpret_cast<t_canvas*>(g));
+                }
+
+                // 4. DSP graph recompile
+                canvas_update_dsp();
+
+                // Count objects
+                for (t_gobj* g = cnv->gl_list; g; g = g->g_next)
+                    objectCount++;
+            }
+            sys_unlock();
+
+            // Synchronise canvas UI and restart DSP.
+            // startDSP() is called directly here — same pattern as /pd/dsp
+            // handler which also calls it from the OSC receiver thread.
+            processor->enqueueFunctionAsync([p = processor] { p->synchroniseCanvases(); });
+
+            if (objectCount > 0 && processor)
+                processor->startDSP();
+
+            // 5. Clear identity map — PHASE 0 reconcile fires on next batch_atomic
+            SmallArray<pd::Atom> atoms;
+            atoms.add(pd::Atom(processor->generateSymbol(canvasName)));
+            atoms.add(pd::Atom(processor->generateSymbol("0")));
+            processor->receiveSysMessage("mcp_clear_ids", atoms);
+
+            processor->enqueueFunctionAsync([p = processor] { p->synchroniseCanvases(); });
+
+            sendReply(replyAddr, static_cast<float>(objectCount));
+        }
+        return;
+    }
+
     if (action == "clear") {
         if (msg.size() >= 1 && processor) {
             auto canvasName = normalizeCanvas(getArgString(msg[0]));
@@ -1679,6 +1833,37 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         return;
     }
 
+    // /pd/rename_id_batch <canvas> <count> <old0> <new0> <old1> <new1> ... <corrId>
+    // Batch rename with a reply — renames directly in mcpStableObjectMap
+    // (inline, synchronous — no receiveSysMessage async queue).
+    if (action == "rename_id_batch") {
+        if (msg.size() >= 2 && processor) {
+            auto canvasName = normalizeCanvas(getArgString(msg[0]));
+            int count = static_cast<int>(getArgFloat(msg[1]));
+            int cursor = 2;
+            int renamed = 0;
+
+            // Inline rename — directly mutates mcpStableObjectMap, no queue.
+            auto& map = processor->mcpStableObjectMap[canvasName.toStdString()];
+            for (int i = 0; i < count && (cursor + 1) < msg.size(); i++) {
+                auto oldId = getArgString(msg[cursor++]).toStdString();
+                auto newId = getArgString(msg[cursor++]).toStdString();
+                auto it = map.find(oldId);
+                if (it != map.end()) {
+                    map[newId] = it->second;
+                    map.erase(it);
+                    renamed++;
+                }
+            }
+            if (renamed > 0)
+                processor->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+
+            auto correlationId = (cursor < msg.size()) ? getArgString(msg[cursor]) : "0";
+            sendReply("/pd/rename_id_batch/reply/" + correlationId, static_cast<float>(renamed));
+        }
+        return;
+    }
+
     if (action == "edit_id") {
         if (msg.size() >= 4 && processor) {
             SmallArray<pd::Atom> atoms;
@@ -1790,6 +1975,136 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 });
             } else {
                 sendReply("/pd/encapsulate/reply/" + correlationId, 0.0f);
+            }
+        }
+        return;
+    }
+
+    // /pd/encapsulate_to_file <canvas> <name> <filePath> <count> <id0> ... [corrId]
+    // Full to_abstraction in one atomic C++ call:
+    //   1. encapsulateSelection() → [pd name] subpatch (same as /pd/encapsulate)
+    //   2. getCanvasContent() on the new subpatch → write to filePath on disk
+    //   3. Delete [pd name], create [name] abstraction reference at same position
+    //   4. reloadAbstractions() so Pd registers the file
+    // Reply: /pd/encapsulate_to_file/reply/<corrId>  1.0=ok, 0.0=failed
+    if (action == "encapsulate_to_file") {
+        if (msg.size() >= 4 && processor) {
+            auto canvasName   = normalizeCanvas(getArgString(msg[0]));
+            auto abstrName    = getArgString(msg[1]);
+            auto filePath     = getArgString(msg[2]);
+            int  count        = static_cast<int>(getArgFloat(msg[3]));
+            std::vector<juce::String> targetIds;
+            int cursor = 4;
+            for (int i = 0; i < count && cursor < msg.size(); i++)
+                targetIds.push_back(getArgString(msg[cursor++]));
+            auto correlationId = (cursor < msg.size()) ? getArgString(msg[cursor]) : "0";
+
+            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
+
+            if (cnv) {
+                juce::MessageManager::callAsync([proc = processor, cnv, canvasName, abstrName, filePath, targetIds, correlationId, bridge = this]() {
+                    // ── Find canvas UI component ────────────────────────────
+                    Canvas* canvasComp = nullptr;
+                    for (auto* editor : proc->getEditors()) {
+                        if (!editor) continue;
+                        for (auto* c : editor->getCanvases()) {
+                            if (c && c->patch.getUncheckedPointer() == cnv) {
+                                canvasComp = c; break;
+                            }
+                        }
+                        if (canvasComp) break;
+                    }
+                    if (!canvasComp) {
+                        bridge->sendReply("/pd/encapsulate_to_file/reply/" + correlationId, 0.0f);
+                        return;
+                    }
+
+                    // ── Step 1: Encapsulate selected objects ─────────────────
+                    canvasComp->patch.deselectAll();
+                    for (const auto& id : targetIds) {
+                        t_gobj* g = proc->resolveStableId(canvasName, id);
+                        if (g) {
+                            for (auto* objComp : canvasComp->objects) {
+                                if (objComp && objComp->getPointer() == g) {
+                                    canvasComp->setSelected(objComp, true);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    canvasComp->encapsulateSelection(abstrName);
+
+                    // ── Step 2: Find the new [pd abstrName] subpatch ─────────
+                    t_gobj* newestObj = pd::Interface::getNewest(cnv);
+                    if (!newestObj) {
+                        bridge->sendReply("/pd/encapsulate_to_file/reply/" + correlationId, 0.0f);
+                        return;
+                    }
+                    t_canvas* subCnv = reinterpret_cast<t_canvas*>(newestObj);
+
+                    // Record position before we replace it
+                    int posX = subCnv->gl_obj.te_xpix;
+                    int posY = subCnv->gl_obj.te_ypix;
+
+                    // ── Step 3: Save subpatch content to file ────────────────
+                    // getCanvasContent runs under sys_lock; disk write is outside.
+                    juce::String content;
+                    sys_lock();
+                    {
+                        char* buf = nullptr; int bufsize = 0;
+                        pd::Interface::getCanvasContent(subCnv, &buf, &bufsize);
+                        if (buf) {
+                            content = juce::String::fromUTF8(buf, static_cast<size_t>(bufsize));
+                            freebytes(buf, static_cast<size_t>(bufsize) * sizeof(char));
+                        }
+                    }
+                    sys_unlock();
+
+                    if (content.isEmpty()) {
+                        bridge->sendReply("/pd/encapsulate_to_file/reply/" + correlationId, 0.0f);
+                        return;
+                    }
+
+                    juce::File destFile(filePath);
+                    destFile.getParentDirectory().createDirectory();
+                    if (!destFile.replaceWithText(content)) {
+                        bridge->sendReply("/pd/encapsulate_to_file/reply/" + correlationId, 0.0f);
+                        return;
+                    }
+
+                    // ── Step 4: Replace [pd abstrName] with [abstrName] ref ──
+                    // Delete the inline subpatch, create abstraction reference.
+                    sys_lock();
+                    {
+                        // Delete the [pd abstrName] subpatch object
+                        glist_delete(cnv, newestObj);
+                        // Create [abstrName] abstraction reference at same position
+                        // using pasteDirect — same path as batch_atomic PHASE 4
+                        juce::String objLine = "#X obj " + juce::String(posX) + " " + juce::String(posY) + " " + abstrName + ";";
+                        pasteDirect(cnv, objLine.toRawUTF8());
+                        // Single DSP recompile
+                        canvas_update_dsp();
+                    }
+                    sys_unlock();
+
+                    // ── Step 5: Register new abstraction object in identity map
+                    t_gobj* newObj = pd::Interface::getNewest(cnv);
+                    if (newObj) {
+                        proc->mcpStableObjectMap[canvasName.toStdString()][abstrName.toStdString()] = newObj;
+                        proc->mcpStableSerialMap[newObj] = proc->mcpSerialCounter++;
+                        proc->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+                    }
+
+                    // ── Step 6: Reload abstractions so Pd registers the file ─
+                    proc->reloadAbstractions(juce::File(filePath), cnv);
+
+                    proc->enqueueFunctionAsync([p = proc] { p->synchroniseCanvases(); });
+
+                    bridge->sendReply("/pd/encapsulate_to_file/reply/" + correlationId, 1.0f);
+                });
+            } else {
+                sendReply("/pd/encapsulate_to_file/reply/" + correlationId, 0.0f);
             }
         }
         return;
