@@ -801,21 +801,43 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         for (auto& [_, ptr] : canvasMap)
                             trackedPointers.insert(ptr);
 
+                        // Build set of tempIds being edited in this transaction
+                        // so we can re-assign them instead of creating gui_* names.
+                        std::unordered_set<std::string> editedIds;
+                        for (auto& pe : preEdits)
+                            editedIds.insert(pe.objectId.toStdString());
+
+                        // Also build ordered list of evicted tempIds for re-use
+                        // (Step B evicted them because their pointer changed after edit)
+                        std::vector<std::string> evictedEditIds;
+                        for (auto& id : toEvict) {
+                            if (editedIds.count(id))
+                                evictedEditIds.push_back(id);
+                        }
+                        size_t evictedEditIdx = 0;
+
                         int adoptIdx = 0;
                         for (t_gobj* y = cnv->gl_list; y; y = y->g_next) {
                             if (trackedPointers.find(y) == trackedPointers.end()) {
                                 // Untracked object — auto-assign a tempId
                                 // Read class name for a meaningful prefix
-                                juce::String className = juce::String::fromUTF8(
-                                    class_getname(pd_class(&y->g_pd)));
-                                // Sanitize: replace ~ with _t for valid identifier
-                                className = className.replace("~", "_t");
-                                std::string autoId = ("gui_" + className + "_"
-                                    + juce::String(adoptIdx++)).toStdString();
-                                // Avoid collisions with existing tempIds
-                                while (canvasMap.count(autoId))
+                                // If this untracked object corresponds to an edited
+                                // tempId (pointer changed after renameObject), reuse
+                                // the original tempId instead of assigning gui_*.
+                                // This keeps the identity map stable across edits.
+                                std::string autoId;
+                                if (evictedEditIdx < evictedEditIds.size()) {
+                                    autoId = evictedEditIds[evictedEditIdx++];
+                                } else {
+                                    juce::String className = juce::String::fromUTF8(
+                                        class_getname(pd_class(&y->g_pd)));
+                                    className = className.replace("~", "_t");
                                     autoId = ("gui_" + className + "_"
                                         + juce::String(adoptIdx++)).toStdString();
+                                    while (canvasMap.count(autoId))
+                                        autoId = ("gui_" + className + "_"
+                                            + juce::String(adoptIdx++)).toStdString();
+                                }
                                 canvasMap[autoId] = y;
                                 processor->mcpStableSerialMap[y] = processor->mcpSerialCounter++;
                                 processor->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
