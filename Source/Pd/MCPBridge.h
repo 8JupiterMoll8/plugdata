@@ -124,6 +124,7 @@ private:
     void handleBridgeDomain(const juce::String& bridgeAction, const juce::OSCMessage& msg);
     void handleMorphDomain(const juce::String& morphAction, const juce::OSCMessage& msg);
     void handleMeterDomain(const juce::String& meterAction, const juce::OSCMessage& msg);
+    void handleTransportDomain(const juce::String& action, const juce::OSCMessage& msg);
 
     t_outconnect* resolveProbeTarget(const juce::String& canvasName, const juce::String& targetId, int outletIndex, juce::String& errorOut);
     bool activateProbing();
@@ -142,6 +143,20 @@ private:
         int currentStep = 0;
         int intervalMs = 50;
         std::vector<MorphParam> params;
+    };
+
+    // Native sample-accurate transport clock. Advanced on the audio thread via
+    // audioTick() by a running sample counter; bar/beat/step and the next downbeat
+    // are derived from that counter (not Date.now()), so they are sample-accurate.
+    struct TransportState {
+        std::atomic<bool> running { false };
+        std::atomic<float> bpm { 120.0f };
+        std::atomic<int> subdivision { 4 };   // steps per beat
+        std::atomic<int> beatsPerBar { 4 };
+        std::atomic<bool> modeClock { false }; // clock vs free (Phase 2 consumes it)
+        std::atomic<int64_t> sampleCounter { 0 };
+        std::atomic<int64_t> anchorSample { 0 }; // sampleCounter at last tempo anchor
+        std::atomic<double> anchorBeat { 0.0 };  // beat position at last tempo anchor
     };
 
     PluginProcessor* processor = nullptr;
@@ -163,6 +178,8 @@ private:
 
     std::vector<MorphJob> morphJobs;
     juce::CriticalSection morphLock;
+
+    TransportState transport;
 
     ProbeManager probeManager;
 

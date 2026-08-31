@@ -287,6 +287,9 @@ void MCPBridge::oscMessageReceived(const juce::OSCMessage& message)
     } else if (domain == "meter") {
         auto meterAction = parts.size() > 1 ? parts[1] : (message.size() > 0 ? getArgString(message[0]) : "");
         handleMeterDomain(meterAction, message);
+    } else if (domain == "transport") {
+        auto action = parts.size() > 1 ? parts[1] : (message.size() > 0 ? getArgString(message[0]) : "");
+        handleTransportDomain(action, message);
     }
 }
 
@@ -2869,8 +2872,104 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
         reply.addArgument(juce::String("connections"));
         reply.addArgument(juce::String("spectral"));
         reply.addArgument(juce::String("batch_atomic"));
+        reply.addArgument(juce::String("transport"));
         reply.addArgument(juce::String("boot:" + bootToken));
         sender.send(reply);
+    }
+}
+
+void MCPBridge::handleTransportDomain(const juce::String& action, const juce::OSCMessage& msg)
+{
+    // Sample-accurate transport clock. Position derives from a running sample
+    // counter (advanced in audioTick()), so bar/beat/step and the next downbeat
+    // are exact — no Date.now()/wall-clock drift.
+
+    if (action == "set_bpm") {
+        if (msg.size() >= 1) {
+            double bpm = getArgFloat(msg[0]);
+            if (bpm < 1.0) bpm = 1.0;
+            if (bpm > 400.0) bpm = 400.0;
+            double const sampleRate = (processor && processor->getSampleRate() > 0.0) ? processor->getSampleRate() : 44100.0;
+            double const oldBpm = transport.bpm.load(std::memory_order_relaxed);
+            double const samplesPerBeat = sampleRate * 60.0 / oldBpm;
+            int64_t const counter = transport.sampleCounter.load(std::memory_order_relaxed);
+            int64_t const anchorSample = transport.anchorSample.load(std::memory_order_relaxed);
+            double const anchorBeat = transport.anchorBeat.load(std::memory_order_relaxed);
+            // Anchor current position so a tempo change preserves the beat position.
+            double const curBeat = samplesPerBeat > 0.0 ? anchorBeat + (double)(counter - anchorSample) / samplesPerBeat : anchorBeat;
+            transport.anchorBeat.store(curBeat, std::memory_order_relaxed);
+            transport.anchorSample.store(counter, std::memory_order_relaxed);
+            transport.bpm.store((float)bpm, std::memory_order_relaxed);
+        }
+        return;
+    }
+
+    if (action == "set_subdivision") {
+        if (msg.size() >= 1) {
+            int sub = (int)getArgFloat(msg[0]);
+            if (sub < 1) sub = 1;
+            if (sub > 64) sub = 64;
+            transport.subdivision.store(sub, std::memory_order_relaxed);
+        }
+        return;
+    }
+
+    if (action == "set_mode") {
+        if (msg.size() >= 1) {
+            juce::String const mode = getArgString(msg[0]);
+            transport.modeClock.store(mode == "clock", std::memory_order_relaxed);
+        }
+        return;
+    }
+
+    if (action == "start") {
+        transport.running.store(true, std::memory_order_relaxed);
+        return;
+    }
+
+    if (action == "pause") {
+        transport.running.store(false, std::memory_order_relaxed);
+        return;
+    }
+
+    if (action == "status") {
+        auto const correlationId = msg.size() > 0 ? getArgString(msg[0]) : "0";
+        double const sampleRate = (processor && processor->getSampleRate() > 0.0) ? processor->getSampleRate() : 44100.0;
+        double const bpm = transport.bpm.load(std::memory_order_relaxed);
+        int const subdivision = transport.subdivision.load(std::memory_order_relaxed);
+        int const beatsPerBar = transport.beatsPerBar.load(std::memory_order_relaxed);
+        bool const running = transport.running.load(std::memory_order_relaxed);
+        bool const modeClock = transport.modeClock.load(std::memory_order_relaxed);
+        int64_t const counter = transport.sampleCounter.load(std::memory_order_relaxed);
+        int64_t const anchorSample = transport.anchorSample.load(std::memory_order_relaxed);
+        double const anchorBeat = transport.anchorBeat.load(std::memory_order_relaxed);
+
+        double const samplesPerBeat = sampleRate * 60.0 / bpm;
+        double const totalBeats = samplesPerBeat > 0.0 ? anchorBeat + (double)(counter - anchorSample) / samplesPerBeat : anchorBeat;
+        double const barD = std::floor(totalBeats / beatsPerBar);
+        int const bar = (int)barD;
+        int const beatInBar = (int)std::floor(totalBeats) - bar * beatsPerBar;
+        int const stepInBeat = (int)std::floor((totalBeats - std::floor(totalBeats)) * subdivision);
+        int const stepsPerBar = beatsPerBar * subdivision;
+        int const stepInBar = ((int)std::floor(totalBeats * subdivision)) % stepsPerBar;
+
+        double const nextBarBeat = (barD + 1.0) * beatsPerBar;
+        int64_t const samplesToNextBar = (int64_t)((nextBarBeat - totalBeats) * samplesPerBeat);
+
+        juce::OSCMessage reply { juce::OSCAddressPattern("/transport/status/" + correlationId) };
+        reply.addArgument((float)bpm);
+        reply.addArgument(subdivision);
+        reply.addArgument(beatsPerBar);
+        reply.addArgument(bar);
+        reply.addArgument(beatInBar);
+        reply.addArgument(stepInBeat);
+        reply.addArgument(stepInBar);
+        reply.addArgument((float)samplesToNextBar);
+        reply.addArgument((float)sampleRate);
+        reply.addArgument(running ? 1 : 0);
+        reply.addArgument(modeClock ? juce::String("clock") : juce::String("free"));
+        sender.send(reply);
+        return;
     }
 }
 
@@ -2914,6 +3013,14 @@ void MCPBridge::handleMorphDomain(const juce::String& morphAction, const juce::O
 void MCPBridge::audioTick()
 {
     probeManager.audioTick();
+
+    // Advance the native transport clock — one PD block per call, so the running
+    // sample counter gives sample-accurate bar/beat/step position.
+    if (transport.running.load(std::memory_order_relaxed)) {
+        int const blockSize = pd::Instance::getBlockSize();
+        if (blockSize > 0)
+            transport.sampleCounter.fetch_add(blockSize, std::memory_order_relaxed);
+    }
 }
 
 static float estimateFrequency(const float* buf, int n, float sampleRate)
