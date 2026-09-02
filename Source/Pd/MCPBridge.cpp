@@ -1927,6 +1927,72 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         return;
     }
 
+    // ── PRD Phase 3 §2.5: FOCUS TAB ─────────────────────────────────────
+    // /pd/focus_tab <file-or-name> [corrId]
+    // Makes the named tab the focused one — "main" then points at it.
+    // Matches by full path or file name. Reply: .../reply/<corrId> "<status>"
+    if (action == "focus_tab") {
+        auto target       = msg.size() > 0 ? getArgString(msg[0]) : juce::String();
+        auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : "0";
+        juce::String replyAddr = "/pd/focus_tab/reply/" + correlationId;
+
+        processor->enqueueFunctionAsync([p = processor, bridge = this, target, replyAddr]() {
+            juce::File f(target);
+            for (auto* editor : p->getEditors()) {
+                if (!editor) continue;
+                for (auto* canvas : editor->getCanvases()) {
+                    if (!canvas) continue;
+                    bool match = canvas->patch.getCurrentFile() == f
+                        || canvas->patch.getCurrentFile().getFileName() == target;
+                    if (match) {
+                        editor->getTabComponent().showTab(canvas, canvas->patch.splitViewIndex);
+                        editor->getTabComponent().setActiveSplit(canvas);
+                        bridge->sendReply(replyAddr, juce::String("focused: ") + canvas->patch.getTitle());
+                        return;
+                    }
+                }
+            }
+            bridge->sendReply(replyAddr, juce::String("error: tab not found: " + target));
+        });
+        return;
+    }
+
+    // ── PRD Phase 3 §2.5: CLOSE TAB ─────────────────────────────────────
+    // /pd/close_tab <file-or-name> [force] [corrId]
+    // Closes the named tab. Refuses unsaved changes unless force=1.
+    // Reply: .../reply/<corrId> "<status>"
+    if (action == "close_tab") {
+        auto target        = msg.size() > 0 ? getArgString(msg[0]) : juce::String();
+        float force        = msg.size() > 1 ? getArgFloat(msg[1]) : 0.0f;
+        auto correlationId = msg.size() > 2 ? getArgString(msg[2]) : "0";
+        juce::String replyAddr = "/pd/close_tab/reply/" + correlationId;
+
+        processor->enqueueFunctionAsync([p = processor, bridge = this, target, force, replyAddr]() {
+            juce::File f(target);
+            for (auto* editor : p->getEditors()) {
+                if (!editor) continue;
+                for (auto* canvas : editor->getCanvases()) {
+                    if (!canvas) continue;
+                    bool match = canvas->patch.getCurrentFile() == f
+                        || canvas->patch.getCurrentFile().getFileName() == target;
+                    if (match) {
+                        if (canvas->patch.isDirty() && force < 0.5f) {
+                            bridge->sendReply(replyAddr, juce::String(
+                                "error: '" + canvas->patch.getTitle() + "' has unsaved changes — save first or pass force=1"));
+                            return;
+                        }
+                        juce::String title = canvas->patch.getTitle();
+                        editor->getTabComponent().closeTab(canvas);
+                        bridge->sendReply(replyAddr, juce::String("closed: " + title));
+                        return;
+                    }
+                }
+            }
+            bridge->sendReply(replyAddr, juce::String("error: tab not found: " + target));
+        });
+        return;
+    }
+
     if (action == "clear") {
         if (msg.size() >= 1 && processor) {
             auto canvasName = normalizeCanvas(getArgString(msg[0]));
@@ -3380,6 +3446,8 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
         // PRD Phase 3 §2.5: multi-tab — open in new tab + enumerate tabs
         reply.addArgument(juce::String("open_patch"));
         reply.addArgument(juce::String("list_tabs"));
+        reply.addArgument(juce::String("focus_tab"));
+        reply.addArgument(juce::String("close_tab"));
         reply.addArgument(juce::String("connections"));
         reply.addArgument(juce::String("spectral"));
         reply.addArgument(juce::String("batch_atomic"));
