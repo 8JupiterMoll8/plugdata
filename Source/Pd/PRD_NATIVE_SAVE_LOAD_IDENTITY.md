@@ -145,6 +145,31 @@ per-tab identity keys by file name, tab-close eviction, explicit canvas targetin
 
 **Estimate:** ~1.5 dev-days (tasks 1–6) + ~1 dev-day (multi-tab, tasks 7–9).
 
+---
+
+## 7. Next Session — FIRST TASK: Named-Tab Editing (Phase 3.1)
+
+**Status (live-verified 2026-09-02):** tasks 1–6 + open/list/save-binding shipped.
+Multi-tab management works; deep-editing follows FOCUS, not name.
+
+**Goal:** "edit the phaser tab while I stay in the beat tab" — every tool accepts a tab key.
+
+1. **Root-file tab addressing** — `getCanvasBySymbol` resolves root tabs by their
+   bound file name (`phase3_roundtrip_test.pd`); TS normalization must not mangle
+   file-name symbols (today's `pd-` prefixing is subpatch-only).
+2. **Per-tab identity keys by file name** — registrations for an opened tab go
+   under `pd-<filename>` instead of the moving `pd-main`; `main` stays an alias
+   for the focused tab.
+3. **Explicit canvas argument everywhere** — edit/probe/census/save accept the
+   tab key; census auto-adopt mints into the right bucket; probe resolves
+   against the named tab's map.
+4. **`tabs` gains keys** — list_tabs reports the canonical canvas key per tab so
+   the agent can address tabs verbatim.
+
+**Acceptance:** focus tab A, tell the AI to edit tab B by name → census/probe/edit
+all land in B; A untouched; identities in both buckets stay stable across focus
+switches.
+
 ## 6. Verification Protocol
 
 Standard beat + hand-drawn MERDA module. Save → close PlugData → reopen → load → assert:
