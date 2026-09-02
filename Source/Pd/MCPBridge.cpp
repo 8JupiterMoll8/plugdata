@@ -323,6 +323,59 @@ static float getArgFloat(const juce::OSCArgument& arg)
     return 0.0f;
 }
 
+// ─── PRD Phase 3 §2.2: identity sidecar applier ──────────────────────────
+// Re-registers sidecar identities (root + named subcanvases) for a freshly
+// loaded/opened canvas. Caller must hold sys_lock. Returns tempIds restored.
+int MCPBridge::mcpApplyIdentitySidecar(PluginProcessor* processor, juce::DynamicObject* sidecarObj,
+                                   const juce::String& rootKey, t_canvas* cnv)
+{
+    if (!processor || !sidecarObj || !cnv) return 0;
+
+    auto registerArray = [&](juce::var const& idArray, juce::String const& mapKey, t_canvas* target) -> int {
+        const auto* arr = idArray.getArray();
+        if (arr == nullptr) return 0;
+        std::unordered_map<int, juce::String> idxToId;
+        for (auto const& v : *arr) {
+            if (auto* o = v.getDynamicObject()) {
+                int i = static_cast<int>(static_cast<double>(o->getProperty("i")));
+                juce::String id = o->getProperty("id").toString();
+                if (id.isNotEmpty()) idxToId[i] = id;
+            }
+        }
+        int restored = 0;
+        int idx = 0;
+        for (t_gobj* g = target->gl_list; g; g = g->g_next, ++idx) {
+            auto it = idxToId.find(idx);
+            if (it == idxToId.end()) continue;
+            processor->mcpStableObjectMap[mapKey.toStdString()][it->second.toStdString()] = g;
+            if (processor->mcpStableSerialMap.find(g) == processor->mcpStableSerialMap.end())
+                processor->mcpStableSerialMap[g] = processor->mcpSerialCounter++;
+            restored++;
+        }
+        return restored;
+    };
+
+    int restored = registerArray(sidecarObj->getProperty("root"), rootKey, cnv);
+
+    // Named subcanvases: key "pd-<gl_name>" matches bridge map-key convention
+    if (auto* subObj = sidecarObj->getProperty("sub").getDynamicObject()) {
+        for (t_gobj* g = cnv->gl_list; g; g = g->g_next) {
+            if (pd_class(&g->g_pd) != canvas_class) continue;
+            auto* child = reinterpret_cast<t_canvas*>(g);
+            if (!child->gl_name) continue;
+            juce::String childName = juce::String::fromUTF8(child->gl_name->s_name);
+            auto childIds = subObj->getProperty(juce::Identifier(childName));
+            if (childIds.getArray() != nullptr && childIds.getArray()->size() > 0) {
+                processor->mcpStableObjectMap[("pd-" + childName).toStdString()].clear();
+                restored += registerArray(childIds, "pd-" + childName, child);
+            }
+        }
+    }
+
+    processor->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+    return restored;
+}
+
 // ─── Native sequencer helpers ────────────────────────────────────────────
 
 static bool isPureDrumName(const juce::String& name)
@@ -468,6 +521,20 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
             // Get class name from the object's pd struct
             juce::String className = juce::String::fromUTF8(class_getname(pd_class(&gobj->g_pd)));
+
+            // PRD §2.1: canvas-class objects (subpatch/abstraction wrappers).
+            // NOTE: class_getname(canvas_class) is "canvas" in Pd, not "pd" —
+            // normalize to the census vocabulary. Resolve the real loaded-file
+            // name (MERDA .m~ / .pd abstraction) via the shared helper so
+            // /pd/typeof is uniformly useful; inline [pd foo] stays "pd".
+            if (pd_class(&gobj->g_pd) == canvas_class) {
+                juce::String abstractName;
+                if (pd::getAbstractionFileName(gobj, abstractName)) {
+                    className = abstractName;
+                } else {
+                    className = "pd";
+                }
+            }
 
             // Get object text from binbuf (e.g. "osc~ 440", "vcf~ 1200 5")
             juce::String objectText;
@@ -1468,6 +1535,395 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
             sendReply(replyAddr, static_cast<float>(objectCount));
         }
+        return;
+    }
+
+    // ── PRD Phase 3 §2.1: NATIVE SAVE WITH IDENTITY SIDECAR ─────────────
+    // /pd/save_patch <canvas> <filePath> [corrId]
+    // C++ owns the save: getCanvasContent writes the .pd, and a sidecar
+    // (<file>.mcpids.json) carries the stable tempId map AT SAVE TIME —
+    // index→tempId for the root canvas plus every named subcanvas. Identity
+    // never crosses the TS boundary, so a later load can restore it exactly
+    // (no positional guessing). Vanilla Pd sees a normal .pd file.
+    // Reply: /pd/save_patch/reply/<corrId> <destFilePath> | "error: ..."
+    if (action == "save_patch") {
+        if (msg.size() >= 2 && processor) {
+            auto canvasName    = normalizeCanvas(getArgString(msg[0]));
+            auto destFilePath  = getArgString(msg[1]);
+            auto correlationId = msg.size() > 2 ? getArgString(msg[2]) : "";
+
+            juce::String replyAddr = correlationId.isNotEmpty()
+                ? "/pd/save_patch/reply/" + correlationId
+                : "/pd/save_patch/reply";
+
+            juce::String content;
+            juce::var sidecar;
+
+            sys_lock();
+            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
+            if (cnv) {
+                char* buf = nullptr;
+                int   bufsize = 0;
+                pd::Interface::getCanvasContent(cnv, &buf, &bufsize);
+                if (buf) {
+                    content = juce::String::fromUTF8(buf, static_cast<size_t>(bufsize));
+                    freebytes(buf, static_cast<size_t>(bufsize) * sizeof(char));
+                }
+
+                if (content.isNotEmpty()) {
+                    // Identity sidecar: reverse map (gobj → tempId) per canvas
+                    auto buildIdArray = [&](const juce::String& mapKey, t_canvas* c) -> juce::var {
+                        juce::Array<juce::var> arr;
+                        std::unordered_map<t_gobj*, juce::String> ptrToId;
+                        auto mapIt = processor->mcpStableObjectMap.find(mapKey.toStdString());
+                        if (mapIt != processor->mcpStableObjectMap.end()) {
+                            for (auto const& [id, ptr] : mapIt->second)
+                                if (ptr) ptrToId[ptr] = juce::String(id);
+                        }
+                        int idx = 0;
+                        for (t_gobj* g = c->gl_list; g; g = g->g_next, ++idx) {
+                            auto it = ptrToId.find(g);
+                            if (it == ptrToId.end()) continue;
+                            auto* o = new juce::DynamicObject();
+                            o->setProperty("i", idx);
+                            o->setProperty("id", it->second);
+                            arr.add(juce::var(o));
+                        }
+                        return juce::var(arr);
+                    };
+
+                    auto* root = new juce::DynamicObject();
+                    root->setProperty("format", juce::String("MCP-IDENTITY"));
+                    root->setProperty("v", 1);
+                    root->setProperty("identity_version",
+                        (double)processor->mcpIdentityVersion.load(std::memory_order_relaxed));
+                    root->setProperty("root", buildIdArray(canvasName, cnv));
+
+                    // Named subcanvases: key "pd-<gl_name>" matches the map keys
+                    // the bridge uses for subpatch census/mutations.
+                    auto* subObj = new juce::DynamicObject();
+                    for (t_gobj* g = cnv->gl_list; g; g = g->g_next) {
+                        if (pd_class(&g->g_pd) != canvas_class) continue;
+                        t_canvas* child = reinterpret_cast<t_canvas*>(g);
+                        if (!child->gl_name) continue;
+                        juce::String childName = juce::String::fromUTF8(child->gl_name->s_name);
+                        auto childIds = buildIdArray("pd-" + childName, child);
+                        if (childIds.getArray() != nullptr && childIds.getArray()->size() > 0)
+                            subObj->setProperty(childName, childIds);
+                    }
+                    root->setProperty("sub", juce::var(subObj));
+                    sidecar = juce::var(root);
+                }
+            }
+            sys_unlock();
+
+            if (content.isEmpty()) {
+                sendReply(replyAddr, juce::String("error: canvas not found or empty"));
+                return;
+            }
+
+            juce::File destFile(destFilePath);
+            if (!destFile.replaceWithText(content)) {
+                sendReply(replyAddr, juce::String("error: could not write to " + destFilePath));
+                return;
+            }
+            // Sidecar next to the .pd — engine-private, invisible to vanilla Pd
+            juce::File sidecarFile(destFilePath + ".mcpids.json");
+            sidecarFile.replaceWithText(juce::JSON::toString(sidecar, true));
+
+            // PRD Phase 3 §2.5 (save-binding): bind the file to the canvas the
+            // way native Save-As does — tab title + current path update, dirty
+            // flag cleared. Subsequent Ctrl+S saves to the same file natively.
+            processor->enqueueFunctionAsync([p = processor, cnv, destFilePath]() {
+                juce::File f(destFilePath);
+                for (auto* editor : p->getEditors()) {
+                    if (!editor) continue;
+                    for (auto* canvas : editor->getCanvases()) {
+                        if (canvas && canvas->patch.getPointer().get() == cnv) {
+                            canvas->patch.savePatch(juce::URL(f));
+                            return;
+                        }
+                    }
+                }
+            });
+
+            sendReply(replyAddr, destFilePath);
+        }
+        return;
+    }
+
+    // ── PRD Phase 3 §2.2: NATIVE LOAD WITH IDENTITY RESTORE ─────────────
+    // /pd/load_patch <canvas> <filePath> [corrId]
+    // Same canvas mechanics as load_content (clear + pasteDirect + loadbang +
+    // canvas_update_dsp), then re-registers the sidecar tempIds DIRECTLY into
+    // the stable map (root + named subcanvases) and bumps the version once.
+    // Objects without a sidecar entry are auto-adopted by the Phase 2 census
+    // naming on next census. No TS involvement, no positional guessing.
+    // Reply: /pd/load_patch/reply/<corrId> <objectCount> (float, -1 = file missing)
+    if (action == "load_patch") {
+        if (msg.size() >= 2 && processor) {
+            auto canvasName    = normalizeCanvas(getArgString(msg[0]));
+            auto srcFilePath   = getArgString(msg[1]);
+            auto correlationId = msg.size() > 2 ? getArgString(msg[2]) : "";
+
+            juce::String replyAddr = correlationId.isNotEmpty()
+                ? "/pd/load_patch/reply/" + correlationId
+                : "/pd/load_patch/reply";
+
+            juce::File srcFile(srcFilePath);
+            if (!srcFile.existsAsFile()) {
+                sendReply(replyAddr, -1.0f);
+                return;
+            }
+
+            // Sidecar read OUTSIDE sys_lock (small file, best-effort)
+            juce::var sidecar;
+            juce::File sidecarFile(srcFilePath + ".mcpids.json");
+            if (sidecarFile.existsAsFile()) {
+                auto parsed = juce::JSON::parse(sidecarFile.loadFileAsString());
+                if (auto* parsedObj = parsed.getDynamicObject()) {
+                    if (parsedObj->getProperty("format") == juce::String("MCP-IDENTITY")) {
+                        sidecar = parsed;
+                    }
+                }
+            }
+
+            auto fileDir  = srcFile.getParentDirectory().getFullPathName();
+            auto fileName = srcFile.getFileName();
+            int objectCount = 0;
+
+            probeManager.stopAllProbes("load_patch_reset");
+
+            sys_lock();
+            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
+            if (cnv) {
+                // 0. Reset identity for this canvas tree BEFORE re-registering
+                processor->mcpStableObjectMap[canvasName.toStdString()].clear();
+
+                // 1. Clear existing objects
+                pd_typedmess(reinterpret_cast<t_pd*>(cnv), gensym("clear"), 0, nullptr);
+
+                // 2. Load .pd file — strip the #N canvas header, pasteDirect
+                t_binbuf* b = binbuf_new();
+                if (binbuf_read(b, fileName.toRawUTF8(), fileDir.toRawUTF8(), 0) == 0) {
+                    int natom = binbuf_getnatom(b);
+                    t_atom* vec = binbuf_getvec(b);
+                    int startIdx = 0;
+                    for (int i = 0; i < natom; i++) {
+                        if (vec[i].a_type == A_SEMI) { startIdx = i + 1; break; }
+                    }
+                    if (startIdx < natom) {
+                        t_binbuf* body = binbuf_new();
+                        binbuf_add(body, natom - startIdx, vec + startIdx);
+                        char* textBuf = nullptr;
+                        int   textLen = 0;
+                        binbuf_gettext(body, &textBuf, &textLen);
+                        if (textBuf && textLen > 0) {
+                            pasteDirect(cnv, juce::String::fromUTF8(textBuf, textLen).toRawUTF8());
+                            freebytes(textBuf, textLen);
+                        }
+                        binbuf_free(body);
+                    }
+                }
+                binbuf_free(b);
+
+                // 3. Loadbangs on newly created subpatches
+                for (t_gobj* g = cnv->gl_list; g; g = g->g_next) {
+                    if (pd_class(&g->g_pd) == canvas_class)
+                         canvas_loadbang(reinterpret_cast<t_canvas*>(g));
+                }
+
+                // 4. DSP graph recompile
+                canvas_update_dsp();
+
+                // 5. Re-register sidecar identities directly into the stable map
+                juce::DynamicObject* sidecarObj = sidecar.getDynamicObject();
+                int restored = mcpApplyIdentitySidecar(processor, sidecarObj, canvasName, cnv);
+                (void)restored;
+
+                for (t_gobj* g = cnv->gl_list; g; g = g->g_next)
+                    objectCount++;
+            }
+            sys_unlock();
+
+            processor->enqueueFunctionAsync([p = processor] { p->synchroniseCanvases(); });
+            if (objectCount > 0 && processor)
+                processor->startDSP();
+            processor->enqueueFunctionAsync([p = processor] { p->synchroniseCanvases(); });
+
+            sendReply(replyAddr, static_cast<float>(objectCount));
+        }
+        return;
+    }
+
+    // ── PRD Phase 3 §2.5: OPEN PATCH IN NEW TAB ─────────────────────────
+    // /pd/open_patch <filePath> [corrId]
+    // Opens a .pd file in a NEW editor tab (native File→Open path), then
+    // pre-registers the sidecar identities if present — the tab comes up
+    // fully named. Reply: /pd/open_patch/reply/<corrId> "<status text>"
+    if (action == "open_patch") {
+        if (msg.size() >= 2 && processor) {
+            auto canvasName    = normalizeCanvas(getArgString(msg[0]));
+            auto srcFilePath   = getArgString(msg[1]);
+            auto correlationId = msg.size() > 2 ? getArgString(msg[2]) : "0";
+            juce::String replyAddr = "/pd/open_patch/reply/" + correlationId;
+
+            juce::File srcFile(srcFilePath);
+            if (!srcFile.existsAsFile()) {
+                sendReply(replyAddr, juce::String("error: file not found: " + srcFilePath));
+                return;
+            }
+
+            // PRD Phase 3 §2.5: duplicate-tab guard — PlugData focuses the
+            // existing tab instead of duplicating a patch (by design). Reply
+            // honestly instead of falling into the async no-reply path.
+            bool alreadyOpen = false;
+            {
+                sys_lock();
+                for (auto* editor : processor->getEditors()) {
+                    if (!editor) continue;
+                    for (auto* canvas : editor->getCanvases()) {
+                        if (canvas && canvas->patch.getCurrentFile() == srcFile) {
+                            alreadyOpen = true;
+                            break;
+                        }
+                    }
+                    if (alreadyOpen) break;
+                }
+                sys_unlock();
+            }
+            if (alreadyOpen) {
+                sendReply(replyAddr, juce::String("already open: " + srcFile.getFullPathName() + " (focused existing tab)"));
+                return;
+            }
+
+            // Sidecar read outside the message-thread hop
+            juce::var sidecar;
+            juce::File sidecarFile(srcFile.getFullPathName() + ".mcpids.json");
+            if (sidecarFile.existsAsFile()) {
+                auto parsed = juce::JSON::parse(sidecarFile.loadFileAsString());
+                if (auto* parsedObj = parsed.getDynamicObject()) {
+                    if (parsedObj->getProperty("format") == juce::String("MCP-IDENTITY"))
+                        sidecar = parsed;
+                }
+            }
+
+            // Acknowledge immediately — the tab-open runs on the message
+            // thread (fire-and-forget); TS verifies via `tabs`/census.
+            sendReply(replyAddr, juce::String("opening: " + srcFile.getFullPathName()));
+
+            processor->enqueueFunctionAsync(
+                [p = processor, canvasName, fileStr = srcFile.getFullPathName(), sidecar]() {
+                bool opened = false;
+                for (auto* editor : p->getEditors()) {
+                    if (!editor) continue;
+                    editor->getTabComponent().openPatch(juce::URL(juce::File(fileStr)));
+                    opened = true;
+                    break;
+                }
+                if (!opened) {
+                    p->logMessage("MCP open_patch: no editor");
+                    return;
+                }
+
+                // PRD Phase 3 §2.5: sidecar registration via the proven async
+                // mcp_register_id path — NO sys_lock in this lambda (lock
+                // inversion with the audio thread crashes the message thread).
+                int queued = 0;
+                if (auto* sidecarObj = sidecar.getDynamicObject()) {
+                    auto queueRegisters = [&p, &queued](juce::var const& idArray, juce::String const& canvasKey, t_canvas* target) {
+                        const auto* arr = idArray.getArray();
+                        if (arr == nullptr) return;
+                        int idx = 0;
+                        for (t_gobj* g = target->gl_list; g; g = g->g_next, ++idx) {
+                            // find the sidecar entry for this index
+                            for (auto const& v : *arr) {
+                                if (auto* o = v.getDynamicObject()) {
+                                    if (static_cast<int>(static_cast<double>(o->getProperty("i"))) != idx) continue;
+                                    juce::String id = o->getProperty("id").toString();
+                                    if (id.isEmpty()) break;
+                                    SmallArray<pd::Atom> atoms;
+                                    atoms.add(pd::Atom(p->generateSymbol(canvasKey)));
+                                    atoms.add(pd::Atom(p->generateSymbol("0")));
+                                    atoms.add(pd::Atom(static_cast<float>(idx)));
+                                    atoms.add(pd::Atom(p->generateSymbol(id)));
+                                    p->receiveSysMessage("mcp_register_id", atoms);
+                                    queued++;
+                                    break;
+                                }
+                            }
+                        }
+                    };
+
+                    juce::File f(fileStr);
+                    for (auto* editor : p->getEditors()) {
+                        if (!editor) continue;
+                        for (auto* canvas : editor->getCanvases()) {
+                            if (!canvas || canvas->patch.getCurrentFile() != f) continue;
+                            if (auto* cnv = canvas->patch.getPointer().get()) {
+                                queueRegisters(sidecarObj->getProperty("root"), canvasName, cnv);
+                                // named subcanvases
+                                if (auto* subObj = sidecarObj->getProperty("sub").getDynamicObject()) {
+                                    for (t_gobj* g = cnv->gl_list; g; g = g->g_next) {
+                                        if (pd_class(&g->g_pd) != canvas_class) continue;
+                                        auto* child = reinterpret_cast<t_canvas*>(g);
+                                        if (!child->gl_name) continue;
+                                        juce::String childName = juce::String::fromUTF8(child->gl_name->s_name);
+                                        auto childIds = subObj->getProperty(juce::Identifier(childName));
+                                        if (childIds.getArray() != nullptr && childIds.getArray()->size() > 0)
+                                            queueRegisters(childIds, "pd-" + childName, child);
+                                    }
+                                }
+                            }
+                            break;
+                        }
+                        break;
+                    }
+                }
+
+                p->logMessage(juce::String("MCP open_patch: ") + fileStr
+                    + (queued > 0 ? " (" + juce::String(queued) + " identities queued)" : ""));
+                (void)opened;
+            });
+        }
+        return;
+    }
+
+    // ── PRD Phase 3 §2.5: LIST OPEN TABS ────────────────────────────────
+    // /pd/list_tabs [corrId]
+    // Enumerates every open root tab: title, file, focused flag, object
+    // count. Reply: /pd/list_tabs/reply/<corrId> <json>
+    if (action == "list_tabs") {
+        auto correlationId = msg.size() > 0 ? getArgString(msg[0]) : "0";
+        juce::String replyAddr = "/pd/list_tabs/reply/" + correlationId;
+
+        processor->enqueueFunctionAsync([p = processor, bridge = this, replyAddr]() {
+            juce::Array<juce::var> list;
+            for (auto* editor : p->getEditors()) {
+                if (!editor) continue;
+                auto* focused = editor->getCurrentCanvas();
+                for (auto* canvas : editor->getCanvases()) {
+                    if (!canvas) continue;
+                    auto* o = new juce::DynamicObject();
+                    o->setProperty("title", canvas->patch.getTitle());
+                    o->setProperty("file", canvas->patch.getCurrentFile().getFullPathName());
+                    o->setProperty("focused", canvas == focused);
+                    int count = 0;
+                    sys_lock();
+                    if (auto* cnv = canvas->patch.getPointer().get()) {
+                        for (t_gobj* g = cnv->gl_list; g; g = g->g_next) count++;
+                    }
+                    sys_unlock();
+                    o->setProperty("objects", count);
+                    list.add(juce::var(o));
+                }
+            }
+            auto* root = new juce::DynamicObject();
+            root->setProperty("tabs", list);
+            bridge->sendReply(replyAddr, juce::JSON::toString(juce::var(root)));
+        });
         return;
     }
 
@@ -2913,6 +3369,17 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
         reply.addArgument(juce::String("ports"));
         reply.addArgument(juce::String("identity_snapshot"));
         reply.addArgument(juce::String("identity_version"));
+        // PRD Phase 2 §2.6: the bridge mints readable tempIds natively
+        // (census auto-adopt). TS is a read-only mirror on bridges that
+        // advertise this; legacy bridges keep the TS adoption path.
+        reply.addArgument(juce::String("auto_adopt"));
+        // PRD Phase 3 §2.6: C++-native save/load with identity sidecar —
+        // tempIds travel with the file and are re-registered by the engine.
+        reply.addArgument(juce::String("save_patch"));
+        reply.addArgument(juce::String("load_patch"));
+        // PRD Phase 3 §2.5: multi-tab — open in new tab + enumerate tabs
+        reply.addArgument(juce::String("open_patch"));
+        reply.addArgument(juce::String("list_tabs"));
         reply.addArgument(juce::String("connections"));
         reply.addArgument(juce::String("spectral"));
         reply.addArgument(juce::String("batch_atomic"));

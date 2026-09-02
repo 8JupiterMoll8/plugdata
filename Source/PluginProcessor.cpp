@@ -2734,6 +2734,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
 
                 Array<var> objArray;
                 int objectIndex = 0;
+                bool adoptedAny = false; // Phase 2 §2.1: any auto-adoption this census
                 for (t_gobj* y_obj = canvas->gl_list; y_obj; y_obj = y_obj->g_next, ++objectIndex) {
                     auto* o = new DynamicObject();
                     o->setProperty("index", objectIndex);
@@ -2760,6 +2761,11 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
 
                     String kind = "obj";
                     String type = className;
+                    // PRD Phase 2 §2.1: real class name for file-loaded
+                    // abstractions (MERDA .m~, .pd, GOP); empty for inline
+                    // [pd foo] and regular objects. Hoisted so the auto-adopt
+                    // block below can mint the tempId from it.
+                    juce::String abstractName;
                     Array<var> argsList;
 
                     if (cl == canvas_class) {
@@ -2769,6 +2775,12 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
                         if (sub->gl_name) {
                             argsList.add(String::fromUTF8(sub->gl_name->s_name));
                         }
+                        // PRD §2.2 (Phase 1): expose the real class name for
+                        // abstractions loaded from disk. `type` stays "pd" for
+                        // structural backward-compat (§2.6.2 Option A);
+                        // `node_class` carries the human-facing identity.
+                        // Inline [pd foo] gets none.
+                        pd::getAbstractionFileName(y_obj, abstractName);
                     } else if (cl == garray_class) {
                         kind = "table";
                         type = "table";
@@ -2824,9 +2836,62 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
 
                     o->setProperty("kind", kind);
                     o->setProperty("type", type);
+                    if (abstractName.isNotEmpty()) {
+                        o->setProperty("node_class", abstractName);
+                    }
                     o->setProperty("args", argsList);
 
+                    // ── PRD Phase 2 §2.1: NATIVE AUTO-ADOPTION ─────────────
+                    // C++ mints a readable tempId for every object not yet in
+                    // the stable map (i.e. hand-added by the artist in the
+                    // GUI). One census and the object is named, resolvable by
+                    // probe/meter, and version-bumped — zero TS involvement,
+                    // zero adoption window. Naming mirrors the TS policy
+                    // exactly: sanitize(node_class || type)_<canvas>_<index>.
+                    // Never overwrites an existing (possibly artist-renamed)
+                    // registration.
+                    if (tempId.isEmpty()) {
+                        juce::String classSrc = abstractName.isNotEmpty() ? abstractName : type;
+                        // Canvas key: the bridge normalizes "main" → "pd-main"
+                        // (the legacy Lua-bridge convention). Minted tempIds use
+                        // the plain "main" spelling so C++-minted names match
+                        // the TS-era convention (plate_rev_main_34, not
+                        // plate_rev_pd_main_34).
+                        auto canvasKeySymbol = (canvas_symbol == "pd-main" || canvas_symbol == "main")
+                                                   ? juce::String("main")
+                                                   : canvas_symbol;
+                        juce::String canvasKey;
+                        for (auto ch : canvasKeySymbol)
+                            canvasKey << (juce::CharacterFunctions::isLetterOrDigit(ch) || ch == '_'
+                                               ? juce::String::charToString(ch)
+                                               : juce::String("_"));
+                        juce::String minted = pd::sanitizeClassNameForTempId(classSrc)
+                                                  + "_" + canvasKey + "_" + String(objectIndex);
+
+                        auto& canvasIdMap = mcpStableObjectMap[canvas_symbol.toStdString()];
+                        auto existing = canvasIdMap.find(minted.toStdString());
+                        if (existing == canvasIdMap.end()) {
+                            canvasIdMap[minted.toStdString()] = y_obj;
+                            if (mcpStableSerialMap.find(y_obj) == mcpStableSerialMap.end()) {
+                                mcpStableSerialMap[y_obj] = mcpSerialCounter++;
+                            }
+                            tempId = minted;
+                            adoptedAny = true;
+                        } else if (existing->second == y_obj) {
+                            // Already registered under exactly this minted name
+                            tempId = minted;
+                        }
+                        // else: minted name collides with a different object —
+                        // leave unregistered (artist rename territory).
+                        o->setProperty("id", tempId);
+                    }
+
                     objArray.add(var(o));
+                }
+                // One version bump per census that adopted anything — the
+                // identity map changed, so identity_snapshot consumers resync.
+                if (adoptedAny) {
+                    mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
                 }
                 rootObj->setProperty("objectCount", objectIndex);
                 rootObj->setProperty("objects", objArray);

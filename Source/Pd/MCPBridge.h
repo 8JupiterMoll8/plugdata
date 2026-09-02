@@ -18,6 +18,100 @@
 class PluginProcessor;
 class MCPBridge;
 
+// PRD "Real Class Name Sync" §2.1 — the single shared class-name resolution
+// helper. C++ is the ONLY source of truth for object identity: the census
+// (PluginProcessor.cpp mcp_census) and the /pd/typeof endpoint both resolve
+// abstraction names through this one function so every code path agrees.
+//
+// Returns true + outName (e.g. "crusher.m~") when gobj is a canvas-class
+// object loaded from a file (MERDA .m~ module, .pd abstraction, or GOP panel
+// loaded from disk). Returns false for inline [pd foo] subpatches, which
+// genuinely are "pd". Caller must hold sys_lock() (both call sites do).
+namespace pd {
+inline bool getAbstractionFileName(t_gobj* gobj, juce::String& outName)
+{
+    // Step 1: only applies to canvas-class objects (subpatch/abstraction wrappers)
+    if (pd_class(&gobj->g_pd) != canvas_class) return false;
+
+    auto* sub = reinterpret_cast<t_canvas*>(gobj);
+
+    // Step 2: canvas_isabstraction() (g_canvas.c) tests gl_env != NULL — the
+    // canonical Pd-internal check. gl_env is allocated by canvas_new() ONLY
+    // when the canvas was loaded from disk (glob_setfilename/binbuf_evalfile).
+    // Inline [pd foo] subpatches have gl_env == NULL.
+    if (!canvas_isabstraction(sub)) return false;
+
+    // Step 3: gl_name holds the name the canvas was bound to. For a MERDA
+    // module loaded from disk this is the file name (e.g. "crusher.m~"),
+    // NOT the full path. Inline [pd foo] never reaches this point.
+    if (!sub->gl_name) return false;
+
+    juce::String name = juce::String::fromUTF8(sub->gl_name->s_name);
+
+    // Strip any directory prefix Pd may leave on the bound name
+    int lastSlash = name.lastIndexOfChar('/');
+    if (lastSlash >= 0) name = name.substring(lastSlash + 1);
+
+    // Normalize the .pd resolution suffix: Pd resolves the box name
+    // "drive.m~" to the disk file "drive.m~.pd", so gl_name carries the
+    // appended ".pd". The GUI box, the artist, and the selection telemetry
+    // all say "drive.m~" — one object, one identity, everywhere (PRD §2.0)
+    // means census must agree: strip the trailing ".pd" when what remains
+    // is itself a MERDA module name ending in ".m~".
+    if (name.endsWith(".pd")) {
+        juce::String base = name.substring(0, name.length() - 3);
+        if (base.endsWith(".m~")) {
+            name = base;
+        }
+    }
+
+    outName = name;
+    return true;
+}
+
+// PRD Phase 2 §2.1: C++ port of the TS sanitizeTempIdSegment — the naming
+// policy moves INTO the bridge so C++ mints tempIds itself and TS only
+// mirrors. Must produce IDENTICAL output to the TS implementation
+// (parity-tested): "crusher.m~" → "crusher", "drive.m~.pd" → "drive",
+// "plate.rev.m~" → "plate_rev", "myabs.pd" → "myabs", "osc~" → "osc_sig".
+inline juce::String sanitizeClassNameForTempId(const juce::String& className)
+{
+    auto sanitizeBase = [](const juce::String& s) {
+        juce::String out;
+        for (auto ch : s) {
+            if (juce::CharacterFunctions::isLetterOrDigit(ch) || ch == '_')
+                out << ch;
+            else
+                out << '_';
+        }
+        while (out.startsWith("_")) out = out.substring(1);
+        while (out.endsWith("_")) out = out.dropLastCharacters(1);
+        return out;
+    };
+
+    juce::String raw = className.trim();
+    if (raw.isEmpty()) return "obj";
+
+    // Normalize "X.m~.pd" → "X.m~" (Pd file-resolution suffix, mirrors TS)
+    if (raw.endsWith(".pd") && raw.dropLastCharacters(3).endsWith(".m~"))
+        raw = raw.dropLastCharacters(3);
+
+    int lastDot = raw.lastIndexOfChar('.');
+    if (lastDot > 0) {
+        juce::String ext = raw.substring(lastDot + 1);
+        if (ext == "m~" || ext == "pd") {
+            juce::String base = sanitizeBase(raw.substring(0, lastDot));
+            return base.isNotEmpty() ? base : juce::String("abstraction");
+        }
+    }
+
+    // Vanilla/ELSE signal objects: trailing "~" → "_sig"
+    juce::String body = raw.endsWith("~") ? raw.dropLastCharacters(1) + "_sig" : raw;
+    juce::String out = sanitizeBase(body);
+    return out.isNotEmpty() ? out : juce::String("obj");
+}
+} // namespace pd
+
 struct ProbeResult {
     uint32_t probeId = 0;
     float rms = 0.0f;
@@ -78,6 +172,11 @@ class MCPBridge final : public juce::OSCReceiver::Listener<juce::OSCReceiver::Re
 public:
     explicit MCPBridge(PluginProcessor* processor, int listenPort = 9000, int sendPort = 19010);
     ~MCPBridge() override;
+
+    // PRD Phase 3 §2.2: re-registers identity-sidecar tempIds (root + named
+    // subcanvases) for a freshly loaded/opened canvas. Caller holds sys_lock.
+    static int mcpApplyIdentitySidecar(PluginProcessor* processor, juce::DynamicObject* sidecarObj,
+                                       const juce::String& rootKey, t_canvas* cnv);
 
     bool start();
     void stop();
