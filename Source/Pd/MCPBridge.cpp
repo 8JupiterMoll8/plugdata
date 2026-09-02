@@ -130,6 +130,10 @@ juce::String MCPBridge::normalizeCanvas(const juce::String& name)
 {
     juce::String s = name.trim();
     if (s.isEmpty() || s == "main") return "pd-main";
+    // PRD Phase 3.1: root-file tab symbols are the raw file name (the bound
+    // gl_name, e.g. "phase3_roundtrip_test.pd") — pass through unmangled so
+    // canvas resolution and identity map keys agree.
+    if (s.endsWith(".pd")) return s;
     while (s.startsWith("pd-")) s = s.substring(3);
     if (s.isEmpty()) return "pd-main";
     return "pd-" + s;
@@ -1633,15 +1637,19 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             sidecarFile.replaceWithText(juce::JSON::toString(sidecar, true));
 
             // PRD Phase 3 §2.5 (save-binding): bind the file to the canvas the
-            // way native Save-As does — tab title + current path update, dirty
-            // flag cleared. Subsequent Ctrl+S saves to the same file natively.
+            // way native Save-As does — tab title + current path update.
+            // NOTE: deliberately setCurrentFile ONLY — Patch::savePatch(URL)
+            // also runs reloadAbstractions() (recreates abstraction instances)
+            // and crashed when a queued close_tab tore the canvas down mid-
+            // reload. Title derives from currentFile; pd-side state untouched.
             processor->enqueueFunctionAsync([p = processor, cnv, destFilePath]() {
                 juce::File f(destFilePath);
                 for (auto* editor : p->getEditors()) {
                     if (!editor) continue;
                     for (auto* canvas : editor->getCanvases()) {
                         if (canvas && canvas->patch.getPointer().get() == cnv) {
-                            canvas->patch.savePatch(juce::URL(f));
+                            canvas->patch.setCurrentFile(URL(f));
+                            canvas->patch.setTitle(f.getFileName());
                             return;
                         }
                     }
@@ -1776,6 +1784,18 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 return;
             }
 
+            // Phase 3.1 bugfix: the open lambda was observed to deliver twice
+            // (two tabs for one request). Once-guard per file — any repeat
+            // within 2s is ignored (idempotent open, root cause independent).
+            static std::unordered_map<juce::String, juce::int64> lastOpenAtMs;
+            auto nowMs = juce::Time::getMillisecondCounter();
+            auto& lastRef = lastOpenAtMs[srcFile.getFullPathName()];
+            if (nowMs - lastRef < 2000) {
+                sendReply(replyAddr, juce::String("ignored: open already in progress for " + srcFilePath));
+                return;
+            }
+            lastRef = nowMs;
+
             // PRD Phase 3 §2.5: duplicate-tab guard — PlugData focuses the
             // existing tab instead of duplicating a patch (by design). Reply
             // honestly instead of falling into the async no-reply path.
@@ -1815,7 +1835,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             sendReply(replyAddr, juce::String("opening: " + srcFile.getFullPathName()));
 
             processor->enqueueFunctionAsync(
-                [p = processor, canvasName, fileStr = srcFile.getFullPathName(), sidecar]() {
+                [p = processor, fileStr = srcFile.getFullPathName(), sidecar]() {
                 bool opened = false;
                 for (auto* editor : p->getEditors()) {
                     if (!editor) continue;
@@ -1826,6 +1846,20 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 if (!opened) {
                     p->logMessage("MCP open_patch: no editor");
                     return;
+                }
+
+                // Phase 3.1 bugfix: belt-and-suspenders dedup — if more than
+                // one tab for this file exists, keep the first and close extras.
+                juce::File f(fileStr);
+                bool keptFirst = false;
+                for (auto* editor : p->getEditors()) {
+                    if (!editor) continue;
+                    for (auto* canvas : editor->getCanvases()) {
+                        if (!canvas || canvas->patch.getCurrentFile() != f) continue;
+                        if (!keptFirst) { keptFirst = true; continue; }
+                        editor->getTabComponent().closeTab(canvas);
+                        p->logMessage("MCP open_patch: closed duplicate tab for " + fileStr);
+                    }
                 }
 
                 // PRD Phase 3 §2.5: sidecar registration via the proven async
@@ -1863,7 +1897,13 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         for (auto* canvas : editor->getCanvases()) {
                             if (!canvas || canvas->patch.getCurrentFile() != f) continue;
                             if (auto* cnv = canvas->patch.getPointer().get()) {
-                                queueRegisters(sidecarObj->getProperty("root"), canvasName, cnv);
+                                // PRD Phase 3.1: register under the tab's bound
+                                // name (gl_name = file name) so named-tab
+                                // addressing finds these identities.
+                                juce::String boundName = cnv->gl_name
+                                    ? juce::String::fromUTF8(cnv->gl_name->s_name)
+                                    : juce::String(f.getFileName());
+                                queueRegisters(sidecarObj->getProperty("root"), boundName, cnv);
                                 // named subcanvases
                                 if (auto* subObj = sidecarObj->getProperty("sub").getDynamicObject()) {
                                     for (t_gobj* g = cnv->gl_list; g; g = g->g_next) {
