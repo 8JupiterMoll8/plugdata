@@ -25,6 +25,35 @@ Every TS-side workaround built tonight (getErrorsSince scrape, 80ms settle,
 connect-count guard) is a band-aid around this: **diagnosis by echo, racing
 async print delivery.** The C++ diagnostic layer replaces echoes with facts.
 
+## 1.5 BASELINE — What v4's TS layer already shipped (2026-09-02 night)
+
+Before building this layer, know the interim state (all live-verified):
+
+**Shipped in v4's ride-along (TS-only band-aids):**
+- self-connection warning · comma-in-msg warning · topology-rewire warning
+- **silent-connect guard**: requested wires vs `connected` count — names every
+  failed wire (v2's missingWires/unknownTempIds parity, count + first-5 names)
+- console tail — **reads `ctx.getErrorsSince()`** (the REAL Pd console pipe)
+- escalation: on console symptoms → silent-killer registry (27 rules) run on
+  the live graph → cause analysis rides the same response
+
+**Discoveries that shaped these band-aids (the C++ layer removes the causes):**
+1. `LogManager` is an EMPTY SHELL — nothing ever calls `addLog`; Pd console
+   prints never reach it. The real pipe is the errorManager (`getErrorsSince`).
+2. Pd prints are delivered **asynchronously** — "couldn't create" posts during
+   the batch but lands in the log ~80ms later. Hence the settle-wait race.
+3. `resolveStableId` **silently no-ops** stale tempId connects (no error,
+   no count) — the root of the silent master severance.
+4. The bare-`*~` class **prints nothing at all** — only graph analysis
+   (diagnose) or ears/probe can find it. THE remaining blind spot.
+
+**Coverage tonight:** every failure class that PRINTS or breaks a wire is now
+caught in the build response. The blind spot: silent structural faults (no
+print, wires intact) — exactly what this PRD's `/pd/diagnose` solves.
+**Dropout status:** all TS additions are read-only post-flight — builds may be
+~10–90ms slower on creates; audio never gaps from verification. The only drop
+surface remains signal-topology rewires (flagged `⚠ topology rewire`).
+
 ## 2. Design
 
 ### 2.1 Batch Reply Enrichment (kills failures #1 and #2)
