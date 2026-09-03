@@ -162,6 +162,52 @@ cause named → fix → confirm. The session-long hunt becomes one call.
 
 ---
 
+## 7. IMPLEMENTATION STATUS (2026-09-02 night — build session results)
+
+| Task | Status | Evidence |
+|---|---|---|
+| 1. Batch facts (create/connect failures) | ✅ SHIPPED | named failures in reply; live test: unavailable class → `⚠ console: couldn't create` in-response |
+| 2. `/pd/diagnose` graph X-ray | ✅ SHIPPED | live test: named `diag_loop_osc` cycle, `diag_bare_vca` zeroed VCA, dangling set — in one call |
+| 3. Caps `diagnose` | ✅ | verified in caps list |
+| 4. TS escalation → native diagnose | ✅ SHIPPED | one response carried: console symptom + silent-killer dsp-loop/block + null-gain/warn + dangling/info (5 warnings, cause + fix named) |
+| 5. `analyze_patch(diagnostics)` action | ✅ SHIPPED (schema updated) | live: X-ray facts rendered |
+| 6. Tests | ⚠ PARTIAL | `tests/verify-phase-b-diagnose.ts` validates sections/read-only/zeroed detection; **dedicated-window re-run needed** (see §8 port note) |
+
+**Deferred to next iteration:**
+- `mismatched` wires fact (Pd blocks most sig→control wires at connect-time;
+  the semantic class — control into audio-rate — needs intent judgment)
+- Red-box create failures: deeper pasteDirect introspection (console symptom
+  already covers the artist-facing need)
+- TS silent-killer registry demotion (the ~20 pdDocs-dependent rules stay TS)
+
+---
+
+## 8. KNOWN ISSUE — action-parameter confusion (2026-09-02, fixed)
+
+**Incident:** the AI repeatedly called `analyze_patch(action:"diff")` when
+intending `diagnostics` — 5 times consecutively. Root cause: model-level
+context priming (the session contained many earlier `diff` calls) + the
+schema not advertising the new action.
+
+**Fixed:** `diagnostics` added to the schema enum + rich description (the AI
+discovers it in the tool list).
+
+**Harness rules learned (apply to every new action):**
+1. **Schema ships with the feature** — a new action invisible in the schema is
+   invisible to the AI, no matter how well it works.
+2. **Always read the echoed `requested` field** in `_v2meta` before accepting
+   a result — the receipt names exactly what executed, not what was intended.
+3. **Repetition loops = environment fix, not effort.** When the model repeats
+   a wrong call: stop, switch medium (script/different tool), or add the
+   schema/description. Trying harder makes it worse.
+
+**Related infra note:** verify scripts (raw OSC) race with the REAL MCP
+server for port 19020 replies — run dedicated-window scripts with the real
+server paused, or on `PLUGDATA_RECEIVE_PORT=19021` + `/bridge/connect`
+retarget before each call.
+
+---
+
 ## 7. IMPLEMENTATION PLAN — step-by-step (build tomorrow)
 
 All touchpoints verified against the current code (2026-09-02 state).
