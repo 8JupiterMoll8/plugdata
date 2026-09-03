@@ -1033,7 +1033,8 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         }
                     }
 
-                    // PHASE 1: DELETE
+                    // PHASE 1: DELETE — audio-thread-safe variant (no undo/GUI
+                    // teardown; editor reconciles via trailing synchronise).
                     for (auto& pd : preDeletes) {
                         t_gobj* obj = processor->resolveStableId(canvasName, pd.objectId);
                         if (obj) {
@@ -1041,7 +1042,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                             processor->mcpStableSerialMap.erase(obj);
                             processor->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
                             SmallArray<t_gobj*> toDelete; toDelete.add(obj);
-                            pd::Interface::removeObjects(cnv, toDelete);
+                            pd::Interface::removeObjectsAudioThread(cnv, toDelete);
                             deleted++;
                         }
                     }
