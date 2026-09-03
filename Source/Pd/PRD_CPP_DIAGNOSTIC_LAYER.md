@@ -54,6 +54,17 @@ print, wires intact) — exactly what this PRD's `/pd/diagnose` solves.
 ~10–90ms slower on creates; audio never gaps from verification. The only drop
 surface remains signal-topology rewires (flagged `⚠ topology rewire`).
 
+**Shipped escalation (current state):** on console symptoms → the TS
+silent-killer registry (27 rules) runs on the live graph → cause analysis
+rides the same response. When the C++ `/pd/diagnose` lands, the escalation
+switches to it (native facts, no TS graph analysis).
+
+**Option — always-on diagnose (recommended addition):** for builds that CREATE
+signal objects, run `/pd/diagnose` unconditionally (not just on symptoms) —
+this closes the no-print silent class (bare `*~` = 0 printed NOTHING tonight;
+only graph analysis catches it). Cost: one analysis round-trip per
+creating-build (~10–50ms, read-only, zero drops). Recommended default ON.
+
 ## 2. Design
 
 ### 2.1 Batch Reply Enrichment (kills failures #1 and #2)
