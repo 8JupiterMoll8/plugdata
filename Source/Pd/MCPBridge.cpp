@@ -1338,6 +1338,10 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 auto destIt = ptrToIndex.find(destGobj);
                 if (srcIt == ptrToIndex.end() || destIt == ptrToIndex.end()) continue;
 
+                bool srcIsSig = (t.tr_outlet && t.tr_outlet->o_sym == gensym("signal"));
+                bool destIsSig = (t.tr_ob2 && obj_issignalinlet(t.tr_ob2, t.tr_inno) != 0);
+                juce::String rate = (srcIsSig || destIsSig) ? "sig" : "ctl";
+
                 auto* c = new juce::DynamicObject();
                 c->setProperty("srcIndex", srcIt->second);
                 c->setProperty("srcOut", t.tr_outno);
@@ -1345,6 +1349,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 c->setProperty("destIn", t.tr_inno);
                 c->setProperty("srcId", ptrToId.count(srcGobj) ? ptrToId[srcGobj] : juce::String());
                 c->setProperty("destId", ptrToId.count(destGobj) ? ptrToId[destGobj] : juce::String());
+                c->setProperty("rate", rate);
 
                 connArray.add(juce::var(c));
                 connCount++;
@@ -2310,6 +2315,299 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         sendReply(replyAddr, json);
     }
 
+    // ── PRD layout-v2 Phase A: read-only layout facts ───────────────────
+    // C++ is the truth of layout (same law as identity + failures):
+    //   /pd/bounds         : true x/y/w/h per object (gobj_getrect, not estimates)
+    //   /pd/collisions     : AABB overlap pairs on true rects (5px pad)
+    //   /pd/wire_occlusions: wire-vs-box hits on true rects; wire modeled as
+    //                        src bottom-center → dest top-center anchor line
+    //                        (true bezier/90° cord paths live in JUCE
+    //                        Connection components — Phase B queries those).
+    // All read-only under sys_lock, zero DSP touch, zero dropout.
+    if (action == "bounds") {
+        auto canvasName    = normalizeCanvas(getArgString(msg[0]));
+        auto correlationId = msg.size() > 1 ? getArgString(msg[msg.size() - 1]) : "0";
+        juce::String replyAddr = "/pd/bounds/reply/" + correlationId;
+
+        juce::String json;
+        bool hasCanvas = false;
+
+        sys_lock();
+        t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+        if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
+
+        if (cnv) {
+            hasCanvas = true;
+            std::unordered_map<t_gobj*, juce::String> ptrToId;
+            auto mapIt = processor->mcpStableObjectMap.find(canvasName.toStdString());
+            if (mapIt != processor->mcpStableObjectMap.end())
+                for (auto& [tid, ptr] : mapIt->second)
+                    if (ptr) ptrToId[ptr] = juce::String(tid);
+
+            Canvas* guiCanvas = nullptr;
+            for (auto* editor : processor->getEditors()) {
+                if (!editor) continue;
+                for (auto* c : editor->getCanvases()) {
+                    if (c && c->patch.getPointer().get() == cnv) {
+                        guiCanvas = c;
+                        break;
+                    }
+                }
+                if (guiCanvas) break;
+            }
+
+            float zoom = 1.0f;
+            int vx = 0, vy = 0, vw = 1000, vh = 800;
+            if (guiCanvas) {
+                zoom = getValue<float>(guiCanvas->zoomScale);
+                if (zoom <= 0.001f) zoom = 1.0f;
+                if (guiCanvas->viewport) {
+                    auto va = guiCanvas->viewport->getViewArea();
+                    vx = static_cast<int>(std::round(va.getX() / zoom));
+                    vy = static_cast<int>(std::round(va.getY() / zoom));
+                    vw = static_cast<int>(std::round(va.getWidth() / zoom));
+                    vh = static_cast<int>(std::round(va.getHeight() / zoom));
+                }
+            }
+
+            json = "{\"canvas\":\"" + canvasName + "\""
+                 + ",\"zoom\":" + juce::String(zoom, 3)
+                 + ",\"viewport\":{\"x\":" + juce::String(vx)
+                 + ",\"y\":" + juce::String(vy)
+                 + ",\"w\":" + juce::String(vw)
+                 + ",\"h\":" + juce::String(vh) + "}"
+                 + ",\"objects\":[";
+            bool first = true;
+            int idx = 0;
+            for (t_gobj* y = cnv->gl_list; y; y = y->g_next, ++idx) {
+                int x = 0, yy = 0, w = 0, h = 0;
+                pd::Interface::getObjectBounds(cnv, y, &x, &yy, &w, &h);
+                juce::String tid = ptrToId.count(y)
+                    ? ptrToId[y]
+                    : (juce::String(class_getname(pd_class(&y->g_pd))) + "#" + juce::String(idx));
+
+                t_class* cl = pd_class(&y->g_pd);
+                const char* clName = class_getname(cl);
+                juce::String className = clName ? juce::String::fromUTF8(clName) : juce::String("unknown");
+
+                juce::String nodeClass = className;
+                juce::String abstractName;
+
+                if (cl == canvas_class) {
+                    nodeClass = "pd";
+                    if (pd::getAbstractionFileName(y, abstractName) && abstractName.isNotEmpty()) {
+                        nodeClass = abstractName;
+                    }
+                } else if (cl == garray_class) {
+                    nodeClass = "table";
+                } else if (pd::Interface::isTextObject(y)) {
+                    t_text* textObj = reinterpret_cast<t_text*>(y);
+                    if (textObj->te_type == T_MESSAGE) {
+                        nodeClass = "msg";
+                    } else if (textObj->te_type == T_ATOM) {
+                        nodeClass = className.containsIgnoreCase("symbol") ? "symbolatom" : "floatatom";
+                    } else if (textObj->te_type == T_TEXT) {
+                        nodeClass = "text";
+                    } else {
+                        char* textBuf = nullptr;
+                        int textSize = 0;
+                        binbuf_gettext(textObj->te_binbuf, &textBuf, &textSize);
+                        if (textBuf && textSize > 0) {
+                            juce::String fullText = juce::String::fromUTF8(textBuf, textSize).trim();
+                            juce::String firstTok = fullText.upToFirstOccurrenceOf(" ", false, false);
+                            if (firstTok.isNotEmpty()) nodeClass = firstTok;
+                            freebytes(textBuf, textSize);
+                        }
+                    }
+                }
+
+                t_object* ob = pd::Interface::checkObject(y);
+                bool sigIn0 = (ob != nullptr && obj_issignalinlet(ob, 0) != 0);
+
+                if (!first) json += ",";
+                json += "{\"tempId\":\"" + tid + "\""
+                      + ",\"x\":" + juce::String(x)
+                      + ",\"y\":" + juce::String(yy)
+                      + ",\"w\":" + juce::String(w)
+                      + ",\"h\":" + juce::String(h)
+                      + ",\"sigIn0\":" + (sigIn0 ? "true" : "false")
+                      + ",\"nodeClass\":\"" + juce::JSON::escapeString(nodeClass) + "\"}";
+                first = false;
+            }
+            json += "]}";
+        }
+        sys_unlock();
+
+        if (!hasCanvas) {
+            sendReply(replyAddr, juce::String("error: canvas not found: " + canvasName));
+            return;
+        }
+        sendReply(replyAddr, json);
+        return;
+    }
+
+    if (action == "collisions") {
+        auto canvasName    = normalizeCanvas(getArgString(msg[0]));
+        auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : "0";
+        juce::String replyAddr = "/pd/collisions/reply/" + correlationId;
+
+        juce::String json;
+        bool hasCanvas = false;
+
+        sys_lock();
+        t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+        if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
+
+        if (cnv) {
+            hasCanvas = true;
+            struct R { juce::String tid; int x, y, w, h; };
+            std::vector<R> rects;
+            std::unordered_map<t_gobj*, juce::String> ptrToId;
+            auto mapIt = processor->mcpStableObjectMap.find(canvasName.toStdString());
+            if (mapIt != processor->mcpStableObjectMap.end())
+                for (auto& [tid, ptr] : mapIt->second)
+                    if (ptr) ptrToId[ptr] = juce::String(tid);
+
+            int idx = 0;
+            for (t_gobj* y = cnv->gl_list; y; y = y->g_next, ++idx) {
+                int x = 0, yy = 0, w = 0, h = 0;
+                pd::Interface::getObjectBounds(cnv, y, &x, &yy, &w, &h);
+                juce::String tid = ptrToId.count(y)
+                    ? ptrToId[y]
+                    : (juce::String(class_getname(pd_class(&y->g_pd))) + "#" + juce::String(idx));
+                rects.push_back({ tid, x, yy, w, h });
+            }
+
+            const int PAD = 5;
+            json = "{\"canvas\":\"" + canvasName + "\",\"collisions\":[";
+            bool first = true;
+            for (size_t i = 0; i < rects.size(); ++i) {
+                for (size_t j = i + 1; j < rects.size(); ++j) {
+                    const auto& a = rects[i];
+                    const auto& b = rects[j];
+                    bool hit = a.x < b.x + b.w + PAD && a.x + a.w + PAD > b.x
+                            && a.y < b.y + b.h + PAD && a.y + a.h + PAD > b.y;
+                    if (hit) {
+                        if (!first) json += ",";
+                        json += "{\"a\":\"" + a.tid + "\",\"b\":\"" + b.tid + "\"}";
+                        first = false;
+                    }
+                }
+            }
+            json += "]}";
+        }
+        sys_unlock();
+
+        if (!hasCanvas) {
+            sendReply(replyAddr, juce::String("error: canvas not found: " + canvasName));
+            return;
+        }
+        sendReply(replyAddr, json);
+        return;
+    }
+
+    if (action == "wire_occlusions") {
+        auto canvasName    = normalizeCanvas(getArgString(msg[0]));
+        auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : "0";
+        juce::String replyAddr = "/pd/wire_occlusions/reply/" + correlationId;
+
+        juce::String json;
+        bool hasCanvas = false;
+
+        sys_lock();
+        t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+        if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
+
+        if (cnv) {
+            hasCanvas = true;
+            std::vector<t_gobj*> objs;
+            std::vector<juce::String> names;
+            std::unordered_map<t_gobj*, int> ptrToIdx;
+            std::unordered_map<t_gobj*, juce::String> ptrToId;
+            auto mapIt = processor->mcpStableObjectMap.find(canvasName.toStdString());
+            if (mapIt != processor->mcpStableObjectMap.end())
+                for (auto& [tid, ptr] : mapIt->second)
+                    if (ptr) ptrToId[ptr] = juce::String(tid);
+
+            int idx = 0;
+            for (t_gobj* y = cnv->gl_list; y; y = y->g_next, ++idx) {
+                objs.push_back(y);
+                ptrToIdx[y] = idx;
+                names.push_back(ptrToId.count(y)
+                    ? ptrToId[y]
+                    : (juce::String(class_getname(pd_class(&y->g_pd))) + "#" + juce::String(idx)));
+            }
+
+            struct R { int x, y, w, h; };
+            std::vector<R> rects(objs.size());
+            for (size_t i = 0; i < objs.size(); ++i) {
+                int x = 0, yy = 0, w = 0, h = 0;
+                pd::Interface::getObjectBounds(cnv, objs[i], &x, &yy, &w, &h);
+                rects[i] = { x, yy, w, h };
+            }
+
+            // Edges via one linetraverser walk (same as diagnose §2).
+            std::vector<std::pair<int, int>> edges;
+            t_linetraverser lt;
+            t_outconnect* oc = nullptr;
+            linetraverser_start(&lt, cnv);
+            while ((oc = linetraverser_next_nosize(&lt))) {
+                auto si = ptrToIdx.find(&lt.tr_ob->ob_g);
+                auto di = ptrToIdx.find(&lt.tr_ob2->ob_g);
+                if (si == ptrToIdx.end() || di == ptrToIdx.end()) continue;
+                edges.emplace_back(si->second, di->second);
+            }
+
+            // Anchor-line vs box test (Liang-Barsky, same as TS rule so
+            // results agree — only the rects are now true).
+            auto lineHitsBox = [](double x1, double y1, double x2, double y2,
+                                  double bx, double by, double bw, double bh) {
+                double minX = std::min(x1, x2), maxX = std::max(x1, x2);
+                double minY = std::min(y1, y2), maxY = std::max(y1, y2);
+                if (maxX < bx || minX > bx + bw || maxY < by || minY > by + bh) return false;
+                double dx = x2 - x1, dy = y2 - y1, t0 = 0.0, t1 = 1.0;
+                double p[4] = { -dx, dx, -dy, dy };
+                double q[4] = { x1 - bx, bx + bw - x1, y1 - by, by + bh - y1 };
+                for (int i = 0; i < 4; ++i) {
+                    if (p[i] == 0) { if (q[i] < 0) return false; }
+                    else {
+                        double t = q[i] / p[i];
+                        if (p[i] < 0) { if (t > t1) return false; if (t > t0) t0 = t; }
+                        else { if (t < t0) return false; if (t < t1) t1 = t; }
+                    }
+                }
+                return t0 < t1 && t0 > 0.05 && t1 < 0.95;
+            };
+
+            json = "{\"canvas\":\"" + canvasName + "\",\"model\":\"anchor-line\",\"occlusions\":[";
+            bool first = true;
+            for (auto& [si, di] : edges) {
+                double x1 = rects[si].x + rects[si].w / 2.0;
+                double y1 = rects[si].y + rects[si].h;
+                double x2 = rects[di].x + rects[di].w / 2.0;
+                double y2 = rects[di].y;
+                for (size_t k = 0; k < objs.size(); ++k) {
+                    if ((int)k == si || (int)k == di) continue;
+                    if (lineHitsBox(x1, y1, x2, y2, rects[k].x, rects[k].y, rects[k].w, rects[k].h)) {
+                        if (!first) json += ",";
+                        json += "{\"srcId\":\"" + names[si] + "\",\"destId\":\"" + names[di]
+                              + "\",\"via\":\"" + names[k] + "\"}";
+                        first = false;
+                    }
+                }
+            }
+            json += "]}";
+        }
+        sys_unlock();
+
+        if (!hasCanvas) {
+            sendReply(replyAddr, juce::String("error: canvas not found: " + canvasName));
+            return;
+        }
+        sendReply(replyAddr, json);
+        return;
+    }
+
     if (action == "clear") {
         if (msg.size() >= 1 && processor) {
             auto canvasName = normalizeCanvas(getArgString(msg[0]));
@@ -3184,6 +3482,452 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         return;
     }
 
+    if (action == "zoom_to_fit") {
+        if (msg.size() >= 1 && processor) {
+            auto canvasName = normalizeCanvas(getArgString(msg[0]));
+            auto correlationId = (msg.size() >= 2) ? getArgString(msg[1]) : "0";
+
+            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
+
+            juce::MessageManager::callAsync([proc = processor, cnv, correlationId, bridge = this]() {
+                Canvas* canvasComp = nullptr;
+                for (auto* editor : proc->getEditors()) {
+                    if (!editor) continue;
+                    if (cnv) {
+                        for (auto* c : editor->getCanvases()) {
+                            if (c && c->patch.getUncheckedPointer() == cnv) {
+                                canvasComp = c;
+                                break;
+                            }
+                        }
+                    }
+                    if (!canvasComp) {
+                        canvasComp = editor->getCurrentCanvas();
+                    }
+                    if (canvasComp) break;
+                }
+
+                if (canvasComp) {
+                    canvasComp->zoomToFitAll();
+                    bridge->sendReply("/pd/zoom_to_fit/reply/" + correlationId, 1.0f);
+                } else {
+                    bridge->sendReply("/pd/zoom_to_fit/reply/" + correlationId, 0.0f);
+                }
+            });
+        }
+        return;
+    }
+
+    if (action == "deoverlap") {
+        // /pd/deoverlap <canvas> <count> <id…> <corrId>
+        // PRD layout-v2 Phase B1: minimal-displacement push on TRUE rects
+        // (gobj_getrect via getObjectBounds, AABB + 5px pad — same as collisions).
+        // Visual-only: pd::Interface::moveObject (w_displacefn), same path as
+        // mcp_move_batch_id — no DSP touch, zero dropout. Single undo sequence.
+        if (msg.size() >= 2 && processor) {
+            auto canvasName = normalizeCanvas(getArgString(msg[0]));
+            int count = static_cast<int>(getArgFloat(msg[1]));
+            std::vector<juce::String> targetIds;
+            int cursor = 2;
+            for (int i = 0; i < count && cursor < (int)msg.size(); i++) {
+                targetIds.push_back(getArgString(msg[cursor++]));
+            }
+            auto correlationId = (cursor < (int)msg.size()) ? getArgString(msg[cursor]) : "0";
+
+            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
+            if (!cnv) {
+                sendReply("/pd/deoverlap/reply/" + correlationId, 0.0f);
+                return;
+            }
+
+            sys_lock();
+            std::vector<t_gobj*> objs;
+            if (!targetIds.empty()) {
+                for (auto& id : targetIds) {
+                    t_gobj* g = processor->resolveStableId(canvasName, id);
+                    if (g) objs.push_back(g);
+                }
+            } else {
+                for (t_gobj* y = cnv->gl_list; y; y = y->g_next) objs.push_back(y);
+            }
+            if (objs.empty()) {
+                sys_unlock();
+                sendReply("/pd/deoverlap/reply/" + correlationId, 1.0f);
+                return;
+            }
+
+            struct DR { t_gobj* g; int x, y, w, h; };
+            std::vector<DR> rects;
+            rects.reserve(objs.size());
+            for (auto* g : objs) {
+                int x = 0, yy = 0, w = 0, h = 0;
+                pd::Interface::getObjectBounds(cnv, g, &x, &yy, &w, &h);
+                if (w <= 0) w = 60;
+                if (h <= 0) h = 20;
+                rects.push_back({ g, x, yy, w, h });
+            }
+
+            const int PAD = 5;
+            const int MAXPASS = 24;
+            auto snap10 = [](int v) { return (v / 10) * 10; };
+            for (int pass = 0; pass < MAXPASS; pass++) {
+                bool anyHit = false;
+                for (size_t i = 0; i < rects.size(); i++) {
+                    for (size_t j = i + 1; j < rects.size(); j++) {
+                        auto& a = rects[i];
+                        auto& b = rects[j];
+                        bool hit = a.x < b.x + b.w + PAD && a.x + a.w + PAD > b.x
+                                && a.y < b.y + b.h + PAD && a.y + a.h + PAD > b.y;
+                        if (!hit) continue;
+                        anyHit = true;
+                        int overlapX = std::min(a.x + a.w + PAD - b.x, b.x + b.w + PAD - a.x);
+                        int overlapY = std::min(a.y + a.h + PAD - b.y, b.y + b.h + PAD - a.y);
+                        // Keep relative order: push the later object (j) along the
+                        // minimal axis, snapped to the 10px grid (min 10px step).
+                        if (overlapX <= overlapY) {
+                            int acx = a.x + a.w / 2, bcx = b.x + b.w / 2;
+                            int dx = snap10(overlapX + 9);
+                            if (dx < 10) dx = 10;
+                            b.x += (bcx >= acx ? dx : -dx);
+                        } else {
+                            int acy = a.y + a.h / 2, bcy = b.y + b.h / 2;
+                            int dy = snap10(overlapY + 9);
+                            if (dy < 10) dy = 10;
+                            b.y += (bcy >= acy ? dy : -dy);
+                        }
+                    }
+                }
+                if (!anyHit) break;
+            }
+
+            int moved = 0;
+            for (auto& r : rects) {
+                int ox = 0, oy = 0, ow = 0, oh = 0;
+                pd::Interface::getObjectBounds(cnv, r.g, &ox, &oy, &ow, &oh);
+                if (r.x != ox || r.y != oy) {
+                    pd::Interface::moveObject(cnv, r.g, r.x, r.y);
+                    moved++;
+                }
+            }
+            if (moved > 0) canvas_dirty(cnv, 1);
+            sys_unlock();
+
+            processor->enqueueFunctionAsync([p = processor] { p->synchroniseCanvases(); });
+            sendReply("/pd/deoverlap/reply/" + correlationId, 1.0f);
+        }
+        return;
+    }
+
+    if (action == "pillars") {
+        // /pd/pillars <canvas> [count id1 id2...] <corrId>
+        // PRD layout-v2 Phase B: Eurorack modular column arrangement.
+        // Assigns objects to columns at x = 50, 350, 650, 950... by floor(x/300),
+        // with strictly monotonic Y ordering per pillar, snapped to 10px grid.
+        if (msg.size() >= 1 && processor) {
+            auto canvasName = normalizeCanvas(getArgString(msg[0]));
+            int count = (msg.size() > 2) ? static_cast<int>(getArgFloat(msg[1])) : 0;
+            std::vector<juce::String> targetIds;
+            int cursor = 2;
+            for (int i = 0; i < count && cursor < (int)msg.size(); i++) {
+                targetIds.push_back(getArgString(msg[cursor++]));
+            }
+            auto correlationId = (cursor < (int)msg.size()) ? getArgString(msg[cursor])
+                               : (msg.size() > 1 ? getArgString(msg[1]) : "0");
+
+            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
+            if (!cnv) {
+                sendReply("/pd/pillars/reply/" + correlationId, 0.0f);
+                return;
+            }
+
+            sys_lock();
+            std::vector<t_gobj*> objs;
+            if (!targetIds.empty()) {
+                for (auto& id : targetIds) {
+                    t_gobj* g = processor->resolveStableId(canvasName, id);
+                    if (g) objs.push_back(g);
+                }
+            } else {
+                for (t_gobj* y = cnv->gl_list; y; y = y->g_next) objs.push_back(y);
+            }
+            if (objs.empty()) {
+                sys_unlock();
+                sendReply("/pd/pillars/reply/" + correlationId, 1.0f);
+                return;
+            }
+
+            struct PR { t_gobj* g; int x, y, w, h; int pillar; };
+            std::vector<PR> rects;
+            rects.reserve(objs.size());
+            for (auto* g : objs) {
+                int x = 0, yy = 0, w = 0, h = 0;
+                pd::Interface::getObjectBounds(cnv, g, &x, &yy, &w, &h);
+                if (w <= 0) w = 60;
+                if (h <= 0) h = 20;
+                int p = std::max(0, (x + 100) / 300);
+                rects.push_back({ g, x, yy, w, h, p });
+            }
+
+            auto snap10 = [](int v) { return (v / 10) * 10; };
+
+            // Group into pillars and sort each pillar by original Y
+            std::map<int, std::vector<size_t>> pillarGroups;
+            for (size_t i = 0; i < rects.size(); ++i) {
+                pillarGroups[rects[i].pillar].push_back(i);
+            }
+
+            for (auto& [pIdx, indices] : pillarGroups) {
+                std::sort(indices.begin(), indices.end(), [&](size_t a, size_t b) {
+                    return rects[a].y < rects[b].y;
+                });
+                int colX = 50 + pIdx * 300;
+                int curY = 50;
+                for (size_t idx : indices) {
+                    rects[idx].x = colX;
+                    rects[idx].y = curY;
+                    curY = snap10(curY + rects[idx].h + 20);
+                }
+            }
+
+            int moved = 0;
+            for (auto& r : rects) {
+                int ox = 0, oy = 0, ow = 0, oh = 0;
+                pd::Interface::getObjectBounds(cnv, r.g, &ox, &oy, &ow, &oh);
+                if (r.x != ox || r.y != oy) {
+                    pd::Interface::moveObject(cnv, r.g, r.x, r.y);
+                    moved++;
+                }
+            }
+            if (moved > 0) canvas_dirty(cnv, 1);
+            sys_unlock();
+
+            processor->enqueueFunctionAsync([p = processor] { p->synchroniseCanvases(); });
+            sendReply("/pd/pillars/reply/" + correlationId, 1.0f);
+        }
+        return;
+    }
+
+    if (action == "flow") {
+        // /pd/flow <canvas> [count id1 id2...] <corrId>
+        // PRD layout-v2 Phase B: Audio-semantic ranking.
+        // Sources (no signal in) top rank -> DSP processing mid -> sinks (dac~/catch~) bottom.
+        // Control objects placed in left gutter. 10px grid snapped, single undo sequence.
+        if (msg.size() >= 1 && processor) {
+            auto canvasName = normalizeCanvas(getArgString(msg[0]));
+            int count = (msg.size() > 2) ? static_cast<int>(getArgFloat(msg[1])) : 0;
+            std::vector<juce::String> targetIds;
+            int cursor = 2;
+            for (int i = 0; i < count && cursor < (int)msg.size(); i++) {
+                targetIds.push_back(getArgString(msg[cursor++]));
+            }
+            auto correlationId = (cursor < (int)msg.size()) ? getArgString(msg[cursor])
+                               : (msg.size() > 1 ? getArgString(msg[1]) : "0");
+
+            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
+            if (!cnv) {
+                sendReply("/pd/flow/reply/" + correlationId, 0.0f);
+                return;
+            }
+
+            sys_lock();
+            std::vector<t_gobj*> objs;
+            if (!targetIds.empty()) {
+                for (auto& id : targetIds) {
+                    t_gobj* g = processor->resolveStableId(canvasName, id);
+                    if (g) objs.push_back(g);
+                }
+            } else {
+                for (t_gobj* y = cnv->gl_list; y; y = y->g_next) objs.push_back(y);
+            }
+            if (objs.empty()) {
+                sys_unlock();
+                sendReply("/pd/flow/reply/" + correlationId, 1.0f);
+                return;
+            }
+
+            auto snap10 = [](int v) { return (v / 10) * 10; };
+
+            // 1. Identify connections & rate
+            std::unordered_map<t_gobj*, std::vector<t_gobj*>> sigDownstream;
+            std::unordered_map<t_gobj*, int> sigInCount;
+            std::unordered_set<t_gobj*> hasSignalOut;
+            std::unordered_set<t_gobj*> hasSignalIn;
+
+            t_linetraverser lt;
+            linetraverser_start(&lt, cnv);
+            t_outconnect* oc = nullptr;
+            while ((oc = linetraverser_next_nosize(&lt))) {
+                t_gobj* sg = &lt.tr_ob->ob_g;
+                t_gobj* dg = &lt.tr_ob2->ob_g;
+                bool srcIsSig = (lt.tr_outlet && lt.tr_outlet->o_sym == gensym("signal"));
+                bool destIsSig = (lt.tr_ob2 && obj_issignalinlet(lt.tr_ob2, lt.tr_inno) != 0);
+                if (srcIsSig || destIsSig) {
+                    sigDownstream[sg].push_back(dg);
+                    sigInCount[dg]++;
+                    hasSignalOut.insert(sg);
+                    hasSignalIn.insert(dg);
+                }
+            }
+
+            // 2. Classify objects
+            struct FR {
+                t_gobj* g;
+                int x, y, w, h;
+                int category; // 0 = control gutter, 1 = source, 2 = DSP, 3 = sink
+                int rank;
+                juce::String nodeClass;
+            };
+            std::vector<FR> rects;
+            rects.reserve(objs.size());
+
+            for (auto* g : objs) {
+                int x = 0, yy = 0, w = 0, h = 0;
+                pd::Interface::getObjectBounds(cnv, g, &x, &yy, &w, &h);
+                if (w <= 0) w = 60;
+                if (h <= 0) h = 20;
+
+                t_class* cl = pd_class(&g->g_pd);
+                const char* clName = class_getname(cl);
+                juce::String className = clName ? juce::String::fromUTF8(clName) : juce::String("unknown");
+                juce::String nodeClass = className;
+                juce::String abstractName;
+                if (cl == canvas_class) {
+                    nodeClass = "pd";
+                    if (pd::getAbstractionFileName(g, abstractName) && abstractName.isNotEmpty())
+                        nodeClass = abstractName;
+                } else if (cl == garray_class) {
+                    nodeClass = "table";
+                } else if (pd::Interface::isTextObject(g)) {
+                    t_text* textObj = reinterpret_cast<t_text*>(g);
+                    if (textObj->te_type == T_MESSAGE) nodeClass = "msg";
+                    else if (textObj->te_type == T_ATOM) nodeClass = className.containsIgnoreCase("symbol") ? "symbolatom" : "floatatom";
+                    else if (textObj->te_type == T_TEXT) nodeClass = "text";
+                    else {
+                        char* tb = nullptr; int tsz = 0;
+                        binbuf_gettext(textObj->te_binbuf, &tb, &tsz);
+                        if (tb && tsz > 0) {
+                            juce::String full = juce::String::fromUTF8(tb, tsz).trim();
+                            nodeClass = full.upToFirstOccurrenceOf(" ", false, false);
+                            freebytes(tb, tsz);
+                        }
+                    }
+                }
+
+                t_object* ob = pd::Interface::checkObject(g);
+                bool isSigIn0 = (ob != nullptr && obj_issignalinlet(ob, 0) != 0);
+                bool isSink = (nodeClass == "dac~" || nodeClass == "catch~" || nodeClass == "throw~"
+                               || (hasSignalIn.count(g) > 0 && hasSignalOut.count(g) == 0));
+                bool isSource = ((isSigIn0 == false && sigInCount[g] == 0 && (hasSignalOut.count(g) > 0 || nodeClass.endsWith("~")))
+                                 || nodeClass == "noise~" || nodeClass == "r~" || nodeClass == "readsf~");
+
+                int cat = 2; // default DSP
+                if (nodeClass == "r" || nodeClass == "s" || nodeClass == "f" || nodeClass == "float"
+                    || nodeClass == "pack" || nodeClass == "unpack" || nodeClass == "t" || nodeClass == "trigger"
+                    || nodeClass == "bng" || nodeClass == "tgl" || nodeClass == "msg"
+                    || nodeClass == "floatatom" || nodeClass == "symbolatom"
+                    || (!nodeClass.endsWith("~") && hasSignalIn.count(g) == 0 && hasSignalOut.count(g) == 0)) {
+                    cat = 0; // Control Left Gutter
+                } else if (isSink) {
+                    cat = 3; // Sink Bottom
+                } else if (isSource) {
+                    cat = 1; // Source Top
+                }
+
+                rects.push_back({ g, x, yy, w, h, cat, (cat == 1 ? 0 : (cat == 3 ? 3 : 1)), nodeClass });
+            }
+
+            // 3. Compute topological ranks for DSP objects (cat == 2)
+            for (auto& r : rects) {
+                if (r.category == 1) { // Source
+                    std::vector<t_gobj*> queue = sigDownstream[r.g];
+                    int rk = 1;
+                    std::unordered_set<t_gobj*> visited;
+                    while (!queue.empty() && rk < 3) {
+                        std::vector<t_gobj*> nextQ;
+                        for (auto* down : queue) {
+                            if (visited.count(down)) continue;
+                            visited.insert(down);
+                            for (auto& target : rects) {
+                                if (target.g == down && target.category == 2) {
+                                    target.rank = std::max(target.rank, rk);
+                                }
+                            }
+                            for (auto* nxt : sigDownstream[down]) nextQ.push_back(nxt);
+                        }
+                        queue = nextQ;
+                        rk++;
+                    }
+                }
+            }
+
+            // 4. Place Control gutter (cat == 0) at x = 50
+            int ctlY = 50;
+            for (auto& r : rects) {
+                if (r.category == 0) {
+                    r.x = 50;
+                    r.y = ctlY;
+                    ctlY = snap10(ctlY + r.h + 20);
+                }
+            }
+
+            // 5. Place Signal ranks at x >= 250
+            std::map<int, std::vector<size_t>> rankGroups;
+            for (size_t i = 0; i < rects.size(); ++i) {
+                if (rects[i].category != 0) {
+                    rankGroups[rects[i].rank].push_back(i);
+                }
+            }
+
+            for (auto& [rank, indices] : rankGroups) {
+                int rankY = 50 + rank * 150;
+                int curX = 250;
+                for (size_t idx : indices) {
+                    rects[idx].x = curX;
+                    rects[idx].y = rankY;
+                    curX = snap10(curX + rects[idx].w + 30);
+                }
+            }
+
+            // 6. Minimal deoverlap pass to ensure no collision
+            const int PAD = 5;
+            for (int pass = 0; pass < 12; pass++) {
+                bool hit = false;
+                for (size_t i = 0; i < rects.size(); i++) {
+                    for (size_t j = i + 1; j < rects.size(); j++) {
+                        auto& a = rects[i];
+                        auto& b = rects[j];
+                        if (a.x < b.x + b.w + PAD && a.x + a.w + PAD > b.x
+                            && a.y < b.y + b.h + PAD && a.y + a.h + PAD > b.y) {
+                            hit = true;
+                            b.x = snap10(a.x + a.w + 20);
+                        }
+                    }
+                }
+                if (!hit) break;
+            }
+
+            int moved = 0;
+            for (auto& r : rects) {
+                int ox = 0, oy = 0, ow = 0, oh = 0;
+                pd::Interface::getObjectBounds(cnv, r.g, &ox, &oy, &ow, &oh);
+                if (r.x != ox || r.y != oy) {
+                    pd::Interface::moveObject(cnv, r.g, r.x, r.y);
+                    moved++;
+                }
+            }
+            if (moved > 0) canvas_dirty(cnv, 1);
+            sys_unlock();
+
+            processor->enqueueFunctionAsync([p = processor] { p->synchroniseCanvases(); });
+            sendReply("/pd/flow/reply/" + correlationId, 1.0f);
+        }
+        return;
+    }
+
     if (action == "undo") {
         if (msg.size() >= 1 && processor) {
             auto canvasName = normalizeCanvas(getArgString(msg[0]));
@@ -3767,7 +4511,16 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
         reply.addArgument(juce::String("close_tab"));
         // PRD diagnostic layer: the graph X-ray
         reply.addArgument(juce::String("diagnose"));
+        // PRD layout-v2 Phase A: read-only layout facts (C++ truth of layout)
+        reply.addArgument(juce::String("bounds"));
+        reply.addArgument(juce::String("collisions"));
+        reply.addArgument(juce::String("wire_occlusions"));
+        // PRD layout-v2 Phase B1/B2: native writers on the zero-drop move path
+        reply.addArgument(juce::String("deoverlap"));
+        reply.addArgument(juce::String("flow"));
+        reply.addArgument(juce::String("pillars"));
         reply.addArgument(juce::String("connections"));
+        reply.addArgument(juce::String("zoom_to_fit"));
         reply.addArgument(juce::String("spectral"));
         reply.addArgument(juce::String("batch_atomic"));
         reply.addArgument(juce::String("transport"));

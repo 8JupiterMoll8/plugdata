@@ -211,22 +211,22 @@ struct Interface {
 
     static t_outconnect* setConnectionPath(t_canvas* cnv, t_object* src, int const nout, t_object* sink, int const nin, t_symbol* old_connection_path, t_symbol* new_connection_path)
     {
-        canvas_undo_add(cnv, UNDO_SEQUENCE_START, "ConnectionPath", nullptr);
-
-        removeConnection(cnv, src, nout, sink, nin, old_connection_path);
-
-        t_outconnect* oc = obj_connect(src, nout, sink, nin);
-        if (oc) {
-            outconnect_set_path_data(oc, new_connection_path);
-
-            canvas_undo_add(cnv, UNDO_CONNECT, "connect", canvas_undo_set_connect(cnv, canvas_getindex(cnv, &src->ob_g), nout, canvas_getindex(cnv, &sink->ob_g), nin, new_connection_path));
-
+        sys_lock();
+        t_linetraverser t;
+        linetraverser_start(&t, cnv);
+        t_outconnect* foundOc = nullptr;
+        while (auto const* oc = linetraverser_next_nosize(&t)) {
+            if (t.tr_ob == src && t.tr_outno == nout && t.tr_ob2 == sink && t.tr_inno == nin) {
+                foundOc = const_cast<t_outconnect*>(oc);
+                break;
+            }
+        }
+        if (foundOc) {
+            outconnect_set_path_data(foundOc, new_connection_path);
             canvas_dirty(cnv, 1);
         }
-
-        canvas_undo_add(cnv, UNDO_SEQUENCE_END, "ConnectionPath", nullptr);
-
-        return oc;
+        sys_unlock();
+        return foundOc;
     }
 
     static char const* copy(t_canvas* cnv, int* size, SmallArray<t_gobj*> const& objects)
