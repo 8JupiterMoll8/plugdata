@@ -8,6 +8,7 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 #include "Canvas.h"
+#include "Object.h"
 #include "Objects/ObjectBase.h"
 #include "Pd/Interface.h"
 #include "../../Libraries/fftw3/api/fftw3.h"
@@ -2318,13 +2319,81 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
     // ── PRD layout-v2 Phase A: read-only layout facts ───────────────────
     // C++ is the truth of layout (same law as identity + failures):
-    //   /pd/bounds         : true x/y/w/h per object (gobj_getrect, not estimates)
+    //   /pd/bounds         : true x/y/w/h per object (JUCE Object components / gobj_getrect)
     //   /pd/collisions     : AABB overlap pairs on true rects (5px pad)
     //   /pd/wire_occlusions: wire-vs-box hits on true rects; wire modeled as
     //                        src bottom-center → dest top-center anchor line
     //                        (true bezier/90° cord paths live in JUCE
     //                        Connection components — Phase B queries those).
     // All read-only under sys_lock, zero DSP touch, zero dropout.
+
+    auto findGuiCanvasFor = [](PluginProcessor* proc, t_canvas* c) -> Canvas* {
+        if (!proc || !c) return nullptr;
+        for (auto* editor : proc->getEditors()) {
+            if (!editor) continue;
+            for (auto* cnvItem : editor->getCanvases()) {
+                if (cnvItem && cnvItem->patch.getPointer().get() == c)
+                    return cnvItem;
+            }
+        }
+        return nullptr;
+    };
+
+    auto getTrueObjectBounds = [](t_canvas* c, t_gobj* y, Canvas* guiCanvas, int* x, int* yy, int* w, int* h) {
+        *x = 0; *yy = 0; *w = 0; *h = 0;
+        pd::Interface::getObjectBounds(c, y, x, yy, w, h);
+
+        // 1. Check live JUCE Canvas Object component bounds for true visual geometry
+        if (guiCanvas) {
+            for (auto* obj : guiCanvas->objects) {
+                if (obj && obj->getPointer() == y) {
+                    auto b = obj->getSelectableBounds();
+                    if (b.getWidth() > 0 && b.getHeight() > 0) {
+                        *x = b.getX();
+                        *yy = b.getY();
+                        *w = b.getWidth();
+                        *h = b.getHeight();
+                        return;
+                    }
+                    break;
+                }
+            }
+        }
+
+        // 2. Pure Data text fallback: when running headless or before GUI paint,
+        // gobj_getrect hardcodes comments/text to 10x10.
+        // Calculate true pixel dimensions from character metrics.
+        if (pd::Interface::isTextObject(y) && (*w <= 10 || *h <= 10)) {
+            t_text* textObj = reinterpret_cast<t_text*>(y);
+            if (textObj && textObj->te_binbuf) {
+                char* textBuf = nullptr;
+                int textSize = 0;
+                binbuf_gettext(textObj->te_binbuf, &textBuf, &textSize);
+                if (textBuf && textSize > 0) {
+                    int fontWidth = glist_fontwidth(c);
+                    int fontHeight = glist_fontheight(c);
+                    if (fontWidth <= 0) fontWidth = 7;
+                    if (fontHeight <= 0) fontHeight = 14;
+
+                    juce::String fullText = juce::String::fromUTF8(textBuf, textSize).trim();
+                    auto lines = juce::StringArray::fromLines(fullText);
+                    int maxLineLen = 0;
+                    for (const auto& line : lines) {
+                        maxLineLen = std::max(maxLineLen, line.length());
+                    }
+                    int textW = maxLineLen * fontWidth + 12;
+                    int textH = std::max(1, lines.size()) * fontHeight + 7;
+                    if (*w <= 10) *w = textW;
+                    if (*h <= 10) *h = textH;
+                    freebytes(textBuf, textSize);
+                }
+            }
+        }
+
+        if (*w <= 0) *w = 60;
+        if (*h <= 0) *h = 20;
+    };
+
     if (action == "bounds") {
         auto canvasName    = normalizeCanvas(getArgString(msg[0]));
         auto correlationId = msg.size() > 1 ? getArgString(msg[msg.size() - 1]) : "0";
@@ -2345,17 +2414,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 for (auto& [tid, ptr] : mapIt->second)
                     if (ptr) ptrToId[ptr] = juce::String(tid);
 
-            Canvas* guiCanvas = nullptr;
-            for (auto* editor : processor->getEditors()) {
-                if (!editor) continue;
-                for (auto* c : editor->getCanvases()) {
-                    if (c && c->patch.getPointer().get() == cnv) {
-                        guiCanvas = c;
-                        break;
-                    }
-                }
-                if (guiCanvas) break;
-            }
+            Canvas* guiCanvas = findGuiCanvasFor(processor, cnv);
 
             float zoom = 1.0f;
             int vx = 0, vy = 0, vw = 1000, vh = 800;
@@ -2382,7 +2441,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             int idx = 0;
             for (t_gobj* y = cnv->gl_list; y; y = y->g_next, ++idx) {
                 int x = 0, yy = 0, w = 0, h = 0;
-                pd::Interface::getObjectBounds(cnv, y, &x, &yy, &w, &h);
+                getTrueObjectBounds(cnv, y, guiCanvas, &x, &yy, &w, &h);
                 juce::String tid = ptrToId.count(y)
                     ? ptrToId[y]
                     : (juce::String(class_getname(pd_class(&y->g_pd))) + "#" + juce::String(idx));
@@ -2469,10 +2528,11 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 for (auto& [tid, ptr] : mapIt->second)
                     if (ptr) ptrToId[ptr] = juce::String(tid);
 
+            Canvas* guiCanvas = findGuiCanvasFor(processor, cnv);
             int idx = 0;
             for (t_gobj* y = cnv->gl_list; y; y = y->g_next, ++idx) {
                 int x = 0, yy = 0, w = 0, h = 0;
-                pd::Interface::getObjectBounds(cnv, y, &x, &yy, &w, &h);
+                getTrueObjectBounds(cnv, y, guiCanvas, &x, &yy, &w, &h);
                 juce::String tid = ptrToId.count(y)
                     ? ptrToId[y]
                     : (juce::String(class_getname(pd_class(&y->g_pd))) + "#" + juce::String(idx));
@@ -2539,11 +2599,12 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     : (juce::String(class_getname(pd_class(&y->g_pd))) + "#" + juce::String(idx)));
             }
 
+            Canvas* guiCanvas = findGuiCanvasFor(processor, cnv);
             struct R { int x, y, w, h; };
             std::vector<R> rects(objs.size());
             for (size_t i = 0; i < objs.size(); ++i) {
                 int x = 0, yy = 0, w = 0, h = 0;
-                pd::Interface::getObjectBounds(cnv, objs[i], &x, &yy, &w, &h);
+                getTrueObjectBounds(cnv, objs[i], guiCanvas, &x, &yy, &w, &h);
                 rects[i] = { x, yy, w, h };
             }
 
@@ -3559,14 +3620,13 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 return;
             }
 
+            Canvas* guiCanvas = findGuiCanvasFor(processor, cnv);
             struct DR { t_gobj* g; int x, y, w, h; };
             std::vector<DR> rects;
             rects.reserve(objs.size());
             for (auto* g : objs) {
                 int x = 0, yy = 0, w = 0, h = 0;
-                pd::Interface::getObjectBounds(cnv, g, &x, &yy, &w, &h);
-                if (w <= 0) w = 60;
-                if (h <= 0) h = 20;
+                getTrueObjectBounds(cnv, g, guiCanvas, &x, &yy, &w, &h);
                 rects.push_back({ g, x, yy, w, h });
             }
 
@@ -3660,14 +3720,13 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 return;
             }
 
+            Canvas* guiCanvas = findGuiCanvasFor(processor, cnv);
             struct PR { t_gobj* g; int x, y, w, h; int pillar; };
             std::vector<PR> rects;
             rects.reserve(objs.size());
             for (auto* g : objs) {
                 int x = 0, yy = 0, w = 0, h = 0;
-                pd::Interface::getObjectBounds(cnv, g, &x, &yy, &w, &h);
-                if (w <= 0) w = 60;
-                if (h <= 0) h = 20;
+                getTrueObjectBounds(cnv, g, guiCanvas, &x, &yy, &w, &h);
                 int p = std::max(0, (x + 100) / 300);
                 rects.push_back({ g, x, yy, w, h, p });
             }
@@ -3785,11 +3844,10 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             std::vector<FR> rects;
             rects.reserve(objs.size());
 
+            Canvas* guiCanvas = findGuiCanvasFor(processor, cnv);
             for (auto* g : objs) {
                 int x = 0, yy = 0, w = 0, h = 0;
-                pd::Interface::getObjectBounds(cnv, g, &x, &yy, &w, &h);
-                if (w <= 0) w = 60;
-                if (h <= 0) h = 20;
+                getTrueObjectBounds(cnv, g, guiCanvas, &x, &yy, &w, &h);
 
                 t_class* cl = pd_class(&g->g_pd);
                 const char* clName = class_getname(cl);
