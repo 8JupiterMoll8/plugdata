@@ -171,7 +171,7 @@ cause named → fix → confirm. The session-long hunt becomes one call.
 | 3. Caps `diagnose` | ✅ | verified in caps list |
 | 4. TS escalation → native diagnose | ✅ SHIPPED | one response carried: console symptom + silent-killer dsp-loop/block + null-gain/warn + dangling/info (5 warnings, cause + fix named) |
 | 5. `analyze_patch(diagnostics)` action | ✅ SHIPPED (schema updated) | live: X-ray facts rendered |
-| 6. Tests | ⚠ PARTIAL | `tests/verify-phase-b-diagnose.ts` validates sections/read-only/zeroed detection; **dedicated-window re-run needed** (see §8 port note) |
+| 6. Tests | ✅ COMPLETE (2026-09-03) | `tests/verify-phase-b-diagnose.ts` dedicated-window run on `PLUGDATA_RECEIVE_PORT=19021`: **5/5 passed** (sections, zeroed_vcgs, dsp_cycles, read-only, cleanup). Root cause of earlier PARTIAL: the script's raw-OSC `batchAtomic` sent corrId A in the message but awaited reply path B (two `Math.random()` calls) → fixed to inject one corrId into both. |
 
 **Deferred to next iteration:**
 - `mismatched` wires fact (Pd blocks most sig→control wires at connect-time;
