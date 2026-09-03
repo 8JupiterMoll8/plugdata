@@ -218,6 +218,20 @@ static juce::String escapePdText(const juce::String& text)
     return text.replace(";", " \\;");
 }
 
+// Escape commas AND semicolons inside OBJECT box creation args so
+// binbuf_text doesn't split them into separate messages. binbuf_text
+// treats `,` as a message separator, so an unescaped `[expr pow($f1, 2)]`
+// was created as `expr pow($f1` + a stray `2)` message. Backslash escapes
+// are the Pd paste-buffer convention: `\,` → literal comma in the atom.
+static juce::String escapePdObjArgs(const juce::String& text)
+{
+    juce::String out = text;
+    out = out.replace("\\", "\\\\");
+    out = out.replace(",", "\\,");
+    out = out.replace(";", "\\;");
+    return out;
+}
+
 // Convert MCP kind + tokens to Pd paste-format line
 static juce::String formatAsPdLine(const juce::String& kind,
                                     const juce::StringArray& tokens,
@@ -250,7 +264,7 @@ static juce::String formatAsPdLine(const juce::String& kind,
 
     if (!t.isEmpty() && t[0] == "+") t.set(0, "\\+");
     return "#X obj " + juce::String(x) + " " + juce::String(y)
-           + " " + t.joinIntoString(" ").trim() + ";";
+           + " " + escapePdObjArgs(t.joinIntoString(" ").trim()) + ";";
 }
 
 void MCPBridge::oscMessageReceived(const juce::OSCMessage& message)
