@@ -159,3 +159,117 @@ Deliberately create each failure class (bad object, stale connect, self-loop,
 bare `*~`) → each must be **named in the response/diagnose output** without any
 console scraping, while the beat keeps playing. Then: gap → one `diagnose` →
 cause named → fix → confirm. The session-long hunt becomes one call.
+
+---
+
+## 7. IMPLEMENTATION PLAN — step-by-step (build tomorrow)
+
+All touchpoints verified against the current code (2026-09-02 state).
+
+### Phase A — batch facts (C++, ~2h) — kills failures #1 + #2
+
+**A1. Track create failures** — `MCPBridge.cpp`, PHASE 4 CREATE block
+(~line 1073–1105). Today: `newCount` objects map to `pendingCreates[i]`; a
+failed create = the mismatch. Capture it:
+
+```cpp
+// after the newCount loop:
+for (int i = static_cast<int>(newCount); i < static_cast<int>(pendingCreates.size()); ++i) {
+    createFailures.push_back({ pendingCreates[i].tempId,
+                               pendingCreates[i].type,
+                               "couldn't create" });
+}
+```
+
+**A2. Track connect failures** — PHASE 5 CONNECT block (~line 1107–1119).
+Today: `resolveStableId` null → silent skip. Capture:
+
+```cpp
+for (auto& cc : allConns) {
+    t_gobj* sg = processor->resolveStableId(canvasName, cc.srcId);
+    t_gobj* dg = processor->resolveStableId(canvasName, cc.destId);
+    if (!sg || !dg) {
+        connectFailures.push_back({ cc.srcId, cc.destId,
+            sg ? "" : "src not found", dg ? "" : "dest not found" });
+        continue;   // loud failure instead of silent skip
+    }
+    ...
+}
+```
+
+**A3. Reply enrichment** — reply building (~line 1161). OSC atoms are flat, so
+append failures as paired strings:
+
+```
+reply.addArgument(int32 createFailCount);
+for each failure: reply.addArgument(tempId); reply.addArgument(reason);
+reply.addArgument(int32 connectFailCount);
+for each failure: reply.addArgument(srcId + "->" + destId); reply.addArgument(reason);
+```
+
+**A4. TS parse** — `osc-client.ts batchAtomic()`: parse the new atoms,
+return `{ ..., createFailures, connectFailures }`; `transaction-v4.ts`
+maps them into `_v2meta.failedCreates` / `_v2meta.failedWires` (replacing the
+count-based guard's guess with exact names).
+
+**A5. Test gate:** build `compressor~` (known fail) → reply names it. Connect
+to a stale tempId → reply names it. Beat keeps playing; zero drops.
+
+### Phase B — /pd/diagnose (C++, ~3h) — kills failures #3 + #4
+
+**B1. Signal-graph model.** Walk `linetraverser` once (same as census
+connections): for each wire, if `lt.tr_ob`'s outlet is signal-rate
+(`outlet->o_sym == gensym("signal")` — the check `resolveProbeTarget` already
+uses), record edge `srcObj → destObj`. Build `adj: t_gobj* → vector<t_gobj*>`.
+
+**B2. Cycle detection (DFS with visited-set):**
+
+```cpp
+// iterative DFS per connected component, signal edges only;
+// on revisit of an in-progress node → record the path as a cycle
+```
+
+Output: `dsp_cycles: [[tempId, tempId, ...], ...]` — names tonight's
+`osc_bass → sum_pitch → osc_bass` directly. Terminates always (visited set).
+
+**B3. Unscheduled detection:** after `canvas_update_dsp()`, signal objects
+present in `gl_list` but excluded from the DSP schedule. Simplest v1:
+re-run the cycle DFS — members of detected cycles = the unscheduled set
+(Pd refuses loop members). v2 (later): hook the signal compiler.
+
+**B4. Dangling + zeroed:**
+- dangling signal inlet: object has an audio inlet (`struct` check or
+  `obj_siginlet`-style probe) with no wire → record `{tempId, inlet}`
+- zeroed VCA: `*~` whose inlet 1 has no wire AND no creation float →
+  outputs constant 0 → record (the bare-`*~` law, checked natively)
+
+**B5. Reply JSON:** one OSC string arg containing
+`{dsp_cycles, unscheduled, dangling_sig_inlets, zeroed_vcgs, mismatched}`.
+TS parses and renders. Add `key` per object (bound name) for tab scoping.
+
+### Phase C — TS glue (~1h)
+
+**C1.** `osc-client.ts`: `saveDiagnose(canvas)` → `/pd/diagnose` + JSON parse.
+**C2.** `transaction-v4.ts`: escalation (3b) switches from the TS registry
+run to `/pd/diagnose` when cap `diagnose` present (TS registry stays as
+fallback for legacy bridges).
+**C3.** `analyze_patch` gains `action: "diagnostics"` rendering the facts for
+the agent (human-readable, same style as audit).
+
+### Phase D — Gates
+
+1. `cmake --build` + `npm run build` (both clean)
+2. Artist: reopen PlugData + reload server
+3. Identity gauntlet re-run (I1–I9) — no regressions
+4. Failure-class tests: each deliberately created → named in same response
+5. Zero-drop check: beat playing through every test
+
+### Risk notes
+
+- Cycle DFS must only traverse SIGNAL edges (control wires would create false
+  cycles) — filter by outlet signal-type during adjacency build.
+- All walks under the existing `sys_lock()` in the batch lambda — same
+  pattern as census; read-only, zero audio impact.
+- diagnose is READ-ONLY — it must never mutate (the failure class that
+  started the session: silent mutation).
+
