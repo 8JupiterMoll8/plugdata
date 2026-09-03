@@ -2343,14 +2343,12 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         *x = 0; *yy = 0; *w = 0; *h = 0;
         pd::Interface::getObjectBounds(c, y, x, yy, w, h);
 
-        // 1. Check live JUCE Canvas Object component bounds for true visual geometry
+        // 1. Check live JUCE Canvas Object component bounds for true visual geometry (w and h only)
         if (guiCanvas) {
             for (auto* obj : guiCanvas->objects) {
                 if (obj && obj->getPointer() == y) {
                     auto b = obj->getSelectableBounds();
                     if (b.getWidth() > 0 && b.getHeight() > 0) {
-                        *x = b.getX();
-                        *yy = b.getY();
                         *w = b.getWidth();
                         *h = b.getHeight();
                         return;
