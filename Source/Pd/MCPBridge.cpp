@@ -805,6 +805,12 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
             int deleted = 0, disconnected = 0, edited = 0, created = 0, connected = 0;
             int reconcileEvicted = 0, reconcileAdopted = 0;
+            // Phase A (PRD diagnostic layer): create/connect failure facts —
+            // named failures instead of silent skips (see PRD §2.1).
+            struct CreateFailure { std::string tempId; std::string type; std::string reason; };
+            struct ConnectFailure { std::string srcId; std::string destId; std::string reason; };
+            std::vector<CreateFailure> createFailures;
+            std::vector<ConnectFailure> connectFailures;
             std::vector<std::string> createdIds;
             std::vector<t_gobj*> createdPtrs;
 
@@ -1102,19 +1108,47 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                             createdPtrs.push_back(newObj);
                             created++;
                         }
+
+                        // Phase A (PRD diagnostic layer): pendingCreates with no
+                        // corresponding live object = create failures, named.
+                        // (Known limitation: pasteDirect appends in buffer order, so
+                        // a mid-batch failure shifts later indices — the tail is
+                        // reported as failed; subsequent batches re-sync via PHASE 0.)
+                        for (int i = static_cast<int>(newCount);
+                             i < static_cast<int>(pendingCreates.size()); ++i) {
+                            createFailures.push_back({
+                                pendingCreates[i].tempId.toStdString(),
+                                pendingCreates[i].objType.toStdString(),
+                                "couldn't create" });
+                        }
                     }
 
                     // PHASE 5: CONNECT via obj_connect
                     for (auto& cc : allConns) {
                         t_gobj* sg = processor->resolveStableId(canvasName, cc.srcId);
                         t_gobj* dg = processor->resolveStableId(canvasName, cc.destId);
-                        if (sg && dg) {
-                            t_object* so = pd::Interface::checkObject(sg);
-                            t_object* d_o = pd::Interface::checkObject(dg);
-                            if (so && d_o) {
-                                if (obj_connect(so, cc.srcOut, d_o, cc.destIn))
-                                    connected++;
-                            }
+                        if (!sg || !dg) {
+                            // Phase A (PRD diagnostic layer): name the silent
+                            // failure instead of skipping silently.
+                            connectFailures.push_back({
+                                cc.srcId.toStdString(), cc.destId.toStdString(),
+                                std::string(sg ? "" : "src not found, ")
+                                    + (dg ? "" : "dest not found") });
+                            continue;
+                        }
+                        t_object* so = pd::Interface::checkObject(sg);
+                        t_object* d_o = pd::Interface::checkObject(dg);
+                        if (so && d_o) {
+                            if (obj_connect(so, cc.srcOut, d_o, cc.destIn))
+                                connected++;
+                            else
+                                connectFailures.push_back({
+                                    cc.srcId.toStdString(), cc.destId.toStdString(),
+                                    "obj_connect failed" });
+                        } else {
+                            connectFailures.push_back({
+                                cc.srcId.toStdString(), cc.destId.toStdString(),
+                                "not a patchable object" });
                         }
                     }
 
@@ -1196,8 +1230,9 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
             // Append PHASE 0 detected connections as a compact JSON string.
             // Format: [{"s":"srcId","so":0,"d":"destId","di":0}, ...]
-            // Sent as a single OSC string arg — backward compatible (TS ignores if absent).
-            if (!detectedConnections.empty()) {
+            // ALWAYS appended (empty "[]" when no wires) — the TS parser relies
+            // on this marker to locate the failure-fact section that follows.
+            {
                 juce::String dcJson = "[";
                 for (size_t i = 0; i < detectedConnections.size(); i++) {
                     auto& dc = detectedConnections[i];
@@ -1209,6 +1244,22 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 }
                 dcJson += "]";
                 reply.addArgument(dcJson);
+            }
+
+            // Phase A (PRD diagnostic layer): create/connect failure facts —
+            // appended VERY LAST, after the detected-connections JSON. Old TS
+            // clients stop parsing at the JSON and ignore these; new TS clients
+            // read them as named failures (PRD diagnostic layer §2.1).
+            reply.addArgument(static_cast<int32>(createFailures.size()));
+            for (auto& cf : createFailures) {
+                reply.addArgument(juce::String(cf.tempId));
+                reply.addArgument(juce::String(cf.type));
+                reply.addArgument(juce::String(cf.reason));
+            }
+            reply.addArgument(static_cast<int32>(connectFailures.size()));
+            for (auto& cf : connectFailures) {
+                reply.addArgument(juce::String(cf.srcId) + juce::String("->") + juce::String(cf.destId));
+                reply.addArgument(juce::String(cf.reason));
             }
 
             sender.send(reply);
@@ -2031,6 +2082,183 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             bridge->sendReply(replyAddr, juce::String("error: tab not found: " + target));
         });
         return;
+    }
+
+    // ── PRD diagnostic layer §2.2: /pd/diagnose — THE GRAPH X-RAY ───────
+    // /pd/diagnose <canvasName> [corrId]
+    // Read-only structured facts, computed where the data lives (no console
+    // scraping, no TS graph analysis):
+    //   dsp_cycles   : signal-graph cycles, each named by objects (PRD §2.2)
+    //   unscheduled  : members of detected cycles (Pd refuses to schedule them)
+    //   dangling_main_sig : objects with a DSP method but nothing wired into
+    //                      their main signal inlet (informational)
+    //   zeroed_vcgs  : bare [*~] with no float arg and no inlet-1 wire —
+    //                  outputs constant 0, silently killing the downstream
+    //                  chain (the Audio-VCA law, checked natively)
+    // Reply: /pd/diagnose/reply/<corrId> <jsonString>
+    if (action == "diagnose") {
+        auto canvasName    = normalizeCanvas(getArgString(msg[0]));
+        auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : "0";
+        juce::String replyAddr = "/pd/diagnose/reply/" + correlationId;
+
+        juce::String json;
+        bool hasCanvas = false;
+
+        sys_lock();
+        t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+        if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
+
+        if (cnv) {
+            hasCanvas = true;
+
+            // 1. Objects: index, stable tempId (fallback: class#idx)
+            std::vector<t_gobj*> objs;
+            std::vector<juce::String> names;
+            std::unordered_map<t_gobj*, juce::String> ptrToId;
+            auto mapIt = processor->mcpStableObjectMap.find(canvasName.toStdString());
+            if (mapIt != processor->mcpStableObjectMap.end())
+                for (auto& [tid, ptr] : mapIt->second)
+                    if (ptr) ptrToId[ptr] = juce::String(tid);
+
+            int idx = 0;
+            for (t_gobj* y = cnv->gl_list; y; y = y->g_next, ++idx) {
+                objs.push_back(y);
+                names.push_back(ptrToId.count(y)
+                    ? ptrToId[y]
+                    : (juce::String(class_getname(pd_class(&y->g_pd))) + "#" + juce::String(idx)));
+            }
+
+            // 2. One linetraverser walk: signal edges + ALL wired inlets
+            std::vector<std::pair<int, int>> sigEdges;         // (srcIdx, destIdx), signal only
+            std::set<std::pair<int, int>> anyInletWired;       // (destIdx, inletNo), any type
+            t_linetraverser lt;
+            t_outconnect* oc = nullptr;
+            linetraverser_start(&lt, cnv);
+            while ((oc = linetraverser_next_nosize(&lt))) {
+                int si = -1, di = -1;
+                for (int i = 0; i < (int)objs.size(); ++i) {
+                    if (objs[i] == &lt.tr_ob->ob_g) si = i;
+                    if (objs[i] == &lt.tr_ob2->ob_g) di = i;
+                }
+                if (si < 0 || di < 0) continue;
+                anyInletWired.insert({ di, lt.tr_inno });
+                if (lt.tr_outlet->o_sym == gensym("signal"))
+                    sigEdges.push_back({ si, di });
+            }
+
+            // 3. DSP cycles: DFS over signal edges (white/gray/black — the
+            // visited-set guarantees termination even on real loops)
+            std::vector<std::vector<int>> adj(objs.size());
+            for (auto& e : sigEdges) adj[e.first].push_back(e.second);
+            std::vector<int> color(objs.size(), 0);
+            std::vector<int> path;
+            std::vector<std::vector<int>> cycles;
+            std::function<void(int)> dfs = [&](int u) {
+                color[u] = 1;
+                path.push_back(u);
+                for (int v : adj[u]) {
+                    if (color[v] == 1) {
+                        std::vector<int> cyc;
+                        for (int k = (int)path.size() - 1; k >= 0; --k) {
+                            cyc.push_back(path[k]);
+                            if (path[k] == v) break;
+                        }
+                        std::reverse(cyc.begin(), cyc.end());
+                        cycles.push_back(cyc);
+                    } else if (color[v] == 0) {
+                        dfs(v);
+                    }
+                }
+                path.pop_back();
+                color[u] = 2;
+            };
+            for (int i = 0; i < (int)objs.size(); ++i)
+                if (color[i] == 0) dfs(i);
+
+            // 4. Main-signal-inlet check + zeroed-VCA check
+            // Only flag objects whose inlet 0 is a real SIGNAL inlet. In
+            // modern Pd every class has c_firstin unless CLASS_NOINLET, so
+            // obj_ninlets() >= 1 even for pure sources — but noise~/catch~
+            // never set c_floatsignalin (no CLASS_MAINSIGNALIN): their first
+            // inlet is a phantom message inlet that can never carry signal.
+            std::set<std::pair<int, int>> mainSigUnwired; // (idx, 0)
+            std::set<std::pair<int, int>> zeroedVcas;     // (idx, 1)
+            idx = 0;
+            for (t_gobj* y = cnv->gl_list; y; y = y->g_next, ++idx) {
+                t_object* ob = pd::Interface::checkObject(y);
+                bool hasDspMethod = zgetfn(&y->g_pd, gensym("dsp")) != nullptr;
+                bool mainWired = anyInletWired.count({ idx, 0 }) > 0;
+                if (hasDspMethod && ob && obj_issignalinlet(ob, 0) && !mainWired)
+                    mainSigUnwired.insert({ idx, 0 });
+
+                if (!ob) continue;
+                char* tb = nullptr; int tsz = 0;
+                pd::Interface::getObjectText(ob, &tb, &tsz);
+                juce::String text = (tb && tsz > 0)
+                    ? juce::String::fromUTF8(tb, static_cast<size_t>(tsz)).trim()
+                    : juce::String();
+                if (tb) freebytes(tb, static_cast<size_t>(tsz) * sizeof(char));
+
+                juce::String firstTok = text.upToFirstOccurrenceOf(" ", false, false);
+                if (firstTok == "*~") {
+                    bool hasFloatArg = text.contains(" ");
+                    bool inlet1Wired = anyInletWired.count({ idx, 1 }) > 0;
+                    if (!hasFloatArg && !inlet1Wired)
+                        zeroedVcas.insert({ idx, 1 });
+                }
+            }
+
+            // 5. Build JSON — cycles, unscheduled (cycle members), dangling, zeroed
+            auto nameOf = [&](int i) { return (i >= 0 && i < (int)names.size()) ? names[(size_t)i] : juce::String("?"); };
+            json = "{\"canvas\":\"" + canvasName + "\",\"objectCount\":" + juce::String(objs.size());
+            json += ",\"dsp_cycles\":[";
+            for (size_t c = 0; c < cycles.size(); ++c) {
+                if (c > 0) json += ",";
+                json += "[";
+                for (size_t k = 0; k < cycles[c].size(); ++k) {
+                    if (k > 0) json += ",";
+                    json += "\"" + nameOf(cycles[c][k]) + "\"";
+                }
+                json += "]";
+            }
+            json += "],\"unscheduled\":[";
+            {
+                std::set<int> unscheduled;
+                for (auto& cyc : cycles) for (int m : cyc) unscheduled.insert(m);
+                bool first = true;
+                for (int m : unscheduled) {
+                    if (!first) json += ",";
+                    json += "\"" + nameOf(m) + "\"";
+                    first = false;
+                }
+            }
+            json += "],\"dangling_main_sig\":[";
+            {
+                bool first = true;
+                for (auto& z : mainSigUnwired) {
+                    if (!first) json += ",";
+                    json += "\"" + nameOf(z.first) + "\"";
+                    first = false;
+                }
+            }
+            json += "],\"zeroed_vcgs\":[";
+            {
+                bool first = true;
+                for (auto& z : zeroedVcas) {
+                    if (!first) json += ",";
+                    json += "{\"tempId\":\"" + nameOf(z.first) + "\",\"inlet\":" + juce::String(z.second) + "}";
+                    first = false;
+                }
+            }
+            json += "]}";
+        }
+        sys_unlock();
+
+        if (!hasCanvas) {
+            sendReply(replyAddr, juce::String("error: canvas not found: " + canvasName));
+            return;
+        }
+        sendReply(replyAddr, json);
     }
 
     if (action == "clear") {
@@ -3488,6 +3716,8 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
         reply.addArgument(juce::String("list_tabs"));
         reply.addArgument(juce::String("focus_tab"));
         reply.addArgument(juce::String("close_tab"));
+        // PRD diagnostic layer: the graph X-ray
+        reply.addArgument(juce::String("diagnose"));
         reply.addArgument(juce::String("connections"));
         reply.addArgument(juce::String("spectral"));
         reply.addArgument(juce::String("batch_atomic"));
