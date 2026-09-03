@@ -15,6 +15,7 @@
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
+#include <cstdlib>
 
 extern "C" {
 #include <m_pd.h>
@@ -2095,6 +2096,8 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
     //   zeroed_vcgs  : bare [*~] with no float arg and no inlet-1 wire —
     //                  outputs constant 0, silently killing the downstream
     //                  chain (the Audio-VCA law, checked natively)
+    //   mismatched   : rate-mismatched wires (sig→ctl / ctl→sig) — mostly
+    //                  blocked by Pd at connect-time, emitted when present
     // Reply: /pd/diagnose/reply/<corrId> <jsonString>
     if (action == "diagnose") {
         auto canvasName    = normalizeCanvas(getArgString(msg[0]));
@@ -2128,9 +2131,12 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     : (juce::String(class_getname(pd_class(&y->g_pd))) + "#" + juce::String(idx)));
             }
 
-            // 2. One linetraverser walk: signal edges + ALL wired inlets
+            // 2. One linetraverser walk: signal edges + ALL wired inlets +
+            //    rate-mismatched wires (PRD §2.2 `mismatched`)
             std::vector<std::pair<int, int>> sigEdges;         // (srcIdx, destIdx), signal only
             std::set<std::pair<int, int>> anyInletWired;       // (destIdx, inletNo), any type
+            struct MismatchedWire { int src, srcOut, dest, destIn; bool srcIsSig; };
+            std::vector<MismatchedWire> mismatchedWires;
             t_linetraverser lt;
             t_outconnect* oc = nullptr;
             linetraverser_start(&lt, cnv);
@@ -2142,7 +2148,11 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 }
                 if (si < 0 || di < 0) continue;
                 anyInletWired.insert({ di, lt.tr_inno });
-                if (lt.tr_outlet->o_sym == gensym("signal"))
+                bool srcIsSig = (lt.tr_outlet->o_sym == gensym("signal"));
+                bool destIsSig = obj_issignalinlet(lt.tr_ob2, lt.tr_inno);
+                if (srcIsSig != destIsSig)
+                    mismatchedWires.push_back({ si, lt.tr_outno, di, lt.tr_inno, srcIsSig });
+                if (srcIsSig)
                     sigEdges.push_back({ si, di });
             }
 
@@ -2201,7 +2211,21 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
                 juce::String firstTok = text.upToFirstOccurrenceOf(" ", false, false);
                 if (firstTok == "*~") {
-                    bool hasFloatArg = text.contains(" ");
+                    // X-ray blind-spot fix (2026-09-03): "has float arg" used to
+                    // mean text.contains(" ") — a SYMBOL arg (`*~ *~ 0.6` from
+                    // the v4 edit-args bug) passed as "has arg" while Pd coerces
+                    // the symbol to 0 → zeroed VCA missed. Now parse the first
+                    // arg atom as a real number: only a numeric atom counts.
+                    bool hasFloatArg = false;
+                    juce::String argTok = text
+                        .fromFirstOccurrenceOf(" ", false, false)
+                        .upToFirstOccurrenceOf(" ", false, false)
+                        .trim();
+                    if (argTok.isNotEmpty()) {
+                        char* endPtr = nullptr;
+                        std::strtod(argTok.toRawUTF8(), &endPtr);
+                        hasFloatArg = (endPtr != argTok.toRawUTF8());
+                    }
                     bool inlet1Wired = anyInletWired.count({ idx, 1 }) > 0;
                     if (!hasFloatArg && !inlet1Wired)
                         zeroedVcas.insert({ idx, 1 });
@@ -2247,6 +2271,17 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 for (auto& z : zeroedVcas) {
                     if (!first) json += ",";
                     json += "{\"tempId\":\"" + nameOf(z.first) + "\",\"inlet\":" + juce::String(z.second) + "}";
+                    first = false;
+                }
+            }
+            json += "],\"mismatched\":[";
+            {
+                bool first = true;
+                for (auto& w : mismatchedWires) {
+                    if (!first) json += ",";
+                    json += "{\"srcId\":\"" + nameOf(w.src) + "\",\"srcOut\":" + juce::String(w.srcOut)
+                          + ",\"destId\":\"" + nameOf(w.dest) + "\",\"destIn\":" + juce::String(w.destIn)
+                          + ",\"dir\":\"" + (w.srcIsSig ? "sig->ctl" : "ctl->sig") + "\"}";
                     first = false;
                 }
             }
