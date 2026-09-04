@@ -1207,23 +1207,21 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     }
 
                     // PHASE 1: DELETE — safe deletion handling:
-                    // Simple objects use removeObjectsAudioThread (zero GUI overhead).
-                    // Canvases/abstractions/GOP modules use removeObjects (glist_delete)
-                    // to properly clean up nested child objects, subpatches, and GUI components.
+                    // PHASE 1: DELETE — audio-thread-safe object removal (zero undo/GUI
+                    // overhead; editor reconciles via trailing synchroniseCanvases).
+                    SmallArray<t_gobj*> toDelete;
                     for (auto& pd : preDeletes) {
                         t_gobj* obj = processor->resolveStableId(canvasName, pd.objectId);
                         if (obj) {
                             processor->mcpStableObjectMap[canvasName.toStdString()].erase(pd.objectId.toStdString());
                             processor->mcpStableSerialMap.erase(obj);
                             processor->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
-                            SmallArray<t_gobj*> toDelete; toDelete.add(obj);
-                            if (pd_class(&obj->g_pd) == canvas_class) {
-                                pd::Interface::removeObjects(cnv, toDelete);
-                            } else {
-                                pd::Interface::removeObjectsAudioThread(cnv, toDelete);
-                            }
+                            toDelete.add(obj);
                             deleted++;
                         }
+                    }
+                    if (toDelete.size() > 0) {
+                        pd::Interface::removeObjectsAudioThread(cnv, toDelete);
                     }
 
                     // PHASE 2: DISCONNECT
@@ -1236,7 +1234,8 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                             if (so && d_o) {
                                 int si = 0, di2 = 0, idx = 0;
                                 for (t_gobj* y = cnv->gl_list; y; y = y->g_next, idx++) {
-                                    if (y == sg) si = idx; if (y == dg) di2 = idx;
+                                    if (y == sg) si = idx;
+                                    if (y == dg) di2 = idx;
                                 }
                                 t_atom ca[4];
                                 SETFLOAT(&ca[0], static_cast<float>(si));
