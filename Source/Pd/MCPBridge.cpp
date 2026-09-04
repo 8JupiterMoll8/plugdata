@@ -8,6 +8,7 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 #include "Canvas.h"
+#include "TabComponent.h"
 #include "Object.h"
 #include "Objects/ObjectBase.h"
 #include "Pd/Interface.h"
@@ -287,10 +288,13 @@ juce::String MCPBridge::computeDiagnoseFacts(PluginProcessor* processor, t_canva
 
     int idx = 0;
     for (t_gobj* y = cnv->gl_list; y; y = y->g_next, ++idx) {
+        if (!y) continue;
         objs.push_back(y);
+        t_class* cl = pd_class(&y->g_pd);
+        const char* cName = cl ? class_getname(cl) : nullptr;
         names.push_back(ptrToId.count(y)
             ? ptrToId[y]
-            : (juce::String(class_getname(pd_class(&y->g_pd))) + "#" + juce::String(idx)));
+            : (juce::String(cName ? cName : "unknown") + "#" + juce::String(idx)));
     }
 
     // 2. One linetraverser walk: signal edges + ALL wired inlets +
@@ -351,8 +355,9 @@ juce::String MCPBridge::computeDiagnoseFacts(PluginProcessor* processor, t_canva
     std::set<std::pair<int, int>> zeroedVcas;     // (idx, 1)
     idx = 0;
     for (t_gobj* y = cnv->gl_list; y; y = y->g_next, ++idx) {
+        if (!y) continue;
         t_object* ob = pd::Interface::checkObject(y);
-        bool hasDspMethod = zgetfn(&y->g_pd, gensym("dsp")) != nullptr;
+        bool hasDspMethod = (ob != nullptr && zgetfn(&y->g_pd, gensym("dsp")) != nullptr);
         bool mainWired = anyInletWired.count({ idx, 0 }) > 0;
         if (hasDspMethod && ob && obj_issignalinlet(ob, 0) && !mainWired)
             mainSigUnwired.insert({ idx, 0 });
@@ -607,6 +612,30 @@ static bool varToBool(const juce::var& v, bool def)
     if (v.isVoid() || v.isUndefined()) return def;
     if (v.isBool()) return v.toString().equalsIgnoreCase("true");
     return (double)v != 0.0;
+}
+
+static Canvas* getOrCreateCanvasComponent(PluginProcessor* proc, t_canvas* cnv)
+{
+    if (!proc || !cnv) return nullptr;
+    Canvas* canvasComp = nullptr;
+    for (auto* editor : proc->getEditors()) {
+        if (!editor) continue;
+        for (auto* c : editor->getCanvases()) {
+            if (c && (c->patch.getUncheckedPointer() == cnv || c->patch.getRawPointer() == cnv || (c->patch.getPointer().get() == cnv))) {
+                canvasComp = c;
+                break;
+            }
+        }
+        if (!canvasComp && editor->getCurrentCanvas()) {
+            if (editor->getCurrentCanvas()->patch.getUncheckedPointer() == cnv || editor->getCurrentCanvas()->patch.getRawPointer() == cnv)
+                canvasComp = editor->getCurrentCanvas();
+        }
+        if (!canvasComp) {
+            canvasComp = editor->getTabComponent().openPatch(new pd::Patch(pd::WeakReference(cnv, proc), proc, false));
+        }
+        if (canvasComp) break;
+    }
+    return canvasComp;
 }
 
 void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessage& msg)
@@ -1001,6 +1030,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             std::vector<ConnectFailure> connectFailures;
             std::vector<std::string> createdIds;
             std::vector<t_gobj*> createdPtrs;
+            std::vector<int32> mappingIndices;
 
             // =========================================================================
             // PHASE 0: PRE-PARSE outside audio thread — zero contention
@@ -1312,6 +1342,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
                             createdIds.push_back(pc.tempId.toStdString());
                             createdPtrs.push_back(newObj);
+                            mappingIndices.push_back(static_cast<int32>(preCreateCount + i));
                             created++;
                         }
 
@@ -1409,25 +1440,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             reply.addArgument(static_cast<int32>(reconcileAdopted));
 
             // Append inline mappings — built from data collected in lambda
-            // The identity mapping was already done inside the lambda (createdIds/createdPtrs).
-            // We just need the index. Enqueue a quick lookup on audio thread.
-            std::vector<int32> mappingIndices(createdIds.size(), -1);
-            if (cnv && !createdIds.empty()) {
-                juce::WaitableEvent mapDone;
-                processor->enqueueFunctionAsync([&]() {
-                    std::unordered_map<t_gobj*, int> ptrToIdx;
-                    int idx = 0;
-                    for (t_gobj* y = cnv->gl_list; y; y = y->g_next, idx++)
-                        ptrToIdx[y] = idx;
-                    for (size_t i = 0; i < createdPtrs.size(); i++) {
-                        auto it = ptrToIdx.find(createdPtrs[i]);
-                        if (it != ptrToIdx.end()) mappingIndices[i] = it->second;
-                    }
-                    mapDone.signal();
-                });
-                mapDone.wait(500);
-            }
-            for (size_t i = 0; i < createdIds.size(); i++) {
+            for (size_t i = 0; i < createdIds.size() && i < mappingIndices.size(); i++) {
                 if (mappingIndices[i] >= 0) {
                     reply.addArgument(juce::String(createdIds[i]));
                     reply.addArgument(static_cast<int32>(mappingIndices[i]));
@@ -1475,8 +1488,10 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 if (pc.objType.contains("~")) { hasSignalCreate = true; break; }
             }
             juce::String diagJson;
-            if (hasSignalCreate) {
+            if (hasSignalCreate && cnv) {
+                sys_lock();
                 diagJson = computeDiagnoseFacts(processor, cnv, canvasName);
+                sys_unlock();
             }
             reply.addArgument(diagJson);
 
@@ -3298,17 +3313,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
             if (cnv) {
                 juce::MessageManager::callAsync([proc = processor, cnv, canvasName, subpatchName, targetIds, correlationId, bridge = this]() {
-                    Canvas* canvasComp = nullptr;
-                    for (auto* editor : proc->getEditors()) {
-                        if (!editor) continue;
-                        for (auto* c : editor->getCanvases()) {
-                            if (c && c->patch.getUncheckedPointer() == cnv) {
-                                canvasComp = c;
-                                break;
-                            }
-                        }
-                        if (canvasComp) break;
-                    }
+                    Canvas* canvasComp = getOrCreateCanvasComponent(proc, cnv);
 
                     if (!canvasComp) {
                         bridge->sendReply("/pd/encapsulate/reply/" + correlationId, 0.0f);
@@ -3316,12 +3321,14 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     }
 
                     canvasComp->patch.deselectAll();
+                    int selCount = 0;
                     for (const auto& id : targetIds) {
                         t_gobj* g = proc->resolveStableId(canvasName, id);
                         if (g) {
                             for (auto* objComp : canvasComp->objects) {
                                 if (objComp && objComp->getPointer() == g) {
                                     canvasComp->setSelected(objComp, true);
+                                    selCount++;
                                     break;
                                 }
                             }
@@ -3346,13 +3353,6 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         return;
     }
 
-    // /pd/encapsulate_to_file <canvas> <name> <filePath> <count> <id0> ... [corrId]
-    // Full to_abstraction in one atomic C++ call:
-    //   1. encapsulateSelection() → [pd name] subpatch (same as /pd/encapsulate)
-    //   2. getCanvasContent() on the new subpatch → write to filePath on disk
-    //   3. Delete [pd name], create [name] abstraction reference at same position
-    //   4. reloadAbstractions() so Pd registers the file
-    // Reply: /pd/encapsulate_to_file/reply/<corrId>  1.0=ok, 0.0=failed
     if (action == "encapsulate_to_file") {
         if (msg.size() >= 4 && processor) {
             auto canvasName   = normalizeCanvas(getArgString(msg[0]));
@@ -3370,17 +3370,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
             if (cnv) {
                 juce::MessageManager::callAsync([proc = processor, cnv, canvasName, abstrName, filePath, targetIds, correlationId, bridge = this]() {
-                    // ── Find canvas UI component ────────────────────────────
-                    Canvas* canvasComp = nullptr;
-                    for (auto* editor : proc->getEditors()) {
-                        if (!editor) continue;
-                        for (auto* c : editor->getCanvases()) {
-                            if (c && c->patch.getUncheckedPointer() == cnv) {
-                                canvasComp = c; break;
-                            }
-                        }
-                        if (canvasComp) break;
-                    }
+                    Canvas* canvasComp = getOrCreateCanvasComponent(proc, cnv);
                     if (!canvasComp) {
                         bridge->sendReply("/pd/encapsulate_to_file/reply/" + correlationId, 0.0f);
                         return;
@@ -3432,9 +3422,10 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         return;
                     }
 
-                    juce::File destFile(filePath);
-                    destFile.getParentDirectory().createDirectory();
-                    if (!destFile.replaceWithText(content)) {
+                    juce::File targetFile(filePath);
+                    targetFile.getParentDirectory().createDirectory();
+                    bool writeOk = targetFile.replaceWithText(content);
+                    if (!writeOk) {
                         bridge->sendReply("/pd/encapsulate_to_file/reply/" + correlationId, 0.0f);
                         return;
                     }
@@ -3532,17 +3523,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
             if (cnv) {
                 juce::MessageManager::callAsync([proc = processor, cnv, canvasName, alignStr, targetIds, correlationId, bridge = this]() {
-                    Canvas* canvasComp = nullptr;
-                    for (auto* editor : proc->getEditors()) {
-                        if (!editor) continue;
-                        for (auto* c : editor->getCanvases()) {
-                            if (c && c->patch.getUncheckedPointer() == cnv) {
-                                canvasComp = c;
-                                break;
-                            }
-                        }
-                        if (canvasComp) break;
-                    }
+                    Canvas* canvasComp = getOrCreateCanvasComponent(proc, cnv);
 
                     if (!canvasComp) {
                         bridge->sendReply("/pd/align/reply/" + correlationId, 0.0f);
@@ -3592,22 +3573,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
 
             juce::MessageManager::callAsync([proc = processor, cnv, correlationId, bridge = this]() {
-                Canvas* canvasComp = nullptr;
-                for (auto* editor : proc->getEditors()) {
-                    if (!editor) continue;
-                    if (cnv) {
-                        for (auto* c : editor->getCanvases()) {
-                            if (c && c->patch.getUncheckedPointer() == cnv) {
-                                canvasComp = c;
-                                break;
-                            }
-                        }
-                    }
-                    if (!canvasComp) {
-                        canvasComp = editor->getCurrentCanvas();
-                    }
-                    if (canvasComp) break;
-                }
+                Canvas* canvasComp = getOrCreateCanvasComponent(proc, cnv);
 
                 if (canvasComp) {
                     canvasComp->zoomToFitAll();

@@ -190,29 +190,92 @@ struct Interface {
     // pd_free clears weakrefs atomically (Instance::clearWeakReferences hook),
     // and the trailing synchroniseCanvases (message thread) removes editor components
     // while canvas_update_dsp rebuilds the DSP tree safely.
+    static t_canvas* findOwnerCanvas(t_glist* gl, t_gobj* obj)
+    {
+        if (!gl || !obj) return nullptr;
+        for (t_gobj* g = gl->gl_list; g; g = g->g_next) {
+            if (g == obj) return reinterpret_cast<t_canvas*>(gl);
+            if (pd_class(&g->g_pd) == canvas_class) {
+                if (auto* found = findOwnerCanvas(reinterpret_cast<t_glist*>(g), obj))
+                    return found;
+            }
+        }
+        return nullptr;
+    }
+
+    static t_canvas* unlinkGobj(t_glist* gl, t_gobj* obj)
+    {
+        if (!gl || !obj) return nullptr;
+        if (gl->gl_list == obj) {
+            gl->gl_list = obj->g_next;
+            return reinterpret_cast<t_canvas*>(gl);
+        }
+        for (t_gobj* g = gl->gl_list; g; g = g->g_next) {
+            if (g->g_next == obj) {
+                g->g_next = obj->g_next;
+                return reinterpret_cast<t_canvas*>(gl);
+            }
+            if (pd_class(&g->g_pd) == canvas_class) {
+                if (auto* found = unlinkGobj(reinterpret_cast<t_glist*>(g), obj))
+                    return found;
+            }
+        }
+        return nullptr;
+    }
+
+    // Audio-thread-safe object removal for /pd/batch_atomic (runs inside the
+    // enqueueFunctionAsync lambda, i.e. on the audio thread before performDSP).
+    // Unlike removeObjects() (message thread only), this performs:
+    //   - NO canvas_undo_add (undo machinery is scheduler-thread-only; see the
+    //     canvas_undo_free crash precedent — batch deletes are engine-undoable
+    //     only via harness snapshots, never the Pd undo stack),
+    //   - NO GUI selection / editor teardown: glist_select/deselect and gobj_vis
+    //     must NOT run here because they race with the JUCE message thread.
+    //   - Clean wire disconnect via canvas_deletelinesfor (in plugdata,
+    //     _canvas_delete_line is a no-op, so this safely unhooks all t_outconnects
+    //     under canvas_suspend_dsp without touching GUI).
+    //   - Unlinks from gl_editor->e_selection / e_grab so MessageManager never
+    //     dereferences the freed pointer.
+    //   - Frees rtext via rtext_free.
+    // What it does: disconnect wires + unlink editor refs + unlink gl_list + pd_free.
+    // pd_free clears weakrefs atomically (Instance::clearWeakReferences hook),
+    // and the trailing synchroniseCanvases (message thread) removes editor components
+    // while canvas_update_dsp rebuilds the DSP tree safely.
     static void removeObjectsAudioThread(t_canvas* cnv, SmallArray<t_gobj*> const& objects)
     {
         int const dspstate = canvas_suspend_dsp();
 
         for (auto* obj : objects) {
+            if (!obj) continue;
             if (libpd_this_instance()->pd_newest == &obj->g_pd)
                 libpd_this_instance()->pd_newest = nullptr;
 
-            // 1. Disconnect all lines and free rtext cleanly (no GUI overhead)
+            // 1. Find owning canvas across canvas and subcanvases first
+            t_canvas* owner = findOwnerCanvas(cnv, obj);
+            if (!owner) {
+                for (t_canvas* c = pd_this->pd_canvaslist; c && !owner; c = c->gl_next) {
+                    owner = findOwnerCanvas(c, obj);
+                }
+            }
+
+            t_canvas* targetCnv = owner ? owner : cnv;
+
+            // 2. Disconnect all lines and free rtext cleanly WHILE STILL IN gl_list!
+            // (canvas_deletelinesfor uses linetraverser which walks gl_list to disconnect outlets)
             if (auto* ob = pd_checkobject(&obj->g_pd)) {
-                canvas_deletelinesfor(cnv, ob);
-                if (cnv->gl_editor) {
-                    if (auto* rt = glist_findrtext(cnv, ob))
+                canvas_deletelinesfor(targetCnv, ob);
+                if (targetCnv->gl_editor) {
+                    if (auto* rt = glist_findrtext(targetCnv, ob))
                         rtext_free(rt);
                 }
             }
 
-            // 2. Unlink from editor selection and grab to protect MessageManager
-            if (cnv->gl_editor) {
-                if (cnv->gl_editor->e_grab == obj)
-                    cnv->gl_editor->e_grab = nullptr;
+            // 3. Unlink from editor selection and grab to protect MessageManager
+            if (targetCnv->gl_editor) {
+                if (targetCnv->gl_editor->e_grab == obj)
+                    targetCnv->gl_editor->e_grab = nullptr;
 
-                t_selection** prevSel = &cnv->gl_editor->e_selection;
+                t_selection** prevSel = &targetCnv->gl_editor->e_selection;
                 while (*prevSel) {
                     if ((*prevSel)->sel_what == obj) {
                         t_selection* toFree = *prevSel;
@@ -224,22 +287,15 @@ struct Interface {
                 }
             }
 
-            // 3. Unlink from gl_list (mirror glist_delete list surgery, no GUI).
-            int const wasdeleting = canvas_setdeleting(cnv, 1);
-            if (cnv->gl_list == obj) {
-                cnv->gl_list = obj->g_next;
-            } else {
-                for (t_gobj* g = cnv->gl_list; g; g = g->g_next) {
-                    if (g->g_next == obj) {
-                        g->g_next = obj->g_next;
-                        break;
-                    }
-                }
-            }
+            // 4. Unlink from gl_list (ONLY AFTER lines are disconnected)
+            unlinkGobj(targetCnv, obj);
 
-            // 4. Free object (triggers clearWeakReferences)
-            pd_free(&obj->g_pd);
-            canvas_setdeleting(cnv, wasdeleting);
+            // 5. Free object only if safely unlinked from canvas
+            if (owner) {
+                int const wasdeleting = canvas_setdeleting(owner, 1);
+                pd_free(&obj->g_pd);
+                canvas_setdeleting(owner, wasdeleting);
+            }
         }
 
         canvas_resume_dsp(dspstate);
@@ -248,6 +304,13 @@ struct Interface {
 
     static void removeObjects(t_canvas* cnv, SmallArray<t_gobj*> const& objects)
     {
+        if (!cnv) return;
+
+        if (!cnv->gl_editor) {
+            removeObjectsAudioThread(cnv, objects);
+            return;
+        }
+
         canvas_undo_add(cnv, UNDO_SEQUENCE_START, "clear", nullptr);
 
         glist_noselect(cnv);
@@ -264,7 +327,7 @@ struct Interface {
         /* if text is selected, deselecting it might remake the
          object. So we deselect it and hunt for a "new" object on
          the glist to reselect. */
-        if (cnv->gl_editor->e_textedfor) {
+        if (cnv->gl_editor && cnv->gl_editor->e_textedfor) {
             // t_gobj *selwas = x->gl_editor->e_selection->sel_what;
             libpd_this_instance()->pd_newest = nullptr;
             glist_noselect(cnv);
