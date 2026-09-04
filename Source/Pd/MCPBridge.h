@@ -231,6 +231,8 @@ private:
     t_outconnect* resolveProbeTarget(const juce::String& canvasName, const juce::String& targetId, int outletIndex, juce::String& errorOut);
     bool activateProbing();
 
+    static juce::String computeDiagnoseFacts(PluginProcessor* processor, t_canvas* cnv, const juce::String& canvasName);
+
     void timerCallback() override;
 
     struct MorphParam {
