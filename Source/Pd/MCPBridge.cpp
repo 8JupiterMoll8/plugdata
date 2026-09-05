@@ -1338,7 +1338,15 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 preEdits.push_back({ oid, tk.joinIntoString(" ") });
             }
 
-            struct PendingCreate { juce::String tempId; juce::String objType; float initValue; bool seedInit; };
+            struct PendingCreate {
+                juce::String tempId;
+                juce::String objType;
+                juce::String kind;
+                int x;
+                int y;
+                float initValue;
+                bool seedInit;
+            };
             std::vector<PendingCreate> pendingCreates;
             juce::String pastaBuffer;
             for (int o = 0; o < createCount && cursor < msg.size(); o++) {
@@ -1372,7 +1380,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 }
 
                 pastaBuffer += formatAsPdLine(kind, tk, static_cast<int>(px), static_cast<int>(py)) + "\n";
-                pendingCreates.push_back({ oid, ot, initValue, seedInit });
+                pendingCreates.push_back({ oid, ot, kind, static_cast<int>(px), static_cast<int>(py), initValue, seedInit });
             }
 
             // ALL connections go through obj_connect after paste (no #X connect in buffer)
@@ -1589,14 +1597,115 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         for (t_gobj* g = cnv->gl_list; g; g = g->g_next)
                             allObjects.push_back(g);
                         int newCount = static_cast<int>(allObjects.size()) - preCreateCount;
-                        for (int i = 0; i < newCount && i < static_cast<int>(pendingCreates.size()); i++) {
-                            t_gobj* newObj = allObjects[preCreateCount + i];
-                            auto& pc = pendingCreates[i];
 
-                            // Red-box detection: in Pure Data, when object creation fails,
-                            // pasteDirect creates a t_text object with te_type == T_OBJECT and class == text_class.
-                            t_object* ob = pd::Interface::checkObject(newObj);
-                            if (ob && ob->te_type == T_OBJECT && pd_class(&newObj->g_pd) == text_class) {
+                        struct NewObjInfo {
+                            t_gobj* ptr = nullptr;
+                            int glIndex = -1;
+                            int x = 0;
+                            int y = 0;
+                            int type = -1;
+                            juce::String firstWord;
+                            juce::String className;
+                            bool isRedBox = false;
+                        };
+
+                        std::vector<NewObjInfo> newInfos;
+                        for (int i = 0; i < newCount; ++i) {
+                            t_gobj* g = allObjects[preCreateCount + i];
+                            NewObjInfo info;
+                            info.ptr = g;
+                            info.glIndex = preCreateCount + i;
+                            t_object* ob = pd::Interface::checkObject(g);
+                            if (ob) {
+                                info.x = ob->te_xpix;
+                                info.y = ob->te_ypix;
+                                info.type = ob->te_type;
+                                t_class* cl = pd_class(&g->g_pd);
+                                if (cl) {
+                                    const char* cName = class_getname(cl);
+                                    if (cName) info.className = juce::String::fromUTF8(cName);
+                                }
+                                info.isRedBox = (ob->te_type == T_OBJECT && cl == text_class);
+                                if (ob->te_binbuf) {
+                                    char* tb = nullptr; int tsz = 0;
+                                    binbuf_gettext(ob->te_binbuf, &tb, &tsz);
+                                    if (tb && tsz > 0) {
+                                        juce::String full = juce::String::fromUTF8(tb, tsz).trim();
+                                        info.firstWord = full.upToFirstOccurrenceOf(" ", false, false);
+                                        freebytes(tb, tsz);
+                                    }
+                                }
+                            }
+                            newInfos.push_back(info);
+                        }
+
+                        auto computeMatchScore = [](const PendingCreate& pc, const NewObjInfo& no) -> int {
+                            int score = 0;
+                            // Exact coordinate match is a strong structural anchor
+                            if (pc.x == no.x && pc.y == no.y) score += 20;
+
+                            // Red-box match: Pd creates text_class dummy, but te_binbuf preserves original type
+                            if (no.isRedBox && no.firstWord == pc.objType) {
+                                score += 25;
+                                return score;
+                            }
+
+                            // Class name / binbuf first word match
+                            if (no.firstWord.isNotEmpty() && no.firstWord == pc.objType) {
+                                score += 20;
+                            } else if (no.className.isNotEmpty() && no.className == pc.objType) {
+                                score += 20;
+                            }
+
+                            // Kind match
+                            if (pc.kind == "msg" && no.type == T_MESSAGE) score += 10;
+                            else if (pc.kind == "text" && no.type == T_TEXT) score += 10;
+                            else if ((pc.kind == "floatatom" || pc.kind == "symbolatom") &&
+                                     (no.type == T_ATOM || no.className.containsIgnoreCase("atom"))) score += 10;
+                            else if ((pc.kind == "obj" || pc.kind.isEmpty()) && no.type == T_OBJECT) score += 5;
+
+                            return score;
+                        };
+
+                        // Monotonic alignment of created gobjs to pendingCreates.
+                        // Since pasteDirect appends strictly in buffer order, newInfos
+                        // is guaranteed to be a monotonic subsequence of pendingCreates.
+                        int pCur = 0;
+                        const int totalPending = static_cast<int>(pendingCreates.size());
+
+                        for (int o = 0; o < newCount; ++o) {
+                            const auto& no = newInfos[o];
+                            int bestP = -1;
+                            int bestScore = 0;
+
+                            int remainingObjs = newCount - 1 - o;
+                            int maxSearchP = totalPending - remainingObjs;
+
+                            for (int p = pCur; p < maxSearchP; ++p) {
+                                int score = computeMatchScore(pendingCreates[p], no);
+                                if (score > bestScore) {
+                                    bestScore = score;
+                                    bestP = p;
+                                }
+                            }
+
+                            if (bestP < 0) {
+                                bestP = pCur;
+                            }
+
+                            // All pendingCreates between pCur and bestP produced NO gobj on canvas
+                            for (int p = pCur; p < bestP; ++p) {
+                                createFailures.push_back({
+                                    pendingCreates[p].tempId.toStdString(),
+                                    pendingCreates[p].objType.toStdString(),
+                                    "couldn't create"
+                                });
+                            }
+
+                            auto& pc = pendingCreates[bestP];
+
+                            // Check if this object is a dummy red box
+                            if (no.isRedBox) {
                                 createFailures.push_back({
                                     pc.tempId.toStdString(),
                                     pc.objType.toStdString(),
@@ -1604,13 +1713,14 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                                 });
                             }
 
-                            processor->mcpStableObjectMap[canvasName.toStdString()][pc.tempId.toStdString()] = newObj;
-                            processor->mcpStableSerialMap[newObj] = processor->mcpSerialCounter++;
+                            // Map the stable tempId to the live gobj pointer
+                            processor->mcpStableObjectMap[canvasName.toStdString()][pc.tempId.toStdString()] = no.ptr;
+                            processor->mcpStableSerialMap[no.ptr] = processor->mcpSerialCounter++;
                             processor->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
 
-                            // Auto-seed line~/vline~ init value (fork ignores creation args).
-                            if (pc.seedInit) {
-                                t_object* so = pd::Interface::checkObject(newObj);
+                            // Auto-seed line~/vline~ init value (fork ignores creation args)
+                            if (pc.seedInit && !no.isRedBox) {
+                                t_object* so = pd::Interface::checkObject(no.ptr);
                                 if (so) {
                                     t_atom sa;
                                     SETFLOAT(&sa, pc.initValue);
@@ -1619,22 +1729,21 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                             }
 
                             createdIds.push_back(pc.tempId.toStdString());
-                            createdPtrs.push_back(newObj);
-                            mappingIndices.push_back(static_cast<int32>(preCreateCount + i));
+                            createdPtrs.push_back(no.ptr);
+                            mappingIndices.push_back(static_cast<int32>(no.glIndex));
                             created++;
+
+                            pCur = bestP + 1;
                         }
 
-                        // Phase A (PRD diagnostic layer): pendingCreates with no
-                        // corresponding live object = create failures, named.
-                        // (Known limitation: pasteDirect appends in buffer order, so
-                        // a mid-batch failure shifts later indices — the tail is
-                        // reported as failed; subsequent batches re-sync via PHASE 0.)
-                        for (int i = static_cast<int>(newCount);
-                             i < static_cast<int>(pendingCreates.size()); ++i) {
+                        // Any remaining pendingCreates after all newInfos were matched
+                        // had no corresponding live object
+                        for (int p = pCur; p < totalPending; ++p) {
                             createFailures.push_back({
-                                pendingCreates[i].tempId.toStdString(),
-                                pendingCreates[i].objType.toStdString(),
-                                "couldn't create" });
+                                pendingCreates[p].tempId.toStdString(),
+                                pendingCreates[p].objType.toStdString(),
+                                "couldn't create"
+                            });
                         }
                     }
 
