@@ -737,6 +737,8 @@ struct Interface {
             _rtext* x_next;
         };
 
+        if (!cnv || !cnv->gl_editor) return;
+
         auto const wasEditMode = cnv->gl_edit;
         canvas_editmode(cnv, 1);
 
@@ -744,6 +746,11 @@ struct Interface {
         glist_select(cnv, obj);
 
         auto* fuddy = reinterpret_cast<_fake_rtext*>(glist_findrtext(cnv, reinterpret_cast<t_text*>(obj)));
+        if (!fuddy) {
+            glist_deselect(cnv, obj);
+            canvas_editmode(cnv, wasEditMode);
+            return;
+        }
         cnv->gl_editor->e_textedfor = reinterpret_cast<t_rtext*>(fuddy);
 
         fuddy->x_buf = static_cast<char*>(resizebytes(fuddy->x_buf, fuddy->x_bufsize, bufsize));

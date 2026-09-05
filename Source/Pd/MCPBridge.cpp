@@ -12,6 +12,7 @@
 #include "Object.h"
 #include "Objects/ObjectBase.h"
 #include "Pd/Interface.h"
+#include "Utility/Fonts.h"
 #include "../../Libraries/fftw3/api/fftw3.h"
 
 #include <set>
@@ -442,6 +443,283 @@ juce::String MCPBridge::computeDiagnoseFacts(PluginProcessor* processor, t_canva
         }
     }
     json += "]}";
+    return json;
+}
+
+MCPBridge::MasterMeterResult MCPBridge::computeMasterMeter(PluginProcessor* processor, t_canvas* cnv, const juce::String& canvasName)
+{
+    MasterMeterResult res;
+    if (!processor || !cnv) return res;
+
+    // Search for master sinks on this canvas in priority order:
+    // 1. [dac~]
+    // 2. [throw~]
+    // 3. [catch~]
+    // 4. [out~]
+    std::vector<t_object*> dacObjs;
+    std::vector<t_object*> throwObjs;
+    std::vector<t_object*> catchObjs;
+    std::vector<t_object*> outObjs;
+
+    for (t_gobj* y = cnv->gl_list; y; y = y->g_next) {
+        if (!y) continue;
+        t_object* ob = pd::Interface::checkObject(y);
+        if (!ob) continue;
+        t_class* cl = pd_class(&y->g_pd);
+        const char* cName = cl ? class_getname(cl) : nullptr;
+        if (!cName) continue;
+        juce::String cStr(cName);
+        if (cStr == "dac~") dacObjs.push_back(ob);
+        else if (cStr == "throw~") throwObjs.push_back(ob);
+        else if (cStr == "catch~") catchObjs.push_back(ob);
+        else if (cStr == "out~") outObjs.push_back(ob);
+    }
+
+    std::vector<t_object*> targetSinks;
+    bool isOutgoingCatch = false;
+    if (!dacObjs.empty()) {
+        targetSinks = dacObjs;
+        res.masterType = "dac~";
+        res.masterFound = true;
+    } else if (!throwObjs.empty()) {
+        targetSinks = throwObjs;
+        res.masterType = "throw~";
+        res.masterFound = true;
+    } else if (!catchObjs.empty()) {
+        targetSinks = catchObjs;
+        res.masterType = "catch~";
+        res.masterFound = true;
+        isOutgoingCatch = true;
+    } else if (!outObjs.empty()) {
+        targetSinks = outObjs;
+        res.masterType = "out~";
+        res.masterFound = true;
+    } else {
+        res.masterFound = false;
+        res.masterType = "none";
+        return res;
+    }
+
+    std::set<t_object*> sinkSet(targetSinks.begin(), targetSinks.end());
+
+    // Traverse all wires and measure signal on connections to/from the target sinks
+    float maxPeak = 0.0f;
+    double totalSumSq = 0.0;
+    int64_t totalSamples = 0;
+
+    t_linetraverser lt;
+    t_outconnect* oc = nullptr;
+    linetraverser_start(&lt, cnv);
+    while ((oc = linetraverser_next_nosize(&lt))) {
+        bool match = false;
+        if (isOutgoingCatch) {
+            if (sinkSet.count(lt.tr_ob) && lt.tr_outno == 0) {
+                match = true;
+            }
+        } else {
+            if (sinkSet.count(lt.tr_ob2)) {
+                match = true;
+            }
+        }
+
+        if (!match) continue;
+
+        t_signal* sig = outconnect_get_signal(oc);
+        if (sig && sig->s_vec && sig->s_n > 0) {
+            for (int i = 0; i < sig->s_n; ++i) {
+                float s = sig->s_vec[i];
+                float abs_s = std::abs(s);
+                totalSumSq += (double)(s * s);
+                if (abs_s > maxPeak) maxPeak = abs_s;
+            }
+            totalSamples += sig->s_n;
+        }
+    }
+
+    float rms = (totalSamples > 0) ? (float)std::sqrt(totalSumSq / (double)totalSamples) : 0.0f;
+    res.rmsDb = (rms > 1e-7f) ? (20.0f * std::log10(rms)) : -100.0f;
+    res.peakDb = (maxPeak > 1e-7f) ? (20.0f * std::log10(maxPeak)) : -100.0f;
+
+    return res;
+}
+
+juce::String MCPBridge::computeSignalTrace(PluginProcessor* processor, t_canvas* cnv, const juce::String& canvasName)
+{
+    if (!processor || !cnv) return "{\"error\":\"canvas not available\"}";
+
+    // 1. Map objects and tempIds
+    std::vector<t_gobj*> objs;
+    std::vector<juce::String> names;
+    std::vector<juce::String> classNames;
+    std::unordered_map<t_gobj*, juce::String> ptrToId;
+    auto mapIt = processor->mcpStableObjectMap.find(canvasName.toStdString());
+    if (mapIt != processor->mcpStableObjectMap.end())
+        for (auto& [tid, ptr] : mapIt->second)
+            if (ptr) ptrToId[ptr] = juce::String(tid);
+
+    int idx = 0;
+    for (t_gobj* y = cnv->gl_list; y; y = y->g_next, ++idx) {
+        if (!y) continue;
+        objs.push_back(y);
+        t_class* cl = pd_class(&y->g_pd);
+        const char* cName = cl ? class_getname(cl) : nullptr;
+        juce::String clStr = cName ? juce::String(cName) : juce::String("unknown");
+        classNames.push_back(clStr);
+        names.push_back(ptrToId.count(y)
+            ? ptrToId[y]
+            : (clStr + "#" + juce::String(idx)));
+    }
+
+    int numObjs = (int)objs.size();
+    std::vector<float> maxInPeak(numObjs, 0.0f);
+    std::vector<float> maxOutPeak(numObjs, 0.0f);
+    std::vector<int> incomingSigWires(numObjs, 0);
+    std::vector<int> outgoingSigWires(numObjs, 0);
+    std::vector<std::unordered_map<int, float>> inletPeaks(numObjs);
+    std::vector<std::unordered_map<int, std::vector<int>>> inletSources(numObjs);
+
+    t_linetraverser lt;
+    t_outconnect* oc = nullptr;
+    linetraverser_start(&lt, cnv);
+    while ((oc = linetraverser_next_nosize(&lt))) {
+        int si = -1, di = -1;
+        for (int i = 0; i < numObjs; ++i) {
+            if (objs[i] == &lt.tr_ob->ob_g) si = i;
+            if (objs[i] == &lt.tr_ob2->ob_g) di = i;
+        }
+        if (si < 0 || di < 0) continue;
+
+        bool isSig = (lt.tr_outlet->o_sym == gensym("signal"));
+        if (!isSig) continue;
+
+        float wirePeak = 0.0f;
+        t_signal* sig = outconnect_get_signal(oc);
+        if (sig && sig->s_vec && sig->s_n > 0) {
+            for (int k = 0; k < sig->s_n; ++k) {
+                float val = std::abs(sig->s_vec[k]);
+                if (val > wirePeak) wirePeak = val;
+            }
+        }
+
+        outgoingSigWires[si]++;
+        if (wirePeak > maxOutPeak[si]) maxOutPeak[si] = wirePeak;
+
+        incomingSigWires[di]++;
+        if (wirePeak > maxInPeak[di]) maxInPeak[di] = wirePeak;
+        inletPeaks[di][lt.tr_inno] = std::max(inletPeaks[di][lt.tr_inno], wirePeak);
+        inletSources[di][lt.tr_inno].push_back(si);
+    }
+
+    constexpr float ALIVE_THRESH = 1e-4f; // -80 dBFS
+    std::vector<juce::String> liveSources;
+    std::vector<juce::String> silentGenerators;
+    std::vector<juce::String> silentEnvelopes;
+
+    int dacIndex = -1;
+    for (int i = 0; i < numObjs; ++i) {
+        const juce::String& c = classNames[i];
+        if (c == "dac~") dacIndex = i;
+
+        bool isGen = (c == "osc~" || c == "phasor~" || c == "noise~" || c == "sig~" ||
+                      c == "tabread4~" || c == "tabread~" || c == "tabplay~" || c == "adc~");
+        bool isEnv = (c == "vline~" || c == "line~" || c == "adsr~" || c == "envgen~");
+
+        if (isGen) {
+            if (maxOutPeak[i] >= ALIVE_THRESH) {
+                liveSources.push_back(names[i]);
+            } else if (outgoingSigWires[i] > 0) {
+                silentGenerators.push_back(names[i]);
+            }
+        } else if (isEnv) {
+            if (maxOutPeak[i] < ALIVE_THRESH && outgoingSigWires[i] > 0) {
+                silentEnvelopes.push_back(names[i]);
+            }
+        } else if (incomingSigWires[i] == 0 && outgoingSigWires[i] > 0 && maxOutPeak[i] >= ALIVE_THRESH) {
+            liveSources.push_back(names[i]);
+        }
+    }
+
+    int chokeIndex = -1;
+    juce::String chokeReason;
+
+    for (int i = 0; i < numObjs; ++i) {
+        const juce::String& c = classNames[i];
+        if (c == "dac~" || c == "throw~" || c == "out~") continue;
+
+        if (maxInPeak[i] >= ALIVE_THRESH && maxOutPeak[i] < ALIVE_THRESH) {
+            chokeIndex = i;
+            if (c == "*~") {
+                float inlet1Signal = inletPeaks[i].count(1) ? inletPeaks[i][1] : 0.0f;
+                if (inletSources[i].count(1) && !inletSources[i][1].empty()) {
+                    int srcI = inletSources[i][1][0];
+                    if (inlet1Signal < ALIVE_THRESH) {
+                        chokeReason = "multiplier control inlet 1 is zero from envelope '" + names[srcI] + "' (envelope did not trigger or [r gate] missing)";
+                    } else {
+                        chokeReason = "multiplier output is silent despite control signal on inlet 1";
+                    }
+                } else {
+                    chokeReason = "multiplier control inlet 1 is zero or disconnected (silent VCA)";
+                }
+            } else if (c == "vcf~" || c == "lop~" || c == "hip~" || c == "bp~") {
+                chokeReason = "filter attenuated signal to silence (cutoff may be at 0 Hz)";
+            } else {
+                float inDb = 20.0f * std::log10(maxInPeak[i] + 1e-7f);
+                float outDb = 20.0f * std::log10(maxOutPeak[i] + 1e-7f);
+                chokeReason = "signal died at this object (input " + juce::String(inDb, 1) + " dBFS, output " + juce::String(outDb, 1) + " dBFS)";
+            }
+            break;
+        }
+    }
+
+    if (chokeIndex < 0) {
+        if (!silentGenerators.empty() && liveSources.empty()) {
+            chokeReason = "sound generator '" + silentGenerators[0] + "' is silent (check frequency or pitch receiver)";
+            for (int i = 0; i < numObjs; ++i) {
+                if (names[i] == silentGenerators[0]) { chokeIndex = i; break; }
+            }
+        } else if (!silentEnvelopes.empty() && liveSources.empty()) {
+            chokeReason = "envelope generator '" + silentEnvelopes[0] + "' output is zero (envelope did not trigger)";
+            for (int i = 0; i < numObjs; ++i) {
+                if (names[i] == silentEnvelopes[0]) { chokeIndex = i; break; }
+            }
+        } else if (!liveSources.empty()) {
+            if (dacIndex >= 0 && maxInPeak[dacIndex] < ALIVE_THRESH) {
+                chokeReason = "signal generated by '" + liveSources[0] + "' never reaches dac~ (broken signal path)";
+                chokeIndex = dacIndex;
+            } else {
+                chokeReason = "sound generated but not reaching master sink";
+            }
+        } else {
+            chokeReason = "no active audio sources found on canvas";
+        }
+    }
+
+    juce::String chokeName = (chokeIndex >= 0 && chokeIndex < numObjs) ? names[chokeIndex] : "none";
+    juce::String chokeClass = (chokeIndex >= 0 && chokeIndex < numObjs) ? classNames[chokeIndex] : "none";
+    float inDb = (chokeIndex >= 0 && chokeIndex < numObjs && maxInPeak[chokeIndex] > 1e-7f)
+        ? (20.0f * std::log10(maxInPeak[chokeIndex])) : -100.0f;
+    float outDb = (chokeIndex >= 0 && chokeIndex < numObjs && maxOutPeak[chokeIndex] > 1e-7f)
+        ? (20.0f * std::log10(maxOutPeak[chokeIndex])) : -100.0f;
+
+    juce::String json = "{";
+    json += "\"canvas\":\"" + canvasName + "\",";
+    json += "\"chokePoint\":\"" + chokeName + "\",";
+    json += "\"class\":\"" + chokeClass + "\",";
+    json += "\"inputLevelDb\":" + juce::String(inDb, 1) + ",";
+    json += "\"outputLevelDb\":" + juce::String(outDb, 1) + ",";
+    json += "\"reason\":\"" + chokeReason.replace("\"", "\\\"") + "\",";
+    json += "\"liveSources\":[";
+    for (size_t i = 0; i < liveSources.size(); ++i) {
+        if (i > 0) json += ",";
+        json += "\"" + liveSources[i] + "\"";
+    }
+    json += "],\"silentEnvelopes\":[";
+    for (size_t i = 0; i < silentEnvelopes.size(); ++i) {
+        if (i > 0) json += ",";
+        json += "\"" + silentEnvelopes[i] + "\"";
+    }
+    json += "]}";
+
     return json;
 }
 
@@ -1236,25 +1514,8 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         }
                     }
 
-                    // PHASE 1: DELETE — safe deletion handling:
-                    // PHASE 1: DELETE — audio-thread-safe object removal (zero undo/GUI
-                    // overhead; editor reconciles via trailing synchroniseCanvases).
-                    SmallArray<t_gobj*> toDelete;
-                    for (auto& pd : preDeletes) {
-                        t_gobj* obj = processor->resolveStableId(canvasName, pd.objectId);
-                        if (obj) {
-                            processor->mcpStableObjectMap[canvasName.toStdString()].erase(pd.objectId.toStdString());
-                            processor->mcpStableSerialMap.erase(obj);
-                            processor->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
-                            toDelete.add(obj);
-                            deleted++;
-                        }
-                    }
-                    if (toDelete.size() > 0) {
-                        pd::Interface::removeObjectsAudioThread(cnv, toDelete);
-                    }
-
-                    // PHASE 2: DISCONNECT
+                    // PHASE 1: DISCONNECT — remove wires BEFORE objects are deleted
+                    // so endpoints and stable IDs remain valid for clean unlinking.
                     for (auto& pdc : preDisconnects) {
                         t_gobj* sg = processor->resolveStableId(canvasName, pdc.srcId);
                         t_gobj* dg = processor->resolveStableId(canvasName, pdc.destId);
@@ -1276,6 +1537,23 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                                 disconnected++;
                             }
                         }
+                    }
+
+                    // PHASE 2: DELETE — audio-thread-safe object removal (zero undo/GUI
+                    // overhead; editor reconciles via trailing synchroniseCanvases).
+                    SmallArray<t_gobj*> toDelete;
+                    for (auto& pd : preDeletes) {
+                        t_gobj* obj = processor->resolveStableId(canvasName, pd.objectId);
+                        if (obj) {
+                            processor->mcpStableObjectMap[canvasName.toStdString()].erase(pd.objectId.toStdString());
+                            processor->mcpStableSerialMap.erase(obj);
+                            processor->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+                            toDelete.add(obj);
+                            deleted++;
+                        }
+                    }
+                    if (toDelete.size() > 0) {
+                        pd::Interface::removeObjectsAudioThread(cnv, toDelete);
                     }
 
                     // PHASE 3: EDIT
@@ -3467,6 +3745,246 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         return;
     }
 
+    if (action == "encapsulate_gop") {
+        // PRD GOP Module v2 Phase A: atomic parent-canvas swap for a TS-generated
+        // MERDA abstraction. TS already generated + wrote the .pd file (file bytes
+        // never cross OSC); C++ does delete-originals + create-[module] + rewire
+        // parent boundary under ONE sys_lock + ONE canvas_update_dsp.
+        // Args: [canvasName, moduleName, filePath, jsonSpec, correlationId]
+        // jsonSpec: {"targetIds":["tid",...],
+        //            "inbound":[{"src":"tid","out":0,"in":0}],   // parent→box
+        //            "outbound":[{"out":0,"dest":"tid","in":0}], // box→parent
+        //            "posX":123,"posY":45}
+        // Reply: JSON string on /pd/encapsulate_gop/reply/<corrId>.
+        // NOTE: native UndoSequence is Phase B; undo is via TS rollback snapshot.
+        if (msg.size() >= 4 && processor) {
+            auto canvasName = normalizeCanvas(getArgString(msg[0]));
+            auto moduleName  = getArgString(msg[1]).trim();
+            auto filePath    = getArgString(msg[2]);
+            auto jsonSpec    = getArgString(msg[3]);
+            auto correlationId = (msg.size() > 4) ? getArgString(msg[4]) : juce::String("0");
+            auto replyAddr = "/pd/encapsulate_gop/reply/" + correlationId;
+
+            juce::String safeName;
+            for (auto c : moduleName) {
+                if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.')
+                    safeName += c;
+            }
+            if (safeName.endsWith(".pd")) safeName = safeName.dropLastCharacters(3);
+
+            // Pre-parse JSON outside the message-thread lambda (zero contention).
+            juce::StringArray targetIds;
+            struct GopIn { juce::String src; int srcOut; int boxIn; };
+            struct GopOut { int boxOut; juce::String dest; int destIn; };
+            std::vector<GopIn> inbound;
+            std::vector<GopOut> outbound;
+            int posX = 0, posY = 0;
+            juce::String specError;
+            {
+                juce::var parsed = juce::JSON::parse(jsonSpec);
+                if (auto* o = parsed.getDynamicObject()) {
+                    if (auto* arr = o->getProperty("targetIds").getArray())
+                        for (auto& v : *arr) targetIds.add(v.toString());
+                    if (auto* arr = o->getProperty("inbound").getArray())
+                        for (auto& e : *arr)
+                            if (auto* w = e.getDynamicObject())
+                                inbound.push_back({ w->getProperty("src").toString(),
+                                    static_cast<int>(w->getProperty("out")),
+                                    static_cast<int>(w->getProperty("in")) });
+                    if (auto* arr = o->getProperty("outbound").getArray())
+                        for (auto& e : *arr)
+                            if (auto* w = e.getDynamicObject())
+                                outbound.push_back({ static_cast<int>(w->getProperty("out")),
+                                    w->getProperty("dest").toString(),
+                                    static_cast<int>(w->getProperty("in")) });
+                    posX = static_cast<int>(o->getProperty("posX"));
+                    posY = static_cast<int>(o->getProperty("posY"));
+                } else {
+                    specError = "spec JSON parse failed";
+                }
+            }
+
+            if (safeName.isEmpty()) {
+                sendReply(replyAddr, juce::String("{\"ok\":false,\"error\":\"GOP_BAD_NAME\",\"detail\":\"empty module name\"}"));
+            } else if (specError.isNotEmpty()) {
+                sendReply(replyAddr, juce::String("{\"ok\":false,\"error\":\"GOP_BAD_SPEC\",\"detail\":\"" + specError + "\"}"));
+            } else if (targetIds.isEmpty()) {
+                sendReply(replyAddr, juce::String("{\"ok\":false,\"error\":\"GOP_BAD_SPEC\",\"detail\":\"no targetIds\"}"));
+            } else {
+                t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+                if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
+                if (!cnv) {
+                    sendReply(replyAddr, juce::String("{\"ok\":false,\"error\":\"GOP_NO_CANVAS\",\"detail\":\"" + canvasName + "\"}"));
+                } else {
+                    juce::MessageManager::callAsync([proc = processor, cnv, canvasName, safeName, filePath, targetIds, inbound, outbound, posX, posY, correlationId, replyAddr, bridge = this]() {
+                        // Resolve everything BEFORE touching the canvas.
+                        SmallArray<t_gobj*> toDelete;
+                        juce::StringArray missing;
+                        for (auto& tid : targetIds) {
+                            if (t_gobj* g = proc->resolveStableId(canvasName, tid))
+                                toDelete.add(g);
+                            else
+                                missing.add(tid);
+                        }
+                        struct ResWire { t_gobj* far; int farPort; int boxPort; };
+                        std::vector<ResWire> inWires;
+                        std::vector<ResWire> outWires;
+                        for (auto& w : inbound) {
+                            if (t_gobj* g = proc->resolveStableId(canvasName, w.src))
+                                inWires.push_back({ g, w.srcOut, w.boxIn });
+                            else
+                                missing.add(w.src);
+                        }
+                        for (auto& w : outbound) {
+                            if (t_gobj* g = proc->resolveStableId(canvasName, w.dest))
+                                outWires.push_back({ g, w.destIn, w.boxOut });
+                            else
+                                missing.add(w.dest);
+                        }
+                        if (missing.size() > 0) {
+                            bridge->sendReply(replyAddr, "{\"ok\":false,\"error\":\"GOP_TARGET_NOT_FOUND\",\"detail\":\"" + missing.joinIntoString(",") + "\"}");
+                            return;
+                        }
+
+                        // Drop boundary wires whose far endpoint sits INSIDE the
+                        // delete set (stale spec): after deletion those pointers
+                        // are freed and obj_connect would UAF on them.
+                        juce::StringArray staleErrs;
+                        {
+                            std::unordered_set<t_gobj*> doomed;
+                            for (auto* g : toDelete) doomed.insert(g);
+                            auto stale = [&](t_gobj* far) { return doomed.find(far) != doomed.end(); };
+                            inWires.erase(std::remove_if(inWires.begin(), inWires.end(),
+                                [&](auto& w) {
+                                    if (stale(w.far)) { staleErrs.add("stale-in:" + juce::String(w.boxPort)); return true; }
+                                    return false;
+                                }), inWires.end());
+                            outWires.erase(std::remove_if(outWires.begin(), outWires.end(),
+                                [&](auto& w) {
+                                    if (stale(w.far)) { staleErrs.add("stale-out:" + juce::String(w.boxPort)); return true; }
+                                    return false;
+                                }), outWires.end());
+                        }
+
+                        int connected = 0;
+                        juce::StringArray connErrs;
+                        juce::String newTempId;
+                        sys_lock();
+                        {
+                            // 1. Create the abstraction box FIRST so a red-box
+                            // failure leaves the originals untouched.
+                            juce::String objLine = "#X obj " + juce::String(posX) + " " + juce::String(posY) + " " + safeName + ";";
+                            pasteDirect(cnv, objLine.toRawUTF8());
+                            t_gobj* newObj = pd::Interface::getNewest(cnv);
+                            t_object* newOb = newObj ? pd::Interface::checkObject(newObj) : nullptr;
+                            bool redBox = !newOb || (newOb->te_type == T_OBJECT && pd_class(&newObj->g_pd) == text_class);
+                            if (redBox) {
+                                // Roll the failed box back out; originals intact.
+                                if (newObj) glist_delete(cnv, newObj);
+                                canvas_update_dsp();
+                                bridge->sendReply(replyAddr, "{\"ok\":false,\"error\":\"GOP_CREATE_FAILED\",\"detail\":\"[" + safeName + "] couldn't create (red box)\"}");
+                            } else {
+                                // 2. Delete originals via the message-thread-safe
+                                // remover. removeObjects() clears selection first (noselect),
+                                // opens UNDO_SEQUENCE_START, records UNDO_CUT, and suspends DSP around free.
+                                for (auto* g : toDelete) {
+                                    proc->mcpStableObjectMap[canvasName.toStdString()].erase(
+                                        [&]() -> std::string {
+                                            for (auto& [tid, ptr] : proc->mcpStableObjectMap[canvasName.toStdString()])
+                                                if (ptr == g) return tid;
+                                            return "";
+                                        }());
+                                    proc->mcpStableSerialMap.erase(g);
+                                }
+                                pd::Interface::removeObjectsAudioThread(cnv, toDelete);
+                                proc->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+
+                                // 3. Rewire parent boundary through the new box with createConnection.
+                                for (auto& w : inWires) {
+                                    t_object* so = pd::Interface::checkObject(w.far);
+                                    if (so && newOb && pd::Interface::createConnection(cnv, so, w.farPort, newOb, w.boxPort))
+                                        connected++;
+                                    else
+                                        connErrs.add("in:" + juce::String(w.boxPort));
+                                }
+                                for (auto& w : outWires) {
+                                    t_object* d_o = pd::Interface::checkObject(w.far);
+                                    if (d_o && newOb && pd::Interface::createConnection(cnv, newOb, w.boxPort, d_o, w.farPort))
+                                        connected++;
+                                    else
+                                        connErrs.add("out:" + juce::String(w.boxPort));
+                                }
+                                canvas_dirty(cnv, 1);
+                                // Single DSP recompile for the whole swap.
+                                canvas_update_dsp();
+
+                                // Clear undo queue safely on Pd scheduler thread to prevent stale pointer crashes on Ctrl+Z.
+                                SmallArray<pd::Atom> undoAtoms;
+                                undoAtoms.add(pd::Atom(proc->generateSymbol(canvasName)));
+                                proc->receiveSysMessage("mcp_clear_undo", undoAtoms);
+                                for (auto& e : staleErrs) connErrs.add(e);
+                                proc->mcpStableObjectMap[canvasName.toStdString()][safeName.toStdString()] = newObj;
+                                proc->mcpSerialCounter++;
+                                proc->mcpStableSerialMap[newObj] = proc->mcpSerialCounter;
+                                proc->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+                                newTempId = safeName;
+                            }
+                        }
+                        sys_unlock();
+
+                        if (newTempId.isEmpty()) return; // error reply already sent
+
+                        // Sync GUI so plugdata displays the newly instantiated abstraction.
+                        proc->enqueueFunctionAsync([p = proc] { p->synchroniseCanvases(); });
+
+                        juce::String receipt = "{\"ok\":true,\"tempId\":\"" + newTempId
+                            + "\",\"inlets\":" + juce::String(static_cast<int>(inWires.size()))
+                            + ",\"outlets\":" + juce::String(static_cast<int>(outWires.size()))
+                            + ",\"connected\":" + juce::String(connected)
+                            + ",\"warnings\":[" + [&]() -> juce::String {
+                                juce::StringArray q;
+                                for (auto& e : connErrs) q.add("\"" + e + "\"");
+                                return q.joinIntoString(",");
+                            }() + "]}";
+                        bridge->sendReply(replyAddr, receipt);
+                    });
+                }
+            }
+        }
+        return;
+    }
+
+    if (action == "measure_text") {
+        // /pd/measure_text <jsonStringsArray> <fontSize> <correlationId>
+        // Fast font metrics batch using JUCE Font / Inter font.
+        // Returns: /pd/measure_text/reply/<corrId> {"text": width, ...}
+        if (msg.size() >= 2) {
+            auto jsonArrayStr  = getArgString(msg[0]);
+            float fontSize     = getArgFloat(msg[1]);
+            if (fontSize <= 0.0f) fontSize = 12.0f;
+            auto correlationId = (msg.size() > 2) ? getArgString(msg[2]) : "0";
+            auto replyAddr     = "/pd/measure_text/reply/" + correlationId;
+
+            juce::var parsed = juce::JSON::parse(jsonArrayStr);
+            juce::Font font = Fonts::getCurrentFont().withHeight(fontSize);
+            auto* resultObj = new juce::DynamicObject();
+
+            if (auto* arr = parsed.getArray()) {
+                for (const auto& item : *arr) {
+                    auto str = item.toString();
+                    resultObj->setProperty(str, font.getStringWidth(str));
+                }
+            } else if (parsed.isString()) {
+                auto str = parsed.toString();
+                resultObj->setProperty(str, font.getStringWidth(str));
+            }
+
+            juce::String jsonResult = juce::JSON::toString(juce::var(resultObj));
+            sendReply(replyAddr, jsonResult);
+        }
+        return;
+    }
+
     if (action == "tidy") {
         if (msg.size() >= 2 && processor) {
             auto canvasName = normalizeCanvas(getArgString(msg[0]));
@@ -4553,6 +5071,8 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
         reply.addArgument(juce::String("delete_batch_id"));
         reply.addArgument(juce::String("meter"));
         reply.addArgument(juce::String("meter_query"));
+        reply.addArgument(juce::String("meter_master"));
+        reply.addArgument(juce::String("meter_trace"));
         reply.addArgument(juce::String("inline_mappings"));
         reply.addArgument(juce::String("array_bulk"));
         reply.addArgument(juce::String("census"));
@@ -4575,6 +5095,11 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
         reply.addArgument(juce::String("close_tab"));
         // PRD diagnostic layer: the graph X-ray
         reply.addArgument(juce::String("diagnose"));
+        // PRD GOP Module v2 Phase A: atomic parent-canvas swap for TS-generated
+        // MERDA abstractions (single delete+create+rewire under one DSP update)
+        reply.addArgument(juce::String("encapsulate_gop"));
+        // PRD GOP Module v2 Phase B: font measurement for pixel-perfect GOP layout
+        reply.addArgument(juce::String("measure_text"));
         // PRD layout-v2 Phase A: read-only layout facts (C++ truth of layout)
         reply.addArgument(juce::String("bounds"));
         reply.addArgument(juce::String("collisions"));
@@ -5509,6 +6034,81 @@ void MCPBridge::handleMeterDomain(const juce::String& meterAction, const juce::O
         rep.addArgument(static_cast<int32>(activeCount));
         rep.addArgument(static_cast<int32>(debugEnabled));
         sender.send(rep);
+        return;
+    }
+
+    if (meterAction == "master") {
+        // /meter/master <canvasName> <correlationId>
+        if (msg.size() < 1) return;
+        auto canvasName = normalizeCanvas(getArgString(msg[0]));
+        juce::String correlationId = msg.size() > 1 ? getArgString(msg[1]) : "0";
+
+        bool justActivated = activateProbing();
+        if (justActivated) {
+            juce::Thread::sleep(5);
+        }
+
+        t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+        if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
+        if (!cnv) {
+            juce::OSCMessage rep { juce::OSCAddressPattern("/meter/master/reply/" + correlationId) };
+            rep.addArgument(-100.0f);
+            rep.addArgument(-100.0f);
+            rep.addArgument(static_cast<int32>(0));
+            rep.addArgument(juce::String("canvas_not_found"));
+            sender.send(rep);
+            return;
+        }
+
+        sys_lock();
+        MasterMeterResult res;
+        try {
+            res = computeMasterMeter(processor, cnv, canvasName);
+        } catch (...) {
+            res.peakDb = -100.0f;
+            res.rmsDb = -100.0f;
+            res.masterFound = false;
+            res.masterType = "error";
+        }
+        sys_unlock();
+
+        juce::OSCMessage rep { juce::OSCAddressPattern("/meter/master/reply/" + correlationId) };
+        rep.addArgument(res.peakDb);
+        rep.addArgument(res.rmsDb);
+        rep.addArgument(static_cast<int32>(res.masterFound ? 1 : 0));
+        rep.addArgument(res.masterType);
+        sender.send(rep);
+        return;
+    }
+
+    if (meterAction == "trace") {
+        // /meter/trace <canvasName> <correlationId>
+        if (msg.size() < 1) return;
+        auto canvasName = normalizeCanvas(getArgString(msg[0]));
+        juce::String correlationId = msg.size() > 1 ? getArgString(msg[1]) : "0";
+
+        bool justActivated = activateProbing();
+        if (justActivated) {
+            juce::Thread::sleep(5);
+        }
+
+        t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+        if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
+        if (!cnv) {
+            sendReply("/meter/trace/reply/" + correlationId, "{\"error\":\"canvas not found: " + canvasName + "\"}");
+            return;
+        }
+
+        sys_lock();
+        juce::String json;
+        try {
+            json = computeSignalTrace(processor, cnv, canvasName);
+        } catch (...) {
+            json = "{\"error\":\"trace failed: exception under sys_lock\"}";
+        }
+        sys_unlock();
+
+        sendReply("/meter/trace/reply/" + correlationId, json);
         return;
     }
 }

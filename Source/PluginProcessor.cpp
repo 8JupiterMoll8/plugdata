@@ -2230,7 +2230,14 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
             auto canvas_symbol = list[0].toString();
             t_canvas* cnv = getCanvasBySymbol(canvas_symbol);
             if (!cnv && (canvas_symbol == "pd-main")) cnv = pd_this->pd_canvaslist;
-            if (cnv) canvas_undo_free(cnv);
+            if (cnv) {
+                canvas_undo_free(cnv);
+                if (auto* udo = canvas_undo_get(cnv)) {
+                    udo->u_queue = nullptr;
+                    udo->u_last = nullptr;
+                    udo->u_cleanstate = nullptr;
+                }
+            }
         }
         break;
     }

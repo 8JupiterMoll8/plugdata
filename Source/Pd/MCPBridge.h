@@ -233,6 +233,16 @@ private:
 
     static juce::String computeDiagnoseFacts(PluginProcessor* processor, t_canvas* cnv, const juce::String& canvasName);
 
+    struct MasterMeterResult {
+        float peakDb = -100.0f;
+        float rmsDb = -100.0f;
+        bool masterFound = false;
+        juce::String masterType = "none";
+    };
+
+    static MasterMeterResult computeMasterMeter(PluginProcessor* processor, t_canvas* cnv, const juce::String& canvasName);
+    static juce::String computeSignalTrace(PluginProcessor* processor, t_canvas* cnv, const juce::String& canvasName);
+
     void timerCallback() override;
 
     struct MorphParam {
