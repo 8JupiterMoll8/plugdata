@@ -1711,27 +1711,27 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                                     pc.objType.toStdString(),
                                     "couldn't create"
                                 });
-                            }
+                            } else {
+                                // Map the stable tempId to the live gobj pointer
+                                processor->mcpStableObjectMap[canvasName.toStdString()][pc.tempId.toStdString()] = no.ptr;
+                                processor->mcpStableSerialMap[no.ptr] = processor->mcpSerialCounter++;
+                                processor->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
 
-                            // Map the stable tempId to the live gobj pointer
-                            processor->mcpStableObjectMap[canvasName.toStdString()][pc.tempId.toStdString()] = no.ptr;
-                            processor->mcpStableSerialMap[no.ptr] = processor->mcpSerialCounter++;
-                            processor->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
-
-                            // Auto-seed line~/vline~ init value (fork ignores creation args)
-                            if (pc.seedInit && !no.isRedBox) {
-                                t_object* so = pd::Interface::checkObject(no.ptr);
-                                if (so) {
-                                    t_atom sa;
-                                    SETFLOAT(&sa, pc.initValue);
-                                    pd_typedmess(reinterpret_cast<t_pd*>(so), gensym("float"), 1, &sa);
+                                // Auto-seed line~/vline~ init value (fork ignores creation args)
+                                if (pc.seedInit) {
+                                    t_object* so = pd::Interface::checkObject(no.ptr);
+                                    if (so) {
+                                        t_atom sa;
+                                        SETFLOAT(&sa, pc.initValue);
+                                        pd_typedmess(reinterpret_cast<t_pd*>(so), gensym("float"), 1, &sa);
+                                    }
                                 }
-                            }
 
-                            createdIds.push_back(pc.tempId.toStdString());
-                            createdPtrs.push_back(no.ptr);
-                            mappingIndices.push_back(static_cast<int32>(no.glIndex));
-                            created++;
+                                createdIds.push_back(pc.tempId.toStdString());
+                                createdPtrs.push_back(no.ptr);
+                                mappingIndices.push_back(static_cast<int32>(no.glIndex));
+                                created++;
+                            }
 
                             pCur = bestP + 1;
                         }
