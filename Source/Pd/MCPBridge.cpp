@@ -11,6 +11,7 @@
 #include "TabComponent.h"
 #include "Object.h"
 #include "Objects/ObjectBase.h"
+#include "Objects/AllGuis.h" // t_fake_knob raw snd/rcv fields for screenshot labels
 #include "Pd/Interface.h"
 #include "Utility/Fonts.h"
 #include "../../Libraries/fftw3/api/fftw3.h"
@@ -18,14 +19,24 @@
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
+#include <atomic>
 #include <cstdlib>
+#include <thread>
+#include <vector>
+
 
 extern "C" {
 #include <m_pd.h>
 #include <g_canvas.h>
 #include <s_inter.h>
+#include <g_all_guis.h> // t_iemgui x_snd/x_rcv for screenshot GUI-widget labels
 
 extern t_class *text_class;
+
+// pd-else knob: snd/rcv are lazily parsed from the binbuf — the GUI calls these
+// before reading x_snd_raw/x_rcv_raw (KnobObject.h); screenshot labels do the same.
+extern "C" void knob_get_snd(void* x);
+extern "C" void knob_get_rcv(void* x);
 
 struct _outlet
 {
@@ -271,6 +282,286 @@ static juce::String formatAsPdLine(const juce::String& kind,
     return "#X obj " + juce::String(x) + " " + juce::String(y)
            + " " + escapePdObjArgs(t.joinIntoString(" ").trim()) + ";";
 }
+
+// =========================================================================
+// Offline Render (/pd/render)
+// =========================================================================
+
+static float estimateFrequency(const float* buf, int n, float sampleRate); // defined near ProbeManager
+
+// Single-flight guard — one render at a time. File-static: the OSC thread
+// (claim/release around launch) and the render thread (release at exit) are
+// the only touchers.
+static std::atomic<bool> mcpRenderActive { false };
+
+// RAII: ensures live audio is resumed + the single-flight flag is cleared on
+// every exit path of the render thread (including early failures).
+struct RenderGuard {
+    PluginProcessor* proc;
+    ~RenderGuard()
+    {
+        if (proc)
+            proc->suspendProcessing(false);
+        mcpRenderActive.store(false);
+    }
+};
+
+// Spectral analysis over the baked render buffer. Reuses the /meter/spectral
+// feature set (Hann window + FFTW r2c on the final 1024 samples of the
+// loudest channel) so the JSON keys match what the server already parses.
+static juce::String renderSpectralJson(float const* data, int n, double sampleRate)
+{
+    constexpr int N = PROBE_RING_SIZE; // 1024
+    if (n < N || !data || sampleRate <= 0.0)
+        return {};
+
+    // Hann window over the final N samples
+    std::array<float, N> windowed {};
+    for (int i = 0; i < N; ++i) {
+        float const w = 0.5f * (1.0f - std::cos(2.0f * juce::MathConstants<float>::pi * i / (N - 1)));
+        windowed[i] = data[n - N + i] * w;
+    }
+
+    // RMS / peak over the full analyzed window (unwindowed)
+    double sumSq = 0.0;
+    float maxPeak = 0.0f;
+    for (int i = n - N; i < n; ++i) {
+        float const s = std::abs(data[i]);
+        sumSq += (double)(data[i] * data[i]);
+        if (s > maxPeak) maxPeak = s;
+    }
+    float const rms = (float)std::sqrt(sumSq / N);
+
+    // FFT (single precision, same as the probe path)
+    std::array<float, N> fftInput {};
+    std::copy(windowed.begin(), windowed.end(), fftInput.begin());
+    constexpr int NBINS = N / 2 + 1;
+    std::vector<fftwf_complex> fftOutput(NBINS);
+    fftwf_plan plan = fftwf_plan_dft_r2c_1d(N, fftInput.data(),
+        reinterpret_cast<fftwf_complex*>(fftOutput.data()), FFTW_ESTIMATE);
+    fftwf_execute(plan);
+    fftwf_destroy_plan(plan);
+
+    float const binHz = (float)sampleRate / (float)N;
+
+    double sumWeightedFreq = 0.0, sumMag = 0.0;
+    double logSum = 0.0;
+    int magCount = 0;
+    float maxMag = 0.0f;
+    int maxBin = 0;
+    for (int i = 1; i < NBINS; ++i) { // skip DC
+        float const re = fftOutput[i][0];
+        float const im = fftOutput[i][1];
+        float const mag = std::sqrt(re * re + im * im);
+        float const freq = i * binHz;
+        sumWeightedFreq += (double)(mag * freq);
+        sumMag += (double)mag;
+        if (mag > 1e-10f) {
+            logSum += std::log((double)mag);
+            magCount++;
+        }
+        if (mag > maxMag) {
+            maxMag = mag;
+            maxBin = i;
+        }
+    }
+
+    float const spectralCentroid = (sumMag > 1e-10) ? (float)(sumWeightedFreq / sumMag) : 0.0f;
+    double const arithmeticMean = (magCount > 0) ? (sumMag / magCount) : 0.0;
+    double const geometricMean = (magCount > 0) ? std::exp(logSum / magCount) : 0.0;
+    float spectralFlatness = (arithmeticMean > 1e-10)
+        ? (float)(geometricMean / arithmeticMean) : 0.0f;
+    spectralFlatness = juce::jlimit(0.0f, 1.0f, spectralFlatness);
+
+    // Rolloff (85% of spectral energy)
+    double sumEnergy = 0.0;
+    std::vector<double> binEnergy(NBINS, 0.0);
+    for (int i = 1; i < NBINS; ++i) {
+        float const re = fftOutput[i][0];
+        float const im = fftOutput[i][1];
+        binEnergy[i] = (double)(re * re + im * im);
+        sumEnergy += binEnergy[i];
+    }
+    float rolloffFreq = 0.0f;
+    if (sumEnergy > 1e-12) {
+        double acc = 0.0;
+        for (int i = 1; i < NBINS; ++i) {
+            acc += binEnergy[i];
+            if (acc >= 0.85 * sumEnergy) {
+                rolloffFreq = i * binHz;
+                break;
+            }
+        }
+    }
+
+    // Top-8 harmonic peaks (local maxima above 1% of max magnitude)
+    juce::Array<juce::var> peaksArr;
+    for (int i = 2; i < NBINS - 1 && peaksArr.size() < 8; ++i) {
+        auto magAt = [&](int k) {
+            return std::sqrt(fftOutput[k][0] * fftOutput[k][0] + fftOutput[k][1] * fftOutput[k][1]);
+        };
+        float const m = magAt(i);
+        if (m > 0.01f * maxMag && m >= magAt(i - 1) && m >= magAt(i + 1)) {
+            float const db = (m > 1e-7f) ? (20.0f * std::log10(m)) : -100.0f;
+            auto* p = new juce::DynamicObject();
+            p->setProperty("freq", i * binHz);
+            p->setProperty("dB", db);
+            peaksArr.add(juce::var(p));
+        }
+    }
+
+    float const rmsDb = (rms > 1e-7f) ? (20.0f * std::log10(rms)) : -100.0f;
+    float const peakDb = (maxPeak > 1e-7f) ? (20.0f * std::log10(maxPeak)) : -100.0f;
+    float const crestFactor = (rms > 1e-7f) ? (maxPeak / rms) : 0.0f;
+    float const peakFrequency = maxBin * binHz;
+
+    // Fundamental via autocorrelation on the raw tail (same helper as probes)
+    float const fundamental = estimateFrequency(data + (n - N), N, (float)sampleRate);
+
+    auto* root = new juce::DynamicObject();
+    root->setProperty("rmsDb", rmsDb);
+    root->setProperty("peakDb", peakDb);
+    root->setProperty("fundamental", fundamental);
+    root->setProperty("peakFrequency", peakFrequency);
+    root->setProperty("spectralCentroid", spectralCentroid);
+    root->setProperty("spectralFlatness", spectralFlatness);
+    root->setProperty("spectralRolloff", rolloffFreq);
+    root->setProperty("crestFactor", crestFactor);
+    root->setProperty("fftSize", N);
+    root->setProperty("peaks", peaksArr);
+    return juce::JSON::toString(juce::var(root), true);
+}
+
+// The offline render itself. Runs on a detached background thread; owns the
+// DSP graph for its whole lifetime (live audio suspended via RAII guard).
+static void runOfflineRender(PluginProcessor* processor, juce::String const& filePath,
+    float durationSec, bool analyze, juce::String const& correlationId, MCPBridge* bridge)
+{
+    RenderGuard guard { processor };
+
+    auto const t0 = juce::Time::getMillisecondCounterHiRes();
+
+    int const pdBlockSize = pd::Instance::getBlockSize();
+    double const sampleRate = (processor->getSampleRate() > 0.0) ? processor->getSampleRate() : 44100.0;
+
+    // Stereo cap + channel count consistent with the live recorder tap.
+    int const numCh = juce::jlimit(1, 2,
+        std::max(processor->getTotalNumInputChannels(), processor->getTotalNumOutputChannels()));
+    int const maxChannels = std::max(processor->getTotalNumInputChannels(), processor->getTotalNumOutputChannels());
+
+    int64 const totalSamples = (int64)std::ceil(durationSec * sampleRate);
+    int64 const totalBlocks = (totalSamples + pdBlockSize - 1) / pdBlockSize;
+
+    // Interleaved render accumulation buffer. 60s stereo @44.1k ~ 21MB (bounded).
+    std::vector<float> renderBuf((size_t)(numCh * totalSamples), 0.0f);
+
+    // Suspend live audio FIRST — the render thread becomes the sole graph
+    // runner (standalone player skips callbacks while suspended).
+    processor->suspendProcessing(true);
+
+    // Input vectors: pre-sized maxChannels * pdBlockSize by prepareToPlay.
+    // Zero once — [adc~] reads silence, correct offline semantics.
+    auto const inSize = (size_t)(maxChannels * pdBlockSize);
+    std::vector<float> inVec(inSize, 0.0f);
+    std::vector<float> outVec(inSize, 0.0f);
+
+    bool renderOk = true;
+    juce::String failReason;
+
+    for (int64 b = 0; b < totalBlocks && renderOk; ++b) {
+        int64 const sampleOff = b * pdBlockSize;
+        int const samplesThisBlock = (int)std::min<int64>(pdBlockSize, totalSamples - sampleOff);
+
+        // Mirror processConstant per block: message phase then DSP phase.
+        processor->setThis();
+        processor->sendParameters();
+        processor->sendMessagesFromQueue(); // drains OSC fires + loadbangs
+
+        std::fill(outVec.begin(), outVec.end(), 0.0f);
+        processor->performDSP(inVec.data(), outVec.data()); // sys_lock inside
+
+        bridge->audioTick(); // probes + native transport + sequencer advance
+
+        // De-interleave out-vector → renderBuf (processConstant copy pattern)
+        for (int ch = 0; ch < numCh; ++ch) {
+            float const* src = outVec.data() + ch * pdBlockSize;
+            float* dst = renderBuf.data() + (size_t)(ch * totalSamples + sampleOff);
+            std::copy(src, src + samplesThisBlock, dst);
+        }
+    }
+
+    auto const t1 = juce::Time::getMillisecondCounterHiRes();
+
+    // Write the WAV — 16-bit PCM stereo-cap, recorder conventions, render
+    // thread owns the file exclusively (no lazy audio-thread writer).
+    if (renderOk) {
+        juce::File destFile(filePath);
+        auto outStream = std::unique_ptr<juce::FileOutputStream>(destFile.createOutputStream());
+        if (!outStream) {
+            renderOk = false;
+            failReason = "could not create output stream";
+        } else {
+            juce::WavAudioFormat wavFormat;
+            auto writer = std::unique_ptr<juce::AudioFormatWriter>(
+                wavFormat.createWriterFor(outStream.get(), sampleRate, numCh, 16, {}, 0));
+            if (!writer) {
+                renderOk = false;
+                failReason = "WAV writer creation failed";
+            } else {
+                outStream.release(); // writer owns the stream now
+                // juce::AudioBuffer over the interleaved planes — needs split
+                // channels, so wrap per-channel pointers.
+                juce::AudioBuffer<float> tmpBuf(numCh, (int)totalSamples);
+                for (int ch = 0; ch < numCh; ++ch)
+                    tmpBuf.copyFrom(ch, 0, renderBuf.data() + (size_t)(ch * totalSamples), (int)totalSamples);
+                writer->writeFromAudioSampleBuffer(tmpBuf, 0, (int)totalSamples);
+                writer->flush();
+            }
+        }
+    }
+
+    if (!renderOk) {
+        bridge->sendReply("/pd/render/error/" + correlationId, failReason.isNotEmpty() ? failReason : juce::String("render failed"));
+        return;
+    }
+
+    auto const wallClockMs = t1 - t0;
+
+    // Build the completion JSON.
+    auto* root = new juce::DynamicObject();
+    root->setProperty("path", filePath);
+    root->setProperty("renderedMs", (int)(durationSec * 1000.0f));
+    root->setProperty("wallClockMs", (int)wallClockMs);
+    root->setProperty("speedFactor", (wallClockMs > 1.0) ? (double)(durationSec * 1000.0f) / wallClockMs : 0.0);
+    root->setProperty("sampleRate", sampleRate);
+    root->setProperty("numChannels", numCh);
+    root->setProperty("pdBlockSize", pdBlockSize);
+    root->setProperty("blocks", (int64)totalBlocks);
+
+    if (analyze && numCh >= 1 && totalSamples >= PROBE_RING_SIZE) {
+        // Analyze the loudest channel (robust when a voice is panned).
+        int bestCh = 0;
+        double bestRms = -1.0;
+        for (int ch = 0; ch < numCh; ++ch) {
+            double sumSq = 0.0;
+            float const* p = renderBuf.data() + (size_t)(ch * totalSamples);
+            for (int64 i = 0; i < totalSamples; ++i)
+                sumSq += (double)(p[i] * p[i]);
+            double const rms = std::sqrt(sumSq / (double)totalSamples);
+            if (rms > bestRms) {
+                bestRms = rms;
+                bestCh = ch;
+            }
+        }
+        auto analysisJson = renderSpectralJson(renderBuf.data() + (size_t)(bestCh * totalSamples),
+            (int)totalSamples, sampleRate);
+        if (analysisJson.isNotEmpty())
+            root->setProperty("analysis", juce::JSON::parse(analysisJson));
+    }
+
+    bridge->sendReply("/pd/render/reply/" + correlationId, juce::JSON::toString(juce::var(root), true));
+}
+
 
 // Compute native diagnostic graph facts under sys_lock(). Shared by standalone
 // /pd/diagnose and inline conditional X-ray in batch_atomic.
@@ -2110,6 +2401,57 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         sendReply("/pd/record_stop/reply/" + correlationId, 1.0f);
         return;
     }
+
+    // /pd/render <filePath> <durationSec> [analyze 0|1] [corrId]
+    // Offline faster-than-realtime render: bakes the current patch to WAV on a
+    // background thread by looping performDSP without the audio device clock.
+    // Mirrors processConstant exactly (setThis/sendParameters/sendMessagesFromQueue/
+    // performDSP/audioTick) so a render is what you'd hear live — sequencer jobs
+    // and transport advance inside the loop via audioTick(). Live audio is
+    // suspended for the render wall-time (standalone player skips the callback
+    // while suspended, so no dropouts — a brief mute blip only).
+    // Replies:
+    //   /pd/render/started/<corrId>          (immediate ack, OSC thread)
+    //   /pd/render/reply/<corrId> <json>     (completion: path, timings, analysis?)
+    //   /pd/render/error/<corrId> <reason>   (failure after the ack)
+    if (action == "render") {
+        if (msg.size() >= 2 && processor) {
+            auto filePath      = getArgString(msg[0]);
+            float durationSec  = getArgFloat(msg[1]);
+            bool analyze       = (msg.size() >= 3) ? (getArgFloat(msg[2]) > 0.5f) : false;
+            auto correlationId = (msg.size() >= 4) ? getArgString(msg[3]) : "0";
+
+            durationSec = juce::jlimit(0.1f, 60.0f, durationSec);
+
+            // Single-flight: one render at a time.
+            if (mcpRenderActive.exchange(true)) {
+                sendReply("/pd/render/error/" + correlationId, juce::String("render already in progress"));
+                return;
+            }
+
+            juce::File destFile(filePath);
+            auto parent = destFile.getParentDirectory();
+            if (!parent.createDirectory().wasOk()) {
+                mcpRenderActive.store(false);
+                post("MCP render: could not create directory %s", parent.getFullPathName().toRawUTF8());
+                sendReply("/pd/render/error/" + correlationId, juce::String("could not create directory"));
+                return;
+            }
+
+            sendRawReply("/pd/render/started/" + correlationId);
+
+            // Detached one-shot render thread — owns the graph for its lifetime.
+            std::thread([proc = processor, filePath = filePath, durationSec, analyze,
+                         correlationId = correlationId, bridge = this]() {
+                runOfflineRender(proc, filePath, durationSec, analyze, correlationId, bridge);
+            }).detach();
+        } else if (processor) {
+            auto correlationId = (msg.size() >= 4) ? getArgString(msg[3]) : "0";
+            sendReply("/pd/render/error/" + correlationId, juce::String("usage: /pd/render <path> <durationSec> [analyze] [corrId]"));
+        }
+        return;
+    }
+
 
     // /pd/load_content <canvasName> <srcFilePath> [correlationId]
     // Clears the canvas and reconstructs it atomically from a .pd file using
@@ -4229,13 +4571,95 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             auto canvasName     = normalizeCanvas(getArgString(msg[0]));
             float scale         = (msg.size() >= 2) ? static_cast<float>(getArgFloat(msg[1])) : 0.5f;
             auto  correlationId = (msg.size() >= 3) ? getArgString(msg[2]) : "0";
+            bool  wantLabels    = (msg.size() >= 4) ? (getArgFloat(msg[3]) > 0.5f) : false;
 
             scale = juce::jlimit(0.1f, 2.0f, scale);
 
             // Resolve t_canvas — null is fine, we fall back to focused editor canvas
             t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
 
-            juce::MessageManager::callAsync([proc = processor, cnv, scale, correlationId, bridge = this]() {
+            // ── Label collection (read-only, under sys_lock, BEFORE callAsync) ──
+            // Pure-data coords of GUI widgets + their semantic names. Labels are
+            // painted onto the captured bitmap ONLY — never added to the glist,
+            // never visible in PlugData, no undo entries. C++ truth for identity;
+            // pixels for position.
+            struct ScreenshotLabel {
+                int x, y, w, h;       // pd coords
+                juce::String text;    // "name · class" or "class"
+            };
+            std::vector<ScreenshotLabel> labels;
+
+            if (wantLabels && cnv) {
+                // GUI widget classes whose pixels carry no self-explaining text
+                static const std::unordered_set<juce::String> guiClasses = {
+                    "knob", "vsl", "hsl", "vu", "tgl", "bng", "nbx",
+                    "hradio", "vradio", "cnv"
+                };
+
+                sys_lock();
+                auto mapIt = processor->mcpStableObjectMap.find(canvasName.toStdString());
+                std::unordered_map<t_gobj*, juce::String> ptrToId;
+                if (mapIt != processor->mcpStableObjectMap.end())
+                    for (auto& [tid, ptr] : mapIt->second)
+                        if (ptr) ptrToId[ptr] = juce::String(tid);
+
+                for (t_gobj* y = cnv->gl_list; y; y = y->g_next) {
+                    t_class* cl = pd_class(&y->g_pd);
+                    const char* clName = class_getname(cl);
+                    if (!clName) continue;
+                    juce::String className = juce::String::fromUTF8(clName);
+                    if (!guiClasses.count(className)) continue;
+
+                    // Semantic name: iemgui receive/send, knob var/snd/rcv, fallback tempId
+                    juce::String semantic;
+                    if (className == "knob") {
+                        // t_fake_knob layout in AllGuis.h matches pd-else t_knob for
+                        // the fields we touch (x_snd_raw/x_rcv_raw). snd/rcv are
+                        // lazily parsed from the binbuf — pull them first, exactly
+                        // like the GUI (KnobObject.h) does before reading.
+                        auto* knb = reinterpret_cast<t_fake_knob*>(y);
+                        knob_get_rcv(knb);
+                        knob_get_snd(knb);
+                        auto valid = [](t_symbol* s) -> bool {
+                            return s && s->s_name && s->s_name[0]
+                                && juce::String::fromUTF8(s->s_name) != "empty";
+                        };
+                        if (valid(knb->x_rcv_raw))      semantic = juce::String::fromUTF8(knb->x_rcv_raw->s_name);
+                        else if (valid(knb->x_snd_raw)) semantic = juce::String::fromUTF8(knb->x_snd_raw->s_name);
+                    } else {
+                        // Every other class in guiClasses is a vanilla iemgui
+                        // (vsl hsl tgl bng nbx hradio vradio cnv vu)
+                        auto* iem = reinterpret_cast<t_iemgui*>(y);
+                        auto valid = [](t_symbol* s) -> bool {
+                            return s && s != gensym("") && s->s_name && s->s_name[0]
+                                && juce::String::fromUTF8(s->s_name) != "empty";
+                        };
+                        if (valid(iem->x_rcv))      semantic = juce::String::fromUTF8(iem->x_rcv->s_name);
+                        else if (valid(iem->x_snd)) semantic = juce::String::fromUTF8(iem->x_snd->s_name);
+                    }
+                    if (semantic.isEmpty()) {
+                        auto it = ptrToId.find(y);
+                        if (it != ptrToId.end()) semantic = it->second;
+                    }
+                    semantic = semantic.replace("\\ ", " ");
+
+                    int x = 0, yy = 0, w = 0, h = 0;
+                    pd::Interface::getObjectBounds(cnv, y, &x, &yy, &w, &h);
+                    if (w <= 0) w = 60;
+                    if (h <= 0) h = 20;
+
+                    ScreenshotLabel lbl;
+                    lbl.x = x; lbl.y = yy; lbl.w = w; lbl.h = h;
+                    lbl.text = semantic.isNotEmpty()
+                        ? semantic + " · " + className
+                        : className;
+                    labels.push_back(lbl);
+                }
+                sys_unlock();
+            }
+
+            juce::MessageManager::callAsync([proc = processor, cnv, scale, correlationId, bridge = this,
+                                             labels = std::move(labels)]() {
                 // Prefer named canvas; fall back to focused canvas in any open editor
                 Canvas* canvasComp = cnv ? getOrCreateCanvasComponent(proc, cnv) : nullptr;
                 if (!canvasComp && proc) {
@@ -4275,6 +4699,55 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 if (!img.isValid()) {
                     bridge->sendReply("/pd/screenshot_canvas/reply/" + correlationId, juce::String("error:render_failed"));
                     return;
+                }
+
+                // ── Paint labels onto the captured bitmap (never the canvas) ──
+                // pd coords → component px (× zoom) → image px (− view origin, × scale).
+                if (!labels.empty()) {
+                    float zoom = 1.0f;
+                    int viewX = 0, viewY = 0;
+                    if (canvasComp->viewport) {
+                        zoom = getValue<float>(canvasComp->zoomScale);
+                        if (zoom <= 0.001f) zoom = 1.0f;
+                        auto va = canvasComp->viewport->getViewArea();
+                        viewX = va.getX();
+                        viewY = va.getY();
+                    }
+
+                    juce::Graphics g(img);
+                    juce::Font labelFont = Fonts::getCurrentFont()
+                        .withHeight(juce::jlimit(9.0f, 16.0f, 12.0f * scale * zoom));
+                    g.setFont(labelFont);
+
+                    for (auto const& lbl : labels) {
+                        // object top-left in component coords
+                        float objX = static_cast<float>(lbl.x) * zoom;
+                        float objY = static_cast<float>(lbl.y) * zoom;
+                        // → image coords
+                        float imgX = (objX - static_cast<float>(viewX)) * scale;
+                        float imgY = (objY - static_cast<float>(viewY)) * scale;
+
+                        float tw = labelFont.getStringWidthFloat(lbl.text);
+                        float th = labelFont.getHeight();
+                        float pad = 2.0f * scale;
+                        float chipH = th + 2.0f * pad;
+                        float chipW = tw + 3.0f * pad;
+
+                        // Place chip above the object; flip below when clipped at top
+                        float chipY = imgY - chipH - 1.0f;
+                        if (chipY < 0.0f) chipY = imgY + static_cast<float>(lbl.h) * zoom * scale + 1.0f;
+
+                        // Skip labels fully outside the capture
+                        if (imgX + chipW < 0.0f || imgX > static_cast<float>(img.getWidth())
+                            || chipY > static_cast<float>(img.getHeight()))
+                            continue;
+
+                        g.setColour(juce::Colours::black.withAlpha(0.72f));
+                        g.fillRoundedRectangle(juce::Rectangle<float>(imgX, chipY, chipW, chipH), 3.0f * scale);
+                        g.setColour(juce::Colours::white.withAlpha(0.92f));
+                        g.drawText(lbl.text, juce::Rectangle<float>(imgX + pad, chipY + pad, tw, th),
+                            juce::Justification::centredLeft);
+                    }
                 }
 
                 // Write PNG to a temp file — TS reads it synchronously (same machine)
@@ -5315,6 +5788,10 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
         reply.addArgument(juce::String("seq"));
         // Canvas screenshot 2192 LLM vision: render Canvas to PNG temp file, MCP returns ImageContent
         reply.addArgument(juce::String("screenshot_canvas"));
+        // Labeled screenshots: GUI-widget name chips painted on the bitmap only
+        reply.addArgument(juce::String("screenshot_labels"));
+        // Offline faster-than-realtime render to WAV (background DSP bake)
+        reply.addArgument(juce::String("render"));
         reply.addArgument(juce::String("boot:" + bootToken));
         sender.send(reply);
     }
