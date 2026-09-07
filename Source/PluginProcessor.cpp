@@ -18,6 +18,10 @@
 #include "Utility/Config.h"
 #include "Utility/Fonts.h"
 #include "Utility/SettingsFile.h"
+#include <g_all_guis.h>
+#include "Objects/AllGuis.h"
+extern "C" void knob_get_snd(void* x);
+extern "C" void knob_get_rcv(void* x);
 #include "Utility/PluginParameter.h"
 #include "Utility/OSUtils.h"
 #include "Utility/MidiDeviceManager.h"
@@ -2847,6 +2851,40 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
                         o->setProperty("node_class", abstractName);
                     }
                     o->setProperty("args", argsList);
+
+                    // ── GUI send/receive for lint (orphan knob detection) ──
+                    // Vanilla iemgui + else/knob store snd/rcv outside binbuf; expose them so lint can see them.
+                    if (kind == "gui") {
+                        String sndSym, rcvSym;
+                        if (type == "knob") {
+                            auto* knb = reinterpret_cast<t_fake_knob*>(y_obj);
+                            // t_fake_knob layout matches pd-else t_knob for this region
+                            knob_get_rcv(knb);
+                            knob_get_snd(knb);
+                            auto valid = [](t_symbol* s) -> bool {
+                                return s && s->s_name && s->s_name[0]
+                                    && String::fromUTF8(s->s_name) != "empty";
+                            };
+                            if (knb->x_rcv_raw && valid(knb->x_rcv_raw)) rcvSym = String::fromUTF8(knb->x_rcv_raw->s_name).replace("\\ ", " ");
+                            else if (knb->x_snd_raw && valid(knb->x_snd_raw)) sndSym = String::fromUTF8(knb->x_snd_raw->s_name).replace("\\ ", " ");
+                            // knob reports rcv as primary (receive), snd as fallback
+                            if (rcvSym.isNotEmpty()) o->setProperty("rcv", rcvSym);
+                            if (sndSym.isNotEmpty()) o->setProperty("snd", sndSym);
+                        } else {
+                            auto* iem = reinterpret_cast<t_iemgui*>(y_obj);
+                            // Guard with x_fsf — raw pointers are garbage when not set (vu bug: "nosndno")
+                            bool hasRcv = iem->x_fsf.x_rcv_able;
+                            bool hasSnd = iem->x_fsf.x_snd_able;
+                            auto valid = [](t_symbol* s) -> bool {
+                                return s && s != gensym("") && s->s_name && s->s_name[0]
+                                    && String::fromUTF8(s->s_name) != "empty";
+                            };
+                            if (hasRcv && valid(iem->x_rcv)) rcvSym = String::fromUTF8(iem->x_rcv->s_name);
+                            if (hasSnd && valid(iem->x_snd)) sndSym = String::fromUTF8(iem->x_snd->s_name);
+                            if (rcvSym.isNotEmpty()) o->setProperty("rcv", rcvSym);
+                            if (sndSym.isNotEmpty()) o->setProperty("snd", sndSym);
+                        }
+                    }
 
                     // ── PRD Phase 2 §2.1: NATIVE AUTO-ADOPTION ─────────────
                     // C++ mints a readable tempId for every object not yet in

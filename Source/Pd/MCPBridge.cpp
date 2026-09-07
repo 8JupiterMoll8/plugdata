@@ -4759,8 +4759,9 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                                     return s && s != gensym("") && s->s_name && s->s_name[0]
                                         && juce::String::fromUTF8(s->s_name) != "empty";
                                 };
-                                if (valid(iem->x_rcv))      semantic = juce::String::fromUTF8(iem->x_rcv->s_name);
-                                else if (valid(iem->x_snd)) semantic = juce::String::fromUTF8(iem->x_snd->s_name);
+                                // Guard with x_fsf flags — raw x_snd/x_rcv are garbage when not set (vu bug: "nosndno")
+                                if (iem->x_fsf.x_rcv_able && valid(iem->x_rcv))      semantic = juce::String::fromUTF8(iem->x_rcv->s_name);
+                                else if (iem->x_fsf.x_snd_able && valid(iem->x_snd)) semantic = juce::String::fromUTF8(iem->x_snd->s_name);
                             }
                             if (semantic.isEmpty()) {
                                 auto it = ptrToId.find(y);
