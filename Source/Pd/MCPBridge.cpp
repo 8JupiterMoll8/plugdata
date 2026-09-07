@@ -4213,6 +4213,95 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         return;
     }
 
+    // /pd/screenshot_canvas <canvas> <scale> <corrId>
+    // Renders the focused JUCE Canvas component to a PNG temp file and replies
+    // with the absolute file path. The MCP server reads the file, base64-encodes
+    // it, and returns an MCP ImageContent block so the LLM sees the patch visually.
+    //
+    // Threading: createComponentSnapshot MUST run on the JUCE Message Thread.
+    //            We use callAsync (same pattern as zoom_to_fit). DSP is untouched —
+    //            zero dropout guaranteed.
+    //
+    // Scale: 0.25–1.0 (default 0.5). Canvas can be large; 50% captures structure
+    //        without burning LLM vision token budget.
+    if (action == "screenshot_canvas") {
+        if (msg.size() >= 1 && processor) {
+            auto canvasName     = normalizeCanvas(getArgString(msg[0]));
+            float scale         = (msg.size() >= 2) ? static_cast<float>(getArgFloat(msg[1])) : 0.5f;
+            auto  correlationId = (msg.size() >= 3) ? getArgString(msg[2]) : "0";
+
+            scale = juce::jlimit(0.1f, 2.0f, scale);
+
+            // Resolve t_canvas — null is fine, we fall back to focused editor canvas
+            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+
+            juce::MessageManager::callAsync([proc = processor, cnv, scale, correlationId, bridge = this]() {
+                // Prefer named canvas; fall back to focused canvas in any open editor
+                Canvas* canvasComp = cnv ? getOrCreateCanvasComponent(proc, cnv) : nullptr;
+                if (!canvasComp && proc) {
+                    for (auto* editor : proc->getEditors()) {
+                        if (editor && editor->getCurrentCanvas()) {
+                            canvasComp = editor->getCurrentCanvas();
+                            break;
+                        }
+                    }
+                }
+
+                if (!canvasComp) {
+                    bridge->sendReply("/pd/screenshot_canvas/reply/" + correlationId, juce::String("error:no_canvas"));
+                    return;
+                }
+
+                // Use the VIEWPORT visible area — not getLocalBounds() which is the
+                // entire infinite Pd canvas (can be 64000×64000+ pixels).
+                // We want what the user actually sees on screen right now.
+                juce::Rectangle<int> captureRect;
+                if (canvasComp->viewport != nullptr) {
+                    // getViewArea() returns the visible portion in canvas-local coords
+                    captureRect = canvasComp->viewport->getViewArea();
+                } else {
+                    // Fallback: just the component's own bounds (subpatch / GOP)
+                    captureRect = canvasComp->getLocalBounds();
+                }
+
+                if (captureRect.isEmpty()) {
+                    bridge->sendReply("/pd/screenshot_canvas/reply/" + correlationId, juce::String("error:empty_viewport"));
+                    return;
+                }
+
+                // Render the visible viewport region at the requested scale
+                juce::Image img = canvasComp->createComponentSnapshot(captureRect, false, scale);
+
+                if (!img.isValid()) {
+                    bridge->sendReply("/pd/screenshot_canvas/reply/" + correlationId, juce::String("error:render_failed"));
+                    return;
+                }
+
+                // Write PNG to a temp file — TS reads it synchronously (same machine)
+                auto tmpFile = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                    .getChildFile("plugdata_canvas_" + correlationId + ".png");
+
+                juce::FileOutputStream fos(tmpFile);
+                if (!fos.openedOk()) {
+                    bridge->sendReply("/pd/screenshot_canvas/reply/" + correlationId, juce::String("error:file_open"));
+                    return;
+                }
+
+                juce::PNGImageFormat png;
+                if (!png.writeImageToStream(img, fos)) {
+                    bridge->sendReply("/pd/screenshot_canvas/reply/" + correlationId, juce::String("error:png_encode"));
+                    return;
+                }
+                fos.flush();
+
+                bridge->sendReply("/pd/screenshot_canvas/reply/" + correlationId,
+                    tmpFile.getFullPathName());
+            });
+        }
+        return;
+    }
+
+
     if (action == "deoverlap") {
         // /pd/deoverlap <canvas> <count> <id…> <corrId>
         // PRD layout-v2 Phase B1: minimal-displacement push on TRUE rects
@@ -5224,6 +5313,8 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
         reply.addArgument(juce::String("batch-facts"));
         reply.addArgument(juce::String("transport"));
         reply.addArgument(juce::String("seq"));
+        // Canvas screenshot 2192 LLM vision: render Canvas to PNG temp file, MCP returns ImageContent
+        reply.addArgument(juce::String("screenshot_canvas"));
         reply.addArgument(juce::String("boot:" + bootToken));
         sender.send(reply);
     }
