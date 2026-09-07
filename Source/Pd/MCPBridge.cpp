@@ -4604,29 +4604,105 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     return;
                 }
 
-                // Use the VIEWPORT visible area — not getLocalBounds() which is the
-                // entire infinite Pd canvas (can be 64000×64000+ pixels).
-                // We want what the user actually sees on screen right now.
-                juce::Rectangle<int> captureRect;
-                if (canvasComp->viewport != nullptr) {
-                    // getViewArea() returns the visible portion in canvas-local coords
-                    captureRect = canvasComp->viewport->getViewArea();
-                } else {
-                    // Fallback: just the component's own bounds (subpatch / GOP)
-                    captureRect = canvasComp->getLocalBounds();
+                // ── NVG surface capture ──
+                // PlugData's Canvas is an NVGComponent: its JUCE paint() path is EMPTY
+                // and all rendering goes to the GPU via PluginEditor::nvgSurface.
+                // createComponentSnapshot therefore returns a blank image — verified
+                // (3KB all-black PNGs). Correct path: force-render the target region
+                // into the surface FBO, then pull pixels with renderFrameToImage.
+                PluginEditor* editor = nullptr;
+                for (auto* ed : proc->getEditors()) {
+                    if (ed && ed->getCurrentCanvas() == canvasComp) { editor = ed; break; }
                 }
-
-                if (captureRect.isEmpty()) {
-                    bridge->sendReply("/pd/screenshot_canvas/reply/" + correlationId, juce::String("error:empty_viewport"));
+                if (!editor) {
+                    bridge->sendReply("/pd/screenshot_canvas/reply/" + correlationId, juce::String("error:no_editor"));
                     return;
                 }
 
-                // Render the visible viewport region at the requested scale
-                juce::Image img = canvasComp->createComponentSnapshot(captureRect, false, scale);
+                // ── Native window capture (createSnapshotOfNativeWindow) ──
+                // PlugData's Canvas is NVGComponent: JUCE paint() is empty, GPU-side
+                // rendering. createSnapshotOfNativeWindow uses XGetImage on the X11
+                // display connection JUCE already holds — no shell, no env issues.
+                // It returns a juce::Image of the WHOLE editor window at native pixels.
+                auto* peer = editor->getPeer();
+                if (!peer) {
+                    bridge->sendReply("/pd/screenshot_canvas/reply/" + correlationId, juce::String("error:no_peer"));
+                    return;
+                }
 
+                // Canvas viewport + editor bounds in SCREEN coordinates.
+                juce::Rectangle<int> viewportScreen;
+                if (canvasComp->viewport != nullptr)
+                    viewportScreen = canvasComp->viewport->getScreenBounds();
+                else
+                    viewportScreen = canvasComp->getScreenBounds();
+                auto editorScreen = editor->getScreenBounds();
+
+                // Grab the whole editor window via XGetImage (JUCE public API).
+                // getNativeHandle() returns ::Window (XID) on Linux — same value
+                // xwd -id uses, but via the existing X11 connection (no shell needed).
+                auto img = juce::createSnapshotOfNativeWindow(peer->getNativeHandle());
                 if (!img.isValid()) {
-                    bridge->sendReply("/pd/screenshot_canvas/reply/" + correlationId, juce::String("error:render_failed"));
+                    bridge->sendReply("/pd/screenshot_canvas/reply/" + correlationId, juce::String("error:snapshot_failed"));
                     return;
+                }
+                DBG("[screenshot_canvas] snapshot " + juce::String(img.getWidth()) + "x" + juce::String(img.getHeight())
+                    + " editorScreen=" + editorScreen.toString()
+                    + " viewportScreen=" + viewportScreen.toString());
+
+                // createSnapshotOfNativeWindow returns the image at the display's
+                // physical pixel scale (already divided by desktop scale inside JUCE).
+                // editorScreen + viewportScreen are in logical pixels; no extra scale needed.
+                // Crop to the viewport sub-rect within the window.
+                juce::Rectangle<int> crop;
+                crop.setX(viewportScreen.getX() - editorScreen.getX());
+                crop.setY(viewportScreen.getY() - editorScreen.getY());
+                crop.setWidth(viewportScreen.getWidth());
+                crop.setHeight(viewportScreen.getHeight());
+                crop = crop.getIntersection(img.getBounds());
+                if (crop.isEmpty()) {
+                    bridge->sendReply("/pd/screenshot_canvas/reply/" + correlationId,
+                        juce::String("error:empty_crop w=") + juce::String(img.getWidth())
+                        + " h=" + juce::String(img.getHeight())
+                        + " crop=" + crop.toString());
+                    return;
+                }
+
+                // Guard: at least 1% pixel variance (catches blank/hidden windows)
+                {
+                    juce::Image::BitmapData bd(img, juce::Image::BitmapData::readOnly);
+                    long varying = 0, total = 0;
+                    juce::uint8 firstR = 0, firstG = 0, firstB = 0;
+                    bool haveFirst = false;
+                    for (int row = crop.getY(); row < crop.getBottom(); row += 6) {
+                        for (int col = crop.getX(); col < crop.getRight(); col += 6) {
+                            auto px = img.getPixelAt(col, row);
+                            if (!haveFirst) { firstR = px.getRed(); firstG = px.getGreen(); firstB = px.getBlue(); haveFirst = true; }
+                            if (px.getRed() != firstR || px.getGreen() != firstG || px.getBlue() != firstB) varying++;
+                            total++;
+                        }
+                    }
+                    if (total > 0 && varying * 100 / total < 1) {
+                        bridge->sendReply("/pd/screenshot_canvas/reply/" + correlationId,
+                            juce::String("error:blank_window (uniform canvas — hidden or off-screen?)"));
+                        return;
+                    }
+                }
+
+                img = img.getClippedImage(crop);
+
+                // Apply requested scale
+                if (std::abs(scale - 1.0f) > 0.01f && img.getWidth() > 0 && img.getHeight() > 0) {
+                    int targetW = juce::roundToInt(img.getWidth() * scale);
+                    int targetH = juce::roundToInt(img.getHeight() * scale);
+                    if (targetW > 0 && targetH > 0) {
+                        juce::Image resized(juce::Image::ARGB, targetW, targetH, true);
+                        juce::Graphics rg(resized);
+                        rg.setImageResamplingQuality(juce::Graphics::highResamplingQuality);
+                        rg.drawImage(img, juce::Rectangle<float>(0, 0, (float)targetW, (float)targetH),
+                            juce::RectanglePlacement::stretchToFit);
+                        img = resized;
+                    }
                 }
 
                 // ── Label collection (inside callAsync, on Message Thread) ──
@@ -4726,30 +4802,35 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 }
 
                 // ── Paint labels onto the captured bitmap (never the canvas) ──
-                // pd coords → component px (× zoom) → image px (− view origin, × scale).
+                // Coordinate model (Object::updateBounds + Canvas transform):
+                //   object in canvas-component px = canvasOrigin + pdPos
+                //   viewport shows canvas at viewPos; zoom via component transform
+                //   object in viewport px = zoom × (canvasOrigin + pdPos − viewPos)
+                //   image px = (viewport-relative) × scale, since img IS the viewport
                 if (!labels.empty()) {
                     float zoom = 1.0f;
                     int viewX = 0, viewY = 0;
                     if (canvasComp->viewport) {
                         zoom = getValue<float>(canvasComp->zoomScale);
                         if (zoom <= 0.001f) zoom = 1.0f;
-                        auto va = canvasComp->viewport->getViewArea();
-                        viewX = va.getX();
-                        viewY = va.getY();
+                        viewX = canvasComp->viewport->getViewPositionX();
+                        viewY = canvasComp->viewport->getViewPositionY();
                     }
+                    auto const canvasOrigin = canvasComp->canvasOrigin;
 
                     juce::Graphics g(img);
                     juce::Font labelFont = Fonts::getCurrentFont()
-                        .withHeight(juce::jlimit(9.0f, 16.0f, 12.0f * scale * zoom));
+                        .withHeight(juce::jlimit(9.0f, 16.0f, 12.0f * scale));
                     g.setFont(labelFont);
 
                     for (auto const& lbl : labels) {
-                        // object top-left in component coords
-                        float objX = static_cast<float>(lbl.x) * zoom;
-                        float objY = static_cast<float>(lbl.y) * zoom;
-                        // → image coords
-                        float imgX = (objX - static_cast<float>(viewX)) * scale;
-                        float imgY = (objY - static_cast<float>(viewY)) * scale;
+                        // object top-left in viewport px
+                        float vpX = zoom * static_cast<float>(canvasOrigin.x + lbl.x - viewX);
+                        float vpY = zoom * static_cast<float>(canvasOrigin.y + lbl.y - viewY);
+                        // → image coords (image = viewport × scale)
+                        float imgX = vpX * scale;
+                        float imgY = vpY * scale;
+                        float objHImg = static_cast<float>(lbl.h) * zoom * scale;
 
                         float tw = labelFont.getStringWidthFloat(lbl.text);
                         float th = labelFont.getHeight();
@@ -4759,7 +4840,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
                         // Place chip above the object; flip below when clipped at top
                         float chipY = imgY - chipH - 1.0f;
-                        if (chipY < 0.0f) chipY = imgY + static_cast<float>(lbl.h) * zoom * scale + 1.0f;
+                        if (chipY < 0.0f) chipY = imgY + objHImg + 1.0f;
 
                         // Skip labels fully outside the capture
                         if (imgX + chipW < 0.0f || imgX > static_cast<float>(img.getWidth())
