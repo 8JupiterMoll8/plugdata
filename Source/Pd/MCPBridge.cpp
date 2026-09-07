@@ -4578,88 +4578,16 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             // Resolve t_canvas — null is fine, we fall back to focused editor canvas
             t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
 
-            // ── Label collection (read-only, under sys_lock, BEFORE callAsync) ──
-            // Pure-data coords of GUI widgets + their semantic names. Labels are
-            // painted onto the captured bitmap ONLY — never added to the glist,
-            // never visible in PlugData, no undo entries. C++ truth for identity;
-            // pixels for position.
+            // ScreenshotLabel struct; collection happens inside callAsync after
+            // canvasComp is resolved to avoid the null-cnv race (guard 'cnv' here
+            // may be null when the named canvas falls back to focused editor).
             struct ScreenshotLabel {
                 int x, y, w, h;       // pd coords
                 juce::String text;    // "name · class" or "class"
             };
-            std::vector<ScreenshotLabel> labels;
-
-            if (wantLabels && cnv) {
-                // GUI widget classes whose pixels carry no self-explaining text
-                static const std::unordered_set<juce::String> guiClasses = {
-                    "knob", "vsl", "hsl", "vu", "tgl", "bng", "nbx",
-                    "hradio", "vradio", "cnv"
-                };
-
-                sys_lock();
-                auto mapIt = processor->mcpStableObjectMap.find(canvasName.toStdString());
-                std::unordered_map<t_gobj*, juce::String> ptrToId;
-                if (mapIt != processor->mcpStableObjectMap.end())
-                    for (auto& [tid, ptr] : mapIt->second)
-                        if (ptr) ptrToId[ptr] = juce::String(tid);
-
-                for (t_gobj* y = cnv->gl_list; y; y = y->g_next) {
-                    t_class* cl = pd_class(&y->g_pd);
-                    const char* clName = class_getname(cl);
-                    if (!clName) continue;
-                    juce::String className = juce::String::fromUTF8(clName);
-                    if (!guiClasses.count(className)) continue;
-
-                    // Semantic name: iemgui receive/send, knob var/snd/rcv, fallback tempId
-                    juce::String semantic;
-                    if (className == "knob") {
-                        // t_fake_knob layout in AllGuis.h matches pd-else t_knob for
-                        // the fields we touch (x_snd_raw/x_rcv_raw). snd/rcv are
-                        // lazily parsed from the binbuf — pull them first, exactly
-                        // like the GUI (KnobObject.h) does before reading.
-                        auto* knb = reinterpret_cast<t_fake_knob*>(y);
-                        knob_get_rcv(knb);
-                        knob_get_snd(knb);
-                        auto valid = [](t_symbol* s) -> bool {
-                            return s && s->s_name && s->s_name[0]
-                                && juce::String::fromUTF8(s->s_name) != "empty";
-                        };
-                        if (valid(knb->x_rcv_raw))      semantic = juce::String::fromUTF8(knb->x_rcv_raw->s_name);
-                        else if (valid(knb->x_snd_raw)) semantic = juce::String::fromUTF8(knb->x_snd_raw->s_name);
-                    } else {
-                        // Every other class in guiClasses is a vanilla iemgui
-                        // (vsl hsl tgl bng nbx hradio vradio cnv vu)
-                        auto* iem = reinterpret_cast<t_iemgui*>(y);
-                        auto valid = [](t_symbol* s) -> bool {
-                            return s && s != gensym("") && s->s_name && s->s_name[0]
-                                && juce::String::fromUTF8(s->s_name) != "empty";
-                        };
-                        if (valid(iem->x_rcv))      semantic = juce::String::fromUTF8(iem->x_rcv->s_name);
-                        else if (valid(iem->x_snd)) semantic = juce::String::fromUTF8(iem->x_snd->s_name);
-                    }
-                    if (semantic.isEmpty()) {
-                        auto it = ptrToId.find(y);
-                        if (it != ptrToId.end()) semantic = it->second;
-                    }
-                    semantic = semantic.replace("\\ ", " ");
-
-                    int x = 0, yy = 0, w = 0, h = 0;
-                    pd::Interface::getObjectBounds(cnv, y, &x, &yy, &w, &h);
-                    if (w <= 0) w = 60;
-                    if (h <= 0) h = 20;
-
-                    ScreenshotLabel lbl;
-                    lbl.x = x; lbl.y = yy; lbl.w = w; lbl.h = h;
-                    lbl.text = semantic.isNotEmpty()
-                        ? semantic + " · " + className
-                        : className;
-                    labels.push_back(lbl);
-                }
-                sys_unlock();
-            }
 
             juce::MessageManager::callAsync([proc = processor, cnv, scale, correlationId, bridge = this,
-                                             labels = std::move(labels)]() {
+                                             wantLabels, canvasName]() {
                 // Prefer named canvas; fall back to focused canvas in any open editor
                 Canvas* canvasComp = cnv ? getOrCreateCanvasComponent(proc, cnv) : nullptr;
                 if (!canvasComp && proc) {
@@ -4701,6 +4629,102 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     return;
                 }
 
+                // ── Label collection (inside callAsync, on Message Thread) ──
+                // Collect here after canvasComp is resolved so we always walk the
+                // exact canvas that was rendered — never a stale/null pre-resolved cnv.
+                // sys_lock from Message Thread is safe (same pattern as /pd/diagnose).
+                std::vector<ScreenshotLabel> labels;
+                if (wantLabels) {
+                    static const std::unordered_set<juce::String> guiClasses = {
+                        "knob", "vsl", "hsl", "vu", "tgl", "bng", "nbx",
+                        "hradio", "vradio", "cnv"
+                    };
+
+                    // t_canvas* from resolved canvasComp; walk to root for pd-main
+                    t_canvas* liveCnv = canvasComp->patch.getRawPointer();
+                    if (canvasName == "pd-main" || canvasName == "main") {
+                        auto* g = reinterpret_cast<t_glist*>(liveCnv);
+                        while (g && g->gl_owner) g = g->gl_owner;
+                        if (g) liveCnv = reinterpret_cast<t_canvas*>(g);
+                    }
+
+                    // ptrToId from mcpStableObjectMap for tempId fallback naming
+                    std::unordered_map<t_gobj*, juce::String> ptrToId;
+                    if (proc) {
+                        auto mapIt = proc->mcpStableObjectMap.find(canvasName.toStdString());
+                        if (mapIt != proc->mcpStableObjectMap.end())
+                            for (auto& [tid, ptr] : mapIt->second)
+                                if (ptr) ptrToId[ptr] = juce::String(tid);
+                    }
+
+                    sys_lock();
+                    if (liveCnv) {
+                        for (t_gobj* y = liveCnv->gl_list; y; y = y->g_next) {
+                            t_class* cl = pd_class(&y->g_pd);
+                            const char* clName = class_getname(cl);
+                            if (!clName) continue;
+                            juce::String className = juce::String::fromUTF8(clName);
+                            if (!guiClasses.count(className)) continue;
+
+                            juce::String semantic;
+                            if (className == "knob") {
+                                auto* knb = reinterpret_cast<t_fake_knob*>(y);
+                                knob_get_rcv(knb);
+                                knob_get_snd(knb);
+                                auto valid = [](t_symbol* s) -> bool {
+                                    return s && s->s_name && s->s_name[0]
+                                        && juce::String::fromUTF8(s->s_name) != "empty";
+                                };
+                                if (valid(knb->x_rcv_raw))      semantic = juce::String::fromUTF8(knb->x_rcv_raw->s_name);
+                                else if (valid(knb->x_snd_raw)) semantic = juce::String::fromUTF8(knb->x_snd_raw->s_name);
+                            } else {
+                                auto* iem = reinterpret_cast<t_iemgui*>(y);
+                                auto valid = [](t_symbol* s) -> bool {
+                                    return s && s != gensym("") && s->s_name && s->s_name[0]
+                                        && juce::String::fromUTF8(s->s_name) != "empty";
+                                };
+                                if (valid(iem->x_rcv))      semantic = juce::String::fromUTF8(iem->x_rcv->s_name);
+                                else if (valid(iem->x_snd)) semantic = juce::String::fromUTF8(iem->x_snd->s_name);
+                            }
+                            if (semantic.isEmpty()) {
+                                auto it = ptrToId.find(y);
+                                if (it != ptrToId.end()) semantic = it->second;
+                            }
+                            semantic = semantic.replace("\\ ", " ");
+
+                            int x = 0, yy = 0, w = 0, h = 0;
+                            pd::Interface::getObjectBounds(liveCnv, y, &x, &yy, &w, &h);
+                            if (w <= 0) w = 60;
+                            if (h <= 0) h = 20;
+
+                            ScreenshotLabel lbl;
+                            lbl.x = x; lbl.y = yy; lbl.w = w; lbl.h = h;
+                            lbl.text = semantic.isNotEmpty()
+                                ? semantic + " · " + className
+                                : className;
+                            labels.push_back(lbl);
+                        }
+                    }
+                    sys_unlock();
+
+                    // Diagnostic: label count + first label coords -> stderr (DBG)
+                    DBG("[screenshot_labels] collected=" + juce::String((int)labels.size())
+                        + " liveCnv=" + juce::String(liveCnv ? "ok" : "NULL")
+                        + " img=" + juce::String(img.getWidth()) + "x" + juce::String(img.getHeight()));
+                    if (!labels.empty()) {
+                        float zoom0 = getValue<float>(canvasComp->zoomScale);
+                        if (zoom0 <= 0.001f) zoom0 = 1.0f;
+                        int vx0 = canvasComp->viewport ? canvasComp->viewport->getViewArea().getX() : 0;
+                        int vy0 = canvasComp->viewport ? canvasComp->viewport->getViewArea().getY() : 0;
+                        DBG("[screenshot_labels] first=" + labels[0].text
+                            + " pd(" + juce::String(labels[0].x) + "," + juce::String(labels[0].y) + ")"
+                            + " zoom=" + juce::String(zoom0, 2)
+                            + " view=(" + juce::String(vx0) + "," + juce::String(vy0) + ")"
+                            + " imgX=" + juce::String((labels[0].x * zoom0 - vx0) * scale, 1)
+                            + " imgY=" + juce::String((labels[0].y * zoom0 - vy0) * scale, 1));
+                    }
+                }
+
                 // ── Paint labels onto the captured bitmap (never the canvas) ──
                 // pd coords → component px (× zoom) → image px (− view origin, × scale).
                 if (!labels.empty()) {
@@ -4739,7 +4763,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
                         // Skip labels fully outside the capture
                         if (imgX + chipW < 0.0f || imgX > static_cast<float>(img.getWidth())
-                            || chipY > static_cast<float>(img.getHeight()))
+                            || chipY + chipH < 0.0f || chipY > static_cast<float>(img.getHeight()))
                             continue;
 
                         g.setColour(juce::Colours::black.withAlpha(0.72f));
