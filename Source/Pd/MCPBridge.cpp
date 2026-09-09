@@ -30,6 +30,7 @@ extern "C" {
 #include <g_canvas.h>
 #include <s_inter.h>
 #include <g_all_guis.h> // t_iemgui x_snd/x_rcv for screenshot GUI-widget labels
+#include <m_imp.h>      // obj_starttraverseoutlet/obj_nexttraverseoutlet (duplicate-wire check)
 
 extern t_class *text_class;
 
@@ -664,18 +665,26 @@ juce::String MCPBridge::computeDiagnoseFacts(PluginProcessor* processor, t_canva
 
         juce::String firstTok = text.upToFirstOccurrenceOf(" ", false, false);
         if (firstTok == "*~") {
-            bool hasFloatArg = false;
+            // Zeroed-VCA detection: multiplier is silent if it has NO float arg
+            // and no inlet-1 wire (bare [*~]), OR an explicit arg of exactly 0
+            // ([*~ 0] — a numeric arg parses as zero and locks the gain to silence).
+            bool hasNonZeroFloatArg = false;
+            bool hasZeroFloatArg = false;
             juce::String argTok = text
                 .fromFirstOccurrenceOf(" ", false, false)
                 .upToFirstOccurrenceOf(" ", false, false)
                 .trim();
             if (argTok.isNotEmpty()) {
                 char* endPtr = nullptr;
-                std::strtod(argTok.toRawUTF8(), &endPtr);
-                hasFloatArg = (endPtr != argTok.toRawUTF8());
+                const char* raw = argTok.toRawUTF8();
+                double argVal = std::strtod(raw, &endPtr);
+                if (endPtr != raw) { // numeric atom (symbol args like '*~' don't count)
+                    if (argVal == 0.0) hasZeroFloatArg = true;
+                    else hasNonZeroFloatArg = true;
+                }
             }
             bool inlet1Wired = anyInletWired.count({ idx, 1 }) > 0;
-            if (!hasFloatArg && !inlet1Wired)
+            if ((!hasNonZeroFloatArg && !inlet1Wired) || (hasZeroFloatArg && !inlet1Wired))
                 zeroedVcas.insert({ idx, 1 });
         }
     }
@@ -2054,6 +2063,54 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         t_object* so = pd::Interface::checkObject(sg);
                         t_object* d_o = pd::Interface::checkObject(dg);
                         if (so && d_o) {
+                            // Phase B (fault-injection gauntlet 2026-09-09):
+                            // name self-connections, duplicate wires, and
+                            // out-of-range ports instead of counting them as
+                            // fresh successes.
+                            if (sg == dg) {
+                                connectFailures.push_back({
+                                    cc.srcId.toStdString(), cc.destId.toStdString(),
+                                    "self-connection (same object src==dest) — forbidden, breaks DSP scheduling" });
+                                continue;
+                            }
+                            if (cc.srcOut < 0 || cc.srcOut >= obj_noutlets(so)) {
+                                connectFailures.push_back({
+                                    cc.srcId.toStdString(), cc.destId.toStdString(),
+                                    "src outlet " + std::to_string(cc.srcOut) + " out of range (object has "
+                                        + std::to_string(obj_noutlets(so)) + ")" });
+                                continue;
+                            }
+                            if (cc.destIn < 0 || cc.destIn >= obj_ninlets(d_o)) {
+                                connectFailures.push_back({
+                                    cc.srcId.toStdString(), cc.destId.toStdString(),
+                                    "dest inlet " + std::to_string(cc.destIn) + " out of range (object has "
+                                        + std::to_string(obj_ninlets(d_o)) + ")" });
+                                continue;
+                            }
+                            // Duplicate-wire check: Pd silently accepts re-connecting
+                            // an existing wire; count it as a no-op, not a fresh success.
+                            // Walk the source outlet's connection list (Pd traverse API).
+                            bool alreadyWired = false;
+                            {
+                                t_outlet* srcOutlet = nullptr;
+                                t_outconnect* oc = obj_starttraverseoutlet(so, &srcOutlet, cc.srcOut);
+                                while (oc) {
+                                    t_object* destObj = nullptr;
+                                    t_inlet* destInl = nullptr;
+                                    int which = -1;
+                                    oc = obj_nexttraverseoutlet(oc, &destObj, &destInl, &which);
+                                    if (destObj == d_o && which == cc.destIn) {
+                                        alreadyWired = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            if (alreadyWired) {
+                                connectFailures.push_back({
+                                    cc.srcId.toStdString(), cc.destId.toStdString(),
+                                    "duplicate wire (already connected) — no-op, not counted" });
+                                continue;
+                            }
                             if (obj_connect(so, cc.srcOut, d_o, cc.destIn))
                                 connected++;
                             else
