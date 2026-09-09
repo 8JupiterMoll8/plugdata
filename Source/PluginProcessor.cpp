@@ -1880,6 +1880,22 @@ t_canvas* PluginProcessor::getCanvasBySymbol(const String& canvas_symbol)
     return canvas;
 }
 
+t_canvas* PluginProcessor::getCanvasBySymbolStrict(const String& canvas_symbol)
+{
+    // 'main' / 'pd-main' / empty resolve exactly like the legacy path (true
+    // top-level patch of the focused editor) — those aliases stay valid.
+    if (canvas_symbol == "pd-main" || canvas_symbol == "main" || canvas_symbol.isEmpty()) {
+        return getCanvasBySymbol(canvas_symbol);
+    }
+    t_canvas* canvas = (t_canvas*)pd_findbyclass(gensym(canvas_symbol.toRawUTF8()), canvas_class);
+    if (!canvas && !canvas_symbol.startsWith("pd-")) {
+        canvas = (t_canvas*)pd_findbyclass(gensym(String("pd-" + canvas_symbol).toRawUTF8()), canvas_class);
+    }
+    // NO fallback: unknown names return nullptr so the caller can name the
+    // failure instead of mutating the focused/root canvas by accident.
+    return canvas;
+}
+
 void PluginProcessor::synchroniseCanvases()
 {
     if (auto* mm = juce::MessageManager::getInstanceWithoutCreating()) {

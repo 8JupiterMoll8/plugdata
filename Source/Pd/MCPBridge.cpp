@@ -1706,11 +1706,20 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             extern int dsp_update_deferred;  // defined in m_obj.c
             juce::WaitableEvent done;
             t_canvas* cnv = nullptr;
+            // Bug #11 (fault gauntlet 2026-09-09): strict canvas resolution.
+            // Unknown names must NOT silently fall back to the focused/root
+            // canvas — name the failure instead of mutating the wrong patch.
+            bool canvasNotFound = false;
 
             processor->enqueueFunctionAsync([&]() {
                 auto tLambdaStart = std::chrono::high_resolution_clock::now();
-                cnv = processor->getCanvasBySymbol(canvasName);
-                if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
+                cnv = processor->getCanvasBySymbolStrict(canvasName);
+                if (!cnv && (canvasName == "pd-main" || canvasName == "main" || canvasName.isEmpty()))
+                    cnv = pd_this->pd_canvaslist;
+                if (!cnv) {
+                    canvasNotFound = true;
+                    post("batch_atomic: canvas '%s' not found — mutation refused", canvasName.toRawUTF8());
+                }
 
                 if (cnv) {
                     dsp_update_deferred = 1;
@@ -2229,6 +2238,13 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 sys_unlock();
             }
             reply.addArgument(diagJson);
+
+            // Bug #11 tail fact (appended LAST, after diagnose JSON): 1 when the
+            // requested canvas symbol did not resolve and the mutation was
+            // refused. Old TS clients ignore trailing args; new clients gate on it.
+            reply.addArgument(static_cast<int32>(canvasNotFound ? 1 : 0));
+            if (canvasNotFound)
+                reply.addArgument(canvasName); // the name that failed, for the receipt
 
             sender.send(reply);
         }

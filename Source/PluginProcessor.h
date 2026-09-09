@@ -137,6 +137,11 @@ public:
     void settingsFileReloaded() override;
     void settingsChanged(String const& name, var const& value) override;
     t_canvas* getCanvasBySymbol(const String& canvas_symbol);
+    // Strict variant for mutations: resolves ONLY 'main'/'pd-main'/'' (focused
+    // root) and genuinely registered canvas symbols. Returns nullptr for
+    // unknown names instead of silently falling back to the first canvas
+    // (fault gauntlet 2026-09-09 bug #11 — wrong-canvas injection).
+    t_canvas* getCanvasBySymbolStrict(const String& canvas_symbol);
     void synchroniseCanvases();
     bool getIsProcessingAudio() const noexcept { return isProcessingAudio.load(std::memory_order_relaxed); }
 
