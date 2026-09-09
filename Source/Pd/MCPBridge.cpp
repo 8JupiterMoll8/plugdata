@@ -1802,33 +1802,17 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                             }
                         }
 
-                        // Step D: Connection scan — detect wires drawn manually by user.
-                        // linetraverser walks every wire on the canvas in O(wires).
-                        // Both endpoints already have tempIds after Steps B+C above.
-                        // We build a compact flat list: [srcId, srcOut, destId, destIn, ...]
-                        // appended to the batch_atomic reply so TS gets the full picture
-                        // in one shot — zero extra OSC round-trips.
-                        // Build reverse ptr→tempId map (O(m))
-                        std::unordered_map<t_gobj*, std::string> ptrToTempId;
-                        for (auto& [tid, ptr] : canvasMap)
-                            if (ptr) ptrToTempId[ptr] = tid;
-
-                        t_linetraverser lt;
-                        linetraverser_start(&lt, cnv);
-                        t_outconnect* ltOc = nullptr;
-                        while ((ltOc = linetraverser_next_nosize(&lt))) {
-                            t_gobj* sg = &lt.tr_ob->ob_g;
-                            t_gobj* dg = &lt.tr_ob2->ob_g;
-                            auto sIt = ptrToTempId.find(sg);
-                            auto dIt = ptrToTempId.find(dg);
-                            if (sIt == ptrToTempId.end() || dIt == ptrToTempId.end()) continue;
-                            detectedConnections.push_back({
-                                sIt->second,
-                                static_cast<int>(lt.tr_outno),
-                                dIt->second,
-                                static_cast<int>(lt.tr_inno)
-                            });
-                        }
+                         // Step D: Connection scan — MOVED to post-PHASE-5 (bug #5,
+                         // fault gauntlet 2026-09-09). Scanning inside PHASE 0 made
+                         // detectedConnections lag one transaction: the receipt
+                         // showed PRE-mutation wires; wires created by this very
+                         // batch only appeared one call later. Scan now runs AFTER
+                         // connect/edit/delete so the receipt is always current.
+                         // (linetraverser walks every wire on the canvas in O(wires);
+                         // both endpoints have tempIds — new creates are registered
+                         // in mcpStableObjectMap by PHASE 4 before PHASE 5 wiring.)
+                         // Build reverse ptr→tempId map (O(m)) — kept for the
+                         // post-mutation Step D scan below (bug #5 move).
                     }
 
                     // PHASE 1: DISCONNECT — remove wires BEFORE objects are deleted
@@ -2015,10 +1999,14 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
                             // Check if this object is a dummy red box
                             if (no.isRedBox) {
+                                // Bug #7 (fault gauntlet 2026-09-09): the red box STAYS
+                                // on canvas as a ghost (re-adopted by PHASE 0 as a
+                                // 'gui_*' id next call) — name that so the AI knows a
+                                // follow-up delete/census is needed, not just a retry.
                                 createFailures.push_back({
                                     pc.tempId.toStdString(),
                                     pc.objType.toStdString(),
-                                    "couldn't create"
+                                    "couldn't create — a red-box ghost remains on canvas; it is auto-adopted as a gui_* tempId, delete it or run census to find it"
                                 });
                             } else {
                                 // Map the stable tempId to the live gobj pointer
@@ -2130,6 +2118,36 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                             connectFailures.push_back({
                                 cc.srcId.toStdString(), cc.destId.toStdString(),
                                 "not a patchable object" });
+                        }
+                    }
+
+                    // Step D (moved, bug #5): post-mutation connection scan — runs
+                    // AFTER PHASE 5 connect so the receipt reflects the wires this
+                    // batch just created. PHASE 0 adoption already minted tempIds
+                    // for GUI objects; PHASE 4 registered new creates; deletes
+                    // were erased — every live wire endpoint resolves.
+                    {
+                        auto canvasStr = canvasName.toStdString();
+                        auto& canvasMap = processor->mcpStableObjectMap[canvasStr];
+                        std::unordered_map<t_gobj*, std::string> ptrToTempId;
+                        for (auto& [tid, ptr] : canvasMap)
+                            if (ptr) ptrToTempId[ptr] = tid;
+
+                        t_linetraverser lt;
+                        linetraverser_start(&lt, cnv);
+                        t_outconnect* ltOc = nullptr;
+                        while ((ltOc = linetraverser_next_nosize(&lt))) {
+                            t_gobj* sg = &lt.tr_ob->ob_g;
+                            t_gobj* dg = &lt.tr_ob2->ob_g;
+                            auto sIt = ptrToTempId.find(sg);
+                            auto dIt = ptrToTempId.find(dg);
+                            if (sIt == ptrToTempId.end() || dIt == ptrToTempId.end()) continue;
+                            detectedConnections.push_back({
+                                sIt->second,
+                                static_cast<int>(lt.tr_outno),
+                                dIt->second,
+                                static_cast<int>(lt.tr_inno)
+                            });
                         }
                     }
 
