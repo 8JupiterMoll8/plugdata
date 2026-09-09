@@ -2045,6 +2045,37 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     }
 
                     // PHASE 5: CONNECT via obj_connect
+                    // R2 — live signal adjacency for cycle detection (PRD preflight).
+                    // Built once before the loop: signal edges only. Bounded: skip
+                    // if graph too large (2000 objs / 4000 wires) — X-ray still reports.
+                    std::unordered_map<t_gobj*, std::vector<t_gobj*>> liveSigAdj;
+                    std::unordered_map<t_gobj*, std::vector<t_gobj*>> tentativeSigAdj;
+                    bool cycleGuardActive = false;
+                    {
+                        int liveObjCount = 0;
+                        for (t_gobj* y = cnv->gl_list; y; y = y->g_next) liveObjCount++;
+                        if (liveObjCount <= 2000) {
+                            t_linetraverser ltCount;
+                            linetraverser_start(&ltCount, cnv);
+                            int wireCount = 0;
+                            while (linetraverser_next_nosize(&ltCount)) wireCount++;
+                            if (wireCount <= 4000) {
+                                cycleGuardActive = true;
+                                t_linetraverser lt;
+                                linetraverser_start(&lt, cnv);
+                                t_outconnect* ocTmp = nullptr;
+                                while ((ocTmp = linetraverser_next_nosize(&lt))) {
+                                    t_gobj* sgTmp = &lt.tr_ob->ob_g;
+                                    t_gobj* dgTmp = &lt.tr_ob2->ob_g;
+                                    t_object* soTmp = pd::Interface::checkObject(sgTmp);
+                                    if (soTmp && obj_issignaloutlet(soTmp, lt.tr_outno)) {
+                                        liveSigAdj[sgTmp].push_back(dgTmp);
+                                    }
+                                }
+                                tentativeSigAdj = liveSigAdj;
+                            }
+                        }
+                    }
                     for (auto& cc : allConns) {
                         t_gobj* sg = processor->resolveStableId(canvasName, cc.srcId);
                         t_gobj* dg = processor->resolveStableId(canvasName, cc.destId);
@@ -2107,6 +2138,50 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                                     cc.srcId.toStdString(), cc.destId.toStdString(),
                                     "duplicate wire (already connected) — no-op, not counted" });
                                 continue;
+                            }
+                            // R1 — Rate guard (PRD preflight, 2026-09-09): signal outlet
+                            // -> control inlet. Same rule as Interface::canConnect
+                            // (return !obj_issignaloutlet || obj_issignalinlet). The
+                            // GUI enforces it; batch_atomic previously bypassed it
+                            // via raw obj_connect. Now REJECT with stable prefix.
+                            {
+                                bool srcSig  = obj_issignaloutlet(so,  cc.srcOut) != 0;
+                                bool destSig = obj_issignalinlet(d_o, cc.destIn)  != 0;
+                                if (srcSig && !destSig) {
+                                    connectFailures.push_back({
+                                        cc.srcId.toStdString(), cc.destId.toStdString(),
+                                        "rate: signal outlet " + std::to_string(cc.srcOut)
+                                          + " -> control inlet " + std::to_string(cc.destIn)
+                                          + " — Pd drops the audio; use [snapshot~] or rewire via [*~]" });
+                                    continue;
+                                }
+                            }
+                            // R2 — would this wire close a zero-delay signal loop?
+                            // Only signal-outlet wires can close signal cycles; control
+                            // edges are not tracked. Tentative graph grows in batch order
+                            // so the FIRST loop-closing wire is rejected.
+                            if (cycleGuardActive && obj_issignaloutlet(so, cc.srcOut)) {
+                                std::unordered_set<t_gobj*> visited;
+                                std::vector<t_gobj*> stack;
+                                stack.push_back(dg);
+                                visited.insert(dg);
+                                bool closesCycle = false;
+                                while (!stack.empty() && !closesCycle) {
+                                    t_gobj* cur = stack.back(); stack.pop_back();
+                                    if (cur == sg) { closesCycle = true; break; }
+                                    auto it = tentativeSigAdj.find(cur);
+                                    if (it == tentativeSigAdj.end()) continue;
+                                    for (t_gobj* nxt : it->second) {
+                                        if (visited.insert(nxt).second) stack.push_back(nxt);
+                                    }
+                                }
+                                if (closesCycle) {
+                                    connectFailures.push_back({
+                                        cc.srcId.toStdString(), cc.destId.toStdString(),
+                                        "cycle: would close zero-delay signal loop — break it with [delwrite~]/[delread~] or [send~]/[receive~]" });
+                                    continue;
+                                }
+                                tentativeSigAdj[sg].push_back(dg);
                             }
                             if (obj_connect(so, cc.srcOut, d_o, cc.destIn))
                                 connected++;
