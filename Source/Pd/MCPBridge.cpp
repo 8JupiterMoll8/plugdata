@@ -23,6 +23,17 @@
 #include <cstdlib>
 #include <thread>
 #include <vector>
+#include <deque>
+struct BatchDedupEntry {
+  uint64_t ts = 0;
+  juce::OSCMessage reply;
+  BatchDedupEntry() = delete;
+  BatchDedupEntry(uint64_t t, juce::OSCMessage r) : ts(t), reply(std::move(r)) {}
+  BatchDedupEntry(const BatchDedupEntry&) = default;
+  BatchDedupEntry(BatchDedupEntry&&) = default;
+  BatchDedupEntry& operator=(const BatchDedupEntry&) = default;
+  BatchDedupEntry& operator=(BatchDedupEntry&&) = default;
+};
 
 
 extern "C" {
@@ -1580,6 +1591,29 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         if (msg.size() >= 5 && processor) {
             auto canvasName = normalizeCanvas(getArgString(msg[0]));
             auto correlationId = getArgString(msg[1]);
+            // R3a — corrId dedup (PRD preflight): retry with same corrId must
+            // not double-apply. LRU + TTL cache of full replies.
+            static std::unordered_map<std::string, BatchDedupEntry> s_batchDedupCache;
+            static std::deque<std::string> s_batchDedupOrder;
+            static constexpr int BATCH_DEDUP_MAX = 128;
+            static constexpr uint64_t BATCH_DEDUP_TTL_MS = 30000;
+            {
+                std::string corrKey = correlationId.toStdString();
+                uint64_t nowMs = juce::Time::currentTimeMillis();
+                auto it = s_batchDedupCache.find(corrKey);
+                if (it != s_batchDedupCache.end() && (nowMs - it->second.ts) < BATCH_DEDUP_TTL_MS) {
+                    sender.send(it->second.reply);
+                    return;
+                }
+                // Prune expired entries to bound memory.
+                for (auto eit = s_batchDedupCache.begin(); eit != s_batchDedupCache.end();) {
+                    if ((nowMs - eit->second.ts) >= BATCH_DEDUP_TTL_MS) {
+                        auto oit = std::find(s_batchDedupOrder.begin(), s_batchDedupOrder.end(), eit->first);
+                        if (oit != s_batchDedupOrder.end()) s_batchDedupOrder.erase(oit);
+                        eit = s_batchDedupCache.erase(eit);
+                    } else ++eit;
+                }
+            }
             
             int deleteCount = 0, disconnectCount = 0, editCount = 0, createCount = 0, connectCount = 0;
             int cursor = 2;
@@ -2255,10 +2289,20 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
             // Wait for audio thread to complete (max 2000ms)
             auto tWaitStart = std::chrono::high_resolution_clock::now();
-            done.wait(2000);
+            bool waitOk = done.wait(2000);
             auto tWaitEnd = std::chrono::high_resolution_clock::now();
             auto waitUs = std::chrono::duration_cast<std::chrono::microseconds>(tWaitEnd - tWaitStart).count();
             post("batch_atomic: done.wait() took %lld us (%.1f ms)", (long long)waitUs, waitUs / 1000.0f);
+            // R3b — if the audio thread did not finish in 2000ms, the batch
+            // state is UNKNOWN (partial mutation). Do NOT send a success-shaped
+            // reply (it would look like a normal result and the TS retry would
+            // double-apply). Send an explicit error address.
+            if (!waitOk) {
+                juce::OSCMessage errReply { juce::OSCAddressPattern("/pd/batch_atomic/error/" + correlationId) };
+                errReply.addArgument(juce::String("busy: audio thread did not finish in 2000ms — batch state UNKNOWN"));
+                sender.send(errReply);
+                return;
+            }
 
             // Decoupled UI viewport sync - non-blocking async idle dispatch
             juce::MessageManager::callAsync([p = processor] {
@@ -2340,6 +2384,18 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 reply.addArgument(canvasName); // the name that failed, for the receipt
 
             sender.send(reply);
+            // R3a — store reply in dedup cache (LRU + TTL, for retry idempotency).
+            {
+                uint64_t nowMs = juce::Time::currentTimeMillis();
+                std::string corrKey = correlationId.toStdString();
+                s_batchDedupCache.insert_or_assign(corrKey, BatchDedupEntry{nowMs, reply});
+                s_batchDedupOrder.push_back(corrKey);
+                while ((int)s_batchDedupOrder.size() > BATCH_DEDUP_MAX) {
+                    std::string oldest = s_batchDedupOrder.front();
+                    s_batchDedupOrder.pop_front();
+                    s_batchDedupCache.erase(oldest);
+                }
+            }
         }
         return;
     }
@@ -6056,6 +6112,8 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
         reply.addArgument(juce::String("spectral"));
         reply.addArgument(juce::String("batch_atomic"));
         reply.addArgument(juce::String("batch-facts"));
+        reply.addArgument(juce::String("batch-dedup"));
+        reply.addArgument(juce::String("preflight-guards"));
         reply.addArgument(juce::String("transport"));
         reply.addArgument(juce::String("seq"));
         // Canvas screenshot 2192 LLM vision: render Canvas to PNG temp file, MCP returns ImageContent
