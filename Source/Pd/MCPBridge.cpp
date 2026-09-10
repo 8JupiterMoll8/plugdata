@@ -637,6 +637,7 @@ juce::String MCPBridge::computeDiagnoseFacts(PluginProcessor* processor, t_canva
     // 1. Objects: index, stable tempId (fallback: class#idx)
     std::vector<t_gobj*> objs;
     std::vector<juce::String> names;
+    std::vector<juce::String> classNames;
     std::unordered_map<t_gobj*, juce::String> ptrToId;
     auto mapIt = processor->mcpStableObjectMap.find(canvasName.toStdString());
     if (mapIt != processor->mcpStableObjectMap.end())
@@ -649,6 +650,7 @@ juce::String MCPBridge::computeDiagnoseFacts(PluginProcessor* processor, t_canva
         objs.push_back(y);
         t_class* cl = pd_class(&y->g_pd);
         const char* cName = cl ? class_getname(cl) : nullptr;
+        classNames.push_back(juce::String(cName ? cName : ""));
         names.push_back(ptrToId.count(y)
             ? ptrToId[y]
             : (juce::String(cName ? cName : "unknown") + "#" + juce::String(idx)));
@@ -658,6 +660,7 @@ juce::String MCPBridge::computeDiagnoseFacts(PluginProcessor* processor, t_canva
     //    rate-mismatched wires (PRD §2.2 `mismatched`)
     std::vector<std::pair<int, int>> sigEdges;         // (srcIdx, destIdx), signal only
     std::set<std::pair<int, int>> anyInletWired;       // (destIdx, inletNo), any type
+    std::set<std::pair<int, int>> anyOutletWired;      // (srcIdx, outletNo), any type
     struct MismatchedWire { int src, srcOut, dest, destIn; bool srcIsSig; };
     std::vector<MismatchedWire> mismatchedWires;
     t_linetraverser lt;
@@ -671,6 +674,7 @@ juce::String MCPBridge::computeDiagnoseFacts(PluginProcessor* processor, t_canva
         }
         if (si < 0 || di < 0) continue;
         anyInletWired.insert({ di, lt.tr_inno });
+        anyOutletWired.insert({ si, lt.tr_outno });
         bool srcIsSig = (lt.tr_outlet->o_sym == gensym("signal"));
         bool destIsSig = obj_issignalinlet(lt.tr_ob2, lt.tr_inno);
         if (srcIsSig != destIsSig)
@@ -753,6 +757,50 @@ juce::String MCPBridge::computeDiagnoseFacts(PluginProcessor* processor, t_canva
         }
     }
 
+    // 4b. Structural completeness: orphans (zero wires on both sides) + dead-ends
+    //     (inlet wired, output discarded). Wireless classes connect via send/receive
+    //     SYMBOLS (no wire), GUI objects connect via their send/receive PROPERTIES,
+    //     and comment/text/inlet/outlet are never wireable — all excluded, so the
+    //     check fires only on a genuinely-dead DSP/control object (a forgotten wire),
+    //     never on a legitimate wireless or cosmetic one.
+    auto isWirelessOrCosmetic = [](const juce::String& c) {
+        static const char* skip[] = {
+            // wireless (symbol-addressed, no wire needed)
+            "s", "r", "send", "receive", "s~", "r~", "send~", "receive~", "throw~", "catch~",
+            // cosmetic / structural (never wireable)
+            "comment", "text", "cnv", "canvas", "pd", "graph",
+            // subpatch boundary ports
+            "inlet", "inlet~", "outlet", "outlet~",
+            // GUI (connect via send/receive properties, not wires)
+            "bng", "tgl", "hsl", "vsl", "hradio", "vradio", "numbox", "floatatom", "symbolatom", "vu"
+        };
+        for (auto* k : skip) if (c == k) return true;
+        return false;
+    };
+    auto isSink = [](const juce::String& c) {
+        return c == "dac~" || c == "print" || c == "outlet" || c == "outlet~";
+    };
+    std::set<int> orphans;
+    std::set<int> deadEnds;
+    for (int i = 0; i < (int)objs.size(); ++i) {
+        if (isWirelessOrCosmetic(classNames[(size_t)i])) continue;
+        // Container (inline [pd] subpatch OR file-backed abstraction): a 0-port
+        // container can still be alive via an internal [loadbang]/[metro]/[r], and
+        // we cannot see inside from here — so NEVER flag a container as an orphan.
+        // canvas_class covers BOTH; class-name strings miss abstractions, whose
+        // class name is the abstraction's own name (not "pd").
+        if (pd_class(&objs[(size_t)i]->g_pd) == canvas_class) continue;
+        t_object* ob = pd::Interface::checkObject(objs[(size_t)i]);
+        if (!ob) continue;
+        int nin = obj_ninlets(ob), nout = obj_noutlets(ob);
+        if (nin + nout <= 0) continue;
+        bool hasIn = false, hasOut = false;
+        for (auto& p : anyInletWired) if (p.first == i) { hasIn = true; break; }
+        for (auto& p : anyOutletWired) if (p.first == i) { hasOut = true; break; }
+        if (!hasIn && !hasOut) orphans.insert(i);
+        else if (hasIn && !hasOut && nout > 0 && !isSink(classNames[(size_t)i])) deadEnds.insert(i);
+    }
+
     // 5. Build JSON — cycles, unscheduled, dangling, zeroed
     auto nameOf = [&](int i) { return (i >= 0 && i < (int)names.size()) ? names[(size_t)i] : juce::String("?"); };
     juce::String json = "{\"canvas\":\"" + canvasName + "\",\"objectCount\":" + juce::String(objs.size());
@@ -803,6 +851,24 @@ juce::String MCPBridge::computeDiagnoseFacts(PluginProcessor* processor, t_canva
             json += "{\"srcId\":\"" + nameOf(w.src) + "\",\"srcOut\":" + juce::String(w.srcOut)
                   + ",\"destId\":\"" + nameOf(w.dest) + "\",\"destIn\":" + juce::String(w.destIn)
                   + ",\"dir\":\"" + (w.srcIsSig ? "sig->ctl" : "ctl->sig") + "\"}";
+            first = false;
+        }
+    }
+    json += "],\"orphans\":[";
+    {
+        bool first = true;
+        for (int o : orphans) {
+            if (!first) json += ",";
+            json += "\"" + nameOf(o) + "\"";
+            first = false;
+        }
+    }
+    json += "],\"dead_ends\":[";
+    {
+        bool first = true;
+        for (int o : deadEnds) {
+            if (!first) json += ",";
+            json += "\"" + nameOf(o) + "\"";
             first = false;
         }
     }
@@ -4224,6 +4290,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             hasCanvas = true;
             std::vector<t_gobj*> objs;
             std::vector<juce::String> names;
+    std::vector<juce::String> classNames;
             std::unordered_map<t_gobj*, int> ptrToIdx;
             std::unordered_map<t_gobj*, juce::String> ptrToId;
             auto mapIt = processor->mcpStableObjectMap.find(canvasName.toStdString());
