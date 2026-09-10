@@ -2027,6 +2027,12 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         int pCur = 0;
                         const int totalPending = static_cast<int>(pendingCreates.size());
 
+                        // Red-box ghosts (failed creates) collected for rollback
+                        // AFTER alignment, so the mapping scan reflects the final
+                        // gl_list. A failed create must be a pure no-op (parity with
+                        // the GOP-encapsulate path).
+                        SmallArray<t_gobj*> redBoxes;
+
                         for (int o = 0; o < newCount; ++o) {
                             const auto& no = newInfos[o];
                             int bestP = -1;
@@ -2060,15 +2066,15 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
                             // Check if this object is a dummy red box
                             if (no.isRedBox) {
-                                // Bug #7 (fault gauntlet 2026-09-09): the red box STAYS
-                                // on canvas as a ghost (re-adopted by PHASE 0 as a
-                                // 'gui_*' id next call) — name that so the AI knows a
-                                // follow-up delete/census is needed, not just a retry.
+                                // Roll the red box back so a failed create leaves
+                                // NOTHING behind (parity with the GOP-encapsulate
+                                // path). The ghost is still named in createFailures.
                                 createFailures.push_back({
                                     pc.tempId.toStdString(),
                                     pc.objType.toStdString(),
-                                    "couldn't create — a red-box ghost remains on canvas; it is auto-adopted as a gui_* tempId, delete it or run census to find it"
+                                    "couldn't create — red box rolled back (nothing left on canvas)"
                                 });
+                                redBoxes.add(no.ptr);
                             } else {
                                 // Map the stable tempId to the live gobj pointer
                                 processor->mcpStableObjectMap[canvasName.toStdString()][pc.tempId.toStdString()] = no.ptr;
@@ -2102,6 +2108,23 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                                 pendingCreates[p].objType.toStdString(),
                                 "couldn't create"
                             });
+                        }
+
+                        // Roll back red-box ghosts now that alignment is done.
+                        // Audio-thread-safe removal (they were created moments ago in
+                        // this same lambda; GUI has not synced them yet). Rebuild the
+                        // index mappings against the post-delete gl_list so the reply's
+                        // tempId→index pairs stay correct.
+                        if (redBoxes.size() > 0) {
+                            pd::Interface::removeObjectsAudioThread(cnv, redBoxes);
+                            for (size_t mi = 0; mi < mappingIndices.size() && mi < createdPtrs.size(); ++mi) {
+                                if (!createdPtrs[mi]) continue;
+                                int idx = 0, found = -1;
+                                for (t_gobj* y = cnv->gl_list; y; y = y->g_next, ++idx) {
+                                    if (y == createdPtrs[mi]) { found = idx; break; }
+                                }
+                                if (found >= 0) mappingIndices[mi] = found;
+                            }
                         }
                     }
 
@@ -2143,10 +2166,12 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         if (!sg || !dg) {
                             // Phase A (PRD diagnostic layer): name the silent
                             // failure instead of skipping silently.
+                            std::string reason;
+                            if (!sg && !dg) reason = "src and dest not found";
+                            else if (!sg)   reason = "src not found";
+                            else            reason = "dest not found";
                             connectFailures.push_back({
-                                cc.srcId.toStdString(), cc.destId.toStdString(),
-                                std::string(sg ? "" : "src not found, ")
-                                    + (dg ? "" : "dest not found") });
+                                cc.srcId.toStdString(), cc.destId.toStdString(), reason });
                             continue;
                         }
                         t_object* so = pd::Interface::checkObject(sg);
