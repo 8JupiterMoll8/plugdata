@@ -1102,6 +1102,84 @@ juce::String MCPBridge::computeSignalTrace(PluginProcessor* processor, t_canvas*
     return json;
 }
 
+// ── /pd/clusters — context grouping for layout ──────────────────────────
+// Connected components of the wire graph (signal + control), classified by
+// kind. One union-find pass over gl_list connections — read-only, fast.
+// Feeds context-aware layout (see PRD_CONTEXT_LAYOUT_GUARD.md).
+juce::String MCPBridge::computeClusters(PluginProcessor* processor, t_canvas* cnv, const juce::String& canvasName)
+{
+    if (!processor || !cnv) return "{\"clusters\":[]}";
+
+    std::vector<t_gobj*> objs;
+    std::vector<juce::String> names;
+    std::vector<juce::String> classNames;
+    std::unordered_map<t_gobj*, int> ptrToIdx;
+
+    std::unordered_map<t_gobj*, juce::String> ptrToId;
+    auto mapIt = processor->mcpStableObjectMap.find(canvasName.toStdString());
+    if (mapIt != processor->mcpStableObjectMap.end())
+        for (auto& [tid, ptr] : mapIt->second)
+            if (ptr) ptrToId[ptr] = juce::String(tid);
+
+    int idx = 0;
+    for (t_gobj* y = cnv->gl_list; y; y = y->g_next, ++idx) {
+        ptrToIdx[y] = static_cast<int>(objs.size());
+        objs.push_back(y);
+        t_class* cl = pd_class(&y->g_pd);
+        const char* cName = cl ? class_getname(cl) : nullptr;
+        juce::String clStr = cName ? juce::String::fromUTF8(cName) : juce::String("unknown");
+        classNames.push_back(clStr);
+        names.push_back(ptrToId.count(y) ? ptrToId[y] : (clStr + "#" + juce::String(idx)));
+    }
+
+    int n = static_cast<int>(objs.size());
+    if (n == 0) return "{\"clusters\":[]}";
+
+    std::vector<int> parent(n);
+    for (int i = 0; i < n; ++i) parent[i] = i;
+    auto findRoot = [&](int a) {
+        while (parent[a] != a) { parent[a] = parent[parent[a]]; a = parent[a]; }
+        return a;
+    };
+    auto unite = [&](int a, int b) { int ra = findRoot(a), rb = findRoot(b); if (ra != rb) parent[ra] = rb; };
+
+    t_linetraverser lt;
+    t_outconnect* oc = nullptr;
+    linetraverser_start(&lt, cnv);
+    while ((oc = linetraverser_next_nosize(&lt))) {
+        auto si = ptrToIdx.find(&lt.tr_ob->ob_g);
+        auto di = ptrToIdx.find(&lt.tr_ob2->ob_g);
+        if (si != ptrToIdx.end() && di != ptrToIdx.end()) unite(si->second, di->second);
+    }
+
+    std::unordered_map<int, std::vector<int>> groups;
+    for (int i = 0; i < n; ++i) groups[findRoot(i)].push_back(i);
+
+    juce::String json = "{\"clusters\":[";
+    bool firstC = true;
+    int cid = 0;
+    for (auto& kv : groups) {
+        auto& members = kv.second;
+        bool hasSignal = false, hasBus = false;
+        for (int m : members) {
+            const juce::String& c = classNames[m];
+            if (c.endsWithChar('~')) hasSignal = true;
+            if (c == "catch~" || c == "dac~" || c == "out~") hasBus = true;
+        }
+        juce::String kind = hasBus ? "bus" : (hasSignal ? "signal" : "control");
+        if (!firstC) json += ",";
+        firstC = false;
+        json += "{\"id\":\"c" + juce::String(++cid) + "\",\"kind\":\"" + kind + "\",\"objects\":[";
+        for (size_t mi = 0; mi < members.size(); ++mi) {
+            if (mi > 0) json += ",";
+            json += "\"" + names[members[mi]] + "\"";
+        }
+        json += "]}";
+    }
+    json += "]}";
+    return json;
+}
+
 void MCPBridge::oscMessageReceived(const juce::OSCMessage& message)
 {
     auto addr = message.getAddressPattern().toString();
@@ -3532,6 +3610,26 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         if (*w <= 0) *w = 60;
         if (*h <= 0) *h = 20;
     };
+
+    // ── /pd/clusters — context grouping (PRD_CONTEXT_LAYOUT_GUARD) ──────
+    // /pd/clusters <canvasName> [corrId]
+    // Reply: /pd/clusters/reply/<corrId> {"clusters":[{"id","kind","objects":[...]}]}
+    if (action == "clusters") {
+        auto canvasName    = normalizeCanvas(getArgString(msg[0]));
+        auto correlationId = msg.size() > 1 ? getArgString(msg[msg.size() - 1]) : "0";
+        juce::String replyAddr = "/pd/clusters/reply/" + correlationId;
+
+        juce::String json;
+        sys_lock();
+        t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+        if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
+        json = cnv ? computeClusters(processor, cnv, canvasName)
+                   : juce::String("{\"error\":\"canvas not found\"}");
+        sys_unlock();
+
+        sendReply(replyAddr, json);
+        return;
+    }
 
     if (action == "bounds") {
         auto canvasName    = normalizeCanvas(getArgString(msg[0]));
@@ -6289,6 +6387,7 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
         // PRD layout-v2 Phase A: read-only layout facts (C++ truth of layout)
         reply.addArgument(juce::String("bounds"));
         reply.addArgument(juce::String("collisions"));
+        reply.addArgument(juce::String("clusters"));
         reply.addArgument(juce::String("wire_occlusions"));
         // PRD layout-v2 Phase B1/B2: native writers on the zero-drop move path
         reply.addArgument(juce::String("deoverlap"));

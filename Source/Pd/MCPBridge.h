@@ -243,6 +243,10 @@ private:
     static MasterMeterResult computeMasterMeter(PluginProcessor* processor, t_canvas* cnv, const juce::String& canvasName);
     static juce::String computeSignalTrace(PluginProcessor* processor, t_canvas* cnv, const juce::String& canvasName);
 
+    // Context-aware layout (PRD_CONTEXT_LAYOUT_GUARD): connected components of
+    // the wire graph, classified as signal / bus / control. Read-only, fast.
+    static juce::String computeClusters(PluginProcessor* processor, t_canvas* cnv, const juce::String& canvasName);
+
     void timerCallback() override;
 
     struct MorphParam {
