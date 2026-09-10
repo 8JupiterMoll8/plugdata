@@ -2783,7 +2783,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
             if (cnv) {
                 // 1. Clear existing objects
-                pd_typedmess(reinterpret_cast<t_pd*>(cnv), gensym("clear"), 0, nullptr);
+                pd::Interface::clearCanvasAudioThread(cnv);
 
                 // 2. Load .pd file — strip the #N canvas header line then
                 //    use pasteDirect() which correctly handles both #X obj
@@ -3031,7 +3031,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 processor->mcpStableObjectMap[canvasName.toStdString()].clear();
 
                 // 1. Clear existing objects
-                pd_typedmess(reinterpret_cast<t_pd*>(cnv), gensym("clear"), 0, nullptr);
+                pd::Interface::clearCanvasAudioThread(cnv);
 
                 // 2. Load .pd file — strip the #N canvas header, pasteDirect
                 t_binbuf* b = binbuf_new();
@@ -3761,7 +3761,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             sys_lock();
             t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
             if (cnv) {
-                pd_typedmess(reinterpret_cast<t_pd*>(cnv), gensym("clear"), 0, nullptr);
+                pd::Interface::clearCanvasAudioThread(cnv);
             }
             sys_unlock();
 

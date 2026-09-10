@@ -302,6 +302,21 @@ struct Interface {
         canvas_dirty(cnv, 1);
     }
 
+    // Audio-thread-safe WHOLESALE clear. Collects the top-level objects and
+    // removes them via removeObjectsAudioThread (unlinks editor selection/rtext,
+    // disconnects wires, frees via pd_free). Unlike the raw "clear" message
+    // (glist_clear -> glist_delete), which leaves the JUCE editor holding stale
+    // pointers to freed objects and segfaults on the next GUI refresh — the
+    // exact crash class as the batch-delete bug, but on the load/clear path.
+    static void clearCanvasAudioThread(t_canvas* cnv)
+    {
+        if (!cnv) return;
+        SmallArray<t_gobj*> objs;
+        for (t_gobj* g = cnv->gl_list; g; g = g->g_next) objs.add(g);
+        if (objs.size() > 0)
+            removeObjectsAudioThread(cnv, objs);
+    }
+
     static void removeObjects(t_canvas* cnv, SmallArray<t_gobj*> const& objects)
     {
         if (!cnv) return;
