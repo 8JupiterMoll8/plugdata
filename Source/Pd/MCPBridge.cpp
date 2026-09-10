@@ -1180,6 +1180,69 @@ juce::String MCPBridge::computeClusters(PluginProcessor* processor, t_canvas* cn
     return json;
 }
 
+// ── sanitizeLayout — inline minimal-deoverlap post-guard ────────────────
+// Same algorithm as /pd/deoverlap (PAD 5, 10px snap, minimal-axis push) but
+// using Pd-only bounds so it is safe to call inline under sys_lock from the
+// batch_atomic path. Returns the number of objects moved.
+int MCPBridge::sanitizeLayout(PluginProcessor* processor, t_canvas* cnv)
+{
+    if (!processor || !cnv) return 0;
+
+    std::vector<t_gobj*> objs;
+    for (t_gobj* y = cnv->gl_list; y; y = y->g_next) objs.push_back(y);
+    if (objs.size() < 2) return 0;
+
+    struct DR { t_gobj* g; int x, y, w, h; };
+    std::vector<DR> rects;
+    rects.reserve(objs.size());
+    for (auto* g : objs) {
+        int x = 0, y = 0, w = 0, h = 0;
+        pd::Interface::getObjectBounds(cnv, g, &x, &y, &w, &h);
+        rects.push_back({ g, x, y, w, h });
+    }
+
+    const int PAD = 5;
+    const int MAXPASS = 24;
+    auto snap10 = [](int v) { return (v / 10) * 10; };
+    for (int pass = 0; pass < MAXPASS; pass++) {
+        bool anyHit = false;
+        for (size_t i = 0; i < rects.size(); i++) {
+            for (size_t j = i + 1; j < rects.size(); j++) {
+                auto& a = rects[i];
+                auto& b = rects[j];
+                bool hit = a.x < b.x + b.w + PAD && a.x + a.w + PAD > b.x
+                        && a.y < b.y + b.h + PAD && a.y + a.h + PAD > b.y;
+                if (!hit) continue;
+                anyHit = true;
+                int overlapX = std::min(a.x + a.w + PAD - b.x, b.x + b.w + PAD - a.x);
+                int overlapY = std::min(a.y + a.h + PAD - b.y, b.y + b.h + PAD - a.y);
+                if (overlapX <= overlapY) {
+                    int acx = a.x + a.w / 2, bcx = b.x + b.w / 2;
+                    int dx = std::max(10, snap10(overlapX + 9));
+                    b.x += (bcx >= acx ? dx : -dx);
+                } else {
+                    int acy = a.y + a.h / 2, bcy = b.y + b.h / 2;
+                    int dy = std::max(10, snap10(overlapY + 9));
+                    b.y += (bcy >= acy ? dy : -dy);
+                }
+            }
+        }
+        if (!anyHit) break;
+    }
+
+    int moved = 0;
+    for (auto& r : rects) {
+        int ox = 0, oy = 0, ow = 0, oh = 0;
+        pd::Interface::getObjectBounds(cnv, r.g, &ox, &oy, &ow, &oh);
+        if (r.x != ox || r.y != oy) {
+            pd::Interface::moveObject(cnv, r.g, r.x, r.y);
+            moved++;
+        }
+    }
+    if (moved > 0) canvas_dirty(cnv, 1);
+    return moved;
+}
+
 void MCPBridge::oscMessageReceived(const juce::OSCMessage& message)
 {
     auto addr = message.getAddressPattern().toString();
@@ -1780,6 +1843,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
             int deleted = 0, disconnected = 0, edited = 0, created = 0, connected = 0;
             int reconcileEvicted = 0, reconcileAdopted = 0;
+            int layoutSanitizedMoved = 0;
             // Phase A (PRD diagnostic layer): create/connect failure facts —
             // named failures instead of silent skips (see PRD §2.1).
             struct CreateFailure { std::string tempId; std::string type; std::string reason; };
@@ -1871,6 +1935,12 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 auto d2 = getArgString(msg[cursor++]); int di = static_cast<int>(getArgFloat(msg[cursor++]));
                 allConns.push_back({ s, so, d2, di });
             }
+
+            // Optional trailing flag (PRD_CONTEXT_LAYOUT_GUARD P2): auto-layout
+            // sanitize after mutation. Default ON; old clients omit it.
+            bool autoLayout = true;
+            if (cursor < msg.size()) autoLayout = getArgFloat(msg[cursor++]) > 0.5f;
+
 
             // =========================================================================
             // EXECUTE ON AUDIO THREAD — zero lock contention, zero dropout
@@ -2451,6 +2521,12 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     }
                 }
 
+                // PRD_CONTEXT_LAYOUT_GUARD P2: inline minimal-deoverlap so the
+                // artist never gets a messy canvas. Default on (autoLayout);
+                // geometry-only, no DSP touch.
+                if (cnv && autoLayout)
+                    layoutSanitizedMoved = sanitizeLayout(processor, cnv);
+
                 auto tLambdaEnd = std::chrono::high_resolution_clock::now();
                 auto totalUs = std::chrono::duration_cast<std::chrono::microseconds>(tLambdaEnd - tLambdaStart).count();
                 post("batch_atomic: TOTAL lambda took %lld us", (long long)totalUs);
@@ -2577,6 +2653,10 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             // clients surface it as _v2meta.undoReset so the AI knows native
             // undo cannot step back past this mutation.
             reply.addArgument(static_cast<int32>(undoReset ? 1 : 0));
+
+            // Layout-sanitize tail fact (appended LAST, PRD_CONTEXT_LAYOUT_GUARD
+            // P2): number of objects the inline deoverlap moved (0 = clean).
+            reply.addArgument(static_cast<int32>(layoutSanitizedMoved));
 
             sender.send(reply);
             // R3a — store reply in dedup cache (LRU + TTL, for retry idempotency).

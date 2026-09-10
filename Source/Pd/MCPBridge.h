@@ -247,6 +247,10 @@ private:
     // the wire graph, classified as signal / bus / control. Read-only, fast.
     static juce::String computeClusters(PluginProcessor* processor, t_canvas* cnv, const juce::String& canvasName);
 
+    // Inline layout sanitize (PRD_CONTEXT_LAYOUT_GUARD P2): minimal-deoverlap
+    // of overlapping objects after a mutation. Returns objects moved.
+    static int sanitizeLayout(PluginProcessor* processor, t_canvas* cnv);
+
     void timerCallback() override;
 
     struct MorphParam {
