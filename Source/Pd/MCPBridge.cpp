@@ -1106,6 +1106,93 @@ juce::String MCPBridge::computeSignalTrace(PluginProcessor* processor, t_canvas*
 // Connected components of the wire graph (signal + control), classified by
 // kind. One union-find pass over gl_list connections — read-only, fast.
 // Feeds context-aware layout (see PRD_CONTEXT_LAYOUT_GUARD.md).
+// Shared: find the JUCE Canvas component for a Pd canvas (message thread).
+static Canvas* mcpFindGuiCanvasFor(PluginProcessor* proc, t_canvas* c)
+{
+    if (!proc || !c) return nullptr;
+    for (auto* editor : proc->getEditors()) {
+        if (!editor) continue;
+        for (auto* cnvItem : editor->getCanvases()) {
+            if (cnvItem && cnvItem->patch.getPointer().get() == c) return cnvItem;
+        }
+    }
+    return nullptr;
+}
+
+// Shared true-rect bounds (GUI-aware). MUST run on the JUCE message thread
+// (reads Canvas object components). Used by the layout X-ray AND the inline
+// layout guard so both agree on geometry.
+static void mcpGetTrueObjectBounds(t_canvas* c, t_gobj* y, Canvas* guiCanvas, int* x, int* yy, int* w, int* h)
+{
+    *x = 0; *yy = 0; *w = 0; *h = 0;
+    pd::Interface::getObjectBounds(c, y, x, yy, w, h);
+
+    if (guiCanvas) {
+        for (auto* obj : guiCanvas->objects) {
+            if (obj && obj->getPointer() == y) {
+                auto b = obj->getSelectableBounds();
+                if (b.getWidth() > 0 && b.getHeight() > 0) {
+                    *w = b.getWidth();
+                    *h = b.getHeight();
+                    return;
+                }
+                break;
+            }
+        }
+    }
+
+    if (pd::Interface::isTextObject(y) && (*w <= 10 || *h <= 10)) {
+        t_text* textObj = reinterpret_cast<t_text*>(y);
+        if (textObj && textObj->te_binbuf) {
+            char* textBuf = nullptr;
+            int textSize = 0;
+            binbuf_gettext(textObj->te_binbuf, &textBuf, &textSize);
+            if (textBuf && textSize > 0) {
+                int fontWidth = glist_fontwidth(c);
+                int fontHeight = glist_fontheight(c);
+                if (fontWidth <= 0) fontWidth = 7;
+                if (fontHeight <= 0) fontHeight = 14;
+                juce::String fullText = juce::String::fromUTF8(textBuf, textSize).trim();
+                auto lines = juce::StringArray::fromLines(fullText);
+                int maxLineLen = 0;
+                for (const auto& line : lines) maxLineLen = std::max(maxLineLen, line.length());
+                int textW = maxLineLen * fontWidth + 12;
+                int textH = std::max(1, lines.size()) * fontHeight + 7;
+                if (*w <= 10) *w = textW;
+                if (*h <= 10) *h = textH;
+                freebytes(textBuf, textSize);
+            }
+        }
+    }
+
+    if (*w <= 0) *w = 60;
+    if (*h <= 0) *h = 20;
+}
+
+// True-rect collision check (message thread) — same measurement as the
+// /pd/collisions X-ray, so the guard and the verifier agree.
+static bool mcpHasCollisions(PluginProcessor* processor, t_canvas* cnv, int pad)
+{
+    if (!processor || !cnv) return false;
+    Canvas* gui = mcpFindGuiCanvasFor(processor, cnv);
+    std::vector<t_gobj*> objs;
+    for (t_gobj* y = cnv->gl_list; y; y = y->g_next) objs.push_back(y);
+    struct R { int x, y, w, h; };
+    std::vector<R> rects(objs.size());
+    for (size_t i = 0; i < objs.size(); ++i) {
+        int x = 0, y = 0, w = 0, h = 0;
+        mcpGetTrueObjectBounds(cnv, objs[i], gui, &x, &y, &w, &h);
+        rects[i] = { x, y, w, h };
+    }
+    for (size_t i = 0; i < rects.size(); ++i)
+        for (size_t j = i + 1; j < rects.size(); ++j) {
+            auto& a = rects[i]; auto& b = rects[j];
+            if (a.x < b.x + b.w + pad && a.x + a.w + pad > b.x
+             && a.y < b.y + b.h + pad && a.y + a.h + pad > b.y) return true;
+        }
+    return false;
+}
+
 juce::String MCPBridge::computeClusters(PluginProcessor* processor, t_canvas* cnv, const juce::String& canvasName)
 {
     if (!processor || !cnv) return "{\"clusters\":[]}";
@@ -1317,14 +1404,31 @@ int MCPBridge::fixOcclusions(PluginProcessor* processor, t_canvas* cnv, int pad,
                 t = std::max(0.0, std::min(1.0, t));
                 double wx = x1 + t * (x2 - x1);
                 int bx = rects[k].x, bw = rects[k].w;
+                int by = rects[k].y, bh = rects[k].h;
+                // Shift perpendicular to the wire: horizontal-ish wire → move the
+                // box vertically; vertical-ish wire → move it horizontally.
+                double dxw = x2 - x1, dyw = y2 - y1;
+                int newbx = bx, newby = by;
+                if (std::abs(dxw) >= std::abs(dyw)) {
+                    double wxc = bx + bw / 2.0;
+                    double tw = (dxw != 0.0) ? (wxc - x1) / dxw : 0.5;
+                    tw = std::max(0.0, std::min(1.0, tw));
+                    double wy = y1 + tw * dyw;
+                    int shiftUp   = static_cast<int>(std::ceil((by + bh + pad) - wy)); // >0 → move up
+                    int shiftDown = static_cast<int>(std::ceil(wy + pad - by));        // >0 → move down
+                    if (shiftUp > 0 && (shiftUp <= shiftDown || shiftDown <= 0))
+                        newby = by - snapUp(shiftUp);
+                    else if (shiftDown > 0)
+                        newby = by + snapUp(shiftDown);
+                } else {
                 int shiftLeft  = static_cast<int>(std::ceil((bx + bw + pad) - wx)); // >0 → move left
                 int shiftRight = static_cast<int>(std::ceil(wx + pad - bx));        // >0 → move right
-                int newbx = bx;
                 if (shiftLeft > 0 && (shiftLeft <= shiftRight || shiftRight <= 0))
                     newbx = bx - snapUp(shiftLeft);
                 else if (shiftRight > 0)
                     newbx = bx + snapUp(shiftRight);
-                if (newbx != bx) { rects[k].x = newbx; anyMove = true; totalMoved++; }
+                }
+                if (newbx != bx || newby != by) { rects[k].x = newbx; rects[k].y = newby; anyMove = true; totalMoved++; }
             }
         }
         if (!anyMove) break;
@@ -1332,7 +1436,7 @@ int MCPBridge::fixOcclusions(PluginProcessor* processor, t_canvas* cnv, int pad,
         for (size_t k = 0; k < objs.size(); ++k) {
             int ox = 0, oy = 0, ow = 0, oh = 0;
             pd::Interface::getObjectBounds(cnv, objs[k], &ox, &oy, &ow, &oh);
-            if (rects[k].x != ox) pd::Interface::moveObject(cnv, objs[k], rects[k].x, rects[k].y);
+            if (rects[k].x != ox || rects[k].y != oy) pd::Interface::moveObject(cnv, objs[k], rects[k].x, rects[k].y);
         }
         canvas_dirty(cnv, 1);
     }
@@ -1372,11 +1476,12 @@ int MCPBridge::composeLayout(PluginProcessor* processor, t_canvas* cnv, const ju
     auto findRoot = [&](int a) { while (parent[a] != a) { parent[a] = parent[parent[a]]; a = parent[a]; } return a; };
     auto unite = [&](int a, int b) { int ra = findRoot(a), rb = findRoot(b); if (ra != rb) parent[ra] = rb; };
     t_linetraverser lt; t_outconnect* oc = nullptr;
+    std::vector<std::pair<int, int>> edges;
     linetraverser_start(&lt, cnv);
     while ((oc = linetraverser_next_nosize(&lt))) {
         auto si = idx.find(&lt.tr_ob->ob_g);
         auto di = idx.find(&lt.tr_ob2->ob_g);
-        if (si != idx.end() && di != idx.end()) unite(si->second, di->second);
+        if (si != idx.end() && di != idx.end()) { unite(si->second, di->second); edges.emplace_back(si->second, di->second); }
     }
 
     std::unordered_map<int, std::vector<int>> groups;
@@ -1403,7 +1508,8 @@ int MCPBridge::composeLayout(PluginProcessor* processor, t_canvas* cnv, const ju
         int mx = INT_MAX;
         for (int k : c.members) {
             const juce::String& cc = cls[k];
-            if (cc == "catch~" || cc == "dac~" || cc == "out~" || cc == "throw~") bus = true;
+            // The master bus is catch~/dac~/out~ ONLY. throw~ is a voice SEND.
+            if (cc == "catch~" || cc == "dac~" || cc == "out~") bus = true;
             if (isSynth(cc)) synth = true;
             if (isSignal(cc)) sig = true;
             if (!isGui(cc)) allGui = false;
@@ -1434,17 +1540,40 @@ int MCPBridge::composeLayout(PluginProcessor* processor, t_canvas* cnv, const ju
             if (isSignal(cls[k])) sigv.push_back(k);
             else ctrl.push_back(k);
         }
-        // controls/gui in the gutter, left→right
+        // controls/gui in the gutter, left→right, spaced by their width
         int gx = cx;
         for (int k : ctrl) {
             pd::Interface::moveObject(cnv, objs[k], gx, GUTTER_Y);
             moved++;
-            gx += 120;
+            gx += ow[k] + 20;
         }
-        // signal objects stacked top→bottom, ordered by current y
-        std::sort(sigv.begin(), sigv.end(), [&](int a, int b) { return oy[a] < oy[b]; });
+        // signal objects stacked top→bottom in SIGNAL-FLOW order (topological:
+        // sources first, then processors, then the send/sink), fallback to y.
+        std::unordered_set<int> inC(sigv.begin(), sigv.end());
+        std::unordered_map<int, int> indeg;
+        for (int k : sigv) indeg[k] = 0;
+        for (auto& e : edges) if (inC.count(e.first) && inC.count(e.second)) indeg[e.second]++;
+        std::vector<int> order;
+        std::vector<int> remaining = sigv;
+        while (!remaining.empty()) {
+            bool progress = false;
+            for (auto it = remaining.begin(); it != remaining.end(); ) {
+                if (indeg[*it] <= 0) {
+                    int node = *it;
+                    order.push_back(node);
+                    for (auto& e : edges) if (e.first == node && inC.count(e.second)) indeg[e.second]--;
+                    it = remaining.erase(it);
+                    progress = true;
+                } else ++it;
+            }
+            if (!progress) {
+                std::sort(remaining.begin(), remaining.end(), [&](int a, int b) { return oy[a] < oy[b]; });
+                order.insert(order.end(), remaining.begin(), remaining.end());
+                break;
+            }
+        }
         int yy = SIGNAL_TOP;
-        for (int k : sigv) {
+        for (int k : order) {
             pd::Interface::moveObject(cnv, objs[k], cx, yy);
             moved++;
             yy += ROW_GAP;
@@ -2059,6 +2188,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             int reconcileEvicted = 0, reconcileAdopted = 0;
             int layoutSanitizedMoved = 0;
             int occlusionsFixed = 0;
+            bool fallbackComposed = false;
             // Phase A (PRD diagnostic layer): create/connect failure facts —
             // named failures instead of silent skips (see PRD §2.1).
             struct CreateFailure { std::string tempId; std::string type; std::string reason; };
@@ -2742,17 +2872,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     }
                 }
 
-                // PRD_CONTEXT_LAYOUT_GUARD P2: inline minimal-deoverlap so the
-                // artist never gets a messy canvas. Default on (autoLayout);
-                // geometry-only, no DSP touch.
-                if (cnv && autoLayout) {
-                    layoutSanitizedMoved = sanitizeLayout(processor, cnv, layoutPad, layoutSnap);
-                    if (autoFixOcclusions) {
-                        occlusionsFixed = fixOcclusions(processor, cnv, layoutPad, layoutSnap);
-                        if (occlusionsFixed > 0)
-                            layoutSanitizedMoved += sanitizeLayout(processor, cnv, layoutPad, layoutSnap);
-                    }
-                }
+                // (layout guard + fallback run on the message thread below.)
 
                 auto tLambdaEnd = std::chrono::high_resolution_clock::now();
                 auto totalUs = std::chrono::duration_cast<std::chrono::microseconds>(tLambdaEnd - tLambdaStart).count();
@@ -2778,10 +2898,40 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 return;
             }
 
+            // PRD_CONTEXT_LAYOUT_GUARD (P2/P3/P3.1): layout guard on the JUCE
+            // message thread. Deoverlap + occlusion rounds (fast, Pd coords),
+            // then a GUARANTEED fallback: if true-rect collisions remain,
+            // compose the canvas by role (proven collision-free).
+            if (cnv && autoLayout) {
+                juce::WaitableEvent sanitizeDone;
+                juce::MessageManager::callAsync([&]() {
+                    const int guardPad = layoutPad + 15;
+                    for (int round = 0; round < 8; round++) {
+                        sys_lock();
+                        int c = sanitizeLayout(processor, cnv, guardPad, layoutSnap);
+                        int o = autoFixOcclusions ? fixOcclusions(processor, cnv, guardPad, layoutSnap) : 0;
+                        sys_unlock();
+                        layoutSanitizedMoved += c;
+                        occlusionsFixed += o;
+                        if (c == 0 && o == 0) break;
+                    }
+                    if (mcpHasCollisions(processor, cnv, 5)) {
+                        sys_lock();
+                        int cm = composeLayout(processor, cnv, canvasName, layoutPad, layoutSnap);
+                        sys_unlock();
+                        layoutSanitizedMoved += cm;
+                        fallbackComposed = true;
+                    }
+                    processor->synchroniseCanvases();
+                    sanitizeDone.signal();
+                });
+                sanitizeDone.wait(6000);
+            } else {
             // Decoupled UI viewport sync - non-blocking async idle dispatch
             juce::MessageManager::callAsync([p = processor] {
                 if (p) p->synchroniseCanvases();
             });
+            }
 
             // MCP mutations never register correct Pd undo actions, yet they
             // still reorder/free objects that pre-existing index-based undo
@@ -2886,6 +3036,8 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             reply.addArgument(static_cast<int32>(layoutSanitizedMoved));
             // Occlusion-fix tail fact (P3.1): objects nudged off wire paths.
             reply.addArgument(static_cast<int32>(occlusionsFixed));
+            // Fallback tail fact: 1 if the guard fell back to compose.
+            reply.addArgument(static_cast<int32>(fallbackComposed ? 1 : 0));
 
             sender.send(reply);
             // R3a — store reply in dedup cache (LRU + TTL, for retry idempotency).
@@ -3856,68 +4008,11 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
     // All read-only under sys_lock, zero DSP touch, zero dropout.
 
     auto findGuiCanvasFor = [](PluginProcessor* proc, t_canvas* c) -> Canvas* {
-        if (!proc || !c) return nullptr;
-        for (auto* editor : proc->getEditors()) {
-            if (!editor) continue;
-            for (auto* cnvItem : editor->getCanvases()) {
-                if (cnvItem && cnvItem->patch.getPointer().get() == c)
-                    return cnvItem;
-            }
-        }
-        return nullptr;
+        return mcpFindGuiCanvasFor(proc, c);
     };
 
     auto getTrueObjectBounds = [](t_canvas* c, t_gobj* y, Canvas* guiCanvas, int* x, int* yy, int* w, int* h) {
-        *x = 0; *yy = 0; *w = 0; *h = 0;
-        pd::Interface::getObjectBounds(c, y, x, yy, w, h);
-
-        // 1. Check live JUCE Canvas Object component bounds for true visual geometry (w and h only)
-        if (guiCanvas) {
-            for (auto* obj : guiCanvas->objects) {
-                if (obj && obj->getPointer() == y) {
-                    auto b = obj->getSelectableBounds();
-                    if (b.getWidth() > 0 && b.getHeight() > 0) {
-                        *w = b.getWidth();
-                        *h = b.getHeight();
-                        return;
-                    }
-                    break;
-                }
-            }
-        }
-
-        // 2. Pure Data text fallback: when running headless or before GUI paint,
-        // gobj_getrect hardcodes comments/text to 10x10.
-        // Calculate true pixel dimensions from character metrics.
-        if (pd::Interface::isTextObject(y) && (*w <= 10 || *h <= 10)) {
-            t_text* textObj = reinterpret_cast<t_text*>(y);
-            if (textObj && textObj->te_binbuf) {
-                char* textBuf = nullptr;
-                int textSize = 0;
-                binbuf_gettext(textObj->te_binbuf, &textBuf, &textSize);
-                if (textBuf && textSize > 0) {
-                    int fontWidth = glist_fontwidth(c);
-                    int fontHeight = glist_fontheight(c);
-                    if (fontWidth <= 0) fontWidth = 7;
-                    if (fontHeight <= 0) fontHeight = 14;
-
-                    juce::String fullText = juce::String::fromUTF8(textBuf, textSize).trim();
-                    auto lines = juce::StringArray::fromLines(fullText);
-                    int maxLineLen = 0;
-                    for (const auto& line : lines) {
-                        maxLineLen = std::max(maxLineLen, line.length());
-                    }
-                    int textW = maxLineLen * fontWidth + 12;
-                    int textH = std::max(1, lines.size()) * fontHeight + 7;
-                    if (*w <= 10) *w = textW;
-                    if (*h <= 10) *h = textH;
-                    freebytes(textBuf, textSize);
-                }
-            }
-        }
-
-        if (*w <= 0) *w = 60;
-        if (*h <= 0) *h = 20;
+        mcpGetTrueObjectBounds(c, y, guiCanvas, x, yy, w, h);
     };
 
     // ── /pd/clusters — context grouping (PRD_CONTEXT_LAYOUT_GUARD) ──────
@@ -3960,7 +4055,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 for (auto& [tid, ptr] : mapIt->second)
                     if (ptr) ptrToId[ptr] = juce::String(tid);
 
-            Canvas* guiCanvas = findGuiCanvasFor(processor, cnv);
+            Canvas* guiCanvas = mcpFindGuiCanvasFor(processor, cnv);
 
             float zoom = 1.0f;
             int vx = 0, vy = 0, vw = 1000, vh = 800;
@@ -4074,7 +4169,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 for (auto& [tid, ptr] : mapIt->second)
                     if (ptr) ptrToId[ptr] = juce::String(tid);
 
-            Canvas* guiCanvas = findGuiCanvasFor(processor, cnv);
+            Canvas* guiCanvas = mcpFindGuiCanvasFor(processor, cnv);
             int idx = 0;
             for (t_gobj* y = cnv->gl_list; y; y = y->g_next, ++idx) {
                 int x = 0, yy = 0, w = 0, h = 0;
@@ -4145,7 +4240,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     : (juce::String(class_getname(pd_class(&y->g_pd))) + "#" + juce::String(idx)));
             }
 
-            Canvas* guiCanvas = findGuiCanvasFor(processor, cnv);
+            Canvas* guiCanvas = mcpFindGuiCanvasFor(processor, cnv);
             struct R { int x, y, w, h; };
             std::vector<R> rects(objs.size());
             for (size_t i = 0; i < objs.size(); ++i) {
@@ -5736,7 +5831,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 return;
             }
 
-            Canvas* guiCanvas = findGuiCanvasFor(processor, cnv);
+            Canvas* guiCanvas = mcpFindGuiCanvasFor(processor, cnv);
             struct DR { t_gobj* g; int x, y, w, h; };
             std::vector<DR> rects;
             rects.reserve(objs.size());
@@ -5858,7 +5953,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 return;
             }
 
-            Canvas* guiCanvas = findGuiCanvasFor(processor, cnv);
+            Canvas* guiCanvas = mcpFindGuiCanvasFor(processor, cnv);
             struct PR { t_gobj* g; int x, y, w, h; int pillar; };
             std::vector<PR> rects;
             rects.reserve(objs.size());
@@ -5982,7 +6077,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             std::vector<FR> rects;
             rects.reserve(objs.size());
 
-            Canvas* guiCanvas = findGuiCanvasFor(processor, cnv);
+            Canvas* guiCanvas = mcpFindGuiCanvasFor(processor, cnv);
             for (auto* g : objs) {
                 int x = 0, yy = 0, w = 0, h = 0;
                 getTrueObjectBounds(cnv, g, guiCanvas, &x, &yy, &w, &h);
