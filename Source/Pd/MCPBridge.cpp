@@ -1184,9 +1184,11 @@ juce::String MCPBridge::computeClusters(PluginProcessor* processor, t_canvas* cn
 // Same algorithm as /pd/deoverlap (PAD 5, 10px snap, minimal-axis push) but
 // using Pd-only bounds so it is safe to call inline under sys_lock from the
 // batch_atomic path. Returns the number of objects moved.
-int MCPBridge::sanitizeLayout(PluginProcessor* processor, t_canvas* cnv)
+int MCPBridge::sanitizeLayout(PluginProcessor* processor, t_canvas* cnv, int pad, int snap)
 {
     if (!processor || !cnv) return 0;
+    if (pad < 0) pad = 0;
+    if (snap < 1) snap = 1;
 
     std::vector<t_gobj*> objs;
     for (t_gobj* y = cnv->gl_list; y; y = y->g_next) objs.push_back(y);
@@ -1201,9 +1203,9 @@ int MCPBridge::sanitizeLayout(PluginProcessor* processor, t_canvas* cnv)
         rects.push_back({ g, x, y, w, h });
     }
 
-    const int PAD = 5;
+    const int PAD = pad;
     const int MAXPASS = 24;
-    auto snap10 = [](int v) { return (v / 10) * 10; };
+    auto snapTo = [snap](int v) { return (v / snap) * snap; };
     for (int pass = 0; pass < MAXPASS; pass++) {
         bool anyHit = false;
         for (size_t i = 0; i < rects.size(); i++) {
@@ -1218,11 +1220,11 @@ int MCPBridge::sanitizeLayout(PluginProcessor* processor, t_canvas* cnv)
                 int overlapY = std::min(a.y + a.h + PAD - b.y, b.y + b.h + PAD - a.y);
                 if (overlapX <= overlapY) {
                     int acx = a.x + a.w / 2, bcx = b.x + b.w / 2;
-                    int dx = std::max(10, snap10(overlapX + 9));
+                    int dx = std::max(snap, snapTo(overlapX + snap - 1));
                     b.x += (bcx >= acx ? dx : -dx);
                 } else {
                     int acy = a.y + a.h / 2, bcy = b.y + b.h / 2;
-                    int dy = std::max(10, snap10(overlapY + 9));
+                    int dy = std::max(snap, snapTo(overlapY + snap - 1));
                     b.y += (bcy >= acy ? dy : -dy);
                 }
             }
@@ -1936,10 +1938,14 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 allConns.push_back({ s, so, d2, di });
             }
 
-            // Optional trailing flag (PRD_CONTEXT_LAYOUT_GUARD P2): auto-layout
-            // sanitize after mutation. Default ON; old clients omit it.
+            // Optional trailing flags (PRD_CONTEXT_LAYOUT_GUARD P2/P3):
+            // autoLayout (default ON), then the artist's pad + grid snap.
+            // Old clients omit them.
             bool autoLayout = true;
+            int layoutPad = 5, layoutSnap = 10;
             if (cursor < msg.size()) autoLayout = getArgFloat(msg[cursor++]) > 0.5f;
+            if (cursor < msg.size()) layoutPad = static_cast<int>(getArgFloat(msg[cursor++]));
+            if (cursor < msg.size()) layoutSnap = static_cast<int>(getArgFloat(msg[cursor++]));
 
 
             // =========================================================================
@@ -2525,7 +2531,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 // artist never gets a messy canvas. Default on (autoLayout);
                 // geometry-only, no DSP touch.
                 if (cnv && autoLayout)
-                    layoutSanitizedMoved = sanitizeLayout(processor, cnv);
+                    layoutSanitizedMoved = sanitizeLayout(processor, cnv, layoutPad, layoutSnap);
 
                 auto tLambdaEnd = std::chrono::high_resolution_clock::now();
                 auto totalUs = std::chrono::duration_cast<std::chrono::microseconds>(tLambdaEnd - tLambdaStart).count();
