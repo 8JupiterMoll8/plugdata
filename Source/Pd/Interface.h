@@ -361,6 +361,19 @@ struct Interface {
         canvas_dirty(cnv, 1);
     }
 
+    // Message-thread-safe WHOLESALE clear. Collects top-level objects and
+    // removes them via removeObjects() (deselects editor, registers undo,
+    // glist_delete). Use this from the JUCE message thread — creating/deleting
+    // objects off the message thread is what crashed the load path.
+    static void clearCanvas(t_canvas* cnv)
+    {
+        if (!cnv) return;
+        SmallArray<t_gobj*> objs;
+        for (t_gobj* g = cnv->gl_list; g; g = g->g_next) objs.add(g);
+        if (objs.size() > 0)
+            removeObjects(cnv, objs);
+    }
+
     static t_outconnect* setConnectionPath(t_canvas* cnv, t_object* src, int const nout, t_object* sink, int const nin, t_symbol* old_connection_path, t_symbol* new_connection_path)
     {
         sys_lock();
