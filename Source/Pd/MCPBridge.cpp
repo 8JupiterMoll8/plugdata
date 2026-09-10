@@ -1245,6 +1245,100 @@ int MCPBridge::sanitizeLayout(PluginProcessor* processor, t_canvas* cnv, int pad
     return moved;
 }
 
+// ── fixOcclusions — nudge boxes off wire paths ──────────────────────────
+// Anchor-line vs box test (Liang-Barsky, same model as /pd/wire_occlusions).
+// For each wire that passes through a box, shift that box horizontally (the
+// minimal snapped amount) off the wire's x at the box's vertical centre.
+// Bounded passes; geometry-only, no DSP touch.
+int MCPBridge::fixOcclusions(PluginProcessor* processor, t_canvas* cnv, int pad, int snap)
+{
+    if (!processor || !cnv) return 0;
+    if (snap < 1) snap = 1;
+
+    auto lineHitsBox = [](double x1, double y1, double x2, double y2,
+                          double bx, double by, double bw, double bh) {
+        double minX = std::min(x1, x2), maxX = std::max(x1, x2);
+        double minY = std::min(y1, y2), maxY = std::max(y1, y2);
+        if (maxX < bx || minX > bx + bw || maxY < by || minY > by + bh) return false;
+        double dx = x2 - x1, dy = y2 - y1, t0 = 0.0, t1 = 1.0;
+        double p[4] = { -dx, dx, -dy, dy };
+        double q[4] = { x1 - bx, bx + bw - x1, y1 - by, by + bh - y1 };
+        for (int i = 0; i < 4; ++i) {
+            if (p[i] == 0) { if (q[i] < 0) return false; }
+            else {
+                double t = q[i] / p[i];
+                if (p[i] < 0) { if (t > t1) return false; if (t > t0) t0 = t; }
+                else { if (t < t0) return false; if (t < t1) t1 = t; }
+            }
+        }
+        return t0 < t1 && t0 > 0.05 && t1 < 0.95;
+    };
+
+    int totalMoved = 0;
+    for (int pass = 0; pass < 3; pass++) {
+        std::vector<t_gobj*> objs;
+        for (t_gobj* y = cnv->gl_list; y; y = y->g_next) objs.push_back(y);
+        if (objs.size() < 3) break;
+
+        struct R { int x, y, w, h; };
+        std::vector<R> rects(objs.size());
+        std::unordered_map<t_gobj*, int> ptrToIdx;
+        for (size_t i = 0; i < objs.size(); ++i) {
+            int x = 0, yy = 0, w = 0, h = 0;
+            pd::Interface::getObjectBounds(cnv, objs[i], &x, &yy, &w, &h);
+            rects[i] = { x, yy, w, h };
+            ptrToIdx[objs[i]] = static_cast<int>(i);
+        }
+
+        std::vector<std::pair<int, int>> edges;
+        t_linetraverser lt;
+        t_outconnect* oc = nullptr;
+        linetraverser_start(&lt, cnv);
+        while ((oc = linetraverser_next_nosize(&lt))) {
+            auto si = ptrToIdx.find(&lt.tr_ob->ob_g);
+            auto di = ptrToIdx.find(&lt.tr_ob2->ob_g);
+            if (si == ptrToIdx.end() || di == ptrToIdx.end()) continue;
+            edges.emplace_back(si->second, di->second);
+        }
+
+        auto snapUp = [snap](int v) { return ((v + snap - 1) / snap) * snap; };
+        bool anyMove = false;
+        for (auto& e : edges) {
+            int si = e.first, di = e.second;
+            double x1 = rects[si].x + rects[si].w / 2.0;
+            double y1 = rects[si].y + rects[si].h;
+            double x2 = rects[di].x + rects[di].w / 2.0;
+            double y2 = rects[di].y;
+            for (size_t k = 0; k < objs.size(); ++k) {
+                if ((int)k == si || (int)k == di) continue;
+                if (!lineHitsBox(x1, y1, x2, y2, rects[k].x, rects[k].y, rects[k].w, rects[k].h)) continue;
+                double wyc = rects[k].y + rects[k].h / 2.0;
+                double t = (y2 != y1) ? (wyc - y1) / (y2 - y1) : 0.5;
+                t = std::max(0.0, std::min(1.0, t));
+                double wx = x1 + t * (x2 - x1);
+                int bx = rects[k].x, bw = rects[k].w;
+                int shiftLeft  = static_cast<int>(std::ceil((bx + bw + pad) - wx)); // >0 → move left
+                int shiftRight = static_cast<int>(std::ceil(wx + pad - bx));        // >0 → move right
+                int newbx = bx;
+                if (shiftLeft > 0 && (shiftLeft <= shiftRight || shiftRight <= 0))
+                    newbx = bx - snapUp(shiftLeft);
+                else if (shiftRight > 0)
+                    newbx = bx + snapUp(shiftRight);
+                if (newbx != bx) { rects[k].x = newbx; anyMove = true; totalMoved++; }
+            }
+        }
+        if (!anyMove) break;
+
+        for (size_t k = 0; k < objs.size(); ++k) {
+            int ox = 0, oy = 0, ow = 0, oh = 0;
+            pd::Interface::getObjectBounds(cnv, objs[k], &ox, &oy, &ow, &oh);
+            if (rects[k].x != ox) pd::Interface::moveObject(cnv, objs[k], rects[k].x, rects[k].y);
+        }
+        canvas_dirty(cnv, 1);
+    }
+    return totalMoved;
+}
+
 void MCPBridge::oscMessageReceived(const juce::OSCMessage& message)
 {
     auto addr = message.getAddressPattern().toString();
@@ -1846,6 +1940,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             int deleted = 0, disconnected = 0, edited = 0, created = 0, connected = 0;
             int reconcileEvicted = 0, reconcileAdopted = 0;
             int layoutSanitizedMoved = 0;
+            int occlusionsFixed = 0;
             // Phase A (PRD diagnostic layer): create/connect failure facts —
             // named failures instead of silent skips (see PRD §2.1).
             struct CreateFailure { std::string tempId; std::string type; std::string reason; };
@@ -1938,14 +2033,16 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 allConns.push_back({ s, so, d2, di });
             }
 
-            // Optional trailing flags (PRD_CONTEXT_LAYOUT_GUARD P2/P3):
-            // autoLayout (default ON), then the artist's pad + grid snap.
+            // Optional trailing flags (PRD_CONTEXT_LAYOUT_GUARD P2/P3/P3.1):
+            // autoLayout (default ON), pad, grid snap, fixOcclusions (default ON).
             // Old clients omit them.
             bool autoLayout = true;
             int layoutPad = 5, layoutSnap = 10;
+            bool autoFixOcclusions = true;
             if (cursor < msg.size()) autoLayout = getArgFloat(msg[cursor++]) > 0.5f;
             if (cursor < msg.size()) layoutPad = static_cast<int>(getArgFloat(msg[cursor++]));
             if (cursor < msg.size()) layoutSnap = static_cast<int>(getArgFloat(msg[cursor++]));
+            if (cursor < msg.size()) autoFixOcclusions = getArgFloat(msg[cursor++]) > 0.5f;
 
 
             // =========================================================================
@@ -2530,8 +2627,14 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 // PRD_CONTEXT_LAYOUT_GUARD P2: inline minimal-deoverlap so the
                 // artist never gets a messy canvas. Default on (autoLayout);
                 // geometry-only, no DSP touch.
-                if (cnv && autoLayout)
+                if (cnv && autoLayout) {
                     layoutSanitizedMoved = sanitizeLayout(processor, cnv, layoutPad, layoutSnap);
+                    if (autoFixOcclusions) {
+                        occlusionsFixed = fixOcclusions(processor, cnv, layoutPad, layoutSnap);
+                        if (occlusionsFixed > 0)
+                            layoutSanitizedMoved += sanitizeLayout(processor, cnv, layoutPad, layoutSnap);
+                    }
+                }
 
                 auto tLambdaEnd = std::chrono::high_resolution_clock::now();
                 auto totalUs = std::chrono::duration_cast<std::chrono::microseconds>(tLambdaEnd - tLambdaStart).count();
@@ -2663,6 +2766,8 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             // Layout-sanitize tail fact (appended LAST, PRD_CONTEXT_LAYOUT_GUARD
             // P2): number of objects the inline deoverlap moved (0 = clean).
             reply.addArgument(static_cast<int32>(layoutSanitizedMoved));
+            // Occlusion-fix tail fact (P3.1): objects nudged off wire paths.
+            reply.addArgument(static_cast<int32>(occlusionsFixed));
 
             sender.send(reply);
             // R3a — store reply in dedup cache (LRU + TTL, for retry idempotency).

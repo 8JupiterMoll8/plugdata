@@ -252,6 +252,10 @@ private:
     // and grid snap. Returns objects moved.
     static int sanitizeLayout(PluginProcessor* processor, t_canvas* cnv, int pad = 5, int snap = 10);
 
+    // Inline occlusion fix (PRD_CONTEXT_LAYOUT_GUARD P3.1): nudge boxes that a
+    // wire passes through, off the wire's path. Returns objects moved.
+    static int fixOcclusions(PluginProcessor* processor, t_canvas* cnv, int pad = 5, int snap = 10);
+
     void timerCallback() override;
 
     struct MorphParam {
