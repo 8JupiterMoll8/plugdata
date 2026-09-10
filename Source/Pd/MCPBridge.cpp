@@ -240,6 +240,33 @@ static void pasteDirect(t_canvas* cnv, char const* buf)
     binbuf_free(b);
 }
 
+// ── Undo-stack safety ──────────────────────────────────────────────
+// Free a canvas's Pd undo queue after an MCP mutation that removes or
+// replaces objects (delete / clear / load).
+//
+// Why: MCP mutation paths (pasteDirect for create, removeObjectsAudioThread
+// for delete) and the wholesale clear/load paths intentionally do NOT
+// register Pd undo actions. But Pd's undo entries reference their target
+// objects by *index* (canvas_undo_apply stores u_index, resolved via
+// glist_nth; create/recreate/cut do the same). Deleting or clearing objects
+// shifts or frees those targets, leaving the queue holding stale
+// t_undo_action nodes whose data/indices no longer match the live list. The
+// next undo/redo walks them and dereferences freed memory — the observed
+// "unsupported undo command <garbage int>" heap-corruption crash.
+//
+// Since MCP never contributes correct undo actions, the only safe state for
+// the queue after such a mutation is EMPTY. canvas_undo_free() must run on
+// the Pd scheduler thread, so this routes through
+// receiveSysMessage("mcp_clear_undo") — the exact proven-safe path used by
+// the /pd/clear_undo action (PluginProcessor mcp_clear_undo case).
+static void resetCanvasUndo(PluginProcessor* proc, juce::String const& canvasName)
+{
+    if (!proc) return;
+    SmallArray<pd::Atom> atoms;
+    atoms.add(pd::Atom(proc->generateSymbol(canvasName)));
+    proc->receiveSysMessage("mcp_clear_undo", atoms);
+}
+
 // Escape semicolons for Pd paste buffer format
 static juce::String escapePdText(const juce::String& text)
 {
@@ -2309,6 +2336,17 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 if (p) p->synchroniseCanvases();
             });
 
+            // PHASE 2 delete runs on the audio thread and frees gobjs WITHOUT
+            // registering Pd undo actions. Any pre-existing index-based undo
+            // entries now point at the wrong (or freed) objects — clear the
+            // queue on the OSC thread (same proven path as /pd/clear_undo)
+            // before a later undo can walk it and segfault.
+            bool undoReset = false;
+            if (deleted > 0) {
+                resetCanvasUndo(processor, canvasName);
+                undoReset = true;
+            }
+
             // Build reply with counts and inline identity mappings
             juce::OSCMessage reply { juce::OSCAddressPattern("/pd/batch_atomic/reply/" + correlationId) };
             reply.addArgument(static_cast<int32>(created));
@@ -2382,6 +2420,14 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             reply.addArgument(static_cast<int32>(canvasNotFound ? 1 : 0));
             if (canvasNotFound)
                 reply.addArgument(canvasName); // the name that failed, for the receipt
+
+            // Undo-safety tail fact (appended LAST): 1 when this batch deleted
+            // objects and therefore flushed the Pd undo queue (MCP deletes never
+            // register undo actions, so the queue must be emptied to stay
+            // crash-safe). Old TS clients ignore the extra trailing atom; new
+            // clients surface it as _v2meta.undoReset so the AI knows native
+            // undo cannot step back past this mutation.
+            reply.addArgument(static_cast<int32>(undoReset ? 1 : 0));
 
             sender.send(reply);
             // R3a — store reply in dedup cache (LRU + TTL, for retry idempotency).
@@ -2761,6 +2807,10 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             }
             sys_unlock();
 
+            // All prior objects were freed and replaced — their index-based undo
+            // entries are now dangling. Drop the queue before anything can undo.
+            resetCanvasUndo(processor, canvasName);
+
             // Synchronise canvas UI and restart DSP.
             // startDSP() is called directly here — same pattern as /pd/dsp
             // handler which also calls it from the OSC receiver thread.
@@ -2777,7 +2827,12 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
             processor->enqueueFunctionAsync([p = processor] { p->synchroniseCanvases(); });
 
-            sendReply(replyAddr, static_cast<float>(objectCount));
+            // arg0 = objectCount, arg1 = undoReset (clear+rebuild flushed the
+            // stale undo queue). Old TS clients read arg0 and ignore arg1.
+            juce::Array<juce::var> loadReplyArgs;
+            loadReplyArgs.add(static_cast<double>(objectCount));
+            loadReplyArgs.add(1.0);
+            sendReply(replyAddr, loadReplyArgs);
         }
         return;
     }
@@ -3001,7 +3056,16 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 processor->startDSP();
             processor->enqueueFunctionAsync([p = processor] { p->synchroniseCanvases(); });
 
-            sendReply(replyAddr, static_cast<float>(objectCount));
+            // Clear/free replaced every prior object — its index-based undo
+            // entries now dangle. Reset the queue to keep undo crash-safe.
+            resetCanvasUndo(processor, canvasName);
+
+            // arg0 = objectCount, arg1 = undoReset (clear+rebuild flushed the
+            // stale undo queue). Old TS clients read arg0 and ignore arg1.
+            juce::Array<juce::var> loadReplyArgs;
+            loadReplyArgs.add(static_cast<double>(objectCount));
+            loadReplyArgs.add(1.0);
+            sendReply(replyAddr, loadReplyArgs);
         }
         return;
     }
@@ -3676,6 +3740,10 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             }
             sys_unlock();
 
+            // Clearing freed every object while Pd's index-based undo entries
+            // still point at them — drop the stale queue before it can be undone.
+            resetCanvasUndo(processor, canvasName);
+
             SmallArray<pd::Atom> atoms;
             atoms.add(pd::Atom(processor->generateSymbol(canvasName)));
             atoms.add(pd::Atom(processor->generateSymbol("0")));
@@ -3685,7 +3753,13 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
             sendRawReply("/pd/cleared");
             if (correlationId != "0") {
-                sendReply("/pd/clear/reply/" + correlationId, 1.0f);
+                // arg0 = success, arg1 = undoReset. Clearing freed every object
+                // without registering undo actions, so the queue was flushed
+                // above for crash-safety. Old TS clients read arg0 and ignore arg1.
+                juce::Array<juce::var> clearReplyArgs;
+                clearReplyArgs.add(1.0);
+                clearReplyArgs.add(1.0);
+                sendReply("/pd/clear/reply/" + correlationId, clearReplyArgs);
             }
         }
         return;
