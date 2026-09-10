@@ -1339,6 +1339,124 @@ int MCPBridge::fixOcclusions(PluginProcessor* processor, t_canvas* cnv, int pad,
     return totalMoved;
 }
 
+// ── composeLayout — P4 role-based composition ───────────────────────────
+// Arranges the canvas by cluster role (PRD_CONTEXT_LAYOUT_GUARD P4):
+//   bus/mix cluster -> left edge column
+//   synth cluster   -> one column per cluster (left->right), signal objects
+//                      stacked top->bottom, controls/gui in a gutter above
+// On-demand (like dagre/flow), never forced. Returns objects moved.
+int MCPBridge::composeLayout(PluginProcessor* processor, t_canvas* cnv, const juce::String& canvasName, int pad, int snap)
+{
+    if (!processor || !cnv) return 0;
+    if (snap < 1) snap = 1;
+
+    std::vector<t_gobj*> objs;
+    std::unordered_map<t_gobj*, int> idx;
+    int i = 0;
+    for (t_gobj* y = cnv->gl_list; y; y = y->g_next) { idx[y] = i++; objs.push_back(y); }
+    int n = static_cast<int>(objs.size());
+    if (n < 2) return 0;
+
+    std::vector<juce::String> cls(n);
+    std::vector<int> ox(n), oy(n), ow(n), oh(n);
+    for (int k = 0; k < n; ++k) {
+        pd::Interface::getObjectBounds(cnv, objs[k], &ox[k], &oy[k], &ow[k], &oh[k]);
+        t_class* cl = pd_class(&objs[k]->g_pd);
+        const char* c = cl ? class_getname(cl) : nullptr;
+        cls[k] = c ? juce::String::fromUTF8(c) : juce::String("unknown");
+    }
+
+    // union-find over wires
+    std::vector<int> parent(n);
+    for (int k = 0; k < n; ++k) parent[k] = k;
+    auto findRoot = [&](int a) { while (parent[a] != a) { parent[a] = parent[parent[a]]; a = parent[a]; } return a; };
+    auto unite = [&](int a, int b) { int ra = findRoot(a), rb = findRoot(b); if (ra != rb) parent[ra] = rb; };
+    t_linetraverser lt; t_outconnect* oc = nullptr;
+    linetraverser_start(&lt, cnv);
+    while ((oc = linetraverser_next_nosize(&lt))) {
+        auto si = idx.find(&lt.tr_ob->ob_g);
+        auto di = idx.find(&lt.tr_ob2->ob_g);
+        if (si != idx.end() && di != idx.end()) unite(si->second, di->second);
+    }
+
+    std::unordered_map<int, std::vector<int>> groups;
+    for (int k = 0; k < n; ++k) groups[findRoot(k)].push_back(k);
+
+    auto isSignal = [](const juce::String& c) {
+        return c.endsWithChar('~') || c == "catch~" || c == "dac~" || c == "throw~" || c == "out~" || c == "pd" || c == "table";
+    };
+    auto isGui = [](const juce::String& c) {
+        return c == "bng" || c == "tgl" || c == "hsl" || c == "vsl" || c == "hradio" || c == "vradio"
+            || c == "numbox" || c == "nbx" || c == "floatatom" || c == "symbolatom" || c == "vu"
+            || c == "knob" || c == "slider" || c == "radio" || c == "toggle";
+    };
+    auto isSynth = [](const juce::String& c) {
+        return c == "osc~" || c == "phasor~" || c == "noise~" || c == "sig~" || c.startsWith("bl.")
+            || c.startsWith("plaits") || c == "tabread4~" || c == "tabread~" || c == "tabplay~";
+    };
+
+    struct Cl { std::vector<int> members; juce::String role; int minx; };
+    std::vector<Cl> clusters;
+    for (auto& kv : groups) {
+        Cl c; c.members = kv.second;
+        bool bus = false, synth = false, sig = false, allGui = true;
+        int mx = INT_MAX;
+        for (int k : c.members) {
+            const juce::String& cc = cls[k];
+            if (cc == "catch~" || cc == "dac~" || cc == "out~" || cc == "throw~") bus = true;
+            if (isSynth(cc)) synth = true;
+            if (isSignal(cc)) sig = true;
+            if (!isGui(cc)) allGui = false;
+            mx = std::min(mx, ox[k]);
+        }
+        c.role = bus ? "bus" : (synth ? "synth" : (allGui ? "gui" : (sig ? "signal" : "control")));
+        c.minx = mx;
+        clusters.push_back(c);
+    }
+
+    std::sort(clusters.begin(), clusters.end(), [](const Cl& a, const Cl& b) {
+        if ((a.role == "bus") != (b.role == "bus")) return a.role == "bus";
+        return a.minx < b.minx;
+    });
+
+    const int COL_W = 300;
+    const int COL_X = 30;
+    const int GUTTER_Y = 40;
+    const int ROW_GAP = 60;
+    const int SIGNAL_TOP = 160;
+
+    int moved = 0;
+    int col = 0;
+    for (auto& c : clusters) {
+        int cx = COL_X + col * COL_W;
+        std::vector<int> ctrl, sigv;
+        for (int k : c.members) {
+            if (isSignal(cls[k])) sigv.push_back(k);
+            else ctrl.push_back(k);
+        }
+        // controls/gui in the gutter, left→right
+        int gx = cx;
+        for (int k : ctrl) {
+            pd::Interface::moveObject(cnv, objs[k], gx, GUTTER_Y);
+            moved++;
+            gx += 120;
+        }
+        // signal objects stacked top→bottom, ordered by current y
+        std::sort(sigv.begin(), sigv.end(), [&](int a, int b) { return oy[a] < oy[b]; });
+        int yy = SIGNAL_TOP;
+        for (int k : sigv) {
+            pd::Interface::moveObject(cnv, objs[k], cx, yy);
+            moved++;
+            yy += ROW_GAP;
+        }
+        col++;
+    }
+
+    if (moved > 0) canvas_dirty(cnv, 1);
+    (void)pad; (void)snap;
+    return moved;
+}
+
 void MCPBridge::oscMessageReceived(const juce::OSCMessage& message)
 {
     auto addr = message.getAddressPattern().toString();
@@ -5679,6 +5797,28 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         return;
     }
 
+    // ── /pd/compose — P4 role-based composition ─────────────────────────
+    // /pd/compose <canvas> <pad> <snap> <corrId>
+    if (action == "compose") {
+        auto canvasName    = normalizeCanvas(getArgString(msg[0]));
+        int pad  = msg.size() > 1 ? static_cast<int>(getArgFloat(msg[1])) : 5;
+        int snap = msg.size() > 2 ? static_cast<int>(getArgFloat(msg[2])) : 10;
+        auto correlationId = msg.size() > 3 ? getArgString(msg[3]) : "0";
+        juce::String replyAddr = "/pd/compose/reply/" + correlationId;
+
+        t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+        if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
+        if (!cnv) { sendReply(replyAddr, 0.0f); return; }
+
+        sys_lock();
+        int moved = composeLayout(processor, cnv, canvasName, pad, snap);
+        sys_unlock();
+
+        processor->enqueueFunctionAsync([p = processor] { p->synchroniseCanvases(); });
+        sendReply(replyAddr, static_cast<float>(moved));
+        return;
+    }
+
     if (action == "pillars") {
         // /pd/pillars <canvas> [count id1 id2...] <corrId>
         // PRD layout-v2 Phase B: Eurorack modular column arrangement.
@@ -6582,6 +6722,7 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
         reply.addArgument(juce::String("wire_occlusions"));
         // PRD layout-v2 Phase B1/B2: native writers on the zero-drop move path
         reply.addArgument(juce::String("deoverlap"));
+        reply.addArgument(juce::String("compose"));
         reply.addArgument(juce::String("flow"));
         reply.addArgument(juce::String("pillars"));
         reply.addArgument(juce::String("connections"));

@@ -256,6 +256,12 @@ private:
     // wire passes through, off the wire's path. Returns objects moved.
     static int fixOcclusions(PluginProcessor* processor, t_canvas* cnv, int pad = 5, int snap = 10);
 
+    // P4 compose (PRD_CONTEXT_LAYOUT_GUARD): arrange clusters into role-based
+    // zones — bus/mix at the edge, synth clusters as columns, gui/control in a
+    // gutter. On-demand layout (like dagre/flow), not a per-mutation guard.
+    // Returns objects moved.
+    static int composeLayout(PluginProcessor* processor, t_canvas* cnv, const juce::String& canvasName, int pad = 5, int snap = 10);
+
     void timerCallback() override;
 
     struct MorphParam {
