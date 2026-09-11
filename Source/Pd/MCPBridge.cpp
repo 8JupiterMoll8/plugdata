@@ -7,6 +7,7 @@
 #include "MCPBridge.h"
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "Sidebar/Sidebar.h"
 #include "Canvas.h"
 #include "TabComponent.h"
 #include "Object.h"
@@ -282,9 +283,11 @@ static void pasteDirect(t_canvas* cnv, char const* buf)
 static void resetCanvasUndo(PluginProcessor* proc, juce::String const& canvasName)
 {
     if (!proc) return;
-    SmallArray<pd::Atom> atoms;
-    atoms.add(pd::Atom(proc->generateSymbol(canvasName)));
-    proc->receiveSysMessage("mcp_clear_undo", atoms);
+    proc->enqueueFunctionAsync([proc, canvasName]() {
+        SmallArray<pd::Atom> atoms;
+        atoms.add(pd::Atom(proc->generateSymbol(canvasName)));
+        proc->receiveSysMessage("mcp_clear_undo", atoms);
+    });
 }
 
 // Escape semicolons for Pd paste buffer format
@@ -1852,6 +1855,22 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         return;
     }
 
+    if (action == "clear_console") {
+        if (processor) {
+            juce::MessageManager::callAsync([proc = processor] {
+                proc->getConsoleMessages().clear();
+                for (auto* editor : proc->getEditors()) {
+                    if (editor && editor->sidebar) {
+                        editor->sidebar->clearConsole();
+                    }
+                }
+            });
+            auto correlationId = msg.size() > 0 ? getArgString(msg[0]) : "0";
+            sendReply("/pd/clear_console/reply/" + correlationId, 1.0f);
+        }
+        return;
+    }
+
     if (action == "mcp_reload_lua") {
         auto correlationId = msg.size() >= 2 ? getArgString(msg[1]) : (msg.size() > 0 ? getArgString(msg[0]) : "0");
         sendReply("/pd/mcp_reload_lua/reply/" + correlationId, 1.0f);
@@ -2496,17 +2515,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                             t_object* so = pd::Interface::checkObject(sg);
                             t_object* d_o = pd::Interface::checkObject(dg);
                             if (so && d_o) {
-                                int si = 0, di2 = 0, idx = 0;
-                                for (t_gobj* y = cnv->gl_list; y; y = y->g_next, idx++) {
-                                    if (y == sg) si = idx;
-                                    if (y == dg) di2 = idx;
-                                }
-                                t_atom ca[4];
-                                SETFLOAT(&ca[0], static_cast<float>(si));
-                                SETFLOAT(&ca[1], static_cast<float>(pdc.srcOut));
-                                SETFLOAT(&ca[2], static_cast<float>(di2));
-                                SETFLOAT(&ca[3], static_cast<float>(pdc.destIn));
-                                pd_typedmess(reinterpret_cast<t_pd*>(cnv), gensym("disconnect"), 4, ca);
+                                obj_disconnect(so, pdc.srcOut, d_o, pdc.destIn);
                                 disconnected++;
                             }
                         }
@@ -2986,10 +2995,8 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         if (c == 0 && o == 0) break;
                     }
                     if (mcpHasCollisions(processor, cnv, 5)) {
-                        sys_lock();
-                        int cm = composeLayout(processor, cnv, canvasName, layoutPad, layoutSnap);
-                        sys_unlock();
-                        layoutSanitizedMoved += cm;
+                        // Artist & Agent mandate: Do NOT obliterate creative layout with composeLayout!
+                        // Preserve modular columns and emit warning instead of smashing canvas to y=40.
                         fallbackComposed = true;
                     }
                     processor->synchroniseCanvases();

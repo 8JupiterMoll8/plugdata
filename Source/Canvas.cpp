@@ -2473,18 +2473,7 @@ void Canvas::undo()
         }
     }
 
-    // 1. If user has manual GUI edits on Pure Data's native stack, undo that first!
-    if (patch.canUndo()) {
-        patch.undo();
-        synchronise();
-        handleUpdateNowIfNeeded();
-        patch.deselectAll();
-        synchroniseSplitCanvas();
-        updateSidebarSelection();
-        return;
-    }
-
-    // 2. If no user manual edits remain on native stack, undo the last AI transaction
+    // 1. If an AI transaction exists, undo that first (safe transactional rollback with semantic IDs)
     if (pd && pd->hasMcpTransaction(patch.getUncheckedPointer())) {
         pd->undoMcpTransaction(patch.getUncheckedPointer());
         synchronise();
@@ -2495,17 +2484,18 @@ void Canvas::undo()
         return;
     }
 
-    // Fallback: Tell pd to undo the last action
-    patch.undo();
+    // 2. Otherwise, if user has manual GUI edits on Pure Data's native stack, undo that
+    if (patch.canUndo()) {
+        patch.undo();
+        synchronise();
+        handleUpdateNowIfNeeded();
+        patch.deselectAll();
+        synchroniseSplitCanvas();
+        updateSidebarSelection();
+        return;
+    }
 
-    // Load state from pd
-    synchronise();
-    handleUpdateNowIfNeeded();
-
-    patch.deselectAll();
-
-    synchroniseSplitCanvas();
-    updateSidebarSelection();
+    // Nothing to undo
 }
 
 void Canvas::redo()
@@ -2521,17 +2511,16 @@ void Canvas::redo()
         return;
     }
 
-    // 2. Tell pd to redo the last manual action
-    patch.redo();
-
-    // Load state from pd
-    synchronise();
-    handleUpdateNowIfNeeded();
-
-    patch.deselectAll();
-
-    synchroniseSplitCanvas();
-    updateSidebarSelection();
+    // 2. Otherwise, if user has manual GUI edits to redo, tell pd to redo
+    if (patch.canRedo()) {
+        patch.redo();
+        synchronise();
+        handleUpdateNowIfNeeded();
+        patch.deselectAll();
+        synchroniseSplitCanvas();
+        updateSidebarSelection();
+        return;
+    }
 }
 
 void Canvas::valueChanged(Value& v)
