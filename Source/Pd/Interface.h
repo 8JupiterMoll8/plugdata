@@ -146,7 +146,7 @@ struct Interface {
         if (resortout)
             canvas_resortoutlets(cnv);
 
-        if (cnv->gl_editor->e_selection)
+        if (cnv->gl_editor && cnv->gl_editor->e_selection)
             canvas_dirty(cnv, 1);
 
         glist_noselect(cnv);
@@ -812,10 +812,11 @@ struct Interface {
 
     static int canUndo(t_canvas* cnv)
     {
+        if (!cnv) return 0;
         t_undo* udo = canvas_undo_get(cnv);
 
-        if (udo && udo->u_last) {
-            return strcmp(udo->u_last->name, "no") != 0;
+        if (udo && udo->u_queue && udo->u_last && udo->u_last != udo->u_queue) {
+            return udo->u_last->name && strcmp(udo->u_last->name, "no") != 0;
         }
 
         return 0;
@@ -823,10 +824,11 @@ struct Interface {
 
     static int canRedo(t_canvas* cnv)
     {
+        if (!cnv) return 0;
         t_undo* udo = canvas_undo_get(cnv);
 
-        if (udo && udo->u_last && udo->u_last->next) {
-            return strcmp(udo->u_last->next->name, "no") != 0;
+        if (udo && udo->u_queue && udo->u_last && udo->u_last->next) {
+            return udo->u_last->next->name && strcmp(udo->u_last->next->name, "no") != 0;
         }
 
         return 0;

@@ -2473,7 +2473,29 @@ void Canvas::undo()
         }
     }
 
-    // Tell pd to undo the last action
+    // 1. If user has manual GUI edits on Pure Data's native stack, undo that first!
+    if (patch.canUndo()) {
+        patch.undo();
+        synchronise();
+        handleUpdateNowIfNeeded();
+        patch.deselectAll();
+        synchroniseSplitCanvas();
+        updateSidebarSelection();
+        return;
+    }
+
+    // 2. If no user manual edits remain on native stack, undo the last AI transaction
+    if (pd && pd->hasMcpTransaction(patch.getUncheckedPointer())) {
+        pd->undoMcpTransaction(patch.getUncheckedPointer());
+        synchronise();
+        handleUpdateNowIfNeeded();
+        patch.deselectAll();
+        synchroniseSplitCanvas();
+        updateSidebarSelection();
+        return;
+    }
+
+    // Fallback: Tell pd to undo the last action
     patch.undo();
 
     // Load state from pd
@@ -2488,7 +2510,18 @@ void Canvas::undo()
 
 void Canvas::redo()
 {
-    // Tell pd to undo the last action
+    // 1. If an AI transaction was undone, redo that first to recreate objects before redoing manual edits on them
+    if (pd && pd->hasMcpRedoTransaction(patch.getUncheckedPointer())) {
+        pd->redoMcpTransaction(patch.getUncheckedPointer());
+        synchronise();
+        handleUpdateNowIfNeeded();
+        patch.deselectAll();
+        synchroniseSplitCanvas();
+        updateSidebarSelection();
+        return;
+    }
+
+    // 2. Tell pd to redo the last manual action
     patch.redo();
 
     // Load state from pd

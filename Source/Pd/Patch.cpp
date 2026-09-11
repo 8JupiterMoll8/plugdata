@@ -81,11 +81,17 @@ bool Patch::isDirty() const
 
 bool Patch::canUndo() const
 {
+    if (auto cnv = ptr.get<t_canvas>()) {
+        return pd::Interface::canUndo(cnv.get()) != 0;
+    }
     return canPatchUndo;
 }
 
 bool Patch::canRedo() const
 {
+    if (auto cnv = ptr.get<t_canvas>()) {
+        return pd::Interface::canRedo(cnv.get()) != 0;
+    }
     return canPatchRedo;
 }
 

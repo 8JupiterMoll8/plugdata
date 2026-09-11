@@ -2215,7 +2215,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             static std::deque<std::string> s_batchDedupOrder;
             static constexpr int BATCH_DEDUP_MAX = 128;
             static constexpr uint64_t BATCH_DEDUP_TTL_MS = 30000;
-            {
+            if (!processor->isExecutingMcpUndoRedo) {
                 std::string corrKey = correlationId.toStdString();
                 uint64_t nowMs = juce::Time::currentTimeMillis();
                 auto it = s_batchDedupCache.find(corrKey);
@@ -2357,6 +2357,11 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             if (cursor < msg.size()) layoutPad = static_cast<int>(getArgFloat(msg[cursor++]));
             if (cursor < msg.size()) layoutSnap = static_cast<int>(getArgFloat(msg[cursor++]));
             if (cursor < msg.size()) autoFixOcclusions = getArgFloat(msg[cursor++]) > 0.5f;
+
+            if (processor->isExecutingMcpUndoRedo) {
+                autoLayout = false;
+                autoFixOcclusions = false;
+            }
 
 
             // =========================================================================
@@ -2969,8 +2974,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             // then a GUARANTEED fallback: if true-rect collisions remain,
             // compose the canvas by role (proven collision-free).
             if (cnv && autoLayout) {
-                juce::WaitableEvent sanitizeDone;
-                juce::MessageManager::callAsync([&]() {
+                auto runLayout = [&]() {
                     const int guardPad = layoutPad + 15;
                     for (int round = 0; round < 8; round++) {
                         sys_lock();
@@ -2989,14 +2993,27 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         fallbackComposed = true;
                     }
                     processor->synchroniseCanvases();
-                    sanitizeDone.signal();
-                });
-                sanitizeDone.wait(6000);
+                };
+
+                if (juce::MessageManager::getInstance()->isThisTheMessageThread()) {
+                    runLayout();
+                } else {
+                    juce::WaitableEvent sanitizeDone;
+                    juce::MessageManager::callAsync([&runLayout, &sanitizeDone]() {
+                        runLayout();
+                        sanitizeDone.signal();
+                    });
+                    sanitizeDone.wait(6000);
+                }
             } else {
-            // Decoupled UI viewport sync - non-blocking async idle dispatch
-            juce::MessageManager::callAsync([p = processor] {
-                if (p) p->synchroniseCanvases();
-            });
+                if (juce::MessageManager::getInstance()->isThisTheMessageThread()) {
+                    if (processor) processor->synchroniseCanvases();
+                } else {
+                    // Decoupled UI viewport sync - non-blocking async idle dispatch
+                    juce::MessageManager::callAsync([p = processor] {
+                        if (p) p->synchroniseCanvases();
+                    });
+                }
             }
 
             // MCP mutations never register correct Pd undo actions, yet they
@@ -3010,9 +3027,57 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             // object-freeing op invalidates. The only provably-safe state for
             // the queue after ANY MCP mutation is EMPTY.
             bool undoReset = false;
-            if (created > 0 || connected > 0 || edited > 0 || deleted > 0 || disconnected > 0) {
+            if (created > 0 || connected > 0 || edited > 0 || deleted > 0 || disconnected > 0 || layoutSanitizedMoved > 0 || occlusionsFixed > 0) {
                 resetCanvasUndo(processor, canvasName);
                 undoReset = true;
+            }
+
+            // Stage 2: Register with Unified C++ Transaction Engine for GUI Ctrl+Z / Undo
+            if (processor && cnv && !processor->isExecutingMcpUndoRedo) {
+                if (created > 0 || connected > 0 || disconnected > 0) {
+                    juce::OSCMessage invMsg { juce::OSCAddressPattern("/pd/batch_atomic") };
+                    invMsg.addArgument(canvasName);
+                    invMsg.addArgument(juce::String("inv_" + correlationId));
+
+                    // Header counts: deletes, disconnects, edits, creates, connects
+                    invMsg.addArgument(static_cast<float>(pendingCreates.size())); // deleteCount
+                    invMsg.addArgument(static_cast<float>(allConns.size()));        // disconnectCount
+                    invMsg.addArgument(0.0f);                                      // editCount
+                    invMsg.addArgument(0.0f);                                      // createCount
+                    invMsg.addArgument(static_cast<float>(preDisconnects.size())); // connectCount
+
+                    // 1. DELETES: delete all objects created in pendingCreates
+                    for (auto const& pc : pendingCreates) {
+                        invMsg.addArgument(pc.tempId);
+                    }
+
+                    // 2. DISCONNECTS: disconnect all connections made in allConns
+                    for (auto const& c : allConns) {
+                        invMsg.addArgument(c.srcId);
+                        invMsg.addArgument(static_cast<float>(c.srcOut));
+                        invMsg.addArgument(c.destId);
+                        invMsg.addArgument(static_cast<float>(c.destIn));
+                    }
+
+                    // 3. EDITS: 0
+                    // 4. CREATES: 0
+
+                    // 5. CONNECTS: reconnect all wires disconnected in preDisconnects
+                    for (auto const& pdc : preDisconnects) {
+                        invMsg.addArgument(pdc.srcId);
+                        invMsg.addArgument(static_cast<float>(pdc.srcOut));
+                        invMsg.addArgument(pdc.destId);
+                        invMsg.addArgument(static_cast<float>(pdc.destIn));
+                    }
+
+                    // Layout flags: no autolayout on undo
+                    invMsg.addArgument(0.0f);
+                    invMsg.addArgument(static_cast<float>(layoutPad));
+                    invMsg.addArgument(static_cast<float>(layoutSnap));
+                    invMsg.addArgument(0.0f);
+
+                    processor->pushMcpTransaction(cnv, canvasName, msg, invMsg);
+                }
             }
 
             // Build reply with counts and inline identity mappings
@@ -3107,7 +3172,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
             sender.send(reply);
             // R3a — store reply in dedup cache (LRU + TTL, for retry idempotency).
-            {
+            if (!processor->isExecutingMcpUndoRedo) {
                 uint64_t nowMs = juce::Time::currentTimeMillis();
                 std::string corrKey = correlationId.toStdString();
                 s_batchDedupCache.insert_or_assign(corrKey, BatchDedupEntry{nowMs, reply});
@@ -5502,6 +5567,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     else if (alignStr == "vdistribute") alignMode = Align::VDistribute;
 
                     canvasComp->alignObjects(alignMode);
+                    resetCanvasUndo(proc, canvasName);
                     bridge->sendReply("/pd/align/reply/" + correlationId, 1.0f);
                 });
             } else {
@@ -5950,7 +6016,10 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     moved++;
                 }
             }
-            if (moved > 0) canvas_dirty(cnv, 1);
+            if (moved > 0) {
+                canvas_dirty(cnv, 1);
+                resetCanvasUndo(processor, canvasName);
+            }
             sys_unlock();
 
             processor->enqueueFunctionAsync([p = processor] { p->synchroniseCanvases(); });
@@ -5974,6 +6043,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
         sys_lock();
         int moved = composeLayout(processor, cnv, canvasName, pad, snap);
+        if (moved > 0) resetCanvasUndo(processor, canvasName);
         sys_unlock();
 
         processor->enqueueFunctionAsync([p = processor] { p->synchroniseCanvases(); });
@@ -6061,7 +6131,10 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     moved++;
                 }
             }
-            if (moved > 0) canvas_dirty(cnv, 1);
+            if (moved > 0) {
+                canvas_dirty(cnv, 1);
+                resetCanvasUndo(processor, canvasName);
+            }
             sys_unlock();
 
             processor->enqueueFunctionAsync([p = processor] { p->synchroniseCanvases(); });
@@ -6278,7 +6351,10 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     moved++;
                 }
             }
-            if (moved > 0) canvas_dirty(cnv, 1);
+            if (moved > 0) {
+                canvas_dirty(cnv, 1);
+                resetCanvasUndo(processor, canvasName);
+            }
             sys_unlock();
 
             processor->enqueueFunctionAsync([p = processor] { p->synchroniseCanvases(); });
@@ -6293,7 +6369,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : "0";
 
             t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
-            if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
+            if (!cnv && (canvasName == "pd-main" || canvasName == "main" || canvasName.isEmpty())) cnv = pd_this->pd_canvaslist;
 
             if (cnv) {
                 juce::MessageManager::callAsync([proc = processor, cnv, correlationId, bridge = this]() {
@@ -6309,7 +6385,11 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         if (canvasComp) break;
                     }
 
-                    if (canvasComp) {
+                    if (proc->hasMcpTransaction(cnv)) {
+                        proc->undoMcpTransaction(cnv);
+                        proc->synchroniseCanvases();
+                        bridge->sendReply("/pd/undo/reply/" + correlationId, 1.0f);
+                    } else if (canvasComp) {
                         canvasComp->undo();
                         bridge->sendReply("/pd/undo/reply/" + correlationId, 1.0f);
                     } else {
@@ -6331,7 +6411,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : "0";
 
             t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
-            if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
+            if (!cnv && (canvasName == "pd-main" || canvasName == "main" || canvasName.isEmpty())) cnv = pd_this->pd_canvaslist;
 
             if (cnv) {
                 juce::MessageManager::callAsync([proc = processor, cnv, correlationId, bridge = this]() {
@@ -6347,7 +6427,11 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         if (canvasComp) break;
                     }
 
-                    if (canvasComp) {
+                    if (proc->hasMcpRedoTransaction(cnv)) {
+                        proc->redoMcpTransaction(cnv);
+                        proc->synchroniseCanvases();
+                        bridge->sendReply("/pd/redo/reply/" + correlationId, 1.0f);
+                    } else if (canvasComp) {
                         canvasComp->redo();
                         bridge->sendReply("/pd/redo/reply/" + correlationId, 1.0f);
                     } else {

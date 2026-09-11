@@ -213,6 +213,7 @@ public:
     static juce::String normalizeCanvas(const juce::String& name);
 
     friend class ProbeManager;
+    friend class PluginProcessor;
 
 private:
     void handlePdDomain(const juce::String& action, const juce::OSCMessage& msg);

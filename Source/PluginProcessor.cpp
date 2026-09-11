@@ -2246,18 +2246,27 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
         // Called from /pd/clear_undo handler via receiveSysMessage.
         // Runs on the Pd scheduler thread — the only thread where
         // canvas_undo_free (which calls canvas_suspend_dsp) is safe.
+        auto wipeCanvasUndo = [](t_canvas* c) {
+            if (!c) return;
+            canvas_undo_free(c);
+            if (auto* udo = canvas_undo_get(c)) {
+                udo->u_queue = nullptr;
+                udo->u_last = nullptr;
+                udo->u_cleanstate = nullptr;
+            }
+        };
+
         if (list.size() >= 1) {
             auto canvas_symbol = list[0].toString();
             t_canvas* cnv = getCanvasBySymbol(canvas_symbol);
             if (!cnv && (canvas_symbol == "pd-main")) cnv = pd_this->pd_canvaslist;
-            if (cnv) {
-                canvas_undo_free(cnv);
-                if (auto* udo = canvas_undo_get(cnv)) {
-                    udo->u_queue = nullptr;
-                    udo->u_last = nullptr;
-                    udo->u_cleanstate = nullptr;
-                }
-            }
+            if (cnv) wipeCanvasUndo(cnv);
+        }
+
+        // Always also wipe undo on top-level root patch and all open canvas roots
+        // so subpatch mutations never leave armed undo actions on the parent canvas.
+        for (t_canvas* root = pd_this->pd_canvaslist; root; root = root->gl_next) {
+            wipeCanvasUndo(root);
         }
         break;
     }
@@ -3023,6 +3032,12 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
                 }
                 if (movedCount > 0) {
                     canvas_dirty(canvas, 1);
+                    canvas_undo_free(canvas);
+                    if (auto* udo = canvas_undo_get(canvas)) {
+                        udo->u_queue = nullptr;
+                        udo->u_last = nullptr;
+                        udo->u_cleanstate = nullptr;
+                    }
                 }
             }
             sys_unlock();
@@ -3549,6 +3564,87 @@ void PluginProcessor::sendMCPReply(const String& replyAddr, const SmallArray<pd:
     if (mcpBridge) {
         mcpBridge->sendSelectionTelemetry(replyAddr, atoms);
     }
+}
+
+bool PluginProcessor::hasMcpTransaction(t_canvas* cnv) const
+{
+    auto it = mcpUndoStack.find(cnv);
+    return it != mcpUndoStack.end() && !it->second.empty();
+}
+
+bool PluginProcessor::hasMcpRedoTransaction(t_canvas* cnv) const
+{
+    auto it = mcpRedoStack.find(cnv);
+    return it != mcpRedoStack.end() && !it->second.empty();
+}
+
+void PluginProcessor::pushMcpTransaction(t_canvas* cnv, const juce::String& canvasName, const juce::OSCMessage& forward, const juce::OSCMessage& inverse)
+{
+    mcpUndoStack[cnv].push_back({ canvasName, forward, inverse });
+    if (mcpUndoStack[cnv].size() > 50) {
+        mcpUndoStack[cnv].erase(mcpUndoStack[cnv].begin());
+    }
+    mcpRedoStack[cnv].clear();
+    juce::MessageManager::callAsync([this] {
+        for (auto* editor : getEditors()) {
+            editor->triggerAsyncUpdate();
+        }
+    });
+}
+
+void PluginProcessor::undoMcpTransaction(t_canvas* cnv)
+{
+    auto it = mcpUndoStack.find(cnv);
+    if (it == mcpUndoStack.end() || it->second.empty()) return;
+
+    auto tx = it->second.back();
+    it->second.pop_back();
+
+    mcpRedoStack[cnv].push_back(tx);
+
+    if (mcpBridge) {
+        isExecutingMcpUndoRedo = true;
+        mcpBridge->handlePdDomain("batch_atomic", tx.inverse);
+        isExecutingMcpUndoRedo = false;
+    }
+    juce::MessageManager::callAsync([this] {
+        for (auto* editor : getEditors()) {
+            editor->triggerAsyncUpdate();
+        }
+    });
+}
+
+void PluginProcessor::redoMcpTransaction(t_canvas* cnv)
+{
+    auto it = mcpRedoStack.find(cnv);
+    if (it == mcpRedoStack.end() || it->second.empty()) return;
+
+    auto tx = it->second.back();
+    it->second.pop_back();
+
+    mcpUndoStack[cnv].push_back(tx);
+
+    if (mcpBridge) {
+        isExecutingMcpUndoRedo = true;
+        mcpBridge->handlePdDomain("batch_atomic", tx.forward);
+        isExecutingMcpUndoRedo = false;
+    }
+    juce::MessageManager::callAsync([this] {
+        for (auto* editor : getEditors()) {
+            editor->triggerAsyncUpdate();
+        }
+    });
+}
+
+void PluginProcessor::clearMcpTransactions(t_canvas* cnv)
+{
+    mcpUndoStack.erase(cnv);
+    mcpRedoStack.erase(cnv);
+    juce::MessageManager::callAsync([this] {
+        for (auto* editor : getEditors()) {
+            editor->triggerAsyncUpdate();
+        }
+    });
 }
 
 // This creates new instances of the plugin..

@@ -23,6 +23,13 @@
 
 #include "Pd/Instance.h"
 #include "Pd/Patch.h"
+#include <juce_osc/juce_osc.h>
+
+struct McpTransaction {
+    juce::String canvasName;
+    juce::OSCMessage forward;
+    juce::OSCMessage inverse;
+};
 
 class MCPBridge;
 
@@ -50,6 +57,14 @@ public:
     MCPBridge* getMCPBridge() const { return mcpBridge.get(); }
     juce::String getMcpBridgeStatus() const;
     void sendMCPReply(const String& replyAddr, const SmallArray<pd::Atom>& atoms);
+
+    bool hasMcpTransaction(t_canvas* cnv) const;
+    bool hasMcpRedoTransaction(t_canvas* cnv) const;
+    void pushMcpTransaction(t_canvas* cnv, const juce::String& canvasName, const juce::OSCMessage& forward, const juce::OSCMessage& inverse);
+    void undoMcpTransaction(t_canvas* cnv);
+    void redoMcpTransaction(t_canvas* cnv);
+    void clearMcpTransactions(t_canvas* cnv);
+    bool isExecutingMcpUndoRedo = false;
 
     static AudioProcessor::BusesProperties buildBusesProperties();
 
@@ -314,6 +329,8 @@ private:
     std::atomic<uint64_t> mcpIdentityVersion { 0 };
     int mcpSuspendedDspState = 0;
     std::unique_ptr<MCPBridge> mcpBridge;
+    std::map<t_canvas*, std::vector<McpTransaction>> mcpUndoStack;
+    std::map<t_canvas*, std::vector<McpTransaction>> mcpRedoStack;
 
     // MCP zero-dropout WAV recorder — taps outputFifo directly in processBlock.
     // No canvas objects created, no DSP recompile, zero audio dropout.
