@@ -1913,6 +1913,8 @@ static juce::DynamicObject* mcpBuildGuiProps(const juce::String& className, t_ob
         props->setProperty("log", k->x_log != 0);
         if (k->x_snd_raw) props->setProperty("send", juce::String::fromUTF8(k->x_snd_raw->s_name));
         if (k->x_rcv_raw) props->setProperty("receive", juce::String::fromUTF8(k->x_rcv_raw->s_name));
+        if (k->x_param && k->x_param != gensym("empty"))
+            props->setProperty("param", juce::String::fromUTF8(k->x_param->s_name));
     } else if (cls == "floatatom" || cls == "numbox") {
         auto* g = reinterpret_cast<t_fake_gatom*>(obj);
         props->setProperty("min", (double) g->a_draglo);
@@ -2197,6 +2199,91 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             }
             root->setProperty("atoms", arr);
             sendReply("/pd/param_get/reply/" + correlationId, juce::JSON::toString(juce::var(root)));
+        }
+        return;
+    }
+
+    if (action == "params") {
+        // /pd/params <canvas> <corrId>
+        // List knob-bound named parameters: [{ tempId, name, value, min, max }]
+        if (msg.size() >= 2 && processor) {
+            auto canvasName = normalizeCanvas(getArgString(msg[0]));
+            auto correlationId = getArgString(msg[1]);
+            juce::Array<juce::var> arr;
+            {
+                sys_lock();
+                t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+                if (!cnv && (canvasName == "pd-main" || canvasName == "main" || canvasName.isEmpty()))
+                    cnv = pd_this->pd_canvaslist;
+                if (cnv) {
+                    auto& map = processor->mcpStableObjectMap[canvasName.toStdString()];
+                    for (t_gobj* y = cnv->gl_list; y; y = y->g_next) {
+                        juce::String cn = juce::String::fromUTF8(class_getname(pd_class(&y->g_pd))).toLowerCase();
+                        if (cn != "knob" && cn != "else/knob") continue;
+                        auto* k = reinterpret_cast<t_fake_knob*>(y);
+                        if (!k->x_param || k->x_param == gensym("empty")) continue;
+                        juce::String nm = juce::String::fromUTF8(k->x_param->s_name);
+                        if (nm.isEmpty()) continue;
+                        juce::String tempId;
+                        for (auto& [id, ptr] : map) if (ptr == y) { tempId = id; break; }
+                        auto* o = new juce::DynamicObject();
+                        o->setProperty("tempId", tempId);
+                        o->setProperty("name", nm);
+                        o->setProperty("value", (double) k->x_fval);
+                        o->setProperty("min", (double) k->x_min);
+                        o->setProperty("max", (double) k->x_max);
+                        arr.add(juce::var(o));
+                    }
+                }
+                sys_unlock();
+            }
+            auto* root = new juce::DynamicObject();
+            root->setProperty("params", arr);
+            sendReply("/pd/params/reply/" + correlationId, juce::JSON::toString(juce::var(root)));
+        }
+        return;
+    }
+
+    if (action == "param_set_name") {
+        // /pd/param_set_name <canvas> <corrId> <name> <value>
+        if (msg.size() >= 4 && processor) {
+            auto canvasName = normalizeCanvas(getArgString(msg[0]));
+            auto correlationId = getArgString(msg[1]);
+            auto name = getArgString(msg[2]);
+            float value = getArgFloat(msg[3]);
+            int applied = 0;
+            {
+                sys_lock();
+                t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+                if (!cnv && (canvasName == "pd-main" || canvasName == "main" || canvasName.isEmpty()))
+                    cnv = pd_this->pd_canvaslist;
+                if (cnv) {
+                    for (t_gobj* y = cnv->gl_list; y; y = y->g_next) {
+                        juce::String cn = juce::String::fromUTF8(class_getname(pd_class(&y->g_pd))).toLowerCase();
+                        if (cn != "knob" && cn != "else/knob") continue;
+                        auto* k = reinterpret_cast<t_fake_knob*>(y);
+                        if (!k->x_param) continue;
+                        if (juce::String::fromUTF8(k->x_param->s_name) != name) continue;
+                        t_object* o = pd::Interface::checkObject(y);
+                        if (o) {
+                            t_atom a; SETFLOAT(&a, value);
+                            pd_typedmess(reinterpret_cast<t_pd*>(o), gensym("float"), 1, &a);
+                            applied++;
+                        }
+                    }
+                }
+                sys_unlock();
+            }
+            if (applied > 0) {
+                juce::OSCMessage reply { juce::OSCAddressPattern("/pd/param_set_name/reply/" + correlationId) };
+                reply.addArgument(static_cast<float>(applied));
+                if (applied > 1)
+                    reply.addArgument(juce::String("fanout: matched ") + juce::String(applied) + " knobs");
+                sender.send(reply);
+            } else {
+                sendReply("/pd/param_set_name/reply/" + correlationId,
+                          juce::String("error: param '") + name + "' not found");
+            }
         }
         return;
     }
@@ -7321,6 +7408,8 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
         reply.addArgument(juce::String("obj_get"));
         reply.addArgument(juce::String("obj_get_batch"));
         reply.addArgument(juce::String("param_get"));
+        reply.addArgument(juce::String("params"));
+        reply.addArgument(juce::String("param_set_name"));
         reply.addArgument(juce::String("trigger"));
         reply.addArgument(juce::String("telemetry"));
         reply.addArgument(juce::String("array_io"));
