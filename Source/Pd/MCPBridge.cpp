@@ -13,6 +13,7 @@
 #include "Object.h"
 #include "Objects/ObjectBase.h"
 #include "Objects/AllGuis.h" // t_fake_knob raw snd/rcv fields for screenshot labels
+#include <g_all_guis.h>       // t_slider live fields (x_min/x_max/x_fval) for obj_get
 #include "Pd/Interface.h"
 #include "Utility/Fonts.h"
 #include "../../Libraries/fftw3/api/fftw3.h"
@@ -25,6 +26,7 @@
 #include <thread>
 #include <vector>
 #include <deque>
+#include <mutex>
 struct BatchDedupEntry {
   uint64_t ts = 0;
   juce::OSCMessage reply;
@@ -1848,6 +1850,164 @@ static Canvas* getOrCreateCanvasComponent(PluginProcessor* proc, t_canvas* cnv)
     return canvasComp;
 }
 
+// Prefix-only mirror of Pd's private struct _inlet (m_obj.c:42) — we read
+// i_next only. Needed to address a specific physical inlet (>=1) without
+// pulling in m_obj internals. Inlet 0 is the object itself (not in ob_inlet).
+struct McpInletMirror { t_pd i_pd; McpInletMirror *i_next; };
+
+// Resolve the pd target for a given inlet index. <=0 -> the object itself.
+static t_pd *mcpResolveInlet(t_object *o, int inletIndex)
+{
+    if (!o) return nullptr;
+    if (inletIndex <= 0) return reinterpret_cast<t_pd *>(o);
+    auto *in = reinterpret_cast<McpInletMirror *>(o->ob_inlet);
+    for (int i = 1; in && i < inletIndex; ++i) in = in->i_next;
+    return in ? reinterpret_cast<t_pd *>(in) : nullptr;
+}
+
+// ── PRD_OBJ_GET_SET P4: shadow of values posted to named buses (/param) ──────
+static std::mutex s_paramShadowMutex;
+static std::unordered_map<std::string, std::vector<t_atom>> s_paramShadow;
+
+// ── PRD_OBJ_GET_SET P5b: selectors that can trigger a DSP graph recompile ─────
+static bool mcpIsStructuralSelector(const juce::String& sel)
+{
+    static const std::unordered_set<std::string> s = {
+        "resize", "block~", "switch~", "clone", "send~", "receive~"
+    };
+    return s.count(sel.toStdString()) > 0;
+}
+
+// Shared live-property set core (obj_set / obj_set_batch). Caller holds sys_lock.
+// Returns "" on success, else an error string. Sets *warning on structural hit.
+static juce::String mcpObjSetCore(t_gobj* g, const juce::String& tempId, int inlet,
+                                  const juce::String& selector, std::vector<t_atom>& atoms,
+                                  juce::String* warning)
+{
+    if (!g) return "error: unknown tempId '" + tempId + "'";
+    t_object* o = pd::Interface::checkObject(g);
+    if (!o) return "error: object not resolvable '" + tempId + "'";
+    t_pd* dest = mcpResolveInlet(o, inlet);
+    if (!dest) return "error: could not resolve inlet " + juce::String(inlet);
+    if (warning && mcpIsStructuralSelector(selector))
+        *warning = "structural:" + selector + " (may trigger a DSP recompile — prefer edit)";
+    pd_typedmess(dest, gensym(selector.toRawUTF8()), static_cast<int>(atoms.size()),
+                 atoms.empty() ? nullptr : atoms.data());
+    return {};
+}
+
+// Live `props` for a GUI object (shared by obj_get / obj_get_batch).
+static juce::DynamicObject* mcpBuildGuiProps(const juce::String& className, t_object* obj)
+{
+    auto* props = new juce::DynamicObject();
+    if (!obj) return props;
+    juce::String cls = className.toLowerCase();
+
+    if (cls == "knob" || cls == "else/knob") {
+        knob_get_rcv(reinterpret_cast<void*>(obj));
+        knob_get_snd(reinterpret_cast<void*>(obj));
+        auto* k = reinterpret_cast<t_fake_knob*>(obj);
+        props->setProperty("min", (double) k->x_min);
+        props->setProperty("max", (double) k->x_max);
+        props->setProperty("value", (double) k->x_fval);
+        props->setProperty("log", k->x_log != 0);
+        if (k->x_snd_raw) props->setProperty("send", juce::String::fromUTF8(k->x_snd_raw->s_name));
+        if (k->x_rcv_raw) props->setProperty("receive", juce::String::fromUTF8(k->x_rcv_raw->s_name));
+    } else if (cls == "floatatom" || cls == "numbox") {
+        auto* g = reinterpret_cast<t_fake_gatom*>(obj);
+        props->setProperty("min", (double) g->a_draglo);
+        props->setProperty("max", (double) g->a_draghi);
+        if (g->a_symto) props->setProperty("send", juce::String::fromUTF8(g->a_symto->s_name));
+        if (g->a_symfrom) props->setProperty("receive", juce::String::fromUTF8(g->a_symfrom->s_name));
+    } else if (cls == "hsl" || cls == "vsl") {
+        auto* s = reinterpret_cast<t_slider*>(obj);
+        props->setProperty("min", (double) s->x_min);
+        props->setProperty("max", (double) s->x_max);
+        props->setProperty("value", (double) s->x_fval);
+        props->setProperty("log", s->x_lin0_log1 != 0);
+        props->setProperty("orientation", (int) s->x_orientation);
+        if (s->x_gui.x_snd && s->x_gui.x_snd != gensym("empty")) props->setProperty("send", juce::String::fromUTF8(s->x_gui.x_snd->s_name));
+        if (s->x_gui.x_rcv && s->x_gui.x_rcv != gensym("empty")) props->setProperty("receive", juce::String::fromUTF8(s->x_gui.x_rcv->s_name));
+    } else if (cls == "tgl") {
+        auto* t = reinterpret_cast<t_toggle*>(obj);
+        props->setProperty("value", (double) t->x_on);
+        props->setProperty("nonzero", t->x_nonzero != 0);
+    } else if (cls == "hradio" || cls == "vradio") {
+        auto* r = reinterpret_cast<t_radio*>(obj);
+        props->setProperty("index", r->x_on);
+        props->setProperty("value", (double) r->x_fval);
+    } else if (cls == "nbx") {
+        auto* n = reinterpret_cast<t_my_numbox*>(obj);
+        props->setProperty("value", (double) n->x_val);
+        props->setProperty("min", (double) n->x_min);
+        props->setProperty("max", (double) n->x_max);
+        props->setProperty("log", n->x_lin0_log1 != 0);
+    } else if (cls == "vu") {
+        auto* v = reinterpret_cast<t_vu*>(obj);
+        props->setProperty("rms", (double) v->x_fr);
+        props->setProperty("peak", (double) v->x_fp);
+    } else if (cls == "button") {
+        auto* b = reinterpret_cast<t_fake_button*>(obj);
+        props->setProperty("value", b->x_state);
+        props->setProperty("mode", b->x_mode);
+    } else if (cls == "function") {
+        auto* f = reinterpret_cast<t_fake_function*>(obj);
+        props->setProperty("min", (double) f->x_min);
+        props->setProperty("max", (double) f->x_max);
+        props->setProperty("n_states", f->x_n_states);
+    } else if (cls == "scope~") {
+        auto* sc = reinterpret_cast<t_fake_scope*>(obj);
+        props->setProperty("min", (double) sc->x_min);
+        props->setProperty("max", (double) sc->x_max);
+        props->setProperty("frozen", sc->x_frozen != 0);
+    } else if (cls == "keyboard") {
+        auto* kb = reinterpret_cast<t_fake_keyboard*>(obj);
+        props->setProperty("octaves", kb->x_octaves);
+        props->setProperty("first_c", kb->x_first_c);
+        props->setProperty("velocity", kb->x_velocity);
+    }
+    return props;
+}
+
+// Fill {type, text, props} for one object. Caller holds sys_lock.
+static void mcpFillObjectJson(t_gobj* gobj, juce::DynamicObject* out)
+{
+    juce::String className = juce::String::fromUTF8(class_getname(pd_class(&gobj->g_pd)));
+    if (pd_class(&gobj->g_pd) == canvas_class) {
+        juce::String an;
+        className = pd::getAbstractionFileName(gobj, an) ? an : juce::String("pd");
+    }
+    juce::String objectText;
+    t_object* obj = pd::Interface::checkObject(gobj);
+    if (obj) {
+        char* text = nullptr; int len = 0;
+        pd::Interface::getObjectText(obj, &text, &len);
+        if (text && len > 0) { objectText = juce::String::fromUTF8(text, len); freebytes(text, len); }
+    }
+    out->setProperty("type", className);
+    out->setProperty("text", objectText);
+    out->setProperty("props", juce::var(mcpBuildGuiProps(className, obj)));
+}
+
+// Serialize one object to a JSON string. Caller holds sys_lock.
+static juce::String mcpBuildObjJson(t_gobj* gobj)
+{
+    auto* root = new juce::DynamicObject();
+    mcpFillObjectJson(gobj, root);
+    return juce::JSON::toString(juce::var(root));
+}
+
+// Liveness guard: is `g` still in the canvas object list? A stale identity map
+// (artist cleared/deleted objects via GUI) can hand obj_get/obj_set a dangling
+// pointer. Callers resolve the id (member context) then check this.
+static bool mcpGobjIsLive(t_canvas* cnv, t_gobj* g)
+{
+    if (!cnv || !g) return false;
+    for (t_gobj* y = cnv->gl_list; y; y = y->g_next)
+        if (y == g) return true;
+    return false;
+}
+
 void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessage& msg)
 {
     if (action == "ping") {
@@ -1910,6 +2070,199 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 pd_typedmess(reinterpret_cast<t_pd*>(cnv), gensym("vis"), 1, &a);
             }
             sys_unlock();
+        }
+        return;
+    }
+
+    if (action == "obj_set") {
+        // /pd/obj_set <canvas> <corrId> <tempId> <inlet> <selector> <argc> <atoms...>
+        // Live property/parameter set on a SPECIFIC object by tempId.
+        //   inlet : <=0 = object inlet 0 (pd_typedmess); >=1 = physical inlet
+        //   atoms : floats as-is; symbols tagged "s:name"
+        // reply: 1.0 [optional "structural:<sel>" warning] | "error: ..."
+        if (msg.size() >= 6 && processor) {
+            auto canvasName = normalizeCanvas(getArgString(msg[0]));
+            auto correlationId = getArgString(msg[1]);
+            auto tempId = getArgString(msg[2]);
+            int inlet = static_cast<int>(getArgFloat(msg[3]));
+            auto selector = getArgString(msg[4]);
+            if (selector.startsWith("s:")) selector = selector.substring(2);
+            int argc = static_cast<int>(getArgFloat(msg[5]));
+            int cursor = 6;
+
+            std::vector<t_atom> atoms;
+            if (argc > 0) atoms.reserve(static_cast<size_t>(argc));
+            for (int a = 0; a < argc && cursor < msg.size(); a++) {
+                auto const& arg = msg[cursor++];
+                t_atom at;
+                if (arg.isFloat32() || arg.isInt32()) SETFLOAT(&at, getArgFloat(arg));
+                else {
+                    auto s = getArgString(arg);
+                    if (s.startsWith("s:")) s = s.substring(2);
+                    SETSYMBOL(&at, gensym(s.toRawUTF8()));
+                }
+                atoms.push_back(at);
+            }
+
+            juce::String err, warning;
+            {
+                sys_lock();
+                t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+                if (!cnv && (canvasName == "pd-main" || canvasName == "main" || canvasName.isEmpty()))
+                    cnv = pd_this->pd_canvaslist;
+                t_gobj* g = processor->resolveStableId(canvasName, tempId);
+                if (g && !mcpGobjIsLive(cnv, g)) g = nullptr; // stale → treat as unknown
+                err = mcpObjSetCore(g, tempId, inlet, selector, atoms, &warning);
+                sys_unlock();
+            }
+
+            juce::OSCMessage reply { juce::OSCAddressPattern("/pd/obj_set/reply/" + correlationId) };
+            if (err.isNotEmpty()) reply.addArgument(err);
+            else { reply.addArgument(1.0f); if (warning.isNotEmpty()) reply.addArgument(warning); }
+            sender.send(reply);
+        }
+        return;
+    }
+
+    if (action == "obj_set_batch") {
+        // /pd/obj_set_batch <canvas> <corrId> <count> [tempId inlet selector argc atoms...] * count
+        // reply: JSON { ok, total, results:[{tempId,selector,ok,[detail|warning]}] }
+        if (msg.size() >= 3 && processor) {
+            auto canvasName = normalizeCanvas(getArgString(msg[0]));
+            auto correlationId = getArgString(msg[1]);
+            int count = static_cast<int>(getArgFloat(msg[2]));
+            int cursor = 3;
+            int okCount = 0;
+            juce::Array<juce::var> results;
+
+            sys_lock();
+            for (int i = 0; i < count && cursor < msg.size(); i++) {
+                auto tempId = getArgString(msg[cursor++]);
+                int inlet = (cursor < msg.size()) ? static_cast<int>(getArgFloat(msg[cursor++])) : 0;
+                auto selector = (cursor < msg.size()) ? getArgString(msg[cursor++]) : juce::String();
+                if (selector.startsWith("s:")) selector = selector.substring(2);
+                int argc = (cursor < msg.size()) ? static_cast<int>(getArgFloat(msg[cursor++])) : 0;
+                std::vector<t_atom> atoms;
+                for (int a = 0; a < argc && cursor < msg.size(); a++) {
+                    auto const& arg = msg[cursor++];
+                    t_atom at;
+                    if (arg.isFloat32() || arg.isInt32()) SETFLOAT(&at, getArgFloat(arg));
+                    else {
+                        auto s = getArgString(arg);
+                        if (s.startsWith("s:")) s = s.substring(2);
+                        SETSYMBOL(&at, gensym(s.toRawUTF8()));
+                    }
+                    atoms.push_back(at);
+                }
+                juce::String warning;
+                t_gobj* g = processor->resolveStableId(canvasName, tempId);
+                auto err = mcpObjSetCore(g, tempId, inlet, selector, atoms, &warning);
+                auto* ro = new juce::DynamicObject();
+                ro->setProperty("tempId", tempId);
+                ro->setProperty("selector", selector);
+                if (err.isNotEmpty()) { ro->setProperty("ok", false); ro->setProperty("detail", err); }
+                else { ro->setProperty("ok", true); okCount++; if (warning.isNotEmpty()) ro->setProperty("warning", warning); }
+                results.add(juce::var(ro));
+            }
+            sys_unlock();
+
+            auto* root = new juce::DynamicObject();
+            root->setProperty("ok", okCount);
+            root->setProperty("total", count);
+            root->setProperty("results", results);
+            sendReply("/pd/obj_set_batch/reply/" + correlationId, juce::JSON::toString(juce::var(root)));
+        }
+        return;
+    }
+
+    if (action == "param_get") {
+        // /pd/param_get <name> <corrId>
+        // reply: JSON { name, found, atoms:[...] }  (last value posted via /param)
+        if (msg.size() >= 1) {
+            auto name = getArgString(msg[0]);
+            auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : juce::String("0");
+            std::vector<t_atom> atoms; bool found = false;
+            {
+                std::lock_guard<std::mutex> lk(s_paramShadowMutex);
+                auto it = s_paramShadow.find(name.toStdString());
+                if (it != s_paramShadow.end()) { atoms = it->second; found = true; }
+            }
+            auto* root = new juce::DynamicObject();
+            root->setProperty("name", name);
+            root->setProperty("found", found);
+            juce::Array<juce::var> arr;
+            for (auto const& a : atoms) {
+                if (a.a_type == A_SYMBOL) arr.add(juce::String::fromUTF8(a.a_w.w_symbol ? a.a_w.w_symbol->s_name : ""));
+                else arr.add((double) a.a_w.w_float);
+            }
+            root->setProperty("atoms", arr);
+            sendReply("/pd/param_get/reply/" + correlationId, juce::JSON::toString(juce::var(root)));
+        }
+        return;
+    }
+
+    if (action == "obj_get_batch") {
+        // /pd/obj_get_batch <canvas> <corrId> <count> [tempId...]
+        // reply JSON: { values: { <tempId>: {type,text,props} | {error} } }
+        if (msg.size() >= 3 && processor) {
+            auto canvasName = normalizeCanvas(getArgString(msg[0]));
+            auto correlationId = getArgString(msg[1]);
+            int count = static_cast<int>(getArgFloat(msg[2]));
+            int cursor = 3;
+            auto* values = new juce::DynamicObject();
+            {
+                sys_lock();
+                t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+                if (!cnv && (canvasName == "pd-main" || canvasName == "main" || canvasName.isEmpty()))
+                    cnv = pd_this->pd_canvaslist;
+                for (int i = 0; i < count && cursor < msg.size(); i++) {
+                    auto tempId = getArgString(msg[cursor++]);
+                    t_gobj* gobj = processor->resolveStableId(canvasName, tempId);
+                    if (gobj && !mcpGobjIsLive(cnv, gobj)) gobj = nullptr; // stale → unknown
+                    if (gobj) {
+                        auto* o = new juce::DynamicObject();
+                        mcpFillObjectJson(gobj, o);
+                        values->setProperty(tempId, juce::var(o));
+                    } else {
+                        auto* o = new juce::DynamicObject();
+                        o->setProperty("error", "unknown tempId");
+                        values->setProperty(tempId, juce::var(o));
+                    }
+                }
+                sys_unlock();
+            }
+            auto* root = new juce::DynamicObject();
+            root->setProperty("values", juce::var(values));
+            sendReply("/pd/obj_get_batch/reply/" + correlationId, juce::JSON::toString(juce::var(root)));
+        }
+        return;
+    }
+
+    if (action == "obj_get") {
+        // /pd/obj_get <canvas> <corrId> <tempId>  ->  {type, text, props}
+        // `text` = saved constructor args; `props` = live fields for known GUI classes.
+        if (msg.size() >= 3 && processor) {
+            auto canvasName = normalizeCanvas(getArgString(msg[0]));
+            auto correlationId = getArgString(msg[1]);
+            auto tempId = getArgString(msg[2]);
+
+            juce::String json;
+            {
+                sys_lock();
+                t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+                if (!cnv && (canvasName == "pd-main" || canvasName == "main" || canvasName.isEmpty()))
+                    cnv = pd_this->pd_canvaslist;
+                t_gobj* gobj = processor->resolveStableId(canvasName, tempId);
+                if (gobj && !mcpGobjIsLive(cnv, gobj)) gobj = nullptr; // stale → unknown
+                if (gobj) json = mcpBuildObjJson(gobj);
+                sys_unlock();
+            }
+
+            if (json.isEmpty())
+                sendReply("/pd/obj_get/reply/" + correlationId,
+                          juce::String("error: unknown tempId '") + tempId + "'");
+            else
+                sendReply("/pd/obj_get/reply/" + correlationId, json);
         }
         return;
     }
@@ -6464,13 +6817,16 @@ void MCPBridge::handleParamDomain(const juce::String& /*paramName*/, const juce:
     auto paramName = getArgString(msg[0]);
     if (paramName.isEmpty() || paramName == "nil") return;
 
+    std::vector<t_atom> shadow; // P4: record last value per bus for /pd/param_get
     if (msg.size() == 2) {
         auto const& v = msg[1];
         if (v.isFloat32() || v.isInt32()) {
+            t_atom a; SETFLOAT(&a, getArgFloat(v)); shadow.push_back(a);
             processor->sendFloat(paramName.toRawUTF8(), getArgFloat(v));
         } else {
             auto s = getArgString(v);
             if (s.startsWith("s:")) s = s.substring(2);
+            t_atom a; SETSYMBOL(&a, gensym(s.toRawUTF8())); shadow.push_back(a);
             processor->sendSymbol(paramName.toRawUTF8(), s.toRawUTF8());
         }
     } else if (msg.size() > 2) {
@@ -6478,14 +6834,21 @@ void MCPBridge::handleParamDomain(const juce::String& /*paramName*/, const juce:
         for (int i = 1; i < msg.size(); ++i) {
             auto const& arg = msg[i];
             if (arg.isFloat32() || arg.isInt32()) {
+                t_atom a; SETFLOAT(&a, getArgFloat(arg)); shadow.push_back(a);
                 atoms.add(pd::Atom(getArgFloat(arg)));
             } else {
                 auto s = getArgString(arg);
                 if (s.startsWith("s:")) s = s.substring(2);
+                t_atom a; SETSYMBOL(&a, gensym(s.toRawUTF8())); shadow.push_back(a);
                 atoms.add(pd::Atom(processor->generateSymbol(s)));
             }
         }
         processor->sendList(paramName.toRawUTF8(), atoms);
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(s_paramShadowMutex);
+        s_paramShadow[paramName.toStdString()] = shadow;
     }
 }
 
@@ -6498,6 +6861,35 @@ void MCPBridge::handleTriggerDomain(const juce::String& triggerAction, const juc
         int pitch = static_cast<int>(getArgFloat(msg[1]));
         int vel = static_cast<int>(getArgFloat(msg[2]));
         processor->sendNoteOn(ch, pitch, vel);
+        return;
+    }
+
+    if ((triggerAction == "cc" || triggerAction == "controlchange") && msg.size() >= 3) {
+        int ch = static_cast<int>(getArgFloat(msg[0]));
+        int cc = static_cast<int>(getArgFloat(msg[1]));
+        int val = static_cast<int>(getArgFloat(msg[2]));
+        processor->sendControlChange(ch, cc, val);
+        return;
+    }
+
+    if ((triggerAction == "bend" || triggerAction == "pitchbend") && msg.size() >= 2) {
+        int ch = static_cast<int>(getArgFloat(msg[0]));
+        int val = static_cast<int>(getArgFloat(msg[1]));
+        processor->sendPitchBend(ch, val);
+        return;
+    }
+
+    if ((triggerAction == "aftertouch" || triggerAction == "touch") && msg.size() >= 2) {
+        int ch = static_cast<int>(getArgFloat(msg[0]));
+        int val = static_cast<int>(getArgFloat(msg[1]));
+        processor->sendAfterTouch(ch, val);
+        return;
+    }
+
+    if ((triggerAction == "program" || triggerAction == "programchange") && msg.size() >= 2) {
+        int ch = static_cast<int>(getArgFloat(msg[0]));
+        int val = static_cast<int>(getArgFloat(msg[1]));
+        processor->sendProgramChange(ch, val);
         return;
     }
 
@@ -6924,6 +7316,11 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
         reply.addArgument(juce::String("param"));
         reply.addArgument(juce::String("param_symbol"));
         reply.addArgument(juce::String("param_list"));
+        reply.addArgument(juce::String("obj_set"));
+        reply.addArgument(juce::String("obj_set_batch"));
+        reply.addArgument(juce::String("obj_get"));
+        reply.addArgument(juce::String("obj_get_batch"));
+        reply.addArgument(juce::String("param_get"));
         reply.addArgument(juce::String("trigger"));
         reply.addArgument(juce::String("telemetry"));
         reply.addArgument(juce::String("array_io"));
