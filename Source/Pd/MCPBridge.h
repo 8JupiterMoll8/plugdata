@@ -248,6 +248,10 @@ private:
     // the wire graph, classified as signal / bus / control. Read-only, fast.
     static juce::String computeClusters(PluginProcessor* processor, t_canvas* cnv, const juce::String& canvasName);
 
+    // PRD 1.2: CPU/DSP cost introspection. Live host load + a per-subpatch
+    // cost ESTIMATE from a weighted census of DSP objects (read-only).
+    static juce::String computePerfFacts(PluginProcessor* processor, t_canvas* cnv, const juce::String& canvasName);
+
     // Inline layout sanitize (PRD_CONTEXT_LAYOUT_GUARD P2/P3): minimal-deoverlap
     // of overlapping objects after a mutation, using the artist's preferred pad
     // and grid snap. Returns objects moved.

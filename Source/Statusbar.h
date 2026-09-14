@@ -55,6 +55,9 @@ public:
 
     void setCPUUsage(float cpuUsage);
 
+    // Live host DSP load (%) — read-only access for MCP /pd/perf introspection.
+    float getCPUUsage() const { return cpuUsage.load(); }
+
     class AudioPeakMeter {
     public:
         AudioPeakMeter() = default;

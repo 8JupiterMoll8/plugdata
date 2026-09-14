@@ -7,6 +7,7 @@
 #include "MCPBridge.h"
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "Statusbar.h" // StatusbarSource::getCPUUsage() for /pd/perf
 #include "Sidebar/Sidebar.h"
 #include "Canvas.h"
 #include "TabComponent.h"
@@ -27,6 +28,8 @@
 #include <vector>
 #include <deque>
 #include <mutex>
+#include <map>
+#include <algorithm>
 struct BatchDedupEntry {
   uint64_t ts = 0;
   juce::OSCMessage reply;
@@ -45,6 +48,12 @@ extern "C" {
 #include <s_inter.h>
 #include <g_all_guis.h> // t_iemgui x_snd/x_rcv for screenshot GUI-widget labels
 #include <m_imp.h>      // obj_starttraverseoutlet/obj_nexttraverseoutlet (duplicate-wire check)
+
+extern "C" {
+extern t_class* clone_class; // defined in g_clone.c (pd core)
+extern int clone_get_n(t_gobj*);
+extern t_glist* clone_get_instance(t_gobj*, int);
+}
 
 extern t_class *text_class;
 
@@ -1336,6 +1345,171 @@ juce::String MCPBridge::computeClusters(PluginProcessor* processor, t_canvas* cn
     }
     json += "]}";
     return json;
+}
+
+// ── /pd/perf — CPU / DSP cost introspection (PRD 1.2) ───────────────────
+// Live total host load (statusbar CPU meter) + a per-subpatch cost ESTIMATE
+// from a weighted census of DSP objects. Weights are heuristic (kernel
+// classes cost more than a bare *~), NOT measured block-time. Read-only.
+namespace {
+
+double mcpDspWeight(const juce::String& c)
+{
+    if (c == "fft~" || c == "ifft~" || c == "rfft~" || c == "rifft~" ||
+        c == "conv~" || c == "convolve~" || c == "partconv~") return 8.0;
+    if (c == "rev2~" || c == "rev3~" || c == "freeverb~" || c == "reverb~" ||
+        c == "comb~" || c == "rev~") return 6.0;
+    if (c == "delwrite~" || c == "delread~" || c == "delread4~" || c == "vd~" ||
+        c == "tabread4~" || c == "tabread~" || c == "tabplay~" || c == "writesf~") return 3.0;
+    if (c == "block~" || c == "switch~") return 2.0;
+    return 1.0;
+}
+
+struct PerfNode {
+    juce::String name;
+    double weight = 0.0;
+    int signalObjects = 0;
+    std::map<juce::String, int> heavies;
+};
+
+// Sum ALL descendants of a canvas into weight/count/heavies with NO per-canvas
+// output. Used to treat an abstraction instance as a single cost unit in the
+// canvas that hosts it (so we don't leak rev3~.pd internals and the hosting
+// subpatch shows a real weight).
+double mcpSubtreeWeight(t_canvas* cnv, std::unordered_set<t_canvas*>& visited,
+                        int depth, int& sig, std::map<juce::String, int>& heavies)
+{
+    if (!cnv || depth > 32 || visited.count(cnv)) return 0.0;
+    visited.insert(cnv);
+
+    double total = 0.0;
+    for (t_gobj* y = cnv->gl_list; y; y = y->g_next) {
+        t_class* cl = pd_class(&y->g_pd);
+        if (cl == canvas_class) {
+            total += mcpSubtreeWeight(reinterpret_cast<t_canvas*>(y), visited, depth + 1, sig, heavies);
+            continue;
+        }
+        if (cl == clone_class) {
+            int n = clone_get_n(y);
+            for (int i = 0; i < n; ++i) {
+                auto* inst = clone_get_instance(y, i);
+                if (inst) total += mcpSubtreeWeight(reinterpret_cast<t_canvas*>(inst), visited, depth + 1, sig, heavies);
+            }
+            continue;
+        }
+        if (!zgetfn(&y->g_pd, gensym("dsp"))) continue;
+        juce::String c = (cl && class_getname(cl))
+            ? juce::String::fromUTF8(class_getname(cl)) : juce::String("~");
+        double w = mcpDspWeight(c);
+        total += w;
+        sig += 1;
+        if (w >= 3.0) heavies[c] += 1;
+    }
+    return total;
+}
+
+void mcpWalkPerf(t_canvas* cnv, const juce::String& path,
+                 std::vector<PerfNode>& out,
+                 std::unordered_set<t_canvas*>& visited, int depth)
+{
+    if (!cnv || depth > 24 || visited.count(cnv)) return;
+    visited.insert(cnv);
+
+    PerfNode node;
+    node.name = path;
+
+    for (t_gobj* y = cnv->gl_list; y; y = y->g_next) {
+        t_class* cl = pd_class(&y->g_pd);
+        if (cl == canvas_class) {
+            auto* sub = reinterpret_cast<t_canvas*>(y);
+            juce::String cname = (sub->gl_name && sub->gl_name->s_name)
+                ? juce::String::fromUTF8(sub->gl_name->s_name) : juce::String("pd");
+            if (canvas_isabstraction(sub)) {
+                // Abstraction: fold its whole subtree into THIS canvas as one unit.
+                std::unordered_set<t_canvas*> localVisited;
+                int csig = 0; std::map<juce::String, int> ch;
+                double w = mcpSubtreeWeight(sub, localVisited, depth + 1, csig, ch);
+                node.weight += w;
+                node.signalObjects += csig;
+                for (auto& kv : ch) node.heavies[kv.first] += kv.second;
+                node.heavies["[" + cname + "]"] += 1; // surface the abstraction itself
+            } else {
+                // Inline [pd name]: a real subpatch — emit it separately.
+                mcpWalkPerf(sub, path + "/" + cname, out, visited, depth + 1);
+            }
+            continue;
+        }
+        if (cl == clone_class) {
+            int n = clone_get_n(y);
+            for (int i = 0; i < n; ++i) {
+                auto* inst = clone_get_instance(y, i);
+                if (!inst) continue;
+                std::unordered_set<t_canvas*> localVisited;
+                int csig = 0; std::map<juce::String, int> ch;
+                double w = mcpSubtreeWeight(reinterpret_cast<t_canvas*>(inst), localVisited, depth + 1, csig, ch);
+                node.weight += w;
+                node.signalObjects += csig;
+                for (auto& kv : ch) node.heavies[kv.first] += kv.second;
+            }
+            node.heavies["[clone]"] += 1;
+            continue;
+        }
+        if (!zgetfn(&y->g_pd, gensym("dsp"))) continue;
+        juce::String c = (cl && class_getname(cl))
+            ? juce::String::fromUTF8(class_getname(cl)) : juce::String("~");
+        double w = mcpDspWeight(c);
+        node.weight += w;
+        node.signalObjects += 1;
+        if (w >= 3.0) node.heavies[c] += 1;
+    }
+    out.push_back(node);
+}
+
+} // anonymous namespace
+
+juce::String MCPBridge::computePerfFacts(PluginProcessor* processor, t_canvas* cnv, const juce::String& canvasName)
+{
+    std::vector<PerfNode> nodes;
+    {
+        std::unordered_set<t_canvas*> visited;
+        mcpWalkPerf(cnv, canvasName, nodes, visited, 0);
+    }
+
+    double totalWeight = 0.0;
+    int totalSignal = 0;
+    for (auto& n : nodes) { totalWeight += n.weight; totalSignal += n.signalObjects; }
+
+    auto sorted = nodes;
+    std::sort(sorted.begin(), sorted.end(), [](const PerfNode& a, const PerfNode& b) {
+        return a.weight > b.weight;
+    });
+
+    juce::Array<juce::var> topArr;
+    int limit = juce::jmin(static_cast<int>(sorted.size()), 8);
+    for (int i = 0; i < limit; ++i) {
+        auto& n = sorted[static_cast<size_t>(i)];
+        auto* o = new juce::DynamicObject();
+        o->setProperty("canvas", n.name);
+        o->setProperty("weight", n.weight);
+        o->setProperty("signalObjects", n.signalObjects);
+        auto* h = new juce::DynamicObject();
+        for (auto& kv : n.heavies) h->setProperty(kv.first, kv.second);
+        o->setProperty("heavies", juce::var(h));
+        topArr.add(juce::var(o));
+    }
+
+    float cpu = (processor && processor->statusbarSource) ? processor->statusbarSource->getCPUUsage() : 0.0f;
+
+    auto* root = new juce::DynamicObject();
+    root->setProperty("dsp", pd_getdspstate() != 0);
+    root->setProperty("cpu", static_cast<double>(cpu));
+    root->setProperty("canvases", static_cast<int>(nodes.size()));
+    root->setProperty("signalObjects", totalSignal);
+    root->setProperty("estimatedWeight", totalWeight);
+    root->setProperty("top", topArr);
+    root->setProperty("note", "cpu is live host load; weight is an object-census estimate (kernels weighted heavier)");
+
+    return juce::JSON::toString(juce::var(root));
 }
 
 // ── sanitizeLayout — inline minimal-deoverlap post-guard ────────────────
@@ -4613,6 +4787,26 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         return;
     }
 
+    // ── /pd/perf — CPU/DSP cost introspection (PRD 1.2) ─────────────────
+    // /pd/perf <canvasName> [corrId]
+    // Reply: /pd/perf/reply/<corrId> {cpu,dsp,canvases,signalObjects,
+    //        estimatedWeight,top:[{canvas,weight,signalObjects,heavies}]}
+    if (action == "perf") {
+        auto canvasName    = normalizeCanvas(getArgString(msg[0]));
+        auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : "0";
+        juce::String replyAddr = "/pd/perf/reply/" + correlationId;
+
+        juce::String json = "{\"error\":\"canvas not found\"}";
+        sys_lock();
+        t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+        if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
+        if (cnv) json = computePerfFacts(processor, cnv, canvasName);
+        sys_unlock();
+
+        sendReply(replyAddr, json);
+        return;
+    }
+
     if (action == "bounds") {
         auto canvasName    = normalizeCanvas(getArgString(msg[0]));
         auto correlationId = msg.size() > 1 ? getArgString(msg[msg.size() - 1]) : "0";
@@ -7391,7 +7585,7 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
     } else if (bridgeAction == "capabilities") {
         auto correlationId = msg.size() > 0 ? getArgString(msg[0]) : "0";
         juce::OSCMessage reply { juce::OSCAddressPattern("/bridge/capabilities/reply") };
-        reply.addArgument(juce::String("11.8"));
+        reply.addArgument(juce::String("11.9"));
         reply.addArgument(juce::String("create_batch"));
         reply.addArgument(juce::String("delete_batch"));
         reply.addArgument(juce::String("connect_batch"));
@@ -7449,6 +7643,8 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
         reply.addArgument(juce::String("close_tab"));
         // PRD diagnostic layer: the graph X-ray
         reply.addArgument(juce::String("diagnose"));
+        // PRD 1.2: CPU/DSP cost introspection (live load + weighted census)
+        reply.addArgument(juce::String("perf"));
         // PRD GOP Module v2 Phase A: atomic parent-canvas swap for TS-generated
         // MERDA abstractions (single delete+create+rewire under one DSP update)
         reply.addArgument(juce::String("encapsulate_gop"));
