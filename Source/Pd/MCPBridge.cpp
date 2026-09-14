@@ -14,6 +14,7 @@
 #include "Object.h"
 #include "Objects/ObjectBase.h"
 #include "Objects/AllGuis.h" // t_fake_knob raw snd/rcv fields for screenshot labels
+#include "Objects/GemCapture.h" // PRD 1.4: native GEM window capture
 #include <g_all_guis.h>       // t_slider live fields (x_min/x_max/x_fval) for obj_get
 #include "Pd/Interface.h"
 #include "Utility/Fonts.h"
@@ -6565,6 +6566,61 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         return;
     }
 
+    // /pd/gem_capture <corrId> [scale]
+    // PRD 1.4: capture the live GEM render window (GemJUCEWindow — its own
+    // OpenGL context, a separate native window) as a PNG temp file. NATIVE path:
+    // no pix_snap/pix_write helper objects, no patch mutation. Mirrors
+    // screenshot_canvas (XGetImage via createSnapshotOfNativeWindow, on the
+    // JUCE message thread). DSP untouched — zero dropout.
+    // Reply: /pd/gem_capture/reply/<corrId> <absPath | error:...>
+    if (action == "gem_capture") {
+        auto  correlationId = msg.size() >= 1 ? getArgString(msg[0]) : "0";
+        float scale         = msg.size() >= 2 ? static_cast<float>(getArgFloat(msg[1])) : 0.75f;
+        scale = juce::jlimit(0.1f, 2.0f, scale);
+
+        juce::MessageManager::callAsync([scale, correlationId, bridge = this]() {
+#if ENABLE_GEM
+            auto img = captureGemWindowImage();
+            if (!img.isValid()) {
+                bridge->sendReply("/pd/gem_capture/reply/" + correlationId, juce::String("error:no_gem_window"));
+                return;
+            }
+
+            // Downscale for vision token economy (default 0.75)
+            if (std::abs(scale - 1.0f) > 0.01f && img.getWidth() > 0 && img.getHeight() > 0) {
+                int targetW = juce::roundToInt(img.getWidth() * scale);
+                int targetH = juce::roundToInt(img.getHeight() * scale);
+                if (targetW > 0 && targetH > 0) {
+                    juce::Image resized(juce::Image::ARGB, targetW, targetH, true);
+                    juce::Graphics rg(resized);
+                    rg.setImageResamplingQuality(juce::Graphics::highResamplingQuality);
+                    rg.drawImage(img, juce::Rectangle<float>(0, 0, (float) targetW, (float) targetH),
+                                 juce::RectanglePlacement::stretchToFit);
+                    img = resized;
+                }
+            }
+
+            auto tmpFile = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                .getChildFile("plugdata_gem_" + correlationId + ".png");
+            juce::FileOutputStream fos(tmpFile);
+            if (!fos.openedOk()) {
+                bridge->sendReply("/pd/gem_capture/reply/" + correlationId, juce::String("error:file_open"));
+                return;
+            }
+            juce::PNGImageFormat png;
+            if (!png.writeImageToStream(img, fos)) {
+                bridge->sendReply("/pd/gem_capture/reply/" + correlationId, juce::String("error:png_encode"));
+                return;
+            }
+            fos.flush();
+            bridge->sendReply("/pd/gem_capture/reply/" + correlationId, tmpFile.getFullPathName());
+#else
+            bridge->sendReply("/pd/gem_capture/reply/" + correlationId, juce::String("error:gem_disabled"));
+#endif
+        });
+        return;
+    }
+
 
     if (action == "deoverlap") {
         // /pd/deoverlap <canvas> <count> <id…> <corrId>
@@ -7585,7 +7641,7 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
     } else if (bridgeAction == "capabilities") {
         auto correlationId = msg.size() > 0 ? getArgString(msg[0]) : "0";
         juce::OSCMessage reply { juce::OSCAddressPattern("/bridge/capabilities/reply") };
-        reply.addArgument(juce::String("11.9"));
+        reply.addArgument(juce::String("11.10"));
         reply.addArgument(juce::String("create_batch"));
         reply.addArgument(juce::String("delete_batch"));
         reply.addArgument(juce::String("connect_batch"));
@@ -7671,6 +7727,8 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
         reply.addArgument(juce::String("seq"));
         // Canvas screenshot 2192 LLM vision: render Canvas to PNG temp file, MCP returns ImageContent
         reply.addArgument(juce::String("screenshot_canvas"));
+        // PRD 1.4: native GEM render-window capture (no patch objects)
+        reply.addArgument(juce::String("gem_capture"));
         // Labeled screenshots: GUI-widget name chips painted on the bitmap only
         reply.addArgument(juce::String("screenshot_labels"));
         // Offline faster-than-realtime render to WAV (background DSP bake)

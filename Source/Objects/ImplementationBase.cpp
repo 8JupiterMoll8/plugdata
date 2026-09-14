@@ -205,3 +205,26 @@ void ObjectImplementationManager::clearObjectImplementationsForPatch(t_canvas co
         objectImplementations.erase(y);
     }
 }
+
+#if ENABLE_GEM
+// PRD 1.4: native GEM render capture. GEM's window is a GemJUCEWindow
+// (Component + OpenGLContext) tracked in the global `gemJUCEWindow` map.
+// Mirror screenshot_canvas: grab the native X11 window via XGetImage. MUST be
+// called on the JUCE message thread (same constraint as createSnapshotOfNativeWindow).
+// Returns an invalid image when no GEM window exists (never opened / already closed).
+juce::Image captureGemWindowImage()
+{
+    auto* inst = libpd_this_instance();
+    if (!gemJUCEWindow.contains(inst))
+        return {};
+
+    auto const& win = gemJUCEWindow.at(inst);
+    if (!win || !win->isVisible())
+        return {};
+
+    if (auto* peer = win->getPeer())
+        return juce::createSnapshotOfNativeWindow(peer->getNativeHandle());
+
+    return {};
+}
+#endif
