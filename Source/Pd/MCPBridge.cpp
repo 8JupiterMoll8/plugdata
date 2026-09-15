@@ -5350,6 +5350,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     PluginProcessor::McpAnnotation a;
                     a.text = o->getProperty("text").toString();
                     a.kind = o->getProperty("kind").toString();
+                    a.t = juce::Time::getMillisecondCounterHiRes() * 0.001;
                     if (a.text.isEmpty()) continue;
                     auto target = o->getProperty("target").toString();
                     if (target.isNotEmpty()) {
@@ -5357,13 +5358,40 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         if (!g) continue;
                         int x, y, w, h;
                         pd::Interface::getObjectBounds(cnv, g, &x, &y, &w, &h);
-                        // Margin placement: put the note to the RIGHT of the object
-                        // (out of the vertical wire path) with a leader line.
-                        a.x = static_cast<float>(x + w + 14);
-                        a.y = static_cast<float>(y) + h * 0.5f;
+                        float const ox = static_cast<float>(x), oy = static_cast<float>(y);
+                        float const ow = static_cast<float>(w), oh = static_cast<float>(h);
+                        float const nw = a.text.length() * 7.0f + 28.0f; // approximate note size
+                        constexpr float nh = 18.0f;
+                        // Avoid overlapping ANY object or existing note.
+                        std::vector<juce::Rectangle<float>> avoid;
+                        for (t_gobj* y2 = cnv->gl_list; y2; y2 = y2->g_next) {
+                            int bx, by, bw, bh;
+                            pd::Interface::getObjectBounds(cnv, y2, &bx, &by, &bw, &bh);
+                            avoid.emplace_back(static_cast<float>(bx), static_cast<float>(by),
+                                               static_cast<float>(bw), static_cast<float>(bh));
+                        }
+                        for (auto const& an : proc->mcpAnnotations)
+                            avoid.emplace_back(an.x - 6.0f, an.y - 9.0f, an.text.length() * 7.0f + 28.0f, 18.0f);
+                        auto fits = [&](float nx, float ny) {
+                            juce::Rectangle<float> r(nx, ny, nw, nh);
+                            for (auto& ob : avoid) if (r.expanded(6.0f).intersects(ob)) return false;
+                            return true;
+                        };
+                        struct Cand { float nx, ny, lx, ly; }; // note top-left + leader point
+                        std::vector<Cand> const cands = {
+                            { ox + ow + 14.0f, oy + oh * 0.5f - nh * 0.5f, ox + ow, oy + oh * 0.5f },       // right
+                            { ox - nw - 14.0f, oy + oh * 0.5f - nh * 0.5f, ox, oy + oh * 0.5f },            // left
+                            { ox, oy - nh - 20.0f, ox + ow * 0.5f, oy },                                     // above
+                            { ox, oy + oh + 20.0f, ox + ow * 0.5f, oy + oh },                                // below
+                            { ox + ow + 14.0f, oy - 20.0f, ox + ow, oy },                                    // upper-right
+                        };
+                        Cand chosen = cands[0];
+                        for (auto& c : cands) if (fits(c.nx, c.ny)) { chosen = c; break; }
+                        a.x = chosen.nx + 6.0f; // note anchor (tag left = a.x - 6)
+                        a.y = chosen.ny + 9.0f; // note anchor (tag centre = a.y)
                         a.hasLeader = true;
-                        a.leaderX = static_cast<float>(x + w);
-                        a.leaderY = static_cast<float>(y) + h * 0.5f;
+                        a.leaderX = chosen.lx;
+                        a.leaderY = chosen.ly;
                         a.targetId = target;
                     } else {
                         a.x = static_cast<float>(o->getProperty("x"));

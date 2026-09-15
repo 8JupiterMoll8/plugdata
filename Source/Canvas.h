@@ -81,6 +81,11 @@ public:
     void mouseDown(MouseEvent const& e) override;
     void mouseMove(MouseEvent const& e) override;
     void mouseExit(MouseEvent const& e) override;
+
+    // PRD overlay: handle a click that may land on an AI note (x = dismiss, body =
+    // open the editor). Returns true if a note consumed it. Called by the canvas AND
+    // by objects (so notes overlaying objects stay clickable).
+    bool handleNoteClick(Point<int> canvasPt);
     void mouseDrag(MouseEvent const& e) override;
     void mouseUp(MouseEvent const& e) override;
     bool hitTest(int x, int y) override;

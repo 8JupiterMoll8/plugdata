@@ -744,6 +744,11 @@ void Object::updateIolets()
 
 void Object::mouseDown(MouseEvent const& e)
 {
+    // PRD overlay: if an AI note is drawn over this object, the note wins the click
+    // (x = dismiss, body = edit). Forward the click to the canvas note handler.
+    if (!e.mods.isRightButtonDown() && cnv && cnv->handleNoteClick(e.getEventRelativeTo(cnv).getPosition()))
+        return;
+
     // Only show right-click menu in locked mode if the object can be opened
     // We don't allow alt+click for popupmenus here, as that will conflict with some object behaviour, like for [range.hsl]
     if (e.mods.isRightButtonDown() && !cnv->isGraph && !(gui && gui->isEditorShown())) {

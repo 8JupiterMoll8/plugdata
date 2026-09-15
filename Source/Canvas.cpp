@@ -858,15 +858,9 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
             nvgFill(nvg);
             nvgFillColor(nvg, nvgRGBA(232, 232, 244, 235));
             nvgText(nvg, ax, ay, a.text.toRawUTF8(), nullptr);
-            // dismiss affordance — highlight the "x" when hovered
-            if (hovered && mcpNoteHoverClose) {
-                nvgBeginPath(nvg);
-                nvgRoundedRect(nvg, ax + tw + 3.0f, ay - 8.0f, 14.0f, 16.0f, 3.0f);
-                nvgFillColor(nvg, nvgRGBA(ar, ag, ab, 80));
-                nvgFill(nvg);
-            }
+            // dismiss "x" (rightmost) — click it to remove the note
             nvgFontSize(nvg, 11.0f);
-            nvgFillColor(nvg, (hovered && mcpNoteHoverClose) ? nvgRGBA(255, 255, 255, 255) : accent);
+            nvgFillColor(nvg, hovered ? nvgRGBA(255, 255, 255, 240) : accent);
             nvgText(nvg, ax + tw + 8.0f, ay, "x", nullptr);
             ++noteIdx;
         }
@@ -1505,9 +1499,8 @@ void Canvas::altKeyChanged(bool const isHeld)
 
 void Canvas::mouseMove(MouseEvent const& e)
 {
-    // Hover feedback over AI notes: highlight the note, and the "x" when over it.
+    // Hover feedback: brighten the note under the cursor.
     int hoverIdx = -1;
-    bool hoverClose = false;
     if (pd && !pd->getMcpAnnotations().empty()) {
         auto const pt = e.getPosition().toFloat();
         auto anns = pd->getMcpAnnotations();
@@ -1516,16 +1509,11 @@ void Canvas::mouseMove(MouseEvent const& e)
             float const tx = canvasOrigin.x + a.x - 6.0f;
             float const ty = canvasOrigin.y + a.y - 9.0f;
             float const tw = a.text.length() * 7.0f + 28.0f;
-            if (Rectangle<float>(tx, ty, tw, 18.0f).contains(pt)) {
-                hoverIdx = i;
-                hoverClose = juce::Rectangle<float>(tx + tw - 24.0f, ty - 2.0f, 24.0f, 22.0f).contains(pt);
-                break;
-            }
+            if (Rectangle<float>(tx, ty, tw, 18.0f).contains(pt)) { hoverIdx = i; break; }
         }
     }
-    if (hoverIdx != mcpNoteHover || hoverClose != mcpNoteHoverClose) {
+    if (hoverIdx != mcpNoteHover) {
         mcpNoteHover = hoverIdx;
-        mcpNoteHoverClose = hoverClose;
         repaint();
     }
 }
@@ -1534,9 +1522,101 @@ void Canvas::mouseExit(MouseEvent const& e)
 {
     if (mcpNoteHover != -1) {
         mcpNoteHover = -1;
-        mcpNoteHoverClose = false;
         repaint();
     }
+}
+
+bool Canvas::handleNoteClick(Point<int> canvasPt)
+{
+    if (!pd || pd->getMcpAnnotations().empty()) return false;
+    auto const pt = canvasPt.toFloat();
+    auto anns = pd->getMcpAnnotations();
+    for (int i = static_cast<int>(anns.size()) - 1; i >= 0; --i) {
+        auto const& a = anns[static_cast<size_t>(i)];
+        float const tx = canvasOrigin.x + a.x - 6.0f;
+        float const ty = canvasOrigin.y + a.y - 9.0f;
+        float const tw = a.text.length() * 7.0f + 28.0f;
+        if (!Rectangle<float>(tx, ty, tw, 18.0f).contains(pt)) continue;
+
+        // Rightmost ~22px is the dismiss "x"; anywhere else opens the editor.
+        juce::Rectangle<float> closeZone(tx + tw - 22.0f, ty - 2.0f, 22.0f, 22.0f);
+        if (closeZone.contains(pt)) {
+            if (mcpNoteEditor) mcpNoteEditor->setVisible(false);
+            mcpNoteEditIndex = -1;
+            juce::ScopedLock sl(pd->mcpOverlayLock);
+            if (i < static_cast<int>(pd->mcpAnnotations.size()))
+                pd->mcpAnnotations.erase(pd->mcpAnnotations.begin() + i);
+            repaint();
+            return true;
+        }
+
+        if (!mcpNoteEditor) {
+            mcpNoteEditor = std::make_unique<juce::TextEditor>();
+            mcpNoteEditor->setMultiLine(false);
+            mcpNoteEditor->setReturnKeyStartsNewLine(false);
+            mcpNoteEditor->setWantsKeyboardFocus(true);
+            auto commit = [this](bool send) {
+                if (mcpNoteEditIndex < 0) return;
+                juce::String txt = mcpNoteEditor ? mcpNoteEditor->getText().trim() : juce::String();
+                juce::String targetId;
+                if (pd) {
+                    juce::ScopedLock sl(pd->mcpOverlayLock);
+                    if (mcpNoteEditIndex < static_cast<int>(pd->mcpAnnotations.size())) {
+                        auto& ann = pd->mcpAnnotations[static_cast<size_t>(mcpNoteEditIndex)];
+                        ann.text = txt;
+                        ann.kind = "artist";
+                        targetId = ann.targetId;
+                    }
+                }
+                mcpNoteEditIndex = -1;
+                if (mcpNoteEditor) mcpNoteEditor->setVisible(false);
+                if (send && txt.isNotEmpty() && pd) {
+                    if (auto* br = pd->getMCPBridge()) br->sendArtistNote(targetId, txt);
+                }
+                repaint();
+            };
+            mcpNoteEditor->onReturnKey = [commit] { commit(true); };
+            mcpNoteEditor->onFocusLost = [this, commit] {
+                if (juce::Time::getMillisecondCounter() - mcpNoteOpenedAt < 500) return;
+                commit(true);
+            };
+            mcpNoteEditor->onTextChange = [this] {
+                if (mcpNoteEditor && pd && mcpNoteEditIndex >= 0) {
+                    juce::ScopedLock sl(pd->mcpOverlayLock);
+                    if (mcpNoteEditIndex < static_cast<int>(pd->mcpAnnotations.size()))
+                        pd->mcpAnnotations[static_cast<size_t>(mcpNoteEditIndex)].text = mcpNoteEditor->getText();
+                }
+                repaint();
+                if (editor) editor->nvgSurface.renderAll();
+            };
+            mcpNoteEditor->onEscapeKey = [this] {
+                mcpNoteEditIndex = -1;
+                if (mcpNoteEditor) mcpNoteEditor->setVisible(false);
+            };
+            mcpNoteEditor->setColour(juce::TextEditor::backgroundColourId, juce::Colour(0xff16161c));
+            mcpNoteEditor->setColour(juce::TextEditor::textColourId, juce::Colours::white);
+            mcpNoteEditor->setColour(juce::TextEditor::outlineColourId, juce::Colour(0xff4a9eff));
+            mcpNoteEditor->setColour(juce::TextEditor::focusedOutlineColourId, juce::Colour(0xff4a9eff));
+            mcpNoteEditor->setColour(juce::TextEditor::highlightColourId, juce::Colour(0xff4a9eff));
+            mcpNoteEditor->setColour(juce::CaretComponent::caretColourId, juce::Colours::white);
+            addAndMakeVisible(*mcpNoteEditor);
+        }
+        mcpNoteEditIndex = i;
+        mcpNoteOpenedAt = juce::Time::getMillisecondCounter();
+        mcpNoteEditor->setBounds(juce::roundToInt(canvasOrigin.x + a.x - 6.0f),
+                                 juce::roundToInt(canvasOrigin.y + a.y - 34.0f),
+                                 juce::jmax(140, juce::roundToInt(a.text.length() * 7.0f) + 40), 20);
+        mcpNoteEditor->setText(a.text, false);
+        mcpNoteEditor->setVisible(true);
+        mcpNoteEditor->toFront(true);
+        {
+            auto* ed = mcpNoteEditor.get();
+            juce::MessageManager::callAsync([ed] { if (ed) { ed->grabKeyboardFocus(); ed->selectAll(); } });
+        }
+        repaint();
+        return true;
+    }
+    return false;
 }
 
 void Canvas::mouseDown(MouseEvent const& e)
@@ -1559,8 +1639,11 @@ void Canvas::mouseDown(MouseEvent const& e)
     if (!e.mods.isRightButtonDown()) {
 
         if (source == this) {
-            // PRD overlay: click an AI annotation tag (or its "x") to dismiss it.
-            if (pd && !pd->getMcpAnnotations().empty()) {
+            // A click on an AI note is handled by the shared handler (x = dismiss, body =
+            // edit). Objects forward their clicks here too, so notes overlaying objects
+            // stay clickable.
+            if (handleNoteClick(e.getPosition())) return;
+            if (false && pd && !pd->getMcpAnnotations().empty()) {
                 auto const pt = e.getPosition().toFloat();
                 auto anns = pd->getMcpAnnotations();
                 for (int i = static_cast<int>(anns.size()) - 1; i >= 0; --i) {
@@ -1569,18 +1652,8 @@ void Canvas::mouseDown(MouseEvent const& e)
                     float const ty = canvasOrigin.y + a.y - 9.0f;
                     float const tw = a.text.length() * 7.0f + 30.0f; // estimated hit width
                     if (Rectangle<float>(tx, ty, tw, 18.0f).contains(pt)) {
-                        // ONLY the "x" (far right) dismisses. The body opens/focuses the
-                        // editor; double-click never deletes; clicking away keeps the note.
-                        juce::Rectangle<float> closeZone(tx + tw - 24.0f, ty - 2.0f, 24.0f, 22.0f);
-                        if (closeZone.contains(pt)) {
-                            if (mcpNoteEditor) mcpNoteEditor->setVisible(false);
-                            mcpNoteEditIndex = -1;
-                            juce::ScopedLock sl(pd->mcpOverlayLock);
-                            if (i < static_cast<int>(pd->mcpAnnotations.size()))
-                                pd->mcpAnnotations.erase(pd->mcpAnnotations.begin() + i);
-                            repaint();
-                            return;
-                        }
+                        // Click a note to reply; notes auto-fade, so there is no dismiss
+                        // gesture (no "x" to fight with).
                         {
                             // PRD overlay: click a note -> reply inline (becomes your message to the AI)
                             if (!mcpNoteEditor) {
