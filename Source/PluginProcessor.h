@@ -220,6 +220,18 @@ public:
         return it != mcpAiOverlay.end() ? it->second : 0;
     }
 
+    // PRD overlay: ghost/preview of PROPOSED (uncommitted) changes, drawn by the
+    // canvas above the patch. Boxes are in patch coords; wires are patch-coord
+    // endpoints. Message-thread only — pure draw state, never committed.
+    struct McpGhost {
+        int kind = 0;                              // 0 = box, 1 = wire
+        float x = 0, y = 0, w = 0, h = 0;          // box
+        float x1 = 0, y1 = 0, x2 = 0, y2 = 0;      // wire
+        juce::String label;
+    };
+    std::vector<McpGhost> mcpGhosts;
+    const std::vector<McpGhost>& getMcpGhosts() const { return mcpGhosts; }
+
     Value tailLength = Value(0.0f);
 
     // Just so we never have to deal with deleting the default LnF

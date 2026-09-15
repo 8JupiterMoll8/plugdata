@@ -5251,6 +5251,59 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         return;
     }
 
+    // /pd/ai_ghost <canvas> <corrId> <jsonArray>
+    // PRD overlay: ghost/preview of PROPOSED (uncommitted) changes drawn above the
+    // patch. Each item: {"kind":"box",x,y,w,h,label} or {"kind":"wire",src,dest}
+    // (wire endpoints are computed from object bounds). Empty array clears.
+    // Message-thread only; pure draw state — never touches the DSP graph.
+    // Reply: /pd/ai_ghost/reply/<corrId> <ghostCount>
+    if (action == "ai_ghost") {
+        auto canvasName    = normalizeCanvas(getArgString(msg[0]));
+        auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : "0";
+        auto jsonStr       = msg.size() > 2 ? getArgString(msg[2]) : juce::String("[]");
+
+        t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+        if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
+        if (!cnv) { sendReply("/pd/ai_ghost/reply/" + correlationId, 0.0f); return; }
+
+        auto parsed = juce::JSON::parse(jsonStr);
+
+        juce::MessageManager::callAsync([proc = processor, cnv, canvasName, correlationId, bridge = this, parsed]() {
+            proc->mcpGhosts.clear();
+            if (auto* arr = parsed.getArray()) {
+                sys_lock();
+                for (auto const& v : *arr) {
+                    auto* o = v.getDynamicObject();
+                    if (!o) continue;
+                    PluginProcessor::McpGhost g;
+                    if (o->getProperty("kind").toString() == "wire") {
+                        g.kind = 1;
+                        t_gobj* gs = proc->resolveStableId(canvasName, o->getProperty("src").toString());
+                        t_gobj* gd = proc->resolveStableId(canvasName, o->getProperty("dest").toString());
+                        if (!gs || !gd) continue;
+                        int sx, sy, sw, sh, dx, dy, dw, dh;
+                        pd::Interface::getObjectBounds(cnv, gs, &sx, &sy, &sw, &sh);
+                        pd::Interface::getObjectBounds(cnv, gd, &dx, &dy, &dw, &dh);
+                        g.x1 = sx + sw * 0.5f; g.y1 = sy + sh;
+                        g.x2 = dx + dw * 0.5f; g.y2 = dy;
+                    } else {
+                        g.kind = 0;
+                        g.x = static_cast<float>(o->getProperty("x"));
+                        g.y = static_cast<float>(o->getProperty("y"));
+                        g.w = static_cast<float>(o->getProperty("w"));
+                        g.h = static_cast<float>(o->getProperty("h"));
+                        g.label = o->getProperty("label").toString();
+                    }
+                    proc->mcpGhosts.push_back(g);
+                }
+                sys_unlock();
+            }
+            if (auto* cc = getOrCreateCanvasComponent(proc, cnv)) cc->repaint();
+            bridge->sendReply("/pd/ai_ghost/reply/" + correlationId, static_cast<float>(proc->mcpGhosts.size()));
+        });
+        return;
+    }
+
     if (action == "clear_ids") {
         if (msg.size() >= 2 && processor) {
             SmallArray<pd::Atom> atoms;
@@ -7744,7 +7797,7 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
     } else if (bridgeAction == "capabilities") {
         auto correlationId = msg.size() > 0 ? getArgString(msg[0]) : "0";
         juce::OSCMessage reply { juce::OSCAddressPattern("/bridge/capabilities/reply") };
-        reply.addArgument(juce::String("11.12"));
+        reply.addArgument(juce::String("11.13"));
         reply.addArgument(juce::String("create_batch"));
         reply.addArgument(juce::String("delete_batch"));
         reply.addArgument(juce::String("connect_batch"));
@@ -7836,6 +7889,8 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
         reply.addArgument(juce::String("select"));
         // PRD overlay: per-object AI state markers drawn on the canvas
         reply.addArgument(juce::String("ai_overlay"));
+        // PRD overlay: ghost/preview of proposed (uncommitted) changes
+        reply.addArgument(juce::String("ai_ghost"));
         // Labeled screenshots: GUI-widget name chips painted on the bitmap only
         reply.addArgument(juce::String("screenshot_labels"));
         // Offline faster-than-realtime render to WAV (background DSP bake)

@@ -775,6 +775,50 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
         connection->render(nvg);
     }
 
+    // PRD overlay: ghost/preview of PROPOSED (uncommitted) changes. Drawn above
+    // the patch, never part of it — the artist sees the change before it's real.
+    if (pd && !pd->getMcpGhosts().empty()) {
+        for (auto const& g : pd->getMcpGhosts()) {
+            NVGScopedState scopedGhost(nvg);
+            if (g.kind == 0) {
+                float const gx = canvasOrigin.x + g.x;
+                float const gy = canvasOrigin.y + g.y;
+                float const gw = g.w > 0 ? g.w : 120.0f;
+                float const gh = g.h > 0 ? g.h : 22.0f;
+                nvgBeginPath(nvg);
+                nvgRoundedRect(nvg, gx, gy, gw, gh, Corners::objectCornerRadius);
+                nvgFillColor(nvg, nvgRGBA(74, 158, 255, 55));
+                nvgFill(nvg);
+                nvgStrokeColor(nvg, nvgRGBA(74, 158, 255, 220));
+                nvgStrokeWidth(nvg, 1.5f);
+                nvgLineStyle(nvg, NVG_LINE_DASHED);
+                nvgDashLength(nvg, 6.0f);
+                nvgStroke(nvg);
+                nvgLineStyle(nvg, NVG_LINE_SOLID);
+                if (g.label.isNotEmpty()) {
+                    nvgFontSize(nvg, 12.0f);
+                    nvgFontFace(nvg, "Inter");
+                    nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+                    nvgFillColor(nvg, nvgRGBA(74, 158, 255, 255));
+                    nvgText(nvg, gx + 6.0f, gy + gh * 0.5f, g.label.toRawUTF8(), nullptr);
+                }
+            } else {
+                float const x1 = canvasOrigin.x + g.x1, y1 = canvasOrigin.y + g.y1;
+                float const x2 = canvasOrigin.x + g.x2, y2 = canvasOrigin.y + g.y2;
+                nvgBeginPath(nvg);
+                nvgMoveTo(nvg, x1, y1);
+                float const dx = std::abs(x2 - x1) * 0.5f + 20.0f;
+                nvgBezierTo(nvg, x1, y1 + dx, x2, y2 - dx, x2, y2);
+                nvgStrokeColor(nvg, nvgRGBA(74, 158, 255, 220));
+                nvgStrokeWidth(nvg, 2.0f);
+                nvgLineStyle(nvg, NVG_LINE_DASHED);
+                nvgDashLength(nvg, 6.0f);
+                nvgStroke(nvg);
+                nvgLineStyle(nvg, NVG_LINE_SOLID);
+            }
+        }
+    }
+
     if (graphArea) {
         NVGScopedState scopedState(nvg);
         nvgTranslate(nvg, graphArea->getX(), graphArea->getY());
