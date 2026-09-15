@@ -787,7 +787,8 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
             nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
             float tb[4];
             nvgTextBounds(nvg, ax, ay, a.text.toRawUTF8(), nullptr, tb);
-            float const w = (tb[2] - tb[0]) + 12.0f;
+            float const tw = tb[2] - tb[0];
+            float const w = tw + 26.0f; // text + padding + dismiss "x"
             constexpr float h = 18.0f;
             nvgBeginPath(nvg);
             nvgRoundedRect(nvg, ax - 6.0f, ay - h * 0.5f, w, h, 4.0f);
@@ -795,6 +796,10 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
             nvgFill(nvg);
             nvgFillColor(nvg, nvgRGBA(232, 232, 244, 235));
             nvgText(nvg, ax, ay, a.text.toRawUTF8(), nullptr);
+            // dismiss affordance — click the tag to remove it
+            nvgFontSize(nvg, 11.0f);
+            nvgFillColor(nvg, nvgRGBA(168, 172, 186, 235));
+            nvgText(nvg, ax + tw + 7.0f, ay, "x", nullptr);
         }
     }
     // PRD overlay: ghost/preview of PROPOSED (uncommitted) changes. Drawn above
@@ -1438,6 +1443,24 @@ void Canvas::mouseDown(MouseEvent const& e)
     if (!e.mods.isRightButtonDown()) {
 
         if (source == this) {
+            // PRD overlay: click an AI annotation tag (or its "x") to dismiss it.
+            if (pd && !pd->getMcpAnnotations().empty()) {
+                auto const pt = e.getPosition().toFloat();
+                auto anns = pd->getMcpAnnotations();
+                for (int i = static_cast<int>(anns.size()) - 1; i >= 0; --i) {
+                    auto const& a = anns[static_cast<size_t>(i)];
+                    float const tx = canvasOrigin.x + a.x - 6.0f;
+                    float const ty = canvasOrigin.y + a.y - 9.0f;
+                    float const tw = a.text.length() * 7.0f + 30.0f; // estimated hit width
+                    if (Rectangle<float>(tx, ty, tw, 18.0f).contains(pt)) {
+                        juce::ScopedLock sl(pd->mcpOverlayLock);
+                        if (i < static_cast<int>(pd->mcpAnnotations.size()))
+                            pd->mcpAnnotations.erase(pd->mcpAnnotations.begin() + i);
+                        repaint();
+                        return;
+                    }
+                }
+            }
             dragState.duplicateOffset = { 0, 0 };
             dragState.lastDuplicateOffset = { 0, 0 };
             dragState.wasDuplicated = false;
