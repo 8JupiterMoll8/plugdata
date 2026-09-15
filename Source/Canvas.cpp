@@ -636,6 +636,37 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
 
     currentRenderArea = invalidRegion;
 
+    // PRD overlay: titled regions drawn BEHIND the objects (structure at a glance).
+    if (pd && !pd->getMcpRegions().empty()) {
+        for (auto const& r : pd->getMcpRegions()) {
+            NVGScopedState scopedRegion(nvg);
+            float const rx = canvasOrigin.x + r.x, ry = canvasOrigin.y + r.y;
+            juce::String const k = r.kind.isNotEmpty() ? r.kind : juce::String("group");
+            int ar = 0x8a, ag = 0x93, ab = 0xa6;
+            if (k == "source") { ar = 0x3d; ag = 0xdd; ab = 0x8a; }
+            else if (k == "fx") { ar = 0x4a; ag = 0x9e; ab = 0xff; }
+            else if (k == "loop") { ar = 0xff; ag = 0xbe; ab = 0x50; }
+            else if (k == "output") { ar = 0xff; ag = 0x5a; ab = 0x5a; }
+            nvgBeginPath(nvg);
+            nvgRoundedRect(nvg, rx, ry, r.w, r.h, 8.0f);
+            nvgFillColor(nvg, nvgRGBA(ar, ag, ab, 26));
+            nvgFill(nvg);
+            nvgStrokeColor(nvg, nvgRGBA(ar, ag, ab, 150));
+            nvgStrokeWidth(nvg, 1.5f);
+            nvgLineStyle(nvg, NVG_LINE_DASHED);
+            nvgDashLength(nvg, 8.0f);
+            nvgStroke(nvg);
+            nvgLineStyle(nvg, NVG_LINE_SOLID);
+            if (r.title.isNotEmpty()) {
+                nvgFontSize(nvg, 12.0f);
+                nvgFontFace(nvg, "Inter");
+                nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+                nvgFillColor(nvg, nvgRGBA(ar, ag, ab, 235));
+                nvgText(nvg, rx + 8.0f, ry + 5.0f, r.title.toRawUTF8(), nullptr);
+            }
+        }
+    }
+
     auto drawBorder = [this, nvg, zoom](bool const bg, bool const fg) {
         if (viewport && (showOrigin || showBorder) && !::getValue<bool>(presentationMode)) {
             NVGScopedState scopedState(nvg);
@@ -785,10 +816,24 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
             float const ay = canvasOrigin.y + a.y;
             // Colour by kind so the artist can tell notes apart at a glance.
             juce::String const k = a.kind.isNotEmpty() ? a.kind : juce::String("info");
-            NVGcolor const accent = (k == "change") ? nvgRGB(0x3d, 0xdd, 0x8a)
-                                   : (k == "warn")   ? nvgRGB(0xff, 0x5a, 0x5a)
-                                   : (k == "artist") ? nvgRGB(0xff, 0xbe, 0x50)
-                                                     : nvgRGB(0x4a, 0x9e, 0xff);
+            int ar = 0x4a, ag = 0x9e, ab = 0xff;
+            if (k == "change") { ar = 0x3d; ag = 0xdd; ab = 0x8a; }
+            else if (k == "warn") { ar = 0xff; ag = 0x5a; ab = 0x5a; }
+            else if (k == "artist") { ar = 0xff; ag = 0xbe; ab = 0x50; }
+            NVGcolor const accent = nvgRGBA(ar, ag, ab, 255);
+            // Leader line from the note (in the margin) to the object it explains.
+            if (a.hasLeader) {
+                NVGScopedState scopedLeader(nvg);
+                nvgBeginPath(nvg);
+                nvgMoveTo(nvg, canvasOrigin.x + a.leaderX, canvasOrigin.y + a.leaderY);
+                nvgLineTo(nvg, ax - 6.0f, ay);
+                nvgStrokeColor(nvg, nvgRGBA(ar, ag, ab, 120));
+                nvgStrokeWidth(nvg, 1.0f);
+                nvgLineStyle(nvg, NVG_LINE_DASHED);
+                nvgDashLength(nvg, 4.0f);
+                nvgStroke(nvg);
+                nvgLineStyle(nvg, NVG_LINE_SOLID);
+            }
             nvgFontSize(nvg, 12.0f);
             nvgFontFace(nvg, "Inter");
             nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);

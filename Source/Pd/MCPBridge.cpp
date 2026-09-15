@@ -5357,8 +5357,13 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         if (!g) continue;
                         int x, y, w, h;
                         pd::Interface::getObjectBounds(cnv, g, &x, &y, &w, &h);
-                        a.x = static_cast<float>(x);
-                        a.y = static_cast<float>(y) + h + 16.0f;
+                        // Margin placement: put the note to the RIGHT of the object
+                        // (out of the vertical wire path) with a leader line.
+                        a.x = static_cast<float>(x + w + 14);
+                        a.y = static_cast<float>(y) + h * 0.5f;
+                        a.hasLeader = true;
+                        a.leaderX = static_cast<float>(x + w);
+                        a.leaderY = static_cast<float>(y) + h * 0.5f;
                         a.targetId = target;
                     } else {
                         a.x = static_cast<float>(o->getProperty("x"));
@@ -5370,6 +5375,70 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             }
             if (auto* cc = getOrCreateCanvasComponent(proc, cnv)) cc->repaint();
             bridge->sendReply("/pd/ai_annotate/reply/" + correlationId, static_cast<float>(proc->mcpAnnotations.size()));
+        });
+        return;
+    }
+
+    // /pd/ai_region <canvas> <corrId> <jsonArray>
+    // PRD overlay: titled REGIONS grouping objects. Items {targets:[tempIds], title, kind}
+    // (bounds computed from the objects) or {x,y,w,h,title,kind}. Empty array clears.
+    // Drawn BEHIND the objects so the patch structure shows through.
+    // Reply: /pd/ai_region/reply/<corrId> <count>
+    if (action == "ai_region") {
+        auto canvasName    = normalizeCanvas(getArgString(msg[0]));
+        auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : "0";
+        auto jsonStr       = msg.size() > 2 ? getArgString(msg[2]) : juce::String("[]");
+
+        t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+        if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
+        if (!cnv) { sendReply("/pd/ai_region/reply/" + correlationId, 0.0f); return; }
+
+        auto parsed = juce::JSON::parse(jsonStr);
+
+        juce::MessageManager::callAsync([proc = processor, cnv, canvasName, correlationId, bridge = this, parsed]() {
+            juce::ScopedLock overlaySl(proc->mcpOverlayLock);
+            proc->mcpRegions.clear();
+            if (auto* arr = parsed.getArray()) {
+                sys_lock();
+                for (auto const& v : *arr) {
+                    auto* o = v.getDynamicObject();
+                    if (!o) continue;
+                    PluginProcessor::McpRegion r;
+                    r.title = o->getProperty("title").toString();
+                    r.kind = o->getProperty("kind").toString();
+                    auto* targets = o->getProperty("targets").getArray();
+                    if (targets && !targets->isEmpty()) {
+                        bool first = true;
+                        int minX = 0, minY = 0, maxX = 0, maxY = 0;
+                        for (auto const& tv : *targets) {
+                            t_gobj* g = proc->resolveStableId(canvasName, tv.toString());
+                            if (!g) continue;
+                            int x, y, w, h;
+                            pd::Interface::getObjectBounds(cnv, g, &x, &y, &w, &h);
+                            if (first) { minX = x; minY = y; maxX = x + w; maxY = y + h; first = false; }
+                            else {
+                                minX = std::min(minX, x); minY = std::min(minY, y);
+                                maxX = std::max(maxX, x + w); maxY = std::max(maxY, y + h);
+                            }
+                        }
+                        if (first) continue;
+                        constexpr int pad = 22;
+                        r.x = static_cast<float>(minX - pad);
+                        r.y = static_cast<float>(minY - pad - 16);
+                        r.w = static_cast<float>(maxX - minX + pad * 2);
+                        r.h = static_cast<float>(maxY - minY + pad * 2 + 16);
+                    } else {
+                        r.x = static_cast<float>(o->getProperty("x"));
+                        r.y = static_cast<float>(o->getProperty("y"));
+                        r.w = static_cast<float>(o->getProperty("w"));
+                        r.h = static_cast<float>(o->getProperty("h"));
+                    }
+                    proc->mcpRegions.push_back(r);
+                }
+                sys_unlock();
+            }
+            if (auto* cc = getOrCreateCanvasComponent(proc, cnv)) cc->repaint();
+            bridge->sendReply("/pd/ai_region/reply/" + correlationId, static_cast<float>(proc->mcpRegions.size()));
         });
         return;
     }
@@ -7867,7 +7936,7 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
     } else if (bridgeAction == "capabilities") {
         auto correlationId = msg.size() > 0 ? getArgString(msg[0]) : "0";
         juce::OSCMessage reply { juce::OSCAddressPattern("/bridge/capabilities/reply") };
-        reply.addArgument(juce::String("11.16"));
+        reply.addArgument(juce::String("11.17"));
         reply.addArgument(juce::String("create_batch"));
         reply.addArgument(juce::String("delete_batch"));
         reply.addArgument(juce::String("connect_batch"));
@@ -7963,6 +8032,8 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
         reply.addArgument(juce::String("ai_ghost"));
         // PRD overlay: short in-place AI annotations (explain on the patch)
         reply.addArgument(juce::String("ai_annotate"));
+        // PRD overlay: titled regions grouping objects (structure at a glance)
+        reply.addArgument(juce::String("ai_region"));
         // Labeled screenshots: GUI-widget name chips painted on the bitmap only
         reply.addArgument(juce::String("screenshot_labels"));
         // Offline faster-than-realtime render to WAV (background DSP bake)

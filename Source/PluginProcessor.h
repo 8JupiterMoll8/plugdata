@@ -240,13 +240,26 @@ public:
     // translucent tag near an object (patch coords). Explanation lives where it
     // belongs — on the patch, not in a chat window.
     struct McpAnnotation {
-        float x = 0, y = 0; // patch coords (already anchored to the target)
+        float x = 0, y = 0; // patch coords (placed in the margin beside the target)
         juce::String text;
         juce::String targetId; // tempId this note is attached to (may be empty)
         juce::String kind;     // info | change | warn | artist  (drives the colour)
+        bool hasLeader = false;      // draw a thin line from the note to the object
+        float leaderX = 0, leaderY = 0; // point on the object the line points to
     };
     std::vector<McpAnnotation> mcpAnnotations;
     std::vector<McpAnnotation> getMcpAnnotations() const { juce::ScopedLock sl(mcpOverlayLock); return mcpAnnotations; }
+
+    // PRD overlay: titled REGIONS — translucent boxes grouping objects (e.g. "FX",
+    // "Loops", "Drums"), drawn BEHIND the objects so the patch's structure is
+    // visible at a glance. Bounds are in patch coords.
+    struct McpRegion {
+        float x = 0, y = 0, w = 0, h = 0;
+        juce::String title;
+        juce::String kind; // e.g. source | fx | loop | output | group
+    };
+    std::vector<McpRegion> mcpRegions;
+    std::vector<McpRegion> getMcpRegions() const { juce::ScopedLock sl(mcpOverlayLock); return mcpRegions; }
 
     // Guards mcpAiOverlay / mcpGhosts / mcpAnnotations: written on the message
     // thread, read on the VBlank render thread.
