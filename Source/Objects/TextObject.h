@@ -154,6 +154,14 @@ public:
         lookAndFeelChanged();
     }
 
+    // Refresh the cached display text from the live pd object (e.g. after an MCP
+    // relabel rewrote te_binbuf in place — no recreate, no rebind).
+    void updateLabel() override
+    {
+        objectText = getText();
+        repaint();
+    }
+
     ~TextBase() override = default;
 
     void update() override

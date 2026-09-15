@@ -2330,7 +2330,24 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         }
         sys_unlock();
 
-        if (auto* cc = getOrCreateCanvasComponent(processor, cnv)) cc->repaint();
+        // Refresh the on-screen label on the message thread (the gui caches its text
+        // at construction). No recreate, no rebind.
+        juce::MessageManager::callAsync([proc = processor, cnv, canvasName, tempId]() {
+            if (auto* cc = getOrCreateCanvasComponent(proc, cnv)) {
+                t_gobj* gg = proc->resolveStableId(canvasName, tempId);
+                if (gg) {
+                    for (auto* objComp : cc->objects) {
+                        if (objComp && objComp->getPointer() == gg) {
+                            if (objComp->gui) objComp->gui->updateLabel();
+                            objComp->repaint();
+                            break;
+                        }
+                    }
+                }
+                cc->repaint();
+            }
+        });
+
         sendReply("/pd/obj_relabel/reply/" + correlationId, static_cast<float>(ok));
         return;
     }
