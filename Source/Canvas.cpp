@@ -810,6 +810,7 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
     // PRD overlay: short in-place AI annotations — a translucent tag near the
     // object it explains, so the reason lives on the patch, not in chat.
     if (pd && !pd->getMcpAnnotations().empty()) {
+        int noteIdx = 0;
         for (auto const& a : pd->getMcpAnnotations()) {
             NVGScopedState scopedAnn(nvg);
             float const ax = canvasOrigin.x + a.x;
@@ -842,9 +843,10 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
             float const tw = tb[2] - tb[0];
             float const w = tw + 28.0f; // text + padding + dismiss "x" + accent bar
             constexpr float h = 18.0f;
+            bool const hovered = (noteIdx == mcpNoteHover);
             nvgBeginPath(nvg);
             nvgRoundedRect(nvg, ax - 6.0f, ay - h * 0.5f, w, h, 4.0f);
-            nvgFillColor(nvg, nvgRGBA(22, 22, 28, 200));
+            nvgFillColor(nvg, nvgRGBA(22, 22, 28, hovered ? 238 : 200));
             nvgFill(nvg);
             nvgStrokeColor(nvg, accent); // kind-coloured outline
             nvgStrokeWidth(nvg, 1.0f);
@@ -856,10 +858,17 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
             nvgFill(nvg);
             nvgFillColor(nvg, nvgRGBA(232, 232, 244, 235));
             nvgText(nvg, ax, ay, a.text.toRawUTF8(), nullptr);
-            // dismiss affordance — click the tag to remove it
+            // dismiss affordance — highlight the "x" when hovered
+            if (hovered && mcpNoteHoverClose) {
+                nvgBeginPath(nvg);
+                nvgRoundedRect(nvg, ax + tw + 3.0f, ay - 8.0f, 14.0f, 16.0f, 3.0f);
+                nvgFillColor(nvg, nvgRGBA(ar, ag, ab, 80));
+                nvgFill(nvg);
+            }
             nvgFontSize(nvg, 11.0f);
-            nvgFillColor(nvg, accent);
+            nvgFillColor(nvg, (hovered && mcpNoteHoverClose) ? nvgRGBA(255, 255, 255, 255) : accent);
             nvgText(nvg, ax + tw + 8.0f, ay, "x", nullptr);
+            ++noteIdx;
         }
     }
 
@@ -1494,6 +1503,42 @@ void Canvas::altKeyChanged(bool const isHeld)
     }
 }
 
+void Canvas::mouseMove(MouseEvent const& e)
+{
+    // Hover feedback over AI notes: highlight the note, and the "x" when over it.
+    int hoverIdx = -1;
+    bool hoverClose = false;
+    if (pd && !pd->getMcpAnnotations().empty()) {
+        auto const pt = e.getPosition().toFloat();
+        auto anns = pd->getMcpAnnotations();
+        for (int i = static_cast<int>(anns.size()) - 1; i >= 0; --i) {
+            auto const& a = anns[static_cast<size_t>(i)];
+            float const tx = canvasOrigin.x + a.x - 6.0f;
+            float const ty = canvasOrigin.y + a.y - 9.0f;
+            float const tw = a.text.length() * 7.0f + 28.0f;
+            if (Rectangle<float>(tx, ty, tw, 18.0f).contains(pt)) {
+                hoverIdx = i;
+                hoverClose = juce::Rectangle<float>(tx + tw - 24.0f, ty - 2.0f, 24.0f, 22.0f).contains(pt);
+                break;
+            }
+        }
+    }
+    if (hoverIdx != mcpNoteHover || hoverClose != mcpNoteHoverClose) {
+        mcpNoteHover = hoverIdx;
+        mcpNoteHoverClose = hoverClose;
+        repaint();
+    }
+}
+
+void Canvas::mouseExit(MouseEvent const& e)
+{
+    if (mcpNoteHover != -1) {
+        mcpNoteHover = -1;
+        mcpNoteHoverClose = false;
+        repaint();
+    }
+}
+
 void Canvas::mouseDown(MouseEvent const& e)
 {
     if (isGraph)
@@ -1524,11 +1569,10 @@ void Canvas::mouseDown(MouseEvent const& e)
                     float const ty = canvasOrigin.y + a.y - 9.0f;
                     float const tw = a.text.length() * 7.0f + 30.0f; // estimated hit width
                     if (Rectangle<float>(tx, ty, tw, 18.0f).contains(pt)) {
-                        // Dismiss when clicking the "x" — or anywhere on the note while its
-                        // editor is open, so it always closes cleanly.
-                        bool const editorOpen = mcpNoteEditor && mcpNoteEditor->isVisible();
-                        juce::Rectangle<float> closeZone(tx + tw - 34.0f, ty, 34.0f, 18.0f);
-                        if (closeZone.contains(pt) || editorOpen) {
+                        // ONLY the "x" (far right) dismisses. The body opens/focuses the
+                        // editor; double-click never deletes; clicking away keeps the note.
+                        juce::Rectangle<float> closeZone(tx + tw - 24.0f, ty - 2.0f, 24.0f, 22.0f);
+                        if (closeZone.contains(pt)) {
                             if (mcpNoteEditor) mcpNoteEditor->setVisible(false);
                             mcpNoteEditIndex = -1;
                             juce::ScopedLock sl(pd->mcpOverlayLock);

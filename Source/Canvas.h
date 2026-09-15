@@ -79,6 +79,8 @@ public:
     PluginProcessor* pd;
 
     void mouseDown(MouseEvent const& e) override;
+    void mouseMove(MouseEvent const& e) override;
+    void mouseExit(MouseEvent const& e) override;
     void mouseDrag(MouseEvent const& e) override;
     void mouseUp(MouseEvent const& e) override;
     bool hitTest(int x, int y) override;
@@ -244,6 +246,8 @@ public:
     NVGImage mcpNoteRenderer; // draws the editor into the GPU frame (live typing)
     int mcpNoteEditIndex = -1;
     std::uint32_t mcpNoteOpenedAt = 0; // grace period so it can't self-close on open
+    int mcpNoteHover = -1;             // hovered note index (-1 = none)
+    bool mcpNoteHoverClose = false;    // hovering the dismiss "x"
 
     Value isGraphChild = SynchronousValue(var(false));
     Value hideNameAndArgs = SynchronousValue(var(false));
