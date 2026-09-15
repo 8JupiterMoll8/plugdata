@@ -2330,24 +2330,10 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         }
         sys_unlock();
 
-        // Refresh the on-screen label on the message thread (the gui caches its text
-        // at construction). No recreate, no rebind.
-        juce::MessageManager::callAsync([proc = processor, cnv, canvasName, tempId]() {
-            if (auto* cc = getOrCreateCanvasComponent(proc, cnv)) {
-                t_gobj* gg = proc->resolveStableId(canvasName, tempId);
-                if (gg) {
-                    for (auto* objComp : cc->objects) {
-                        if (objComp && objComp->getPointer() == gg) {
-                            if (objComp->gui) objComp->gui->updateLabel();
-                            objComp->repaint();
-                            break;
-                        }
-                    }
-                }
-                cc->repaint();
-            }
-        });
-
+        // NOTE: rewriting te_binbuf updates the STORED text (props/save). Refreshing the
+        // on-screen label needs the gui's cached text refreshed too — attempted via a
+        // message-thread updateLabel() but it destabilised the app, so it is deferred.
+        if (auto* cc = getOrCreateCanvasComponent(processor, cnv)) cc->repaint();
         sendReply("/pd/obj_relabel/reply/" + correlationId, static_cast<float>(ok));
         return;
     }
