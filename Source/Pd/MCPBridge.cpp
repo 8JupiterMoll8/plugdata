@@ -3044,6 +3044,20 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             // Storage for PHASE 0 reconcile results (filled inside lambda, read outside)
             struct DetectedConn { std::string srcId; int srcOut; std::string destId; int destIn; };
             std::vector<DetectedConn> detectedConnections;
+
+            // ── Undo capture (Stage 2 coverage: edits + deletes) ──────────────
+            // Filled inside the audio lambda BEFORE the mutation, consumed by the
+            // inverse-message builder below. Message-delta only — never pointers.
+            struct DeletedSnapshot {
+                juce::String tempId, kind, type;
+                juce::StringArray args;
+                int x = 0, y = 0;
+            };
+            std::vector<DeletedSnapshot> deletedSnapshots;
+            struct UndoWire { juce::String srcId; int srcOut; juce::String destId; int destIn; };
+            std::vector<UndoWire> deletedWires;
+            struct EditUndo { juce::String objectId, type; juce::StringArray args; };
+            std::vector<EditUndo> editUndoEntries;
             // Manual GUI patching has zero dropout because it enqueues mutations into
             // functionQueue, which runs on the audio thread during sendMessagesFromQueue()
             // BEFORE performDSP(). We do exactly the same thing here.
@@ -3177,6 +3191,66 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
                     // PHASE 2: DELETE — audio-thread-safe object removal (zero undo/GUI
                     // overhead; editor reconciles via trailing synchroniseCanvases).
+                    // Capture each doomed object's creation text + bounds + wires
+                    // FIRST so the inverse can recreate it (message-delta, no pointers).
+                    {
+                        auto& delMap = processor->mcpStableObjectMap[canvasName.toStdString()];
+                        std::unordered_map<t_gobj*, std::string> ptrToTempId;
+                        for (auto& [tid, ptr] : delMap)
+                            if (ptr) ptrToTempId[ptr] = tid;
+
+                        std::unordered_set<t_gobj*> deleteSet;
+                        for (auto& pd : preDeletes) {
+                            t_gobj* obj = processor->resolveStableId(canvasName, pd.objectId);
+                            if (!obj) continue;
+                            deleteSet.insert(obj);
+
+                            DeletedSnapshot ds;
+                            ds.tempId = pd.objectId;
+                            juce::String cls = juce::String::fromUTF8(class_getname(pd_class(&obj->g_pd)));
+                            ds.kind = "obj";
+                            if (cls == "text" || cls == "comment") ds.kind = "text";
+                            else if (cls == "msg" || cls == "message") ds.kind = "msg";
+                            if (auto* tobj = pd::Interface::checkObject(obj)) {
+                                char* tb = nullptr; int tsz = 0;
+                                pd::Interface::getObjectText(tobj, &tb, &tsz);
+                                juce::String full = (tb && tsz) ? juce::String::fromUTF8(tb, tsz) : juce::String();
+                                if (tb) freebytes(tb, static_cast<size_t>(tsz) * sizeof(char));
+                                juce::StringArray toks; toks.addTokens(full, " ", "");
+                                if (ds.kind == "obj") {
+                                    ds.type = toks.size() > 0 ? toks[0] : full;
+                                    for (int i = 1; i < toks.size(); ++i) ds.args.add(toks[i]);
+                                } else {
+                                    ds.type = cls;   // "text"/"msg" — formatAsPdLine strips it
+                                    ds.args = toks;
+                                }
+                            }
+                            int bx = 0, by = 0, bw = 0, bh = 0;
+                            pd::Interface::getObjectBounds(cnv, obj, &bx, &by, &bw, &bh);
+                            ds.x = bx; ds.y = by;
+                            deletedSnapshots.push_back(ds);
+                        }
+
+                        // Wires touching any doomed object (captured while tempIds live).
+                        if (!deleteSet.empty()) {
+                            t_linetraverser lt;
+                            linetraverser_start(&lt, cnv);
+                            t_outconnect* ltoc = nullptr;
+                            while ((ltoc = linetraverser_next_nosize(&lt))) {
+                                t_gobj* sg = &lt.tr_ob->ob_g;
+                                t_gobj* dg = &lt.tr_ob2->ob_g;
+                                if (!deleteSet.count(sg) && !deleteSet.count(dg)) continue;
+                                auto sIt = ptrToTempId.find(sg);
+                                auto dIt = ptrToTempId.find(dg);
+                                if (sIt == ptrToTempId.end() || dIt == ptrToTempId.end()) continue;
+                                deletedWires.push_back({ juce::String(sIt->second),
+                                    static_cast<int>(lt.tr_outno),
+                                    juce::String(dIt->second),
+                                    static_cast<int>(lt.tr_inno) });
+                            }
+                        }
+                    }
+
                     SmallArray<t_gobj*> toDelete;
                     for (auto& pd : preDeletes) {
                         t_gobj* obj = processor->resolveStableId(canvasName, pd.objectId);
@@ -3198,6 +3272,19 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         if (obj) {
                             t_object* o = pd::Interface::checkObject(obj);
                             if (o) {
+                                // Capture old creation text so undo can edit it back.
+                                {
+                                    char* tb = nullptr; int tsz = 0;
+                                    pd::Interface::getObjectText(o, &tb, &tsz);
+                                    juce::String oldT = (tb && tsz) ? juce::String::fromUTF8(tb, tsz) : juce::String();
+                                    if (tb) freebytes(tb, static_cast<size_t>(tsz) * sizeof(char));
+                                    juce::StringArray toks; toks.addTokens(oldT, " ", "");
+                                    EditUndo eu;
+                                    eu.objectId = pe.objectId;
+                                    eu.type = toks.size() > 0 ? toks[0] : oldT;
+                                    for (int i = 1; i < toks.size(); ++i) eu.args.add(toks[i]);
+                                    editUndoEntries.push_back(eu);
+                                }
                                 pd::Interface::renameObject(cnv, obj, pe.newText.toRawUTF8(), pe.newText.length());
                                 t_gobj* newObj = nullptr; bool still = false;
                                 for (t_gobj* y = cnv->gl_list; y; y = y->g_next)
@@ -3695,17 +3782,17 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
             // Stage 2: Register with Unified C++ Transaction Engine for GUI Ctrl+Z / Undo
             if (processor && cnv && !processor->isExecutingMcpUndoRedo) {
-                if (created > 0 || connected > 0 || disconnected > 0) {
+                if (created > 0 || connected > 0 || disconnected > 0 || edited > 0 || deleted > 0) {
                     juce::OSCMessage invMsg { juce::OSCAddressPattern("/pd/batch_atomic") };
                     invMsg.addArgument(canvasName);
                     invMsg.addArgument(juce::String("inv_" + correlationId));
 
                     // Header counts: deletes, disconnects, edits, creates, connects
-                    invMsg.addArgument(static_cast<float>(pendingCreates.size())); // deleteCount
-                    invMsg.addArgument(static_cast<float>(allConns.size()));        // disconnectCount
-                    invMsg.addArgument(0.0f);                                      // editCount
-                    invMsg.addArgument(0.0f);                                      // createCount
-                    invMsg.addArgument(static_cast<float>(preDisconnects.size())); // connectCount
+                    invMsg.addArgument(static_cast<float>(pendingCreates.size()));               // deleteCount
+                    invMsg.addArgument(static_cast<float>(allConns.size()));                     // disconnectCount
+                    invMsg.addArgument(static_cast<float>(editUndoEntries.size()));              // editCount
+                    invMsg.addArgument(static_cast<float>(deletedSnapshots.size()));             // createCount
+                    invMsg.addArgument(static_cast<float>(preDisconnects.size() + deletedWires.size())); // connectCount
 
                     // 1. DELETES: delete all objects created in pendingCreates
                     for (auto const& pc : pendingCreates) {
@@ -3720,15 +3807,38 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         invMsg.addArgument(static_cast<float>(c.destIn));
                     }
 
-                    // 3. EDITS: 0
-                    // 4. CREATES: 0
+                    // 3. EDITS: edit each object back to its pre-mutation text
+                    for (auto const& eu : editUndoEntries) {
+                        invMsg.addArgument(eu.objectId);
+                        invMsg.addArgument(eu.type);
+                        invMsg.addArgument(static_cast<float>(eu.args.size()));
+                        for (auto const& a : eu.args) invMsg.addArgument(a);
+                    }
 
-                    // 5. CONNECTS: reconnect all wires disconnected in preDisconnects
+                    // 4. CREATES: recreate every deleted object (tempId, x, y, kind, type, args...)
+                    for (auto const& ds : deletedSnapshots) {
+                        invMsg.addArgument(ds.tempId);
+                        invMsg.addArgument(static_cast<float>(ds.x));
+                        invMsg.addArgument(static_cast<float>(ds.y));
+                        invMsg.addArgument(ds.kind);
+                        invMsg.addArgument(ds.type);
+                        invMsg.addArgument(static_cast<float>(ds.args.size()));
+                        for (auto const& a : ds.args) invMsg.addArgument(a);
+                    }
+
+                    // 5. CONNECTS: reconnect wires cut in the forward (pre-disconnect
+                    //    + every wire that touched a deleted object)
                     for (auto const& pdc : preDisconnects) {
                         invMsg.addArgument(pdc.srcId);
                         invMsg.addArgument(static_cast<float>(pdc.srcOut));
                         invMsg.addArgument(pdc.destId);
                         invMsg.addArgument(static_cast<float>(pdc.destIn));
+                    }
+                    for (auto const& w : deletedWires) {
+                        invMsg.addArgument(w.srcId);
+                        invMsg.addArgument(static_cast<float>(w.srcOut));
+                        invMsg.addArgument(w.destId);
+                        invMsg.addArgument(static_cast<float>(w.destIn));
                     }
 
                     // Layout flags: no autolayout on undo
