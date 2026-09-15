@@ -1465,9 +1465,13 @@ void Canvas::mouseDown(MouseEvent const& e)
                     float const ty = canvasOrigin.y + a.y - 9.0f;
                     float const tw = a.text.length() * 7.0f + 30.0f; // estimated hit width
                     if (Rectangle<float>(tx, ty, tw, 18.0f).contains(pt)) {
-                        // Rightmost ~26px is the dismiss "x"; anywhere else opens the editor.
-                        juce::Rectangle<float> closeZone(tx + tw - 26.0f, ty, 26.0f, 18.0f);
-                        if (closeZone.contains(pt)) {
+                        // Dismiss when clicking the "x" — or anywhere on the note while its
+                        // editor is open, so it always closes cleanly.
+                        bool const editorOpen = mcpNoteEditor && mcpNoteEditor->isVisible();
+                        juce::Rectangle<float> closeZone(tx + tw - 34.0f, ty, 34.0f, 18.0f);
+                        if (closeZone.contains(pt) || editorOpen) {
+                            if (mcpNoteEditor) mcpNoteEditor->setVisible(false);
+                            mcpNoteEditIndex = -1;
                             juce::ScopedLock sl(pd->mcpOverlayLock);
                             if (i < static_cast<int>(pd->mcpAnnotations.size()))
                                 pd->mcpAnnotations.erase(pd->mcpAnnotations.begin() + i);
