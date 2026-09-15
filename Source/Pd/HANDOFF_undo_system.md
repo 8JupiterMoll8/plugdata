@@ -110,6 +110,21 @@ gesture by design.
 
 ---
 
+## 5b. Design ethos (why this exists — keep this)
+
+This MCP layer is **made by an artist, for artists.** The bar is not "works on
+average" — it is **live-stable**: you can patch and change values *while the music
+plays* with no dropouts, no recompiles, and no crashes. Every design choice serves
+that:
+- **message lane (`set`)** over recreation, so nothing interrupts the sound;
+- **transaction deltas** instead of Pd's fragile index-based undo;
+- **flush-and-fence** around `g_undo`, because artist-grade stability means never
+  letting a known crash vector run.
+
+"Super stable" is a property you **maintain**, not one you have: run the crash
+gauntlet after every change (§5), and keep the ground rules (§6). The old crashes
+were real — they are fenced now, not forgotten.
+
 ## 6. Ground rules (do NOT violate)
 - **Never touch Pd's `g_undo.c` / `canvas_undo_free` threading** — that is the
   crash vector. Stay in message deltas. `resetCanvasUndo` stays as-is.
