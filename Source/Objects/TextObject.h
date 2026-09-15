@@ -156,6 +156,33 @@ public:
 
     ~TextBase() override = default;
 
+    // Pull the live pd text into the cached display string (e.g. after an MCP
+    // relabel rewrote te_binbuf in place — no recreate, no rebind).
+    // Returns true when the cache changed. Never touches the cache while the
+    // user is typing (editor open). Runs on the message thread only (render /
+    // layout paths) — never call this from the bridge/OSC thread.
+    bool syncTextFromPd()
+    {
+        if (editor)
+            return false;
+        String const live = getText();
+        if (live.isEmpty() || live == objectText)
+            return false;
+        objectText = live;
+        return true;
+    }
+
+    // Refresh the cached display text from the live pd object.
+    // NOTE: must also refresh the cached text *layout* — setting objectText
+    // alone leaves the drawn image stale (that was the 61c0c12f0 bug).
+    void updateLabel() override
+    {
+        if (syncTextFromPd())
+            updateTextLayout();
+        else
+            repaint();
+    }
+
     void update() override
     {
         if (auto obj = ptr.get<t_text>()) {
@@ -176,6 +203,13 @@ public:
 
     void render(NVGcontext* nvg) override
     {
+        // Pull live pd text so an in-place relabel (te_binbuf rewrite, no
+        // recreate) shows on screen on the next repaint. The bridge already
+        // calls cc->repaint() after a relabel — no cross-thread GUI calls.
+        // Same precedent as ScalarObject::render() which reads getText() live.
+        if (syncTextFromPd())
+            updateTextLayout();
+
         auto const b = getLocalBounds();
 
         auto finalOutlineColour = object->isSelected() ? selectedOutlineColour : outlineColour;
@@ -304,6 +338,10 @@ public:
     {
         if (cnv->isGraph)
             return; // Text layouting is expensive, so skip if it's not necessary
+
+        // Keep the cache truthful for layout/bounds callers too (getPdBounds()
+        // routes through here, so wider relabels also resize correctly).
+        syncTextFromPd();
 
         auto objText = editor ? editor->getText() : objectText;
         if (editor && cnv->suggestor && cnv->suggestor->getText().isNotEmpty()) {
