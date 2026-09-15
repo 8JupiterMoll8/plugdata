@@ -3568,23 +3568,28 @@ void PluginProcessor::sendMCPReply(const String& replyAddr, const SmallArray<pd:
 
 bool PluginProcessor::hasMcpTransaction(t_canvas* cnv) const
 {
+    juce::ScopedLock sl(mcpUndoLock);
     auto it = mcpUndoStack.find(cnv);
     return it != mcpUndoStack.end() && !it->second.empty();
 }
 
 bool PluginProcessor::hasMcpRedoTransaction(t_canvas* cnv) const
 {
+    juce::ScopedLock sl(mcpUndoLock);
     auto it = mcpRedoStack.find(cnv);
     return it != mcpRedoStack.end() && !it->second.empty();
 }
 
 void PluginProcessor::pushMcpTransaction(t_canvas* cnv, const juce::String& canvasName, const juce::OSCMessage& forward, const juce::OSCMessage& inverse)
 {
-    mcpUndoStack[cnv].push_back({ canvasName, forward, inverse });
-    if (mcpUndoStack[cnv].size() > 50) {
-        mcpUndoStack[cnv].erase(mcpUndoStack[cnv].begin());
+    {
+        juce::ScopedLock sl(mcpUndoLock);
+        mcpUndoStack[cnv].push_back({ canvasName, forward, inverse });
+        if (mcpUndoStack[cnv].size() > 50) {
+            mcpUndoStack[cnv].erase(mcpUndoStack[cnv].begin());
+        }
+        mcpRedoStack[cnv].clear();
     }
-    mcpRedoStack[cnv].clear();
     juce::MessageManager::callAsync([this] {
         for (auto* editor : getEditors()) {
             editor->triggerAsyncUpdate();
@@ -3594,17 +3599,24 @@ void PluginProcessor::pushMcpTransaction(t_canvas* cnv, const juce::String& canv
 
 void PluginProcessor::undoMcpTransaction(t_canvas* cnv)
 {
-    auto it = mcpUndoStack.find(cnv);
-    if (it == mcpUndoStack.end() || it->second.empty()) return;
+    // McpTransaction has no default ctor (OSCMessage needs an address), so hold
+    // the popped transaction by pointer.
+    std::unique_ptr<McpTransaction> tx;
+    {
+        juce::ScopedLock sl(mcpUndoLock);
+        auto it = mcpUndoStack.find(cnv);
+        if (it == mcpUndoStack.end() || it->second.empty()) return;
 
-    auto tx = it->second.back();
-    it->second.pop_back();
+        tx = std::make_unique<McpTransaction>(it->second.back());
+        it->second.pop_back();
+        mcpRedoStack[cnv].push_back(*tx);
+    }
 
-    mcpRedoStack[cnv].push_back(tx);
-
-    if (mcpBridge) {
+    // Execute OUTSIDE the lock — the nested batch_atomic must not re-enter the
+    // stack map while we hold mcpUndoLock.
+    if (mcpBridge && tx) {
         isExecutingMcpUndoRedo = true;
-        mcpBridge->handlePdDomain("batch_atomic", tx.inverse);
+        mcpBridge->handlePdDomain("batch_atomic", tx->inverse);
         isExecutingMcpUndoRedo = false;
     }
     juce::MessageManager::callAsync([this] {
@@ -3616,17 +3628,20 @@ void PluginProcessor::undoMcpTransaction(t_canvas* cnv)
 
 void PluginProcessor::redoMcpTransaction(t_canvas* cnv)
 {
-    auto it = mcpRedoStack.find(cnv);
-    if (it == mcpRedoStack.end() || it->second.empty()) return;
+    std::unique_ptr<McpTransaction> tx;
+    {
+        juce::ScopedLock sl(mcpUndoLock);
+        auto it = mcpRedoStack.find(cnv);
+        if (it == mcpRedoStack.end() || it->second.empty()) return;
 
-    auto tx = it->second.back();
-    it->second.pop_back();
+        tx = std::make_unique<McpTransaction>(it->second.back());
+        it->second.pop_back();
+        mcpUndoStack[cnv].push_back(*tx);
+    }
 
-    mcpUndoStack[cnv].push_back(tx);
-
-    if (mcpBridge) {
+    if (mcpBridge && tx) {
         isExecutingMcpUndoRedo = true;
-        mcpBridge->handlePdDomain("batch_atomic", tx.forward);
+        mcpBridge->handlePdDomain("batch_atomic", tx->forward);
         isExecutingMcpUndoRedo = false;
     }
     juce::MessageManager::callAsync([this] {
@@ -3638,8 +3653,11 @@ void PluginProcessor::redoMcpTransaction(t_canvas* cnv)
 
 void PluginProcessor::clearMcpTransactions(t_canvas* cnv)
 {
-    mcpUndoStack.erase(cnv);
-    mcpRedoStack.erase(cnv);
+    {
+        juce::ScopedLock sl(mcpUndoLock);
+        mcpUndoStack.erase(cnv);
+        mcpRedoStack.erase(cnv);
+    }
     juce::MessageManager::callAsync([this] {
         for (auto* editor : getEditors()) {
             editor->triggerAsyncUpdate();

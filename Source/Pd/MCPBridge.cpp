@@ -4471,6 +4471,9 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     // Clear/free replaced every prior object — its index-based
                     // undo entries now dangle. Reset the queue to stay crash-safe.
                     resetCanvasUndo(proc, canvasName);
+                    // Also drop MCP transactions: their inverse deltas reference
+                    // the objects we just replaced and would fire on dead tempIds.
+                    if (cnv) proc->clearMcpTransactions(cnv);
 
                     // arg0 = objectCount, arg1 = undoReset.
                     juce::Array<juce::var> loadReplyArgs;
@@ -5144,6 +5147,9 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     // Clearing freed every object while Pd's index-based undo
                     // entries still point at them — drop the stale queue.
                     resetCanvasUndo(proc, canvasName);
+                    // Drop MCP transactions too — their inverses reference the
+                    // objects we just freed.
+                    if (cnv) proc->clearMcpTransactions(cnv);
 
                     SmallArray<pd::Atom> atoms;
                     atoms.add(pd::Atom(proc->generateSymbol(canvasName)));

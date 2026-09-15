@@ -64,7 +64,9 @@ public:
     void undoMcpTransaction(t_canvas* cnv);
     void redoMcpTransaction(t_canvas* cnv);
     void clearMcpTransactions(t_canvas* cnv);
-    bool isExecutingMcpUndoRedo = false;
+    // Atomic: written on the message thread (undo/redo), read on the OSC thread
+    // (batch_atomic dedup / push guards). Plain bool was a cross-thread race.
+    std::atomic<bool> isExecutingMcpUndoRedo { false };
 
     static AudioProcessor::BusesProperties buildBusesProperties();
 
@@ -388,6 +390,10 @@ private:
     std::unique_ptr<MCPBridge> mcpBridge;
     std::map<t_canvas*, std::vector<McpTransaction>> mcpUndoStack;
     std::map<t_canvas*, std::vector<McpTransaction>> mcpRedoStack;
+    // Undo/redo stacks are pushed on the OSC thread and read/popped on the
+    // message thread — mcpUndoLock guards all access. Held only for map ops,
+    // never across the nested batch_atomic execution (avoids re-entry deadlock).
+    mutable CriticalSection mcpUndoLock;
 
     // MCP zero-dropout WAV recorder — taps outputFifo directly in processBlock.
     // No canvas objects created, no DSP recompile, zero audio dropout.

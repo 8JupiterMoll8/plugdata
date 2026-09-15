@@ -409,6 +409,13 @@ Canvas::~Canvas()
     zoomScale.removeListener(this);
     editor->removeModifierKeyListener(this);
     pd->unregisterMessageListener(this);
+
+    // Drop this canvas's MCP undo/redo transactions. Without this the stacks
+    // leak (<=50 full forward+inverse messages each) and, worse, a later canvas
+    // could reuse the freed t_canvas* address and inherit a stale stack.
+    if (!isGraph)
+        pd->clearMcpTransactions(patch.getUncheckedPointer());
+
     patch.setVisible(false);
     selectedComponents.removeChangeListener(this);
 }
