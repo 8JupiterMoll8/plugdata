@@ -1469,10 +1469,13 @@ void Canvas::mouseDown(MouseEvent const& e)
                                 mcpNoteEditor = std::make_unique<juce::TextEditor>();
                                 mcpNoteEditor->setMultiLine(false);
                                 mcpNoteEditor->setReturnKeyStartsNewLine(false);
-                                mcpNoteEditor->onReturnKey = [this] {
+                                mcpNoteEditor->setWantsKeyboardFocus(true);
+                                // Commit: write the text back onto the note and forward it to the AI.
+                                auto commit = [this](bool send) {
+                                    if (mcpNoteEditIndex < 0) return;
                                     juce::String txt = mcpNoteEditor ? mcpNoteEditor->getText().trim() : juce::String();
                                     juce::String targetId;
-                                    if (pd && mcpNoteEditIndex >= 0) {
+                                    if (pd) {
                                         juce::ScopedLock sl(pd->mcpOverlayLock);
                                         if (mcpNoteEditIndex < static_cast<int>(pd->mcpAnnotations.size())) {
                                             auto& ann = pd->mcpAnnotations[static_cast<size_t>(mcpNoteEditIndex)];
@@ -1480,16 +1483,24 @@ void Canvas::mouseDown(MouseEvent const& e)
                                             targetId = ann.targetId;
                                         }
                                     }
-                                    if (txt.isNotEmpty() && pd) {
+                                    mcpNoteEditIndex = -1;
+                                    if (mcpNoteEditor) mcpNoteEditor->setVisible(false);
+                                    if (send && txt.isNotEmpty() && pd) {
                                         if (auto* br = pd->getMCPBridge()) br->sendArtistNote(targetId, txt);
                                     }
-                                    if (mcpNoteEditor) mcpNoteEditor->setVisible(false);
-                                    mcpNoteEditIndex = -1;
+                                    repaint();
+                                };
+                                mcpNoteEditor->onReturnKey = [commit] { commit(true); };
+                                // Never lose typing: also commit when focus leaves the field.
+                                mcpNoteEditor->onFocusLost = [commit] { commit(true); };
+                                // Show what you type live (the GPU surface needs a repaint).
+                                mcpNoteEditor->onTextChange = [this] {
+                                    if (mcpNoteEditor) mcpNoteEditor->repaint();
                                     repaint();
                                 };
                                 mcpNoteEditor->onEscapeKey = [this] {
-                                    if (mcpNoteEditor) mcpNoteEditor->setVisible(false);
                                     mcpNoteEditIndex = -1;
+                                    if (mcpNoteEditor) mcpNoteEditor->setVisible(false);
                                 };
                                 mcpNoteEditor->setColour(juce::TextEditor::backgroundColourId, juce::Colour(0xff16161c));
                                 mcpNoteEditor->setColour(juce::TextEditor::textColourId, juce::Colours::white);
