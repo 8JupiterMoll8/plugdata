@@ -2301,6 +2301,40 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         return;
     }
 
+    if (action == "obj_relabel") {
+        // /pd/obj_relabel <canvas> <corrId> <tempId> <text>
+        // Rewrite a TEXT object's creation text (the printed label) WITHOUT recreating
+        // it, so a live `set` can also make the number truthful — no recompile/dropout.
+        // (getText() reads te_binbuf live, so the label repaints automatically.)
+        // Reply: /pd/obj_relabel/reply/<corrId> <1|0>
+        auto canvasName    = normalizeCanvas(getArgString(msg[0]));
+        auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : "0";
+        auto tempId        = msg.size() > 2 ? getArgString(msg[2]) : juce::String();
+        auto newText       = msg.size() > 3 ? getArgString(msg[3]) : juce::String();
+
+        t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+        if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
+        if (!cnv) { sendReply("/pd/obj_relabel/reply/" + correlationId, 0.0f); return; }
+
+        int ok = 0;
+        sys_lock();
+        t_gobj* g = processor->resolveStableId(canvasName, tempId);
+        if (g && pd::Interface::isTextObject(g) && newText.isNotEmpty()) {
+            auto* t = reinterpret_cast<t_text*>(g);
+            if (t->te_binbuf) {
+                binbuf_clear(t->te_binbuf);
+                binbuf_text(t->te_binbuf, newText.toRawUTF8(), newText.getNumBytesAsUTF8());
+                canvas_dirty(cnv, 1);
+                ok = 1;
+            }
+        }
+        sys_unlock();
+
+        if (auto* cc = getOrCreateCanvasComponent(processor, cnv)) cc->repaint();
+        sendReply("/pd/obj_relabel/reply/" + correlationId, static_cast<float>(ok));
+        return;
+    }
+
     if (action == "obj_set_batch") {
         // /pd/obj_set_batch <canvas> <corrId> <count> [tempId inlet selector argc atoms...] * count
         // reply: JSON { ok, total, results:[{tempId,selector,ok,[detail|warning]}] }
@@ -7964,7 +7998,7 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
     } else if (bridgeAction == "capabilities") {
         auto correlationId = msg.size() > 0 ? getArgString(msg[0]) : "0";
         juce::OSCMessage reply { juce::OSCAddressPattern("/bridge/capabilities/reply") };
-        reply.addArgument(juce::String("11.17"));
+        reply.addArgument(juce::String("11.18"));
         reply.addArgument(juce::String("create_batch"));
         reply.addArgument(juce::String("delete_batch"));
         reply.addArgument(juce::String("connect_batch"));
@@ -7983,6 +8017,8 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
         reply.addArgument(juce::String("param_get"));
         reply.addArgument(juce::String("params"));
         reply.addArgument(juce::String("param_set_name"));
+        // Rewrite a text object's label without recreating it (live set + truthful number)
+        reply.addArgument(juce::String("obj_relabel"));
         reply.addArgument(juce::String("trigger"));
         reply.addArgument(juce::String("telemetry"));
         reply.addArgument(juce::String("array_io"));
