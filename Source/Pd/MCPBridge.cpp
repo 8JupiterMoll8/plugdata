@@ -2146,7 +2146,42 @@ static juce::DynamicObject* mcpBuildGuiProps(const juce::String& className, t_ob
     return props;
 }
 
-// Fill {type, text, props} for one object. Caller holds sys_lock.
+// ── Tier-2 value read ──────────────────────────────────────────────────
+// For arg-objects the parameter IS the creation arg, and our set[] convention
+// adds `relabel`, so the printed text stays truthful to the live value. Map a
+// class to the index of the numeric arg that is its value (0 = first arg after
+// the class name). Keep this list conservative and numeric-only.
+static int mcpArgValueIndexForClass(const juce::String& cls)
+{
+    static const std::unordered_map<std::string, int> kMap = {
+        { "osc~", 0 }, { "phasor~", 0 }, { "saw~", 0 }, { "tri~", 0 },
+        { "lop~", 0 }, { "hip~", 0 }, { "vcf~", 0 },
+        { "*~", 0 }, { "+~", 0 }, { "-~", 0 }, { "/~", 0 },
+        { "delread~", 1 },
+    };
+    auto it = kMap.find(cls.toStdString());
+    return it == kMap.end() ? -1 : it->second;
+}
+
+static bool mcpExtractArgValue(const juce::String& className, const juce::String& objectText, double& outValue)
+{
+    int const idx = mcpArgValueIndexForClass(className);
+    if (idx < 0) return false;
+    juce::StringArray toks;
+    toks.addTokens(objectText, " ", "");
+    int const tokIdx = 1 + idx;           // toks[0] is the class name
+    if (tokIdx >= toks.size()) return false;
+    auto const tok = toks[tokIdx];
+    if (tok.isEmpty()) return false;
+    auto cp = tok.getCharPointer();
+    auto const start = cp;
+    juce::CharacterFunctions::readDoubleValue(cp);
+    if (cp == start) return false;        // leading token is not numeric
+    outValue = tok.getDoubleValue();
+    return true;
+}
+
+// Fill {type, text, props, value, valueSource} for one object. Caller holds sys_lock.
 static void mcpFillObjectJson(t_gobj* gobj, juce::DynamicObject* out)
 {
     juce::String className = juce::String::fromUTF8(class_getname(pd_class(&gobj->g_pd)));
@@ -2163,7 +2198,25 @@ static void mcpFillObjectJson(t_gobj* gobj, juce::DynamicObject* out)
     }
     out->setProperty("type", className);
     out->setProperty("text", objectText);
-    out->setProperty("props", juce::var(mcpBuildGuiProps(className, obj)));
+    auto* props = mcpBuildGuiProps(className, obj);
+    out->setProperty("props", juce::var(props));
+
+    // Honest provenance: "stored" = live widget value; "arg" = parsed from the
+    // creation text (truthful because set[] adds relabel); "none" = the object
+    // publishes no readable value (a bare DSP object). The AI can then trust the
+    // number it sees — and know when NOT to trust it.
+    if (props->hasProperty("value")) {
+        out->setProperty("value", props->getProperty("value"));
+        out->setProperty("valueSource", "stored");
+    } else {
+        double v = 0.0;
+        if (mcpExtractArgValue(className, objectText, v)) {
+            out->setProperty("value", v);
+            out->setProperty("valueSource", "arg");
+        } else {
+            out->setProperty("valueSource", "none");
+        }
+    }
 }
 
 // Serialize one object to a JSON string. Caller holds sys_lock.
