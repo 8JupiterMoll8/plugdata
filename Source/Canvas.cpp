@@ -910,6 +910,11 @@ bool Canvas::shouldShowIndex() const
     return showIndex && !presentationMode.getValue();
 }
 
+bool Canvas::shouldShowAIState() const
+{
+    return showAiState && !presentationMode.getValue();
+}
+
 bool Canvas::shouldShowConnectionDirection() const
 {
     return showConnectionDirection;
@@ -951,6 +956,7 @@ void Canvas::updateOverlays()
     connectionsBehind = overlayState & Behind;
     showObjectActivity = overlayState & ActivationState;
     showIndex = overlayState & Index;
+    showAiState = overlayState & AIState;
     showConnectionDirection = overlayState & Direction;
     showConnectionActivity = overlayState & ConnectionActivity;
 

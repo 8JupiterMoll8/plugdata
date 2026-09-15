@@ -213,6 +213,13 @@ public:
 
     std::unique_ptr<StatusbarSource> statusbarSource;
 
+    // PRD overlay: AI state marker for a gobj (0 = none). Used by Object::paint.
+    int getAiOverlayState(t_gobj* g) const
+    {
+        auto it = mcpAiOverlay.find(g);
+        return it != mcpAiOverlay.end() ? it->second : 0;
+    }
+
     Value tailLength = Value(0.0f);
 
     // Just so we never have to deal with deleting the default LnF
@@ -322,6 +329,9 @@ private:
     t_gobj* resolveStableId(const String& canvasName, const String& objectId);
     std::unordered_map<std::string, std::unordered_map<std::string, t_gobj*>> mcpStableObjectMap;
     std::unordered_map<t_gobj*, uint64_t> mcpStableSerialMap;
+    // PRD overlay: per-object AI state for the canvas AI overlay
+    // (1 = changed, 2 = proposed, 3 = error). Message-thread only.
+    std::unordered_map<t_gobj*, int> mcpAiOverlay;
     uint64_t mcpSerialCounter = 1;
     // Monotonic version counter — incremented on every identity mutation
     // (create, delete, rename, register, clear). Node.js can poll this cheaply

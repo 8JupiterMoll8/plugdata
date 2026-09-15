@@ -106,6 +106,7 @@ public:
 
     bool shouldShowObjectActivity() const;
     bool shouldShowIndex() const;
+    bool shouldShowAIState() const;
     bool shouldShowConnectionDirection() const;
     bool shouldShowConnectionActivity() const;
 
@@ -225,6 +226,7 @@ public:
     bool connectionsBehind : 1 = true;
     bool showObjectActivity : 1 = false;
     bool showIndex : 1 = false;
+    bool showAiState : 1 = false;
     bool showConnectionDirection : 1 = false;
     bool showConnectionActivity : 1 = false;
 

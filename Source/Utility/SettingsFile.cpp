@@ -508,10 +508,10 @@ void SettingsFile::initialiseThemesTree()
 void SettingsFile::initialiseOverlayTree()
 {
     UnorderedMap<String, int> defaults = {
-        { "edit", Origin | ActivationState },
-        { "lock", Behind },
+        { "edit", Origin | ActivationState | AIState },
+        { "lock", Behind | AIState },
         { "run", None },
-        { "alt", Origin | Border | ActivationState | Index | Coordinate | Order | Direction }
+        { "alt", Origin | Border | ActivationState | Index | Coordinate | Order | Direction | AIState }
     };
 
     auto overlayTree = settingsTree.getChildWithName("Overlays");
@@ -524,6 +524,13 @@ void SettingsFile::initialiseOverlayTree()
         }
 
         settingsTree.appendChild(overlayTree, nullptr);
+    } else if (!overlayTree.hasProperty("ai_seeded")) {
+        // PRD overlay: seed the AI overlay ON once for existing installs, then
+        // respect the user's toggle afterwards ("Don't Make Me Think").
+        for (auto const& mode : { String("edit"), String("lock"), String("alt") }) {
+            overlayTree.setProperty(mode, static_cast<int>(overlayTree.getProperty(mode)) | AIState, nullptr);
+        }
+        overlayTree.setProperty("ai_seeded", 1, nullptr);
     }
 }
 

@@ -5215,6 +5215,42 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         return;
     }
 
+    // /pd/ai_overlay <canvas> <corrId> <state> <count> <tempId…>
+    // PRD overlay: mark objects with an AI state drawn by the canvas AI overlay
+    // (1=changed, 2=proposed, 3=error; state 0 with no ids clears ALL).
+    // Message-thread only; pure draw state — never touches the DSP graph.
+    // Reply: /pd/ai_overlay/reply/<corrId> <markedCount>
+    if (action == "ai_overlay") {
+        auto canvasName    = normalizeCanvas(getArgString(msg[0]));
+        auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : "0";
+        int  state         = msg.size() > 2 ? static_cast<int>(getArgFloat(msg[2])) : 0;
+        int  count         = msg.size() > 3 ? static_cast<int>(getArgFloat(msg[3])) : 0;
+        std::vector<juce::String> ids;
+        int cursor = 4;
+        for (int i = 0; i < count && cursor < msg.size(); i++) ids.push_back(getArgString(msg[cursor++]));
+
+        t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+        if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
+        if (!cnv) { sendReply("/pd/ai_overlay/reply/" + correlationId, 0.0f); return; }
+
+        juce::MessageManager::callAsync([proc = processor, cnv, canvasName, state, ids, correlationId, bridge = this]() {
+            if (state == 0 && ids.empty()) {
+                proc->mcpAiOverlay.clear();
+            } else if (state == 0) {
+                for (auto const& id : ids) {
+                    if (t_gobj* g = proc->resolveStableId(canvasName, id)) proc->mcpAiOverlay.erase(g);
+                }
+            } else {
+                for (auto const& id : ids) {
+                    if (t_gobj* g = proc->resolveStableId(canvasName, id)) proc->mcpAiOverlay[g] = state;
+                }
+            }
+            if (auto* cc = getOrCreateCanvasComponent(proc, cnv)) cc->repaint();
+            bridge->sendReply("/pd/ai_overlay/reply/" + correlationId, static_cast<float>(proc->mcpAiOverlay.size()));
+        });
+        return;
+    }
+
     if (action == "clear_ids") {
         if (msg.size() >= 2 && processor) {
             SmallArray<pd::Atom> atoms;
@@ -7708,7 +7744,7 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
     } else if (bridgeAction == "capabilities") {
         auto correlationId = msg.size() > 0 ? getArgString(msg[0]) : "0";
         juce::OSCMessage reply { juce::OSCAddressPattern("/bridge/capabilities/reply") };
-        reply.addArgument(juce::String("11.11"));
+        reply.addArgument(juce::String("11.12"));
         reply.addArgument(juce::String("create_batch"));
         reply.addArgument(juce::String("delete_batch"));
         reply.addArgument(juce::String("connect_batch"));
@@ -7798,6 +7834,8 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
         reply.addArgument(juce::String("gem_capture"));
         // PRD 1.5: programmatic GUI selection by tempId (highlight)
         reply.addArgument(juce::String("select"));
+        // PRD overlay: per-object AI state markers drawn on the canvas
+        reply.addArgument(juce::String("ai_overlay"));
         // Labeled screenshots: GUI-widget name chips painted on the bitmap only
         reply.addArgument(juce::String("screenshot_labels"));
         // Offline faster-than-realtime render to WAV (background DSP bake)

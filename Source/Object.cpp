@@ -1243,6 +1243,27 @@ void Object::render(NVGcontext* nvg)
         nvgStrokeWidth(nvg, 1.0f);
         nvgRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), Corners::objectCornerRadius);
         nvgStroke(nvg);
+    } else if (cnv->shouldShowAIState()) {
+        // PRD overlay: AI state marker drawn per-object (1=changed, 2=proposed, 3=error).
+        int const aiState = cnv->pd->getAiOverlayState(getPointer());
+        if (aiState != 0) {
+            int const st = aiState;
+            NVGcolor col = (st == 1) ? nvgRGB(0x3d, 0xdd, 0x8a)
+                        : (st == 2) ? nvgRGB(0x4a, 0x9e, 0xff)
+                                    : nvgRGB(0xff, 0x5a, 0x5a);
+            NVGScopedState scopedAIState(nvg);
+            nvgBeginPath(nvg);
+            nvgStrokeColor(nvg, col);
+            nvgStrokeWidth(nvg, 2.0f);
+            nvgRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), Corners::objectCornerRadius);
+            nvgStroke(nvg);
+
+            // state dot, top-right
+            nvgBeginPath(nvg);
+            nvgFillColor(nvg, col);
+            nvgCircle(nvg, b.getRight() - 3.0f, b.getY() + 3.0f, 4.0f);
+            nvgFill(nvg);
+        }
     } else if (cnv->shouldShowIndex()) {
         constexpr int halfHeight = 5;
 
