@@ -5148,6 +5148,73 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         return;
     }
 
+    // /pd/select <canvas> <count> <tempId…> <corrId>
+    // PRD 1.5: programmatically SET the GUI selection (highlight) by tempId so
+    // the artist SEES exactly what the AI is about to act on. count==0 clears.
+    // Runs on the message thread (Canvas components); DSP untouched, zero dropout.
+    // Reply: /pd/select/reply/<corrId> <selectedCount>
+    if (action == "select") {
+        auto canvasName = normalizeCanvas(getArgString(msg[0]));
+        int  count      = msg.size() > 1 ? static_cast<int>(getArgFloat(msg[1])) : 0;
+        std::vector<juce::String> ids;
+        int cursor = 2;
+        for (int i = 0; i < count && cursor < msg.size(); i++) ids.push_back(getArgString(msg[cursor++]));
+        auto correlationId = (cursor < msg.size()) ? getArgString(msg[cursor]) : "0";
+
+        t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+        if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
+        if (!cnv) { sendReply("/pd/select/reply/" + correlationId, 0.0f); return; }
+
+        juce::MessageManager::callAsync([proc = processor, cnv, canvasName, ids, correlationId, bridge = this]() {
+            Canvas* canvasComp = getOrCreateCanvasComponent(proc, cnv);
+            if (!canvasComp) { bridge->sendReply("/pd/select/reply/" + correlationId, 0.0f); return; }
+
+            canvasComp->patch.deselectAll();
+            std::vector<Object*> chosen;
+            for (const auto& id : ids) {
+                t_gobj* g = proc->resolveStableId(canvasName, id);
+                if (!g) continue;
+                for (auto* objComp : canvasComp->objects) {
+                    if (objComp && objComp->getPointer() == g) {
+                        canvasComp->setSelected(objComp, true);
+                        chosen.push_back(objComp);
+                        break;
+                    }
+                }
+            }
+
+            // Two-way sync: report the programmatic selection to the MCP so
+            // get_selection() reflects it (mirrors Sidebar::showParameters).
+            if (!chosen.empty()) {
+                auto subpatchSym = proc->generateSymbol(canvasComp->patch.getTitle());
+                if (chosen.size() == 1) {
+                    SmallArray<pd::Atom> atoms;
+                    atoms.add(pd::Atom(subpatchSym));
+                    atoms.add(pd::Atom(proc->generateSymbol(chosen[0]->getType(false))));
+                    atoms.add(pd::Atom(static_cast<float>(chosen[0]->cnv->objects.index_of(chosen[0]))));
+                    auto b = chosen[0]->getObjectBounds();
+                    atoms.add(pd::Atom(static_cast<float>(b.getX())));
+                    atoms.add(pd::Atom(static_cast<float>(b.getY())));
+                    bridge->sendSelectionTelemetry("selected_object", atoms);
+                } else {
+                    SmallArray<pd::Atom> countAtoms;
+                    countAtoms.add(pd::Atom(subpatchSym));
+                    countAtoms.add(pd::Atom(static_cast<float>(chosen.size())));
+                    bridge->sendSelectionTelemetry("selection_count", countAtoms);
+
+                    SmallArray<pd::Atom> indexAtoms;
+                    indexAtoms.add(pd::Atom(subpatchSym));
+                    for (auto* o : chosen)
+                        indexAtoms.add(pd::Atom(static_cast<float>(o->cnv->objects.index_of(o))));
+                    bridge->sendSelectionTelemetry("selection_indices", indexAtoms);
+                }
+            }
+
+            bridge->sendReply("/pd/select/reply/" + correlationId, static_cast<float>(chosen.size()));
+        });
+        return;
+    }
+
     if (action == "clear_ids") {
         if (msg.size() >= 2 && processor) {
             SmallArray<pd::Atom> atoms;
@@ -7641,7 +7708,7 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
     } else if (bridgeAction == "capabilities") {
         auto correlationId = msg.size() > 0 ? getArgString(msg[0]) : "0";
         juce::OSCMessage reply { juce::OSCAddressPattern("/bridge/capabilities/reply") };
-        reply.addArgument(juce::String("11.10"));
+        reply.addArgument(juce::String("11.11"));
         reply.addArgument(juce::String("create_batch"));
         reply.addArgument(juce::String("delete_batch"));
         reply.addArgument(juce::String("connect_batch"));
@@ -7729,6 +7796,8 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
         reply.addArgument(juce::String("screenshot_canvas"));
         // PRD 1.4: native GEM render-window capture (no patch objects)
         reply.addArgument(juce::String("gem_capture"));
+        // PRD 1.5: programmatic GUI selection by tempId (highlight)
+        reply.addArgument(juce::String("select"));
         // Labeled screenshots: GUI-widget name chips painted on the bitmap only
         reply.addArgument(juce::String("screenshot_labels"));
         // Offline faster-than-realtime render to WAV (background DSP bake)
