@@ -838,9 +838,9 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
             nvgFontSize(nvg, 12.0f);
             nvgFontFace(nvg, "Inter");
             nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
-            float tb[4];
-            nvgTextBounds(nvg, ax, ay, a.text.toRawUTF8(), nullptr, tb);
-            float const tw = tb[2] - tb[0];
+            // Estimated width — deliberately the SAME formula the hit-test uses, so the
+            // drawn "x" lines up exactly with the dismiss zone.
+            float const tw = a.text.length() * 7.0f;
             float const w = tw + 28.0f; // text + padding + dismiss "x" + accent bar
             constexpr float h = 18.0f;
             bool const hovered = (noteIdx == mcpNoteHover);
