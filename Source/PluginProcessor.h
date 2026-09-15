@@ -213,16 +213,20 @@ public:
 
     std::unique_ptr<StatusbarSource> statusbarSource;
 
+    struct AiMark { int state = 0; bool transient = false; };
     // PRD overlay: AI state marker for a gobj (0 = none). Used by Object::paint.
+    // THREAD-SAFE: render runs on the VBlank thread, writers on the message
+    // thread — all overlay access is guarded by mcpOverlayLock.
     int getAiOverlayState(t_gobj* g) const
     {
+        juce::ScopedLock sl(mcpOverlayLock);
         auto it = mcpAiOverlay.find(g);
-        return it != mcpAiOverlay.end() ? it->second : 0;
+        return it != mcpAiOverlay.end() ? it->second.state : 0;
     }
 
     // PRD overlay: ghost/preview of PROPOSED (uncommitted) changes, drawn by the
     // canvas above the patch. Boxes are in patch coords; wires are patch-coord
-    // endpoints. Message-thread only — pure draw state, never committed.
+    // endpoints. Written on the message thread; read on the VBlank render thread.
     struct McpGhost {
         int kind = 0;                              // 0 = box, 1 = wire
         float x = 0, y = 0, w = 0, h = 0;          // box
@@ -230,17 +234,21 @@ public:
         juce::String label;
     };
     std::vector<McpGhost> mcpGhosts;
-    const std::vector<McpGhost>& getMcpGhosts() const { return mcpGhosts; }
+    std::vector<McpGhost> getMcpGhosts() const { juce::ScopedLock sl(mcpOverlayLock); return mcpGhosts; }
 
     // PRD overlay: short in-place AI annotations ("why"/"what"), drawn as a
     // translucent tag near an object (patch coords). Explanation lives where it
-    // belongs — on the patch, not in a chat window. Message-thread only.
+    // belongs — on the patch, not in a chat window.
     struct McpAnnotation {
         float x = 0, y = 0; // patch coords (already anchored to the target)
         juce::String text;
     };
     std::vector<McpAnnotation> mcpAnnotations;
-    const std::vector<McpAnnotation>& getMcpAnnotations() const { return mcpAnnotations; }
+    std::vector<McpAnnotation> getMcpAnnotations() const { juce::ScopedLock sl(mcpOverlayLock); return mcpAnnotations; }
+
+    // Guards mcpAiOverlay / mcpGhosts / mcpAnnotations: written on the message
+    // thread, read on the VBlank render thread.
+    mutable juce::CriticalSection mcpOverlayLock;
 
     Value tailLength = Value(0.0f);
 
@@ -352,8 +360,9 @@ private:
     std::unordered_map<std::string, std::unordered_map<std::string, t_gobj*>> mcpStableObjectMap;
     std::unordered_map<t_gobj*, uint64_t> mcpStableSerialMap;
     // PRD overlay: per-object AI state for the canvas AI overlay
-    // (1 = changed, 2 = proposed, 3 = error). Message-thread only.
-    std::unordered_map<t_gobj*, int> mcpAiOverlay;
+    // (state 1 = changed, 2 = proposed, 3 = error) + set-time so a *transient*
+    // auto-clear can never erase a later *persistent* mark. Message-thread only.
+    std::unordered_map<t_gobj*, AiMark> mcpAiOverlay;
     uint64_t mcpSerialCounter = 1;
     // Monotonic version counter — incremented on every identity mutation
     // (create, delete, rename, register, clear). Node.js can poll this cheaply

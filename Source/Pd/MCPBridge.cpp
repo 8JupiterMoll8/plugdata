@@ -5224,25 +5224,42 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         auto canvasName    = normalizeCanvas(getArgString(msg[0]));
         auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : "0";
         int  state         = msg.size() > 2 ? static_cast<int>(getArgFloat(msg[2])) : 0;
-        int  count         = msg.size() > 3 ? static_cast<int>(getArgFloat(msg[3])) : 0;
+        bool transient     = msg.size() > 3 && getArgFloat(msg[3]) > 0.5f;
+        int  count         = msg.size() > 4 ? static_cast<int>(getArgFloat(msg[4])) : 0;
         std::vector<juce::String> ids;
-        int cursor = 4;
+        int cursor = 5;
         for (int i = 0; i < count && cursor < msg.size(); i++) ids.push_back(getArgString(msg[cursor++]));
 
         t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
         if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
         if (!cnv) { sendReply("/pd/ai_overlay/reply/" + correlationId, 0.0f); return; }
 
-        juce::MessageManager::callAsync([proc = processor, cnv, canvasName, state, ids, correlationId, bridge = this]() {
+        juce::MessageManager::callAsync([proc = processor, cnv, canvasName, state, transient, ids, correlationId, bridge = this]() {
+            juce::ScopedLock overlaySl(proc->mcpOverlayLock);
             if (state == 0 && ids.empty()) {
-                proc->mcpAiOverlay.clear();
+                // Clear ALL — but only transient ones when the caller is transient.
+                if (transient) {
+                    for (auto it = proc->mcpAiOverlay.begin(); it != proc->mcpAiOverlay.end(); ) {
+                        if (it->second.transient) it = proc->mcpAiOverlay.erase(it);
+                        else ++it;
+                    }
+                } else {
+                    proc->mcpAiOverlay.clear();
+                }
             } else if (state == 0) {
+                // Clear specific ids — transient clears only touch transient marks,
+                // so an ambient flash can never erase a persistent answer/diff mark.
                 for (auto const& id : ids) {
-                    if (t_gobj* g = proc->resolveStableId(canvasName, id)) proc->mcpAiOverlay.erase(g);
+                    t_gobj* g = proc->resolveStableId(canvasName, id);
+                    if (!g) continue;
+                    auto it = proc->mcpAiOverlay.find(g);
+                    if (it == proc->mcpAiOverlay.end()) continue;
+                    if (!transient || it->second.transient) proc->mcpAiOverlay.erase(it);
                 }
             } else {
                 for (auto const& id : ids) {
-                    if (t_gobj* g = proc->resolveStableId(canvasName, id)) proc->mcpAiOverlay[g] = state;
+                    if (t_gobj* g = proc->resolveStableId(canvasName, id))
+                        proc->mcpAiOverlay[g] = PluginProcessor::AiMark { state, transient };
                 }
             }
             if (auto* cc = getOrCreateCanvasComponent(proc, cnv)) cc->repaint();
@@ -5269,6 +5286,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         auto parsed = juce::JSON::parse(jsonStr);
 
         juce::MessageManager::callAsync([proc = processor, cnv, canvasName, correlationId, bridge = this, parsed]() {
+            juce::ScopedLock overlaySl(proc->mcpOverlayLock);
             proc->mcpGhosts.clear();
             if (auto* arr = parsed.getArray()) {
                 sys_lock();
@@ -5322,6 +5340,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         auto parsed = juce::JSON::parse(jsonStr);
 
         juce::MessageManager::callAsync([proc = processor, cnv, canvasName, correlationId, bridge = this, parsed]() {
+            juce::ScopedLock overlaySl(proc->mcpOverlayLock);
             proc->mcpAnnotations.clear();
             if (auto* arr = parsed.getArray()) {
                 sys_lock();
@@ -7846,7 +7865,7 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
     } else if (bridgeAction == "capabilities") {
         auto correlationId = msg.size() > 0 ? getArgString(msg[0]) : "0";
         juce::OSCMessage reply { juce::OSCAddressPattern("/bridge/capabilities/reply") };
-        reply.addArgument(juce::String("11.14"));
+        reply.addArgument(juce::String("11.16"));
         reply.addArgument(juce::String("create_batch"));
         reply.addArgument(juce::String("delete_batch"));
         reply.addArgument(juce::String("connect_batch"));
