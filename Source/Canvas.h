@@ -239,6 +239,10 @@ public:
 
     Rectangle<int> currentRenderArea;
 
+    // PRD overlay: inline editor to reply to an AI note (double-click a note tag).
+    std::unique_ptr<juce::TextEditor> mcpNoteEditor;
+    int mcpNoteEditIndex = -1;
+
     Value isGraphChild = SynchronousValue(var(false));
     Value hideNameAndArgs = SynchronousValue(var(false));
     Value xRange = SynchronousValue();

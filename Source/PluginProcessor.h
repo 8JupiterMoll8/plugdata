@@ -242,6 +242,7 @@ public:
     struct McpAnnotation {
         float x = 0, y = 0; // patch coords (already anchored to the target)
         juce::String text;
+        juce::String targetId; // tempId this note is attached to (may be empty)
     };
     std::vector<McpAnnotation> mcpAnnotations;
     std::vector<McpAnnotation> getMcpAnnotations() const { juce::ScopedLock sl(mcpOverlayLock); return mcpAnnotations; }

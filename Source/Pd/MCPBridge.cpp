@@ -5358,6 +5358,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         pd::Interface::getObjectBounds(cnv, g, &x, &y, &w, &h);
                         a.x = static_cast<float>(x);
                         a.y = static_cast<float>(y) + h + 16.0f;
+                        a.targetId = target;
                     } else {
                         a.x = static_cast<float>(o->getProperty("x"));
                         a.y = static_cast<float>(o->getProperty("y"));
@@ -9003,6 +9004,15 @@ void MCPBridge::timerCallback()
             stopTimer();
         }
     }
+}
+
+void MCPBridge::sendArtistNote(const juce::String& targetId, const juce::String& text)
+{
+    if (!active.load()) return;
+    juce::OSCMessage msg { juce::OSCAddressPattern("/pd/ui/note") };
+    msg.addArgument(targetId);
+    msg.addArgument(text);
+    sender.send(msg);
 }
 
 void MCPBridge::sendSelectionTelemetry(const juce::String& selector, const SmallArray<pd::Atom>& list)

@@ -202,6 +202,10 @@ public:
 
     // Native Telemetry Dispatch (Port 19010)
     void sendSelectionTelemetry(const juce::String& selector, const SmallArray<pd::Atom>& list);
+
+    // PRD overlay: forward an artist-typed note (from an inline note editor) to
+    // the MCP as /pd/ui/note <targetTempId> <text>.
+    void sendArtistNote(const juce::String& targetId, const juce::String& text);
     void sendConsoleLog(const juce::String& message, bool isError);
     void sendPrompt(const juce::String& promptText);
     void sendReply(const juce::String& addressPattern, const juce::Array<juce::var>& args);

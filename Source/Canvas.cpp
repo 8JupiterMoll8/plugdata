@@ -13,6 +13,7 @@
 #include "Object.h"
 #include "Connection.h"
 #include "PluginProcessor.h"
+#include "Pd/MCPBridge.h" // artist-note forwarding from the inline note editor
 #include "PluginEditor.h"
 #include "LookAndFeel.h"
 #include "Components/SuggestionComponent.h"
@@ -1453,11 +1454,69 @@ void Canvas::mouseDown(MouseEvent const& e)
                     float const ty = canvasOrigin.y + a.y - 9.0f;
                     float const tw = a.text.length() * 7.0f + 30.0f; // estimated hit width
                     if (Rectangle<float>(tx, ty, tw, 18.0f).contains(pt)) {
-                        juce::ScopedLock sl(pd->mcpOverlayLock);
-                        if (i < static_cast<int>(pd->mcpAnnotations.size()))
-                            pd->mcpAnnotations.erase(pd->mcpAnnotations.begin() + i);
-                        repaint();
-                        return;
+                        // Rightmost ~26px is the dismiss "x"; anywhere else opens the editor.
+                        juce::Rectangle<float> closeZone(tx + tw - 26.0f, ty, 26.0f, 18.0f);
+                        if (closeZone.contains(pt)) {
+                            juce::ScopedLock sl(pd->mcpOverlayLock);
+                            if (i < static_cast<int>(pd->mcpAnnotations.size()))
+                                pd->mcpAnnotations.erase(pd->mcpAnnotations.begin() + i);
+                            repaint();
+                            return;
+                        }
+                        {
+                            // PRD overlay: click a note -> reply inline (becomes your message to the AI)
+                            if (!mcpNoteEditor) {
+                                mcpNoteEditor = std::make_unique<juce::TextEditor>();
+                                mcpNoteEditor->setMultiLine(false);
+                                mcpNoteEditor->setReturnKeyStartsNewLine(false);
+                                mcpNoteEditor->onReturnKey = [this] {
+                                    juce::String txt = mcpNoteEditor ? mcpNoteEditor->getText().trim() : juce::String();
+                                    juce::String targetId;
+                                    if (pd && mcpNoteEditIndex >= 0) {
+                                        juce::ScopedLock sl(pd->mcpOverlayLock);
+                                        if (mcpNoteEditIndex < static_cast<int>(pd->mcpAnnotations.size())) {
+                                            auto& ann = pd->mcpAnnotations[static_cast<size_t>(mcpNoteEditIndex)];
+                                            ann.text = txt;
+                                            targetId = ann.targetId;
+                                        }
+                                    }
+                                    if (txt.isNotEmpty() && pd) {
+                                        if (auto* br = pd->getMCPBridge()) br->sendArtistNote(targetId, txt);
+                                    }
+                                    if (mcpNoteEditor) mcpNoteEditor->setVisible(false);
+                                    mcpNoteEditIndex = -1;
+                                    repaint();
+                                };
+                                mcpNoteEditor->onEscapeKey = [this] {
+                                    if (mcpNoteEditor) mcpNoteEditor->setVisible(false);
+                                    mcpNoteEditIndex = -1;
+                                };
+                                mcpNoteEditor->setColour(juce::TextEditor::backgroundColourId, juce::Colour(0xff16161c));
+                                mcpNoteEditor->setColour(juce::TextEditor::textColourId, juce::Colours::white);
+                                mcpNoteEditor->setColour(juce::TextEditor::outlineColourId, juce::Colour(0xff4a9eff));
+                                mcpNoteEditor->setColour(juce::TextEditor::focusedOutlineColourId, juce::Colour(0xff4a9eff));
+                                mcpNoteEditor->setColour(juce::TextEditor::highlightColourId, juce::Colour(0xff4a9eff));
+                                mcpNoteEditor->setColour(juce::CaretComponent::caretColourId, juce::Colours::white);
+                                addAndMakeVisible(*mcpNoteEditor);
+                            }
+                            mcpNoteEditIndex = i;
+                            mcpNoteEditor->setBounds(juce::roundToInt(canvasOrigin.x + a.x - 6.0f),
+                                                     juce::roundToInt(canvasOrigin.y + a.y - 10.0f),
+                                                     juce::jmax(140, juce::roundToInt(a.text.length() * 7.0f) + 40), 20);
+                            mcpNoteEditor->setText(a.text, false);
+                            mcpNoteEditor->setVisible(true);
+                            mcpNoteEditor->toFront(true);
+                            // Grab focus AFTER the click finishes — grabbing during mouseDown
+                            // gets overridden by the canvas, so typed keys would go nowhere.
+                            {
+                                auto* ed = mcpNoteEditor.get();
+                                juce::MessageManager::callAsync([ed] {
+                                    if (ed) { ed->grabKeyboardFocus(); ed->selectAll(); }
+                                });
+                            }
+                            repaint();
+                            return;
+                        }
                     }
                 }
             }
