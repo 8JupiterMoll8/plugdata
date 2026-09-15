@@ -244,6 +244,7 @@ public:
         juce::String text;
         juce::String targetId; // tempId this note is attached to (may be empty)
         juce::String kind;     // info | change | warn | artist  (drives the colour)
+        double t = 0;          // creation time (s) — notes auto-fade after a TTL
         bool hasLeader = false;      // draw a thin line from the note to the object
         float leaderX = 0, leaderY = 0; // point on the object the line points to
     };
