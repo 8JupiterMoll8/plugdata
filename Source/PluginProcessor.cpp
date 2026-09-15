@@ -3016,6 +3016,8 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
             auto correlation_id = list[1].toString();
 
             int movedCount = 0;
+            struct MoveUndo { juce::String id; int oldX, oldY, newX, newY; };
+            std::vector<MoveUndo> moveUndo;
             sys_lock();
             t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
             if (canvas) {
@@ -3026,8 +3028,12 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
 
                     t_gobj* targetObj = resolveStableId(canvas_symbol, object_id);
                     if (targetObj) {
+                        int ox = 0, oy = 0, ow = 0, oh = 0;
+                        pd::Interface::getObjectBounds(canvas, targetObj, &ox, &oy, &ow, &oh);
                         pd::Interface::moveObject(canvas, targetObj, x, y);
                         movedCount++;
+                        if (ox != x || oy != y)
+                            moveUndo.push_back({ object_id, ox, oy, x, y });
                     }
                 }
                 if (movedCount > 0) {
@@ -3042,6 +3048,21 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
             }
             sys_unlock();
 
+            // Register an undoable move (message-delta, replayed via move_batch_id).
+            // Skipped while an undo/redo is replaying so we never push recursively.
+            if (canvas && !moveUndo.empty() && !isExecutingMcpUndoRedo) {
+                juce::OSCMessage fwd { juce::OSCAddressPattern("/pd/move_batch_id") };
+                juce::OSCMessage inv { juce::OSCAddressPattern("/pd/move_batch_id") };
+                fwd.addArgument(canvas_symbol);
+                inv.addArgument(canvas_symbol);
+                fwd.addArgument(correlation_id);
+                inv.addArgument(correlation_id);
+                for (auto const& m : moveUndo) {
+                    fwd.addArgument(m.id); fwd.addArgument(static_cast<float>(m.newX)); fwd.addArgument(static_cast<float>(m.newY));
+                    inv.addArgument(m.id); inv.addArgument(static_cast<float>(m.oldX)); inv.addArgument(static_cast<float>(m.oldY));
+                }
+                pushMcpTransaction(canvas, canvas_symbol, fwd, inv, "move_batch_id");
+            }
 
             SmallArray<pd::Atom> atoms;
             atoms.add(pd::Atom((float)movedCount));
@@ -3580,11 +3601,11 @@ bool PluginProcessor::hasMcpRedoTransaction(t_canvas* cnv) const
     return it != mcpRedoStack.end() && !it->second.empty();
 }
 
-void PluginProcessor::pushMcpTransaction(t_canvas* cnv, const juce::String& canvasName, const juce::OSCMessage& forward, const juce::OSCMessage& inverse)
+void PluginProcessor::pushMcpTransaction(t_canvas* cnv, const juce::String& canvasName, const juce::OSCMessage& forward, const juce::OSCMessage& inverse, const juce::String& replayAction)
 {
     {
         juce::ScopedLock sl(mcpUndoLock);
-        mcpUndoStack[cnv].push_back({ canvasName, forward, inverse });
+        mcpUndoStack[cnv].push_back({ canvasName, forward, inverse, replayAction });
         if (mcpUndoStack[cnv].size() > 50) {
             mcpUndoStack[cnv].erase(mcpUndoStack[cnv].begin());
         }
@@ -3616,7 +3637,7 @@ void PluginProcessor::undoMcpTransaction(t_canvas* cnv)
     // stack map while we hold mcpUndoLock.
     if (mcpBridge && tx) {
         isExecutingMcpUndoRedo = true;
-        mcpBridge->handlePdDomain("batch_atomic", tx->inverse);
+        mcpBridge->handlePdDomain(tx->replayAction, tx->inverse);
         isExecutingMcpUndoRedo = false;
     }
     juce::MessageManager::callAsync([this] {
@@ -3641,7 +3662,7 @@ void PluginProcessor::redoMcpTransaction(t_canvas* cnv)
 
     if (mcpBridge && tx) {
         isExecutingMcpUndoRedo = true;
-        mcpBridge->handlePdDomain("batch_atomic", tx->forward);
+        mcpBridge->handlePdDomain(tx->replayAction, tx->forward);
         isExecutingMcpUndoRedo = false;
     }
     juce::MessageManager::callAsync([this] {

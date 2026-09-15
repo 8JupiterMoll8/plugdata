@@ -29,6 +29,9 @@ struct McpTransaction {
     juce::String canvasName;
     juce::OSCMessage forward;
     juce::OSCMessage inverse;
+    // Which /pd action the forward/inverse messages are replayed through.
+    // Defaults to batch_atomic (create/connect/edit/delete); moves use move_batch_id.
+    juce::String replayAction = "batch_atomic";
 };
 
 class MCPBridge;
@@ -60,7 +63,7 @@ public:
 
     bool hasMcpTransaction(t_canvas* cnv) const;
     bool hasMcpRedoTransaction(t_canvas* cnv) const;
-    void pushMcpTransaction(t_canvas* cnv, const juce::String& canvasName, const juce::OSCMessage& forward, const juce::OSCMessage& inverse);
+    void pushMcpTransaction(t_canvas* cnv, const juce::String& canvasName, const juce::OSCMessage& forward, const juce::OSCMessage& inverse, const juce::String& replayAction = "batch_atomic");
     void undoMcpTransaction(t_canvas* cnv);
     void redoMcpTransaction(t_canvas* cnv);
     void clearMcpTransactions(t_canvas* cnv);
