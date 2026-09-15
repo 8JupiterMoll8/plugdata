@@ -783,24 +783,38 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
             NVGScopedState scopedAnn(nvg);
             float const ax = canvasOrigin.x + a.x;
             float const ay = canvasOrigin.y + a.y;
+            // Colour by kind so the artist can tell notes apart at a glance.
+            juce::String const k = a.kind.isNotEmpty() ? a.kind : juce::String("info");
+            NVGcolor const accent = (k == "change") ? nvgRGB(0x3d, 0xdd, 0x8a)
+                                   : (k == "warn")   ? nvgRGB(0xff, 0x5a, 0x5a)
+                                   : (k == "artist") ? nvgRGB(0xff, 0xbe, 0x50)
+                                                     : nvgRGB(0x4a, 0x9e, 0xff);
             nvgFontSize(nvg, 12.0f);
             nvgFontFace(nvg, "Inter");
             nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
             float tb[4];
             nvgTextBounds(nvg, ax, ay, a.text.toRawUTF8(), nullptr, tb);
             float const tw = tb[2] - tb[0];
-            float const w = tw + 26.0f; // text + padding + dismiss "x"
+            float const w = tw + 28.0f; // text + padding + dismiss "x" + accent bar
             constexpr float h = 18.0f;
             nvgBeginPath(nvg);
             nvgRoundedRect(nvg, ax - 6.0f, ay - h * 0.5f, w, h, 4.0f);
-            nvgFillColor(nvg, nvgRGBA(22, 22, 28, 190));
+            nvgFillColor(nvg, nvgRGBA(22, 22, 28, 200));
+            nvgFill(nvg);
+            nvgStrokeColor(nvg, accent); // kind-coloured outline
+            nvgStrokeWidth(nvg, 1.0f);
+            nvgStroke(nvg);
+            // left accent bar
+            nvgBeginPath(nvg);
+            nvgRoundedRect(nvg, ax - 6.0f, ay - h * 0.5f, 3.5f, h, 2.0f);
+            nvgFillColor(nvg, accent);
             nvgFill(nvg);
             nvgFillColor(nvg, nvgRGBA(232, 232, 244, 235));
             nvgText(nvg, ax, ay, a.text.toRawUTF8(), nullptr);
             // dismiss affordance — click the tag to remove it
             nvgFontSize(nvg, 11.0f);
-            nvgFillColor(nvg, nvgRGBA(168, 172, 186, 235));
-            nvgText(nvg, ax + tw + 7.0f, ay, "x", nullptr);
+            nvgFillColor(nvg, accent);
+            nvgText(nvg, ax + tw + 8.0f, ay, "x", nullptr);
         }
     }
 
@@ -1495,6 +1509,7 @@ void Canvas::mouseDown(MouseEvent const& e)
                                         if (mcpNoteEditIndex < static_cast<int>(pd->mcpAnnotations.size())) {
                                             auto& ann = pd->mcpAnnotations[static_cast<size_t>(mcpNoteEditIndex)];
                                             ann.text = txt;
+                                            ann.kind = "artist"; // it's the artist's note now
                                             targetId = ann.targetId;
                                         }
                                     }

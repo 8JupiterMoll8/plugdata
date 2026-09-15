@@ -5349,6 +5349,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     if (!o) continue;
                     PluginProcessor::McpAnnotation a;
                     a.text = o->getProperty("text").toString();
+                    a.kind = o->getProperty("kind").toString();
                     if (a.text.isEmpty()) continue;
                     auto target = o->getProperty("target").toString();
                     if (target.isNotEmpty()) {
