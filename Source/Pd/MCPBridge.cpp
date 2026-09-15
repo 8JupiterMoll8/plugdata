@@ -5304,6 +5304,55 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         return;
     }
 
+    // /pd/ai_annotate <canvas> <corrId> <jsonArray>
+    // PRD overlay: short in-place AI annotations ("why / what"), drawn as a
+    // translucent tag near an object. Each item {target:tempId, text} (anchored
+    // below the object) or {x,y,text}. Empty array clears. Message-thread only;
+    // pure draw state — never touches the DSP graph.
+    // Reply: /pd/ai_annotate/reply/<corrId> <count>
+    if (action == "ai_annotate") {
+        auto canvasName    = normalizeCanvas(getArgString(msg[0]));
+        auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : "0";
+        auto jsonStr       = msg.size() > 2 ? getArgString(msg[2]) : juce::String("[]");
+
+        t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+        if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
+        if (!cnv) { sendReply("/pd/ai_annotate/reply/" + correlationId, 0.0f); return; }
+
+        auto parsed = juce::JSON::parse(jsonStr);
+
+        juce::MessageManager::callAsync([proc = processor, cnv, canvasName, correlationId, bridge = this, parsed]() {
+            proc->mcpAnnotations.clear();
+            if (auto* arr = parsed.getArray()) {
+                sys_lock();
+                for (auto const& v : *arr) {
+                    auto* o = v.getDynamicObject();
+                    if (!o) continue;
+                    PluginProcessor::McpAnnotation a;
+                    a.text = o->getProperty("text").toString();
+                    if (a.text.isEmpty()) continue;
+                    auto target = o->getProperty("target").toString();
+                    if (target.isNotEmpty()) {
+                        t_gobj* g = proc->resolveStableId(canvasName, target);
+                        if (!g) continue;
+                        int x, y, w, h;
+                        pd::Interface::getObjectBounds(cnv, g, &x, &y, &w, &h);
+                        a.x = static_cast<float>(x);
+                        a.y = static_cast<float>(y) + h + 16.0f;
+                    } else {
+                        a.x = static_cast<float>(o->getProperty("x"));
+                        a.y = static_cast<float>(o->getProperty("y"));
+                    }
+                    proc->mcpAnnotations.push_back(a);
+                }
+                sys_unlock();
+            }
+            if (auto* cc = getOrCreateCanvasComponent(proc, cnv)) cc->repaint();
+            bridge->sendReply("/pd/ai_annotate/reply/" + correlationId, static_cast<float>(proc->mcpAnnotations.size()));
+        });
+        return;
+    }
+
     if (action == "clear_ids") {
         if (msg.size() >= 2 && processor) {
             SmallArray<pd::Atom> atoms;
@@ -7797,7 +7846,7 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
     } else if (bridgeAction == "capabilities") {
         auto correlationId = msg.size() > 0 ? getArgString(msg[0]) : "0";
         juce::OSCMessage reply { juce::OSCAddressPattern("/bridge/capabilities/reply") };
-        reply.addArgument(juce::String("11.13"));
+        reply.addArgument(juce::String("11.14"));
         reply.addArgument(juce::String("create_batch"));
         reply.addArgument(juce::String("delete_batch"));
         reply.addArgument(juce::String("connect_batch"));
@@ -7891,6 +7940,8 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
         reply.addArgument(juce::String("ai_overlay"));
         // PRD overlay: ghost/preview of proposed (uncommitted) changes
         reply.addArgument(juce::String("ai_ghost"));
+        // PRD overlay: short in-place AI annotations (explain on the patch)
+        reply.addArgument(juce::String("ai_annotate"));
         // Labeled screenshots: GUI-widget name chips painted on the bitmap only
         reply.addArgument(juce::String("screenshot_labels"));
         // Offline faster-than-realtime render to WAV (background DSP bake)

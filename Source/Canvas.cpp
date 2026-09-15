@@ -775,6 +775,28 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
         connection->render(nvg);
     }
 
+    // PRD overlay: short in-place AI annotations — a translucent tag near the
+    // object it explains, so the reason lives on the patch, not in chat.
+    if (pd && !pd->getMcpAnnotations().empty()) {
+        for (auto const& a : pd->getMcpAnnotations()) {
+            NVGScopedState scopedAnn(nvg);
+            float const ax = canvasOrigin.x + a.x;
+            float const ay = canvasOrigin.y + a.y;
+            nvgFontSize(nvg, 12.0f);
+            nvgFontFace(nvg, "Inter");
+            nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+            float tb[4];
+            nvgTextBounds(nvg, ax, ay, a.text.toRawUTF8(), nullptr, tb);
+            float const w = (tb[2] - tb[0]) + 12.0f;
+            constexpr float h = 18.0f;
+            nvgBeginPath(nvg);
+            nvgRoundedRect(nvg, ax - 6.0f, ay - h * 0.5f, w, h, 4.0f);
+            nvgFillColor(nvg, nvgRGBA(22, 22, 28, 190));
+            nvgFill(nvg);
+            nvgFillColor(nvg, nvgRGBA(232, 232, 244, 235));
+            nvgText(nvg, ax, ay, a.text.toRawUTF8(), nullptr);
+        }
+    }
     // PRD overlay: ghost/preview of PROPOSED (uncommitted) changes. Drawn above
     // the patch, never part of it — the artist sees the change before it's real.
     if (pd && !pd->getMcpGhosts().empty()) {

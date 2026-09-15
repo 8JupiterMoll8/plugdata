@@ -232,6 +232,16 @@ public:
     std::vector<McpGhost> mcpGhosts;
     const std::vector<McpGhost>& getMcpGhosts() const { return mcpGhosts; }
 
+    // PRD overlay: short in-place AI annotations ("why"/"what"), drawn as a
+    // translucent tag near an object (patch coords). Explanation lives where it
+    // belongs — on the patch, not in a chat window. Message-thread only.
+    struct McpAnnotation {
+        float x = 0, y = 0; // patch coords (already anchored to the target)
+        juce::String text;
+    };
+    std::vector<McpAnnotation> mcpAnnotations;
+    const std::vector<McpAnnotation>& getMcpAnnotations() const { return mcpAnnotations; }
+
     Value tailLength = Value(0.0f);
 
     // Just so we never have to deal with deleting the default LnF
