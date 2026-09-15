@@ -803,6 +803,17 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
             nvgText(nvg, ax + tw + 7.0f, ay, "x", nullptr);
         }
     }
+
+    // PRD overlay: draw the inline note editor INTO the GPU frame (same trick as
+    // Object's text editor) so what the artist types is visible live.
+    if (mcpNoteEditor && mcpNoteEditor->isVisible()) {
+        NVGScopedState scopedNote(nvg);
+        auto const nb = mcpNoteEditor->getBounds();
+        nvgTranslate(nvg, static_cast<float>(nb.getX()), static_cast<float>(nb.getY()));
+        nvgDrawRoundedRect(nvg, 0, 0, static_cast<float>(nb.getWidth()), static_cast<float>(nb.getHeight()),
+                           nvgRGBA(22, 22, 28, 255), nvgRGBA(74, 158, 255, 255), 4.0f);
+        mcpNoteRenderer.renderJUCEComponent(nvg, *mcpNoteEditor, zoom * editor->getRenderScale());
+    }
     // PRD overlay: ghost/preview of PROPOSED (uncommitted) changes. Drawn above
     // the patch, never part of it — the artist sees the change before it's real.
     if (pd && !pd->getMcpGhosts().empty()) {
@@ -1493,10 +1504,16 @@ void Canvas::mouseDown(MouseEvent const& e)
                                 mcpNoteEditor->onReturnKey = [commit] { commit(true); };
                                 // Never lose typing: also commit when focus leaves the field.
                                 mcpNoteEditor->onFocusLost = [commit] { commit(true); };
-                                // Show what you type live (the GPU surface needs a repaint).
+                                // Live feedback: write the field's text onto the NOTE as you type
+                                // (the note is GPU-drawn, so it updates reliably every keystroke).
                                 mcpNoteEditor->onTextChange = [this] {
-                                    if (mcpNoteEditor) mcpNoteEditor->repaint();
+                                    if (mcpNoteEditor && pd && mcpNoteEditIndex >= 0) {
+                                        juce::ScopedLock sl(pd->mcpOverlayLock);
+                                        if (mcpNoteEditIndex < static_cast<int>(pd->mcpAnnotations.size()))
+                                            pd->mcpAnnotations[static_cast<size_t>(mcpNoteEditIndex)].text = mcpNoteEditor->getText();
+                                    }
                                     repaint();
+                                    if (editor) editor->nvgSurface.renderAll();
                                 };
                                 mcpNoteEditor->onEscapeKey = [this] {
                                     mcpNoteEditIndex = -1;
@@ -1511,8 +1528,9 @@ void Canvas::mouseDown(MouseEvent const& e)
                                 addAndMakeVisible(*mcpNoteEditor);
                             }
                             mcpNoteEditIndex = i;
+                            // Place the editor ABOVE the note so the note (and its "x") stay clickable.
                             mcpNoteEditor->setBounds(juce::roundToInt(canvasOrigin.x + a.x - 6.0f),
-                                                     juce::roundToInt(canvasOrigin.y + a.y - 10.0f),
+                                                     juce::roundToInt(canvasOrigin.y + a.y - 34.0f),
                                                      juce::jmax(140, juce::roundToInt(a.text.length() * 7.0f) + 40), 20);
                             mcpNoteEditor->setText(a.text, false);
                             mcpNoteEditor->setVisible(true);

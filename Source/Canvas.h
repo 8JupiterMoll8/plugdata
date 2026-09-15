@@ -241,6 +241,7 @@ public:
 
     // PRD overlay: inline editor to reply to an AI note (double-click a note tag).
     std::unique_ptr<juce::TextEditor> mcpNoteEditor;
+    NVGImage mcpNoteRenderer; // draws the editor into the GPU frame (live typing)
     int mcpNoteEditIndex = -1;
 
     Value isGraphChild = SynchronousValue(var(false));
