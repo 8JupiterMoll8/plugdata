@@ -1566,8 +1566,13 @@ void Canvas::mouseDown(MouseEvent const& e)
                                     repaint();
                                 };
                                 mcpNoteEditor->onReturnKey = [commit] { commit(true); };
-                                // Never lose typing: also commit when focus leaves the field.
-                                mcpNoteEditor->onFocusLost = [commit] { commit(true); };
+                                // Never lose typing: also commit when focus leaves the field —
+                                // but ignore the focus-loss that fires right after opening
+                                // (the field doesn't have focus yet, so it would self-close).
+                                mcpNoteEditor->onFocusLost = [this, commit] {
+                                    if (juce::Time::getMillisecondCounter() - mcpNoteOpenedAt < 500) return;
+                                    commit(true);
+                                };
                                 // Live feedback: write the field's text onto the NOTE as you type
                                 // (the note is GPU-drawn, so it updates reliably every keystroke).
                                 mcpNoteEditor->onTextChange = [this] {
@@ -1592,6 +1597,7 @@ void Canvas::mouseDown(MouseEvent const& e)
                                 addAndMakeVisible(*mcpNoteEditor);
                             }
                             mcpNoteEditIndex = i;
+                            mcpNoteOpenedAt = juce::Time::getMillisecondCounter(); // arm the grace period
                             // Place the editor ABOVE the note so the note (and its "x") stay clickable.
                             mcpNoteEditor->setBounds(juce::roundToInt(canvasOrigin.x + a.x - 6.0f),
                                                      juce::roundToInt(canvasOrigin.y + a.y - 34.0f),

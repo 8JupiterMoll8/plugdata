@@ -243,6 +243,7 @@ public:
     std::unique_ptr<juce::TextEditor> mcpNoteEditor;
     NVGImage mcpNoteRenderer; // draws the editor into the GPU frame (live typing)
     int mcpNoteEditIndex = -1;
+    std::uint32_t mcpNoteOpenedAt = 0; // grace period so it can't self-close on open
 
     Value isGraphChild = SynchronousValue(var(false));
     Value hideNameAndArgs = SynchronousValue(var(false));
