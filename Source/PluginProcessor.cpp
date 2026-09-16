@@ -783,6 +783,18 @@ void PluginProcessor::prepareToPlay(double const sampleRate, int const samplesPe
         backupRunLoopInterval = jmax(24, backupRunLoopInterval);
         backupRunLoop.startTimer(backupRunLoopInterval * 32);
     }
+
+    // Armed spectral capture buffer (Phase 5): up to 2s of mono final output.
+    {
+        int const cap = static_cast<int>(std::ceil(sampleRate * 2.0));
+        if (cap > 0) {
+            mcpSpecBuffer.assign(static_cast<size_t>(cap), 0.0f);
+            mcpSpecCapacity.store(cap, std::memory_order_relaxed);
+            mcpSpecWritePos.store(0, std::memory_order_relaxed);
+            mcpSpecLimit.store(0, std::memory_order_relaxed);
+            mcpSpecArmed.store(false, std::memory_order_relaxed);
+        }
+    }
 }
 
 bool PluginProcessor::isBusesLayoutSupported(BusesLayout const& layouts) const
@@ -1006,6 +1018,33 @@ void PluginProcessor::processBlock(AudioBuffer<float>& buffer, MidiBuffer& midiB
         }
         float prev = mcpArmPeak.load(std::memory_order_relaxed);
         while (p > prev && !mcpArmPeak.compare_exchange_weak(prev, p, std::memory_order_relaxed)) {}
+    }
+
+    // Armed spectral capture (Phase 5): append the FINAL output into the mono
+    // buffer while armed, so a one-shot fired between arm and read lands inside
+    // the analysis window. Same common end-of-processBlock placement as the
+    // peak-hold (runs for constant AND variable block sizes). `mcpSpecBusy`
+    // brackets the write so the reader never copies a half-written tail.
+    if (mcpSpecArmed.load(std::memory_order_relaxed)) {
+        mcpSpecBusy.store(true, std::memory_order_release);
+        int pos = mcpSpecWritePos.load(std::memory_order_relaxed);
+        int const stop = std::min(mcpSpecLimit.load(std::memory_order_relaxed),
+                                  mcpSpecCapacity.load(std::memory_order_relaxed));
+        if (!mcpSpecBuffer.empty() && pos < stop) {
+            int const numSamples = buffer.getNumSamples();
+            int const numCh = buffer.getNumChannels();
+            auto* dst = mcpSpecBuffer.data();
+            if (numCh > 0) {
+                for (int i = 0; i < numSamples && pos < stop; ++i) {
+                    float s = 0.0f;
+                    for (int ch = 0; ch < numCh; ++ch) s += buffer.getReadPointer(ch)[i];
+                    dst[pos++] = s / static_cast<float>(numCh);
+                }
+            }
+            mcpSpecWritePos.store(pos, std::memory_order_release);
+            if (pos >= stop) mcpSpecArmed.store(false, std::memory_order_relaxed);
+        }
+        mcpSpecBusy.store(false, std::memory_order_release);
     }
 
     isProcessingAudio = false;

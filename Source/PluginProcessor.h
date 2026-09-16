@@ -411,6 +411,19 @@ private:
     std::atomic<bool> mcpArmActive { false };
     std::atomic<float> mcpArmPeak { 0.0f };
 
+    // Armed spectral capture (PRD_MEASUREMENT_WINDOWS Phase 5). From arm → read,
+    // the FINAL output is appended to a preallocated mono buffer so a one-shot is
+    // inside the window; read runs FFTW over the loudest 1024-sample region. This
+    // is the spectral twin of the peak-hold — no more false negatives from a
+    // window that opened after the hit. Written on the audio thread, drained on
+    // the OSC thread via the armed/busy handshake (no locks on the audio path).
+    std::atomic<bool> mcpSpecArmed { false };
+    std::atomic<bool> mcpSpecBusy { false };
+    std::atomic<int> mcpSpecWritePos { 0 };
+    std::atomic<int> mcpSpecLimit { 0 };
+    std::atomic<int> mcpSpecCapacity { 0 };
+    std::vector<float> mcpSpecBuffer;
+
     // Writes the current output block into the active WAV writer, if recording.
     // Must be called from the audio thread on the final output buffer.
     void writeRecorderTap(dsp::AudioBlock<float> const& buffer);

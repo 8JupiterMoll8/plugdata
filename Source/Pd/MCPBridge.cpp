@@ -72,12 +72,246 @@ struct _outlet
 };
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 4 — Armed CONTROL-message window (PRD_MEASUREMENT_WINDOWS §5)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The audio peak-hold (/meter/arm + /meter/read) already solves the "window
+// opened too late" race for AUDIO. Control messages have the same disease:
+// tap_control_flow / probe_control_msg start listening when called, so a
+// message already sent is missed. The fix is the same SHAPE (arm → send →
+// read) but a different primitive: a real Pd receiver, bound to the target
+// name, that accumulates every atom dispatched to it while armed.
+//
+// Why this is safe without a lock on the capture path: every Pd message
+// dispatch in PlugData runs while the global `sys_lock` is held — libpd's
+// own `libpd_bang/float/list/...` take it, `libpd_process_raw` (the audio +
+// scheduler tick) takes it, and the GUI takes it. arm/read take it too, so
+// writers and the reader are mutually exclusive. The capture itself only
+// touches atomics + a preallocated buffer; it never allocates and never
+// blocks, so it is safe even when a message originates on the audio thread.
+
+// Fixed capture capacity. A measurement window is short and control traffic is
+// sparse; overflow increments `dropped` honestly rather than reallocating.
+static constexpr int MCP_CTRL_MAX_MSGS = 128;
+static constexpr int MCP_CTRL_MAX_ATOMS = 32;
+static constexpr int MCP_CTRL_MAX_SYMLEN = 64;
+
+struct CtrlAtom {
+    bool isSymbol = false;
+    double num = 0.0;
+    char sym[MCP_CTRL_MAX_SYMLEN] = {};
+};
+
+struct CtrlMessage {
+    bool bang = false;
+    int argc = 0;
+    char selector[MCP_CTRL_MAX_SYMLEN] = {};
+    CtrlAtom atoms[MCP_CTRL_MAX_ATOMS];
+};
+
+static void copyTrunc(char* dst, int dstSize, const char* src)
+{
+    if (!src) { if (dstSize > 0) dst[0] = 0; return; }
+    int i = 0;
+    for (; i < dstSize - 1 && src[i]; ++i) dst[i] = src[i];
+    if (dstSize > 0) dst[i] = 0;
+}
+
+static juce::String jsonEscape(const char* s)
+{
+    juce::String out;
+    for (const char* p = s; p && *p; ++p) {
+        unsigned char const c = static_cast<unsigned char>(*p);
+        switch (c) {
+            case '"':  out << "\\\""; break;
+            case '\\': out << "\\\\"; break;
+            case '\n': out << "\\n";  break;
+            case '\r': out << "\\r";  break;
+            case '\t': out << "\\t";  break;
+            default:
+                if (c < 0x20)
+                    out << "\\u" << juce::String::toHexString(static_cast<int>(c)).paddedLeft('0', 4);
+                else
+                    out << static_cast<juce::juce_wchar>(c);
+        }
+    }
+    return out;
+}
+
+// The armed window: a preallocated message log plus the live Pd binding.
+// Definition MUST stay at global scope (the header forward-declares it and
+// MCPBridge holds a unique_ptr<McpControlWindow>).
+struct McpControlWindow {
+    std::atomic<bool> armed { false };
+    std::atomic<int> count { 0 };
+    std::atomic<int> dropped { 0 };
+
+    juce::String name;              // receiver name this window is bound to
+    t_symbol* boundName = nullptr;  // realised Pd symbol
+    void* receiver = nullptr;       // our CLASS_PD receiver object
+
+    CtrlMessage msgs[MCP_CTRL_MAX_MSGS];
+
+    // Append one dispatched message. Called under sys_lock (serialized), so the
+    // plain buffer writes below are never concurrent with arm/read.
+    void record(t_symbol* selector, int argc, t_atom* argv)
+    {
+        if (!armed.load(std::memory_order_acquire)) return;
+        if (argc < 0) argc = 0;
+
+        int const idx = count.load(std::memory_order_relaxed);
+        if (idx >= MCP_CTRL_MAX_MSGS) {
+            dropped.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        count.store(idx + 1, std::memory_order_release);
+
+        CtrlMessage& m = msgs[idx];
+        m.bang = false;
+        m.argc = 0;
+
+        const char* sel = (selector && selector->s_name) ? selector->s_name : "";
+        copyTrunc(m.selector, MCP_CTRL_MAX_SYMLEN, sel);
+        if (juce::String(sel) == "bang") m.bang = true;
+
+        if (argc > MCP_CTRL_MAX_ATOMS) argc = MCP_CTRL_MAX_ATOMS;
+        for (int i = 0; i < argc; ++i) {
+            t_atom const& a = argv[i];
+            CtrlAtom& out = m.atoms[i];
+            if (a.a_type == A_FLOAT) {
+                out.isSymbol = false;
+                out.num = a.a_w.w_float;
+            } else if (a.a_type == A_SYMBOL) {
+                out.isSymbol = true;
+                out.num = 0.0;
+                copyTrunc(out.sym, MCP_CTRL_MAX_SYMLEN,
+                          a.a_w.w_symbol ? a.a_w.w_symbol->s_name : "");
+            } else if (a.a_type == A_POINTER) {
+                out.isSymbol = true;
+                out.num = 0.0;
+                copyTrunc(out.sym, MCP_CTRL_MAX_SYMLEN, "pointer");
+            } else {
+                out.isSymbol = true;
+                out.num = 0.0;
+                copyTrunc(out.sym, MCP_CTRL_MAX_SYMLEN, "?");
+            }
+        }
+        m.argc = argc;
+    }
+
+    juce::String toJson(int n) const
+    {
+        if (n < 0) n = 0;
+        if (n > MCP_CTRL_MAX_MSGS) n = MCP_CTRL_MAX_MSGS;
+        juce::String out = "{\"count\":" + juce::String(n)
+            + ",\"dropped\":" + juce::String(dropped.load(std::memory_order_relaxed))
+            + ",\"receiver\":\"" + jsonEscape(name.toRawUTF8()) + "\""
+            + ",\"messages\":[";
+        for (int i = 0; i < n; ++i) {
+            if (i) out << ",";
+            CtrlMessage const& m = msgs[i];
+            out << "{\"selector\":\"" << jsonEscape(m.selector) << "\"";
+            if (m.bang) out << ",\"bang\":true";
+            out << ",\"atoms\":[";
+            for (int a = 0; a < m.argc; ++a) {
+                if (a) out << ",";
+                CtrlAtom const& at = m.atoms[a];
+                if (at.isSymbol) out << "\"" << jsonEscape(at.sym) << "\"";
+                else out << juce::String(at.num, 6);
+            }
+            out << "]}";
+        }
+        out << "]}";
+        return out;
+    }
+
+    // Free the Pd binding. Caller holds sys_lock.
+    void unbindReceiver()
+    {
+        armed.store(false, std::memory_order_release);
+        if (receiver) {
+            pd_free(reinterpret_cast<t_pd*>(receiver));
+            receiver = nullptr;
+        }
+        boundName = nullptr;
+    }
+};
+
+// ── The native receiver class ──────────────────────────────────────────────
+// CLASS_PD (non-graphical, not on any canvas). Bound straight to the target
+// symbol via pd_bind, so it coexists with any real [r name] in the patch —
+// messages fan out to both. Zero canvas objects, zero DSP recompile.
+struct McpCtrlReceiver {
+    t_object obj;            // ob_pd at offset 0 → bindable/dispatchable
+    t_symbol* sym = nullptr;
+    MCPBridge* bridge = nullptr;
+};
+
+static t_class* mcpCtrlReceiverClass = nullptr;
+
+static void mcpCtrlReceiverFree(McpCtrlReceiver* x)
+{
+    if (x->sym) { pd_unbind(&x->obj.ob_pd, x->sym); x->sym = nullptr; }
+}
+
+static void mcpCtrlReceiverBang(McpCtrlReceiver* x)
+{
+    if (x->bridge) x->bridge->mcpCtrlCapture(&s_bang, 0, nullptr);
+}
+
+static void mcpCtrlReceiverFloat(McpCtrlReceiver* x, t_float f)
+{
+    if (!x->bridge) return;
+    t_atom a; SETFLOAT(&a, f);
+    x->bridge->mcpCtrlCapture(&s_float, 1, &a);
+}
+
+static void mcpCtrlReceiverSymbol(McpCtrlReceiver* x, t_symbol* s)
+{
+    if (!x->bridge) return;
+    t_atom a; SETSYMBOL(&a, s);
+    x->bridge->mcpCtrlCapture(&s_symbol, 1, &a);
+}
+
+static void mcpCtrlReceiverList(McpCtrlReceiver* x, t_symbol* s, int argc, t_atom* argv)
+{
+    if (x->bridge) x->bridge->mcpCtrlCapture(s, argc, argv);
+}
+
+static void mcpCtrlReceiverAnything(McpCtrlReceiver* x, t_symbol* s, int argc, t_atom* argv)
+{
+    if (x->bridge) x->bridge->mcpCtrlCapture(s, argc, argv);
+}
+
+// Caller holds sys_lock. Idempotent.
+static void ensureMcpCtrlReceiverClass()
+{
+    if (mcpCtrlReceiverClass) return;
+    mcpCtrlReceiverClass = class_new(gensym("mcp_ctrl_receive"), nullptr,
+        reinterpret_cast<t_method>(mcpCtrlReceiverFree),
+        sizeof(McpCtrlReceiver), CLASS_PD, static_cast<t_atomtype>(0));
+    class_addbang(mcpCtrlReceiverClass, mcpCtrlReceiverBang);
+    class_addfloat(mcpCtrlReceiverClass, reinterpret_cast<t_method>(mcpCtrlReceiverFloat));
+    class_addsymbol(mcpCtrlReceiverClass, reinterpret_cast<t_method>(mcpCtrlReceiverSymbol));
+    class_addlist(mcpCtrlReceiverClass, reinterpret_cast<t_method>(mcpCtrlReceiverList));
+    class_addanything(mcpCtrlReceiverClass, reinterpret_cast<t_method>(mcpCtrlReceiverAnything));
+}
+
+void MCPBridge::mcpCtrlCapture(t_symbol* selector, int argc, t_atom* argv)
+{
+    if (controlWindow) controlWindow->record(selector, argc, argv);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+
 MCPBridge::MCPBridge(PluginProcessor* proc, int inPort, int outPort)
     : processor(proc)
     , listenPort(inPort)
     , sendPort(outPort)
     , probeManager(this)
 {
+    controlWindow = std::make_unique<McpControlWindow>();
     bootToken = juce::String(juce::Time::getMillisecondCounter()) + "-"
         + juce::String::toHexString(juce::Random::getSystemRandom().nextInt());
     start();
@@ -86,6 +320,13 @@ MCPBridge::MCPBridge(PluginProcessor* proc, int inPort, int outPort)
 MCPBridge::~MCPBridge()
 {
     stop();
+    // Phase 4: release any still-armed control receiver (the Pd instance is
+    // still alive at this point — members destruct before ~PdInstance).
+    if (controlWindow && controlWindow->receiver) {
+        sys_lock();
+        controlWindow->unbindReceiver();
+        sys_unlock();
+    }
 }
 
 bool MCPBridge::start()
@@ -386,36 +627,37 @@ struct RenderGuard {
     }
 };
 
-// Spectral analysis over the baked render buffer. Reuses the /meter/spectral
-// feature set (Hann window + FFTW r2c on the final 1024 samples of the
-// loudest channel) so the JSON keys match what the server already parses.
-static juce::String renderSpectralJson(float const* data, int n, double sampleRate)
+// Spectral analysis over exactly N raw samples (Hann window + FFTW r2c on
+// mono data). Shared by the render path (final 1024 samples), the /meter/spectral
+// probe path, and the Phase-5 armed-capture path. JSON keys match what the
+// server already parses.
+static juce::String spectralJsonFromSamples(float const* samples, int N, double sampleRate)
 {
-    constexpr int N = PROBE_RING_SIZE; // 1024
-    if (n < N || !data || sampleRate <= 0.0)
+    if (!samples || N <= 1 || sampleRate <= 0.0)
         return {};
+    if (N > PROBE_RING_SIZE) N = PROBE_RING_SIZE;
 
-    // Hann window over the final N samples
-    std::array<float, N> windowed {};
+    // Hann window over the N samples
+    std::array<float, PROBE_RING_SIZE> windowed {};
     for (int i = 0; i < N; ++i) {
         float const w = 0.5f * (1.0f - std::cos(2.0f * juce::MathConstants<float>::pi * i / (N - 1)));
-        windowed[i] = data[n - N + i] * w;
+        windowed[i] = samples[i] * w;
     }
 
     // RMS / peak over the full analyzed window (unwindowed)
     double sumSq = 0.0;
     float maxPeak = 0.0f;
-    for (int i = n - N; i < n; ++i) {
-        float const s = std::abs(data[i]);
-        sumSq += (double)(data[i] * data[i]);
+    for (int i = 0; i < N; ++i) {
+        float const s = std::abs(samples[i]);
+        sumSq += (double)(samples[i] * samples[i]);
         if (s > maxPeak) maxPeak = s;
     }
     float const rms = (float)std::sqrt(sumSq / N);
 
     // FFT (single precision, same as the probe path)
-    std::array<float, N> fftInput {};
-    std::copy(windowed.begin(), windowed.end(), fftInput.begin());
-    constexpr int NBINS = N / 2 + 1;
+    std::array<float, PROBE_RING_SIZE> fftInput {};
+    std::copy(windowed.begin(), windowed.begin() + N, fftInput.begin());
+    int const NBINS = N / 2 + 1;
     std::vector<fftwf_complex> fftOutput(NBINS);
     fftwf_plan plan = fftwf_plan_dft_r2c_1d(N, fftInput.data(),
         reinterpret_cast<fftwf_complex*>(fftOutput.data()), FFTW_ESTIMATE);
@@ -495,8 +737,8 @@ static juce::String renderSpectralJson(float const* data, int n, double sampleRa
     float const crestFactor = (rms > 1e-7f) ? (maxPeak / rms) : 0.0f;
     float const peakFrequency = maxBin * binHz;
 
-    // Fundamental via autocorrelation on the raw tail (same helper as probes)
-    float const fundamental = estimateFrequency(data + (n - N), N, (float)sampleRate);
+    // Fundamental via autocorrelation on the raw samples (same helper as probes)
+    float const fundamental = estimateFrequency(samples, N, (float)sampleRate);
 
     auto* root = new juce::DynamicObject();
     root->setProperty("rmsDb", rmsDb);
@@ -508,8 +750,39 @@ static juce::String renderSpectralJson(float const* data, int n, double sampleRa
     root->setProperty("spectralRolloff", rolloffFreq);
     root->setProperty("crestFactor", crestFactor);
     root->setProperty("fftSize", N);
+    root->setProperty("binHz", binHz);
     root->setProperty("peaks", peaksArr);
     return juce::JSON::toString(juce::var(root), true);
+}
+
+// Spectral analysis over the baked render buffer (final 1024 samples).
+static juce::String renderSpectralJson(float const* data, int n, double sampleRate)
+{
+    constexpr int N = PROBE_RING_SIZE; // 1024
+    if (n < N || !data || sampleRate <= 0.0)
+        return {};
+    return spectralJsonFromSamples(data + (n - N), N, sampleRate);
+}
+
+// Phase 5 armed-capture analysis: the captured window may hold a one-shot
+// anywhere, so center the analysis on the loudest sample instead of blindly
+// taking the tail. Reports silence/short honestly if there is nothing to read.
+static juce::String armedSpectralJson(float const* data, int n, double sampleRate)
+{
+    constexpr int N = PROBE_RING_SIZE; // 1024
+    if (n < N || !data || sampleRate <= 0.0)
+        return {};
+
+    int peakIdx = 0;
+    float peak = 0.0f;
+    for (int i = 0; i < n; ++i) {
+        float const a = std::abs(data[i]);
+        if (a > peak) { peak = a; peakIdx = i; }
+    }
+    int start = peakIdx - N / 2;
+    if (start < 0) start = 0;
+    if (start + N > n) start = n - N;
+    return spectralJsonFromSamples(data + start, N, sampleRate);
 }
 
 // The offline render itself. Runs on a detached background thread; owns the
@@ -8197,8 +8470,6 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
         reply.addArgument(juce::String("telemetry"));
         reply.addArgument(juce::String("array_io"));
         reply.addArgument(juce::String("morph"));
-        reply.addArgument(juce::String("adaptive_dump"));
-        reply.addArgument(juce::String("finalize"));
         reply.addArgument(juce::String("array_stats"));
         reply.addArgument(juce::String("get_mappings"));
         reply.addArgument(juce::String("move_batch_id"));
@@ -8210,8 +8481,9 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
         reply.addArgument(juce::String("meter_query"));
         reply.addArgument(juce::String("meter_master"));
         reply.addArgument(juce::String("meter_arm"));
+        reply.addArgument(juce::String("meter_control"));
+        reply.addArgument(juce::String("meter_spectral_arm"));
         reply.addArgument(juce::String("meter_trace"));
-        reply.addArgument(juce::String("inline_mappings"));
         reply.addArgument(juce::String("array_bulk"));
         reply.addArgument(juce::String("census"));
         reply.addArgument(juce::String("typeof"));
@@ -9223,6 +9495,125 @@ void MCPBridge::handleMeterDomain(const juce::String& meterAction, const juce::O
         rep.addArgument(peakDb);
         rep.addArgument(peak);
         sender.send(rep);
+        return;
+    }
+
+    if (meterAction == "arm_control") {
+        // /meter/arm_control <receiverName> <correlationId> — open a CONTROL
+        // window: bind a native receiver to <receiverName> and accumulate every
+        // atom dispatched to it until read. Call BEFORE sending the message.
+        if (msg.size() < 1) return;
+        auto name = getArgString(msg[0]);
+        juce::String const correlationId = msg.size() > 1 ? getArgString(msg[1]) : juce::String("0");
+        if (name.isEmpty()) {
+            sendReply("/meter/arm_control/error/" + correlationId, "receiver name required");
+            return;
+        }
+        if (!controlWindow) controlWindow = std::make_unique<McpControlWindow>();
+
+        sys_lock();
+        // Re-arm replaces any previous window cleanly (frees its binding).
+        controlWindow->unbindReceiver();
+        ensureMcpCtrlReceiverClass();
+        auto* rec = reinterpret_cast<McpCtrlReceiver*>(pd_new(mcpCtrlReceiverClass));
+        rec->sym = gensym(name.toRawUTF8());
+        rec->bridge = this;
+        pd_bind(&rec->obj.ob_pd, rec->sym);
+        controlWindow->name = name;
+        controlWindow->boundName = rec->sym;
+        controlWindow->receiver = rec;
+        controlWindow->count.store(0, std::memory_order_relaxed);
+        controlWindow->dropped.store(0, std::memory_order_relaxed);
+        controlWindow->armed.store(true, std::memory_order_release);
+        sys_unlock();
+
+        sendRawReply("/meter/arm_control/reply/" + correlationId);
+        return;
+    }
+
+    if (meterAction == "read_control") {
+        // /meter/read_control <correlationId> — close the CONTROL window and
+        // reply with every message captured since arm. Unbinds the receiver.
+        juce::String const correlationId = msg.size() > 0 ? getArgString(msg[0]) : juce::String("0");
+        if (!controlWindow) {
+            sendReply("/meter/read_control/reply/" + correlationId,
+                      "{\"error\":\"no control window armed\"}");
+            return;
+        }
+        sys_lock();
+        // exchange(false) makes read idempotent: a second read (or a read with
+        // no armed window) reports "not armed" instead of returning stale
+        // messages from a previous window.
+        bool const wasArmed = controlWindow->armed.exchange(false, std::memory_order_acq_rel);
+        if (!wasArmed) {
+            sys_unlock();
+            sendReply("/meter/read_control/reply/" + correlationId,
+                      "{\"error\":\"no control window armed\"}");
+            return;
+        }
+        int const n = controlWindow->count.load(std::memory_order_acquire);
+        juce::String const json = controlWindow->toJson(n);
+        controlWindow->unbindReceiver();
+        sys_unlock();
+        sendReply("/meter/read_control/reply/" + correlationId, json);
+        return;
+    }
+
+    if (meterAction == "arm_spectral") {
+        // /meter/arm_spectral <durationMs> <correlationId> — open an ARMED
+        // SPECTRAL window: accumulate the final output so a one-shot fired
+        // before read lands inside the FFT analysis. Phase 5 twin of /meter/arm.
+        double durationMs = msg.size() > 0 ? (double)getArgFloat(msg[0]) : 500.0;
+        juce::String const correlationId = msg.size() > 1 ? getArgString(msg[1]) : juce::String("0");
+        if (!processor) {
+            sendReply("/meter/arm_spectral/reply/" + correlationId, "{\"error\":\"no processor\"}");
+            return;
+        }
+        int const cap = processor->mcpSpecCapacity.load(std::memory_order_relaxed);
+        if (cap <= 0) {
+            sendReply("/meter/arm_spectral/reply/" + correlationId,
+                      "{\"error\":\"spectral capture buffer not ready (DSP not prepared)\"}");
+            return;
+        }
+        double const sr = processor->getSampleRate() > 0.0 ? processor->getSampleRate() : 44100.0;
+        if (durationMs < 50.0)   durationMs = 50.0;
+        if (durationMs > 2000.0) durationMs = 2000.0;
+        int target = static_cast<int>(std::ceil(sr * durationMs / 1000.0));
+        if (target > cap) target = cap;
+        if (target < PROBE_RING_SIZE) target = std::min(cap, PROBE_RING_SIZE);
+
+        processor->mcpSpecArmed.store(false, std::memory_order_release);
+        processor->mcpSpecWritePos.store(0, std::memory_order_relaxed);
+        processor->mcpSpecLimit.store(target, std::memory_order_relaxed);
+        processor->mcpSpecArmed.store(true, std::memory_order_release);
+        sendRawReply("/meter/arm_spectral/reply/" + correlationId);
+        return;
+    }
+
+    if (meterAction == "read_spectral") {
+        // /meter/read_spectral <correlationId> — close the window and reply the
+        // spectrum of the loudest 1024-sample region captured since arm.
+        juce::String const correlationId = msg.size() > 0 ? getArgString(msg[0]) : juce::String("0");
+        if (!processor) {
+            sendReply("/meter/read_spectral/reply/" + correlationId, "{\"error\":\"no processor\"}");
+            return;
+        }
+        processor->mcpSpecArmed.store(false, std::memory_order_release);
+        // Wait out any in-flight audio append (a few ms at most) before copying.
+        for (int spin = 0; spin < 200; ++spin) {
+            if (!processor->mcpSpecBusy.load(std::memory_order_acquire)) break;
+            juce::Thread::sleep(1);
+        }
+        int const n = processor->mcpSpecWritePos.load(std::memory_order_acquire);
+        double const sr = processor->getSampleRate() > 0.0 ? processor->getSampleRate() : 44100.0;
+        juce::String json = armedSpectralJson(processor->mcpSpecBuffer.data(), n, sr);
+        processor->mcpSpecWritePos.store(0, std::memory_order_relaxed);
+        if (json.isEmpty()) {
+            sendReply("/meter/read_spectral/reply/" + correlationId,
+                      juce::String("{\"error\":\"insufficient capture\",\"samples\":") + juce::String(n) + "}");
+            return;
+        }
+        sendReply("/meter/read_spectral/reply/" + correlationId, json);
         return;
     }
 

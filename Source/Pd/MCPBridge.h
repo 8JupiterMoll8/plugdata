@@ -12,11 +12,17 @@
 #include <juce_events/juce_events.h>
 #include <readerwriterqueue.h>
 #include <array>
+#include <memory>
 #include "Utility/Config.h"
 #include "Pd/Instance.h"
 
 class PluginProcessor;
 class MCPBridge;
+
+// PRD_MEASUREMENT_WINDOWS Phase 4 — armed CONTROL-message window. A native Pd
+// receiver is bound to the requested name on arm; every message dispatched to
+// that name accumulates into this buffer until read. Defined in MCPBridge.cpp.
+struct McpControlWindow;
 
 // PRD "Real Class Name Sync" §2.1 — the single shared class-name resolution
 // helper. C++ is the ONLY source of truth for object identity: the census
@@ -200,6 +206,12 @@ public:
     void audioTick();
     ProbeManager& getProbeManager() { return probeManager; }
 
+    // Phase 4 (PRD_MEASUREMENT_WINDOWS): entry point for the native armed
+    // control receiver bound during `arm_control`. Runs while the Pd lock is
+    // held by the dispatching thread, so no lock is taken here. No-op unless a
+    // control window is armed.
+    void mcpCtrlCapture(t_symbol* selector, int argc, t_atom* argv);
+
     // Native Telemetry Dispatch (Port 19010)
     void sendSelectionTelemetry(const juce::String& selector, const SmallArray<pd::Atom>& list);
 
@@ -353,6 +365,9 @@ private:
     juce::CriticalSection seqLock;
 
     ProbeManager probeManager;
+
+    // Phase 4 armed control-message window (native Pd receiver + atom buffer).
+    std::unique_ptr<McpControlWindow> controlWindow;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MCPBridge)
 };
