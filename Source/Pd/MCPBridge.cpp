@@ -8209,6 +8209,7 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
         reply.addArgument(juce::String("meter"));
         reply.addArgument(juce::String("meter_query"));
         reply.addArgument(juce::String("meter_master"));
+        reply.addArgument(juce::String("meter_arm"));
         reply.addArgument(juce::String("meter_trace"));
         reply.addArgument(juce::String("inline_mappings"));
         reply.addArgument(juce::String("array_bulk"));
@@ -9194,6 +9195,33 @@ void MCPBridge::handleMeterDomain(const juce::String& meterAction, const juce::O
         juce::OSCMessage rep { juce::OSCAddressPattern("/meter/status/reply/" + correlationId) };
         rep.addArgument(static_cast<int32>(activeCount));
         rep.addArgument(static_cast<int32>(debugEnabled));
+        sender.send(rep);
+        return;
+    }
+
+    if (meterAction == "arm") {
+        // /meter/arm <correlationId> — open the measurement window: reset + start the
+        // master peak-hold. Call this BEFORE triggering, so a one-shot is inside it.
+        auto correlationId = msg.size() > 0 ? getArgString(msg[0]) : juce::String("0");
+        if (processor) {
+            processor->mcpArmPeak.store(0.0f, std::memory_order_relaxed);
+            processor->mcpArmActive.store(true, std::memory_order_release);
+        }
+        sendRawReply("/meter/arm/reply/" + correlationId);
+        return;
+    }
+
+    if (meterAction == "read") {
+        // /meter/read <correlationId> — close the window; reply with peak-since-arm.
+        // peakDb > -60 → the trigger produced sound. Never misses a one-shot because
+        // the window was armed before the event and accumulated every block since.
+        auto correlationId = msg.size() > 0 ? getArgString(msg[0]) : juce::String("0");
+        if (processor) processor->mcpArmActive.store(false, std::memory_order_release);
+        float const peak = processor ? processor->mcpArmPeak.load(std::memory_order_relaxed) : 0.0f;
+        float const peakDb = (peak > 1e-7f) ? (20.0f * std::log10(peak)) : -100.0f;
+        juce::OSCMessage rep { juce::OSCAddressPattern("/meter/read/reply/" + correlationId) };
+        rep.addArgument(peakDb);
+        rep.addArgument(peak);
         sender.send(rep);
         return;
     }

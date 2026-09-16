@@ -405,6 +405,12 @@ private:
     std::atomic<bool> mcpRecording { false };
     juce::String mcpRecorderPath;
 
+    // Armed peak-hold for trigger verification (/meter/arm → trigger → /meter/read).
+    // Accumulated on the audio thread over the FINAL output, so a one-shot fired
+    // between arm and read can NEVER be missed (window opens before the event).
+    std::atomic<bool> mcpArmActive { false };
+    std::atomic<float> mcpArmPeak { 0.0f };
+
     // Writes the current output block into the active WAV writer, if recording.
     // Must be called from the audio thread on the final output buffer.
     void writeRecorderTap(dsp::AudioBlock<float> const& buffer);

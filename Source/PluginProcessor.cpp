@@ -1114,6 +1114,22 @@ void PluginProcessor::processVariable(dsp::AudioBlock<float> buffer, MidiBuffer&
     midiBuffer.clear();
     outputFifo->readAudioAndMidi(buffer, midiBuffer);
 
+    // Armed peak-hold (trigger verification): track the loudest sample of the final
+    // output while armed. Window opens BEFORE the trigger (arm) and is read AFTER it,
+    // so a one-shot can never fall outside the measurement. No-op when not armed.
+    if (mcpArmActive.load(std::memory_order_relaxed)) {
+        float p = 0.0f;
+        for (size_t ch = 0; ch < buffer.getNumChannels(); ++ch) {
+            auto* d = buffer.getChannelPointer(ch);
+            for (size_t i = 0; i < buffer.getNumSamples(); ++i) {
+                float const a = std::abs(d[i]);
+                if (a > p) p = a;
+            }
+        }
+        float prev = mcpArmPeak.load(std::memory_order_relaxed);
+        while (p > prev && !mcpArmPeak.compare_exchange_weak(prev, p, std::memory_order_relaxed)) {}
+    }
+
     // MCP zero-dropout recorder tap — runs after output is ready.
     // Taps the final output buffer directly, no canvas objects needed.
     writeRecorderTap(buffer);
