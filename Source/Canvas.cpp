@@ -2475,7 +2475,12 @@ void Canvas::triggerizeSelection()
 
 void Canvas::encapsulateSelection(String const& subpatchName)
 {
-    auto selectedObjects = getSelectionOfType<Object>();
+    encapsulateSelection(subpatchName, getSelectionOfType<Object>());
+}
+
+void Canvas::encapsulateSelection(String const& subpatchName, SmallArray<Object*> const& objectsToEncapsulate)
+{
+    auto selectedObjects = objectsToEncapsulate;
 
     // Sort by index in pd patch
     selectedObjects.sort([this](auto const* a, auto const* b) -> bool {

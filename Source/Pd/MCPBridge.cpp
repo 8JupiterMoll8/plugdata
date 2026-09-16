@@ -6513,65 +6513,42 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         return;
                     }
 
-                    // PRD B1/Phase 3: reconcile identity BEFORE resolving tempIds so a
-                    // stale id can't resolve to the WRONG object (e.g. a neighbouring
-                    // LFO). Shared routine — the same reconcile the batch path uses.
+                    // Phase 3: reconcile identity BEFORE resolving tempIds so a stale id
+                    // can't resolve to the wrong object. Shared routine.
                     proc->reconcileIdentity(canvasName);
 
-                    // Clear the selection at the CANVAS level. patch.deselectAll() only
-                    // touched pd state and could leave GUI Objects selected — those then
-                    // rode along into encapsulateSelection UNCOUNTED.
-                    canvasComp->deselectAll();
-
-                    // Resolve every requested id; fail closed on the first miss.
-                    std::vector<Component*> toSelect;
-                    std::vector<t_gobj*> targetGobjs;
+                    // SELECTION-FREE: resolve ids straight to Object* and hand the
+                    // explicit list to the native encapsulate. The GUI selection is
+                    // never touched — so a leftover selection cannot ride along, and
+                    // no read-back guard is needed. Fail closed on the first miss.
+                    SmallArray<Object*> toEncapsulate;
                     for (auto const& id : targetIds) {
                         t_gobj* g = proc->resolveStableId(canvasName, id);
                         bool found = false;
                         if (g) {
                             for (auto* objComp : canvasComp->objects) {
                                 if (objComp && objComp->getPointer() == g) {
-                                    toSelect.push_back(objComp);
-                                    targetGobjs.push_back(g);
+                                    if (!toEncapsulate.contains(objComp))
+                                        toEncapsulate.add(objComp);
                                     found = true;
                                     break;
                                 }
                             }
                         }
                         if (!found) {
-                            canvasComp->deselectAll();
                             bridge->sendReply("/pd/encapsulate/reply/" + correlationId, 0.0f);
                             return;
                         }
                     }
 
-                    for (auto* c : toSelect)
-                        canvasComp->setSelected(c, true);
-
-                    // READ-BACK GUARD: exactly the requested objects must be in the
-                    // canvas selection. Catches a missed id AND a leftover/extra
-                    // selection the old count-only guard let through. NOTE: we count
-                    // selectedComponents (updated synchronously by setSelected), NOT
-                    // Object::isSelected() — that flag is updated asynchronously via a
-                    // change listener and would read stale here.
-                    int selectedNow = canvasComp->getLassoSelection().getNumSelected();
-
-                    if (selectedNow != static_cast<int>(targetIds.size())) {
-                        canvasComp->deselectAll();
-                        bridge->sendReply("/pd/encapsulate/reply/" + correlationId, 0.0f);
-                        return;
-                    }
-
                     // Snapshot the parent object count so we can verify the net effect
-                    // (N objects out, 1 [pd] in). NOTE: encapsulation copy+RECREATES the
-                    // objects inside the subpatch — their gobj pointers change — so we
-                    // verify by COUNT, never by comparing old pointers.
+                    // (N objects out, 1 [pd] in). Encapsulation copy+RECREATES the objects
+                    // inside the subpatch — pointers change — so we verify by COUNT.
                     int parentCountBefore = 0;
                     for (t_gobj* y = cnv->gl_list; y; y = y->g_next)
                         parentCountBefore++;
 
-                    canvasComp->encapsulateSelection(subpatchName);
+                    canvasComp->encapsulateSelection(subpatchName, toEncapsulate);
 
                     // ── PHASE 2: POST-OP VERIFICATION + ROLLBACK ─────────────
                     // Confirm the op applied: a canvas-class [pd] now exists, the parent
@@ -6589,7 +6566,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         auto* subCnv = reinterpret_cast<t_canvas*>(newestObj);
                         for (t_gobj* y = subCnv->gl_list; y; y = y->g_next)
                             subCount++;
-                        int const n = static_cast<int>(targetIds.size());
+                            int const n = static_cast<int>(toEncapsulate.size());
                         verified = (parentCountAfter == parentCountBefore - n + 1) && (subCount >= n);
                     }
 
@@ -6644,49 +6621,36 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     }
 
                     // ── Step 1: Encapsulate selected objects ─────────────────
-                    // Phase 3: reconcile identity first, then resolve + select EXACTLY
-                    // the requested objects, with a read-back guard (same as
-                    // /pd/encapsulate). Fail closed on the first miss or any extra.
+                    // Selection-free (same as /pd/encapsulate): reconcile, resolve the
+                    // ids straight to Object*, fail closed on the first miss, and hand
+                    // the explicit list to the native encapsulate. No GUI selection.
                     proc->reconcileIdentity(canvasName);
 
-                    canvasComp->deselectAll();
-
-                    std::vector<Component*> toSelect;
-                    std::vector<t_gobj*> targetGobjs;
+                    SmallArray<Object*> toEncapsulate;
                     for (const auto& id : targetIds) {
                         t_gobj* g = proc->resolveStableId(canvasName, id);
                         bool found = false;
                         if (g) {
                             for (auto* objComp : canvasComp->objects) {
                                 if (objComp && objComp->getPointer() == g) {
-                                    toSelect.push_back(objComp);
-                                    targetGobjs.push_back(g);
+                                    if (!toEncapsulate.contains(objComp))
+                                        toEncapsulate.add(objComp);
                                     found = true;
                                     break;
                                 }
                             }
                         }
                         if (!found) {
-                            canvasComp->deselectAll();
                             bridge->sendReply("/pd/encapsulate_to_file/reply/" + correlationId, 0.0f);
                             return;
                         }
                     }
 
-                    for (auto* c : toSelect)
-                        canvasComp->setSelected(c, true);
-
-                    // Read-back guard against a missed id or leftover selection.
-                    if (canvasComp->getLassoSelection().getNumSelected() != static_cast<int>(targetIds.size())) {
-                        canvasComp->deselectAll();
-                        bridge->sendReply("/pd/encapsulate_to_file/reply/" + correlationId, 0.0f);
-                        return;
-                    }
                     int parentCountBefore = 0;
                     for (t_gobj* y = cnv->gl_list; y; y = y->g_next)
                         parentCountBefore++;
 
-                    canvasComp->encapsulateSelection(abstrName);
+                    canvasComp->encapsulateSelection(abstrName, toEncapsulate);
 
                     // ── PHASE 2: POST-OP VERIFICATION + ROLLBACK ─────────────
                     // Same guarantee as /pd/encapsulate: verify by COUNT (encapsulation
@@ -6703,7 +6667,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                             auto* sub = reinterpret_cast<t_canvas*>(npd);
                             for (t_gobj* y = sub->gl_list; y; y = y->g_next)
                                 subCount++;
-                            int const n = static_cast<int>(targetIds.size());
+                        int const n = static_cast<int>(toEncapsulate.size());
                             ok = (parentCountAfter == parentCountBefore - n + 1) && (subCount >= n);
                         }
                         if (!ok) {

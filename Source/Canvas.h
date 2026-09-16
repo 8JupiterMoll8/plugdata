@@ -143,6 +143,8 @@ public:
     void duplicateSelection();
 
     void encapsulateSelection(String const& subpatchName = "pd");
+    // Selection-free variant: encapsulate an explicit object list (no GUI selection).
+    void encapsulateSelection(String const& subpatchName, SmallArray<Object*> const& objectsToEncapsulate);
     void triggerizeSelection();
     void cycleSelection();
     void connectSelection();
