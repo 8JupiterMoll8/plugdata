@@ -3090,10 +3090,6 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 return;
             }
 
-            // Phase 3: full reconcile (evict + adopt) so this snapshot also NAMES
-            // GUI-created objects, not just drops dead entries. sys_lock already held.
-            processor->reconcileIdentity(canvasName);
-
             // Step 1: Build pointer→index map with ONE walk of gl_list (O(n))
             std::unordered_map<t_gobj*, int> ptrToIndex;
             int idx = 0;
