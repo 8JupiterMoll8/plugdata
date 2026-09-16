@@ -6,6 +6,7 @@
 #include <clocale>
 #include <memory>
 #include <fstream>
+#include <unordered_set>
 
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_audio_basics/juce_audio_basics.h>
@@ -2036,6 +2037,52 @@ t_gobj* PluginProcessor::resolveStableId(const String& canvasName, const String&
     }
 
     return nullptr;
+}
+
+void PluginProcessor::reconcileIdentity(const String& canvasName)
+{
+    t_canvas* canvas = getCanvasBySymbol(canvasName);
+    if (!canvas && (canvasName == "pd-main" || canvasName == "main" || canvasName.isEmpty()))
+        canvas = pd_this->pd_canvaslist;
+    if (!canvas)
+        return;
+
+    auto canvasStr = canvasName.toStdString();
+    auto& canvasMap = mcpStableObjectMap[canvasStr];
+
+    // Step A: live pointer set from gl_list (the ground truth).
+    std::unordered_set<t_gobj*> livePointers;
+    for (t_gobj* y = canvas->gl_list; y; y = y->g_next)
+        livePointers.insert(y);
+
+    // Step B: evict entries whose gobj no longer exists on the canvas.
+    for (auto it = canvasMap.begin(); it != canvasMap.end();) {
+        if (livePointers.find(it->second) == livePointers.end()) {
+            mcpStableSerialMap.erase(it->second);
+            it = canvasMap.erase(it);
+            mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            ++it;
+        }
+    }
+
+    // Step C: adopt objects the identity map doesn't track yet (GUI-created).
+    std::unordered_set<t_gobj*> trackedPointers;
+    for (auto& [_, ptr] : canvasMap)
+        trackedPointers.insert(ptr);
+
+    int adoptIdx = 0;
+    for (t_gobj* y = canvas->gl_list; y; y = y->g_next) {
+        if (trackedPointers.find(y) == trackedPointers.end()) {
+            juce::String className = juce::String::fromUTF8(class_getname(pd_class(&y->g_pd))).replace("~", "_t");
+            std::string autoId = ("gui_" + className + "_" + juce::String(adoptIdx++)).toStdString();
+            while (canvasMap.count(autoId))
+                autoId = ("gui_" + className + "_" + juce::String(adoptIdx++)).toStdString();
+            canvasMap[autoId] = y;
+            mcpStableSerialMap[y] = mcpSerialCounter++;
+            mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
 }
 
 void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<pd::Atom> const& list)

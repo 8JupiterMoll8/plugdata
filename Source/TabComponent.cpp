@@ -371,6 +371,10 @@ Canvas* TabComponent::openPatch(pd::Patch::Ptr existingPatch, bool const warnIfA
         }
     }
 
+    // PRD overlay lifecycle: a patch is about to open in a tab — drop any overlay
+    // from the previous patch so tags/regions/ghosts/marks don't leak onto the new one.
+    pd->clearAiOverlays();
+
     pd->patches.add_unique(existingPatch, [](auto const& ptr1, auto const& ptr2) {
         return *ptr1 == *ptr2;
     });
@@ -1071,6 +1075,10 @@ void TabComponent::closeTab(Canvas* cnv)
     });
 
     pd->updateObjectImplementations();
+
+    // PRD overlay lifecycle: patch closed — clear overlay so stale gobj* marks and
+    // floating tags can't survive onto whatever patch is shown next.
+    pd->clearAiOverlays();
 
     triggerAsyncUpdate();
 }

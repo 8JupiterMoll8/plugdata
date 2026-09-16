@@ -267,6 +267,20 @@ public:
     std::vector<McpRegion> mcpRegions;
     std::vector<McpRegion> getMcpRegions() const { juce::ScopedLock sl(mcpOverlayLock); return mcpRegions; }
 
+    // PRD overlay lifecycle: wipe ALL AI overlay state (annotations, regions, ghosts,
+    // and per-object marks). Called when the active patch changes (new patch, open,
+    // close) so overlay never leaks onto the next patch — and so the gobj*-keyed marks
+    // can never dangle onto deleted objects after a canvas is rebuilt. Message thread;
+    // the render thread reads all of these under mcpOverlayLock.
+    void clearAiOverlays()
+    {
+        juce::ScopedLock sl(mcpOverlayLock);
+        mcpGhosts.clear();
+        mcpAnnotations.clear();
+        mcpRegions.clear();
+        mcpAiOverlay.clear();
+    }
+
     // Guards mcpAiOverlay / mcpGhosts / mcpAnnotations: written on the message
     // thread, read on the VBlank render thread.
     mutable juce::CriticalSection mcpOverlayLock;
@@ -378,6 +392,13 @@ private:
     CriticalSection backupLoopLock;
     std::atomic<bool> isProcessingAudio;
     t_gobj* resolveStableId(const String& canvasName, const String& objectId);
+
+    // Full identity reconcile against the live canvas (gl_list): evict entries whose
+    // gobj is gone, adopt untracked objects (gui_<class>_<n>), bump mcpIdentityVersion.
+    // Caller must be on the message thread / hold the Pd lock (same context as
+    // resolveStableId). Makes the tempId cache equal gl_list truth before any op that
+    // resolves ids — so a stale id can never silently map to the wrong object.
+    void reconcileIdentity(const String& canvasName);
     std::unordered_map<std::string, std::unordered_map<std::string, t_gobj*>> mcpStableObjectMap;
     std::unordered_map<t_gobj*, uint64_t> mcpStableSerialMap;
     // PRD overlay: per-object AI state for the canvas AI overlay
