@@ -5853,6 +5853,10 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         }
                         for (auto const& an : proc->mcpAnnotations)
                             avoid.emplace_back(an.x - 6.0f, an.y - 9.0f, an.text.length() * 7.0f + 28.0f, 18.0f);
+                        for (auto const& rg : proc->mcpRegions) {
+                            if (rg.title.isNotEmpty())
+                                avoid.emplace_back(rg.x, rg.y, rg.w, 24.0f);
+                        }
                         auto fits = [&](float nx, float ny) {
                             juce::Rectangle<float> r(nx, ny, nw, nh);
                             for (auto& ob : avoid) if (r.expanded(6.0f).intersects(ob)) return false;
