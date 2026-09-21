@@ -1642,6 +1642,23 @@ void Canvas::mouseExit(MouseEvent const& e)
     }
 }
 
+bool Canvas::isPointOverNote(Point<int> canvasPt) const
+{
+    if (!pd || pd->getMcpAnnotations().empty()) return false;
+    auto const pt = canvasPt.toFloat();
+    auto anns = pd->getMcpAnnotations();
+    for (auto const& a : anns) {
+        float const tx = canvasOrigin.x + a.x - 6.0f;
+        float const ty = canvasOrigin.y + a.y - 9.0f;
+        float const tw = a.text.length() * 7.0f + 28.0f;
+        if (Rectangle<float>(tx, ty, tw, 18.0f).contains(pt))
+            return true;
+    }
+    if (mcpNoteEditor && mcpNoteEditor->isVisible() && mcpNoteEditor->getBounds().contains(canvasPt))
+        return true;
+    return false;
+}
+
 bool Canvas::handleNoteClick(Point<int> canvasPt)
 {
     if (!pd || pd->getMcpAnnotations().empty()) return false;
@@ -1999,8 +2016,8 @@ void Canvas::mouseUp(MouseEvent const& e)
 
     connectionCancelled = false;
 
-    // Double-click canvas to create new object
-    if (e.mods.isLeftButtonDown() && e.getNumberOfClicks() == 2 && e.originalComponent == this && !isGraph && !getValue<bool>(locked)) {
+    // Double-click canvas to create new object (ignore clicks on AI notes)
+    if (!isPointOverNote(e.getPosition()) && e.mods.isLeftButtonDown() && e.getNumberOfClicks() == 2 && e.originalComponent == this && !isGraph && !getValue<bool>(locked)) {
         auto* newObject = objects.add(this, "", e.getPosition());
         deselectAll();
         setSelected(newObject, true); // Select newly created object

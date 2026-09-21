@@ -86,6 +86,7 @@ public:
     // open the editor). Returns true if a note consumed it. Called by the canvas AND
     // by objects (so notes overlaying objects stay clickable).
     bool handleNoteClick(Point<int> canvasPt);
+    bool isPointOverNote(Point<int> canvasPt) const;
     void mouseDrag(MouseEvent const& e) override;
     void mouseUp(MouseEvent const& e) override;
     bool hitTest(int x, int y) override;
