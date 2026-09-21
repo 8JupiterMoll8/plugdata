@@ -281,6 +281,50 @@ public:
     McpHud mcpHud;
     McpHud getMcpHud() const { juce::ScopedLock sl(mcpOverlayLock); return mcpHud; }
 
+    // Spatial / Targeted Overlays: restricts visual lenses (connection activity,
+    // order, object activity) to specific objects/cords instead of canvas-wide.
+    std::unordered_set<t_gobj*> mcpOverlayTargets;
+    bool mcpOverlayStrictCables = false;
+
+    void setMcpOverlayTargets(std::unordered_set<t_gobj*> targets, bool strictCables = false)
+    {
+        juce::ScopedLock sl(mcpOverlayLock);
+        mcpOverlayTargets = std::move(targets);
+        mcpOverlayStrictCables = strictCables;
+    }
+    void clearMcpOverlayTargets()
+    {
+        juce::ScopedLock sl(mcpOverlayLock);
+        mcpOverlayTargets.clear();
+        mcpOverlayStrictCables = false;
+    }
+    bool hasMcpOverlayTargets() const
+    {
+        juce::ScopedLock sl(mcpOverlayLock);
+        return !mcpOverlayTargets.empty();
+    }
+    size_t getMcpOverlayTargetsCount() const
+    {
+        juce::ScopedLock sl(mcpOverlayLock);
+        return mcpOverlayTargets.size();
+    }
+    bool isMcpTargeted(t_gobj* g) const
+    {
+        juce::ScopedLock sl(mcpOverlayLock);
+        return mcpOverlayTargets.find(g) != mcpOverlayTargets.end();
+    }
+    bool isMcpConnectionTargeted(t_gobj* out, t_gobj* in) const
+    {
+        juce::ScopedLock sl(mcpOverlayLock);
+        if (mcpOverlayTargets.empty()) return true;
+        bool const outTargeted = out && mcpOverlayTargets.find(out) != mcpOverlayTargets.end();
+        bool const inTargeted = in && mcpOverlayTargets.find(in) != mcpOverlayTargets.end();
+        if (mcpOverlayStrictCables) {
+            return outTargeted && inTargeted;
+        }
+        return outTargeted || inTargeted;
+    }
+
     // PRD overlay lifecycle: wipe ALL AI overlay state (annotations, regions, ghosts,
     // and per-object marks). Called when the active patch changes (new patch, open,
     // close) so overlay never leaks onto the next patch — and so the gobj*-keyed marks
@@ -293,10 +337,12 @@ public:
         mcpAnnotations.clear();
         mcpRegions.clear();
         mcpAiOverlay.clear();
+        mcpOverlayTargets.clear();
+        mcpOverlayStrictCables = false;
         mcpHud = McpHud();
     }
 
-    // Guards mcpAiOverlay / mcpGhosts / mcpAnnotations: written on the message
+    // Guards mcpAiOverlay / mcpGhosts / mcpAnnotations / mcpOverlayTargets: written on the message
     // thread, read on the VBlank render thread.
     mutable juce::CriticalSection mcpOverlayLock;
 

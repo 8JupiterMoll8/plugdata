@@ -194,7 +194,7 @@ void Connection::render(NVGcontext* nvg)
 
     float dashSize = isSignalCable ? numSignalChannels <= 1 ? 2.5f : 1.5f : 0.0f;
     auto useGradientLook = PlugDataLook::getUseGradientConnectionLook() && !(isSelected() || isHovering);
-    auto showActivity = cableType == DataCable && cnv->shouldShowConnectionActivity();
+    auto showActivity = cableType == DataCable && cnv->shouldShowConnectionActivity() && cnv->isConnectionTargeted(this);
     nvgStrokePaint(nvg, nvgDoubleStroke(nvg, connectionColour, shadowColour, dashColor, dashSize, useGradientLook, showActivity, offset));
     nvgStrokeWidth(nvg, cableThickness);
 
@@ -264,7 +264,7 @@ void Connection::render(NVGcontext* nvg)
         nvgStroke(nvg);
     };
 
-    if (cnv->shouldShowConnectionDirection()) {
+    if (cnv->shouldShowConnectionDirection() && cnv->isConnectionTargeted(this)) {
         if (isSegmented()) {
             for (int i = 1; i < currentPlan.size(); i++) {
                 auto const pathLine = Line<float>(currentPlan[i - 1], currentPlan[i]);
@@ -1345,7 +1345,7 @@ void ConnectionPathUpdater::timerCallback()
 
 void Connection::receiveMessage(t_symbol* symbol, SmallArray<pd::Atom> const& atoms)
 {
-    if (cnv->shouldShowConnectionActivity()) {
+    if (cnv->shouldShowConnectionActivity() && cnv->isConnectionTargeted(this)) {
         startTimer(StopAnimation, 1000 / 8.0f);
         if (!isTimerRunning(Animation)) {
             startTimer(Animation, 1000 / 60.0f);

@@ -1080,7 +1080,7 @@ void Canvas::renderAllConnections(NVGcontext* nvg, Rectangle<int> const area)
                 connection->render(nvg);
             else
                 connectionsToDrawSelected.add(connection);
-            if (showConnectionOrder) {
+            if (showConnectionOrder && isConnectionTargeted(connection)) {
                 connectionsToDraw.add(connection);
             }
         }
@@ -1182,6 +1182,27 @@ void Canvas::setOverlayMask(int mask)
         overlaysTree.setProperty(key, mask, nullptr);
     }
     updateOverlays();
+}
+
+bool Canvas::hasOverlayTargets() const
+{
+    return pd && pd->hasMcpOverlayTargets();
+}
+
+bool Canvas::isObjectTargeted(Object const* obj) const
+{
+    if (!pd || !pd->hasMcpOverlayTargets()) return true;
+    if (!obj) return false;
+    return pd->isMcpTargeted(obj->getPointer());
+}
+
+bool Canvas::isConnectionTargeted(Connection const* c) const
+{
+    if (!pd || !pd->hasMcpOverlayTargets()) return true;
+    if (!c) return false;
+    t_gobj* const outPtr = c->outobj ? c->outobj->getPointer() : nullptr;
+    t_gobj* const inPtr = c->inobj ? c->inobj->getPointer() : nullptr;
+    return pd->isMcpConnectionTargeted(outPtr, inPtr);
 }
 
 int Canvas::getOverlays() const

@@ -457,7 +457,7 @@ void Object::triggerOverlayActiveState()
     if (rateReducer.tooFast())
         return;
 
-    if (!cnv->shouldShowObjectActivity())
+    if (!cnv->shouldShowObjectActivity() || !cnv->isObjectTargeted(this))
         return;
 
     activeStateAlpha = 1.0f;
@@ -1269,7 +1269,7 @@ void Object::render(NVGcontext* nvg)
             nvgCircle(nvg, b.getRight() - 3.0f, b.getY() + 3.0f, 4.0f);
             nvgFill(nvg);
         }
-    } else if (cnv->shouldShowIndex()) {
+    } else if (cnv->shouldShowIndex() && cnv->isObjectTargeted(this)) {
         constexpr int halfHeight = 5;
 
         auto const text = std::to_string(cnv->objects.index_of(this));

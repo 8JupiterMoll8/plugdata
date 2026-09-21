@@ -123,6 +123,10 @@ public:
     bool shouldShowConnectionActivity() const;
     void setOverlayMask(int mask);
 
+    bool hasOverlayTargets() const;
+    bool isObjectTargeted(Object const* obj) const;
+    bool isConnectionTargeted(Connection const* c) const;
+
     void save(std::function<void()> const& nestedCallback = [] { });
     void saveAs(std::function<void()> const& nestedCallback = [] { });
 

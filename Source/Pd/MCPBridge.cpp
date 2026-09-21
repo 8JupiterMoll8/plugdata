@@ -257,21 +257,21 @@ static void mcpCtrlReceiverFree(McpCtrlReceiver* x)
 
 static void mcpCtrlReceiverBang(McpCtrlReceiver* x)
 {
-    if (x->bridge) x->bridge->mcpCtrlCapture(&s_bang, 0, nullptr);
+    if (x->bridge) x->bridge->mcpCtrlCapture(gensym("bang"), 0, nullptr);
 }
 
 static void mcpCtrlReceiverFloat(McpCtrlReceiver* x, t_float f)
 {
     if (!x->bridge) return;
     t_atom a; SETFLOAT(&a, f);
-    x->bridge->mcpCtrlCapture(&s_float, 1, &a);
+    x->bridge->mcpCtrlCapture(gensym("float"), 1, &a);
 }
 
 static void mcpCtrlReceiverSymbol(McpCtrlReceiver* x, t_symbol* s)
 {
     if (!x->bridge) return;
     t_atom a; SETSYMBOL(&a, s);
-    x->bridge->mcpCtrlCapture(&s_symbol, 1, &a);
+    x->bridge->mcpCtrlCapture(gensym("symbol"), 1, &a);
 }
 
 static void mcpCtrlReceiverList(McpCtrlReceiver* x, t_symbol* s, int argc, t_atom* argv)
@@ -6078,6 +6078,8 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             obj->setProperty("aiAnnotations", static_cast<bool>(mask & AIAnnotations));
             obj->setProperty("aiGhosts", static_cast<bool>(mask & AIGhosts));
             obj->setProperty("aiHud", static_cast<bool>(mask & AIHud));
+            obj->setProperty("hasTargets", proc ? proc->hasMcpOverlayTargets() : false);
+            obj->setProperty("targetedCount", proc ? static_cast<int>(proc->getMcpOverlayTargetsCount()) : 0);
 
             juce::String jsonStr = juce::JSON::toString(juce::var(obj.get()));
             bridge->sendReply("/pd/get_overlays/reply/" + correlationId, jsonStr);
@@ -6095,7 +6097,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         t_canvas* cnv = processor ? processor->getCanvasBySymbol(canvasName) : nullptr;
         if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
 
-        juce::MessageManager::callAsync([proc = processor, cnv, argStr, correlationId, bridge = this]() {
+        juce::MessageManager::callAsync([proc = processor, cnv, canvasName, argStr, correlationId, bridge = this]() {
             auto* cc = getOrCreateCanvasComponent(proc, cnv);
             if (!cc) {
                 bridge->sendReply("/pd/set_overlays/reply/" + correlationId, juce::String("{}"));
@@ -6126,6 +6128,25 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 updateBit("aiAnnotations", AIAnnotations);
                 updateBit("aiGhosts", AIGhosts);
                 updateBit("aiHud", AIHud);
+
+                if (proc) {
+                    if (o->hasProperty("clearTargets") && static_cast<bool>(o->getProperty("clearTargets"))) {
+                        proc->clearMcpOverlayTargets();
+                    } else if (o->hasProperty("targets")) {
+                        auto targetsVar = o->getProperty("targets");
+                        if (targetsVar.isArray()) {
+                            auto* arr = targetsVar.getArray();
+                            std::unordered_set<t_gobj*> targetGobjs;
+                            for (int i = 0; i < arr->size(); ++i) {
+                                juce::String id = (*arr)[i].toString();
+                                t_gobj* g = proc->resolveStableId(canvasName, id);
+                                if (g) targetGobjs.insert(g);
+                            }
+                            bool strict = o->hasProperty("strictCables") ? static_cast<bool>(o->getProperty("strictCables")) : false;
+                            proc->setMcpOverlayTargets(std::move(targetGobjs), strict);
+                        }
+                    }
+                }
             } else if (parsed.isInt() || parsed.isInt64()) {
                 currentMask = static_cast<int>(parsed);
             }
@@ -6148,6 +6169,8 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             obj->setProperty("aiAnnotations", static_cast<bool>(currentMask & AIAnnotations));
             obj->setProperty("aiGhosts", static_cast<bool>(currentMask & AIGhosts));
             obj->setProperty("aiHud", static_cast<bool>(currentMask & AIHud));
+            obj->setProperty("hasTargets", proc ? proc->hasMcpOverlayTargets() : false);
+            obj->setProperty("targetedCount", proc ? static_cast<int>(proc->getMcpOverlayTargetsCount()) : 0);
 
             juce::String jsonStr = juce::JSON::toString(juce::var(obj.get()));
             bridge->sendReply("/pd/set_overlays/reply/" + correlationId, jsonStr);
