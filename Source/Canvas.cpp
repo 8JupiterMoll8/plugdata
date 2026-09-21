@@ -978,7 +978,6 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
             // Distinct floating island: Big Title + Tool Tag + Direct Action Statement.
             bool const hasPrompt = hud.prompt.isNotEmpty();
             bool const hasReceipt = hud.receipt.isNotEmpty();
-            bool const hasDescription = hasPrompt || hasReceipt;
             bool const hasTool = hud.tool.isNotEmpty();
             bool const hasChapter = hud.chapter.isNotEmpty();
 
@@ -1020,45 +1019,13 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
 
             float currentY = cardY + 16.0f;
 
-            // 2. TOP ROW: BIG TITLE + TOOL BADGE
+            // 2. TOP ROW: BIG TITLE
             if (cardTitle.isNotEmpty()) {
                 nvgFontSize(nvg, 21.0f);
                 nvgFontFace(nvg, "Inter");
                 nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
                 nvgFillColor(nvg, nvgRGBA(255, 255, 255, 255));
                 nvgText(nvg, cardX + 22.0f, currentY, cardTitle.toRawUTF8(), nullptr);
-
-                // Right Tool / Latency Pill
-                juce::String rightMeta;
-                if (hasTool) rightMeta << hud.tool;
-                if (hud.latency.isNotEmpty()) {
-                    if (rightMeta.isNotEmpty()) rightMeta << " · ";
-                    rightMeta << hud.latency;
-                }
-
-                if (rightMeta.isNotEmpty()) {
-                    nvgFontSize(nvg, 13.5f);
-                    nvgFontFace(nvg, "Inter");
-                    float rb[4];
-                    nvgTextBounds(nvg, 0, 0, rightMeta.toRawUTF8(), nullptr, rb);
-                    float const badgeTw = rb[2] - rb[0];
-                    float const badgeW = badgeTw + 20.0f;
-                    constexpr float badgeH = 26.0f;
-                    float const badgeX = cardX + cardW - badgeW - 20.0f;
-                    float const badgeY = currentY - 2.0f;
-
-                    nvgBeginPath(nvg);
-                    nvgRoundedRect(nvg, badgeX, badgeY, badgeW, badgeH, 6.0f);
-                    nvgFillColor(nvg, nvgRGBA(74, 158, 255, 45));
-                    nvgFill(nvg);
-                    nvgStrokeColor(nvg, nvgRGBA(74, 158, 255, 180));
-                    nvgStrokeWidth(nvg, 1.2f);
-                    nvgStroke(nvg);
-
-                    nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-                    nvgFillColor(nvg, nvgRGBA(160, 225, 255, 255));
-                    nvgText(nvg, badgeX + badgeW * 0.5f, badgeY + badgeH * 0.5f, rightMeta.toRawUTF8(), nullptr);
-                }
 
                 currentY += 32.0f;
             }
