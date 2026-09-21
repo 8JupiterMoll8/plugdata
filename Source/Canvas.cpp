@@ -964,6 +964,115 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
     if (viewport) {
         reinterpret_cast<CanvasViewport*>(viewport.get())->render(nvg, viewport->getLocalArea(this, invalidRegion));
     }
+
+    // Cinematic Viewport HUD & Subtitle Overlay (Video & Tutorial Mode)
+    // Rendered in screen coordinates (unscaled/unpanned) — zero cord collisions.
+    if (pd) {
+        auto hud = pd->getMcpHud();
+        if (hud.active) {
+            NVGScopedState scopedHud(nvg);
+            float const vw = static_cast<float>(viewport ? viewport->getWidth() : getWidth());
+            float const vh = static_cast<float>(viewport ? viewport->getHeight() : getHeight());
+
+            // FLOATING STUDIO ACTION CARD (Zero header bar, no conversational clutter)
+            // Distinct floating island: Big Title + Tool Tag + Direct Action Statement.
+            bool const hasPrompt = hud.prompt.isNotEmpty();
+            bool const hasReceipt = hud.receipt.isNotEmpty();
+            bool const hasDescription = hasPrompt || hasReceipt;
+            bool const hasTool = hud.tool.isNotEmpty();
+            bool const hasChapter = hud.chapter.isNotEmpty();
+
+            // Card title (Chapter, action name, or tool)
+            juce::String cardTitle;
+            if (hasChapter) cardTitle = hud.chapter;
+            else if (hasTool) cardTitle = hud.tool;
+
+            // Direct action statement (no "Artist:" or "PlugTwin:" prefixes)
+            juce::String cardDesc;
+            if (hasPrompt) cardDesc = hud.prompt;
+            else if (hasReceipt) cardDesc = hud.receipt;
+
+            // Sizing: floating centered card with title-safe margins
+            constexpr float maxCardW = 820.0f;
+            float const cardW = jmin(vw - 48.0f, maxCardW);
+            float const cardX = (vw - cardW) * 0.5f;
+
+            float cardH = 54.0f;
+            if (cardTitle.isNotEmpty() && cardDesc.isNotEmpty()) {
+                cardH = 88.0f;
+            }
+
+            // Floats in bottom title-safe area (36px above bottom toolbar)
+            float const cardY = vh - cardH - 36.0f;
+
+            // 1. Frosted Deep Glass Background
+            nvgBeginPath(nvg);
+            nvgRoundedRect(nvg, cardX, cardY, cardW, cardH, 14.0f);
+            nvgFillColor(nvg, nvgRGBA(12, 14, 18, 246));
+            nvgFill(nvg);
+
+            // Specular luminous cyan border
+            nvgBeginPath(nvg);
+            nvgRoundedRect(nvg, cardX, cardY, cardW, cardH, 14.0f);
+            nvgStrokeColor(nvg, nvgRGBA(74, 158, 255, 175));
+            nvgStrokeWidth(nvg, 1.5f);
+            nvgStroke(nvg);
+
+            float currentY = cardY + 16.0f;
+
+            // 2. TOP ROW: BIG TITLE + TOOL BADGE
+            if (cardTitle.isNotEmpty()) {
+                nvgFontSize(nvg, 21.0f);
+                nvgFontFace(nvg, "Inter");
+                nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+                nvgFillColor(nvg, nvgRGBA(255, 255, 255, 255));
+                nvgText(nvg, cardX + 22.0f, currentY, cardTitle.toRawUTF8(), nullptr);
+
+                // Right Tool / Latency Pill
+                juce::String rightMeta;
+                if (hasTool) rightMeta << hud.tool;
+                if (hud.latency.isNotEmpty()) {
+                    if (rightMeta.isNotEmpty()) rightMeta << " · ";
+                    rightMeta << hud.latency;
+                }
+
+                if (rightMeta.isNotEmpty()) {
+                    nvgFontSize(nvg, 13.5f);
+                    nvgFontFace(nvg, "Inter");
+                    float rb[4];
+                    nvgTextBounds(nvg, 0, 0, rightMeta.toRawUTF8(), nullptr, rb);
+                    float const badgeTw = rb[2] - rb[0];
+                    float const badgeW = badgeTw + 20.0f;
+                    constexpr float badgeH = 26.0f;
+                    float const badgeX = cardX + cardW - badgeW - 20.0f;
+                    float const badgeY = currentY - 2.0f;
+
+                    nvgBeginPath(nvg);
+                    nvgRoundedRect(nvg, badgeX, badgeY, badgeW, badgeH, 6.0f);
+                    nvgFillColor(nvg, nvgRGBA(74, 158, 255, 45));
+                    nvgFill(nvg);
+                    nvgStrokeColor(nvg, nvgRGBA(74, 158, 255, 180));
+                    nvgStrokeWidth(nvg, 1.2f);
+                    nvgStroke(nvg);
+
+                    nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+                    nvgFillColor(nvg, nvgRGBA(160, 225, 255, 255));
+                    nvgText(nvg, badgeX + badgeW * 0.5f, badgeY + badgeH * 0.5f, rightMeta.toRawUTF8(), nullptr);
+                }
+
+                currentY += 32.0f;
+            }
+
+            // 3. BOTTOM ROW: DIRECT DESCRIPTION (Big 17px typography, no chat labels)
+            if (cardDesc.isNotEmpty()) {
+                nvgFontSize(nvg, 17.0f);
+                nvgFontFace(nvg, "Inter");
+                nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+                nvgFillColor(nvg, nvgRGBA(230, 235, 245, 255));
+                nvgText(nvg, cardX + 22.0f, currentY + 2.0f, cardDesc.toRawUTF8(), nullptr);
+            }
+        }
+    }
 }
 
 void Canvas::renderAllObjects(NVGcontext* nvg, Rectangle<int> const area)
@@ -2530,10 +2639,23 @@ void Canvas::encapsulateSelection(String const& subpatchName, SmallArray<Object*
     int i = 0;
     int numIn = 0;
     for (auto* iolet : usedIolets) {
-        auto type = String(iolet->isInlet ? "inlet" : "outlet") + String(iolet->isSignal ? "~" : "");
-        auto* targetEdge = targetIolets[iolet][0];
-        auto pos = targetEdge->object->getObjectBounds().getPosition();
-        newEdgeObjects += "#X obj " + String(pos.x) + " " + String(pos.y) + " " + type + ";\n";
+        bool isSignal = iolet->isSignal;
+        if (iolet->isInlet) {
+            // If all incoming wires from outside are control-rate, create [inlet], not [inlet~]
+            bool hasSignalInput = false;
+            for (auto* outEdge : targetIolets[iolet]) {
+                if (outEdge && outEdge->isSignal) {
+                    hasSignalInput = true;
+                    break;
+                }
+            }
+            isSignal = hasSignalInput;
+        }
+
+        auto type = String(iolet->isInlet ? "inlet" : "outlet") + String(isSignal ? "~" : "");
+        int xPos = 50 + (iolet->isInlet ? i : (i - numIn)) * 100;
+        int yPos = iolet->isInlet ? 20 : 400;
+        newEdgeObjects += "#X obj " + String(xPos) + " " + String(yPos) + " " + type + ";\n";
 
         int objIdx = selectedObjects.index_of(iolet->object);
         int ioletObjectIdx = selectedObjects.size() + i;

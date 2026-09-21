@@ -267,6 +267,20 @@ public:
     std::vector<McpRegion> mcpRegions;
     std::vector<McpRegion> getMcpRegions() const { juce::ScopedLock sl(mcpOverlayLock); return mcpRegions; }
 
+    // Cinematic Viewport HUD & Subtitle overlay for video capture & tutorials.
+    // Rendered in screen space (unscaled/unpanned) — zero cord collisions.
+    struct McpHud {
+        bool active = false;
+        juce::String chapter;   // e.g. "▶ CHAPTER 01: THE ZERO-LATENCY BUILD"
+        juce::String tool;      // e.g. "construct_patch_v4"
+        juce::String latency;   // e.g. "<1ms" or "4ms"
+        juce::String prompt;    // e.g. "Start me off with a warm analog saw"
+        juce::String receipt;   // e.g. "Wired 24dB ladder filter + [tanh~]"
+        juce::String telemetry; // e.g. "128 BPM · 48kHz"
+    };
+    McpHud mcpHud;
+    McpHud getMcpHud() const { juce::ScopedLock sl(mcpOverlayLock); return mcpHud; }
+
     // PRD overlay lifecycle: wipe ALL AI overlay state (annotations, regions, ghosts,
     // and per-object marks). Called when the active patch changes (new patch, open,
     // close) so overlay never leaks onto the next patch — and so the gobj*-keyed marks
@@ -279,6 +293,7 @@ public:
         mcpAnnotations.clear();
         mcpRegions.clear();
         mcpAiOverlay.clear();
+        mcpHud = McpHud();
     }
 
     // Guards mcpAiOverlay / mcpGhosts / mcpAnnotations: written on the message

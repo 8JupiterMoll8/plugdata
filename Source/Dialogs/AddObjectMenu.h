@@ -217,6 +217,7 @@ public:
                 { Icons::GlyphMessbox, "messbox", "ELSE Message box", "Messbox", OtherObject },
                 { Icons::GlyphBicoeff, "#X obj 0 0 bicoeff 450 150 peaking", "Bicoeff generator", "Bicoeff", OtherObject },
                 { Icons::GlyphVUMeter, "vu", "(@keypress) VU meter", "VU Meter", NewVUMeter },
+                { Icons::GlyphFunction, "#X obj 0 0 particlepad 200 200 24", "2D Particle Pad", "Particle Pad", OtherObject },
             } },
         { "General",
             {

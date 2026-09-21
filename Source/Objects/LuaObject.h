@@ -32,30 +32,46 @@ class LuaObject final : public ObjectBase
     UnorderedSegmentedMap<int, NVGFramebuffer> framebuffers;
 
     struct LuaGuiMessage {
-        t_symbol* symbol;
+        int layer = -1;
+        t_symbol* symbol = nullptr;
         SmallArray<t_atom> data;
-        int size;
+        int size = 0;
 
-        LuaGuiMessage() { }
+        LuaGuiMessage() = default;
 
-        LuaGuiMessage(t_symbol* sym, int const argc, t_atom* argv)
-            : symbol(sym)
+        LuaGuiMessage(int const l, t_symbol* sym, int const argc, t_atom* argv)
+            : layer(l)
+            , symbol(sym)
+            , size(argc)
         {
-            data = SmallArray<t_atom>(argv, argv + argc);
-            size = argc;
+            if (argc > 0 && argv != nullptr) {
+                data = SmallArray<t_atom>(argv, argv + argc);
+            }
         }
 
         LuaGuiMessage(LuaGuiMessage const& other) noexcept
+            : layer(other.layer)
+            , symbol(other.symbol)
+            , data(other.data)
+            , size(other.size)
         {
-            symbol = other.symbol;
-            size = other.size;
-            data = other.data;
+        }
+
+        LuaGuiMessage(LuaGuiMessage&& other) noexcept
+            : layer(other.layer)
+            , symbol(other.symbol)
+            , data(std::move(other.data))
+            , size(other.size)
+        {
+            other.size = 0;
+            other.symbol = nullptr;
+            other.layer = -1;
         }
 
         LuaGuiMessage& operator=(LuaGuiMessage const& other) noexcept
         {
-            // Check for self-assignment
             if (this != &other) {
+                layer = other.layer;
                 symbol = other.symbol;
                 size = other.size;
                 data = other.data;
@@ -63,10 +79,25 @@ class LuaObject final : public ObjectBase
 
             return *this;
         }
+
+        LuaGuiMessage& operator=(LuaGuiMessage&& other) noexcept
+        {
+            if (this != &other) {
+                layer = other.layer;
+                symbol = other.symbol;
+                size = other.size;
+                data = std::move(other.data);
+                other.size = 0;
+                other.symbol = nullptr;
+                other.layer = -1;
+            }
+
+            return *this;
+        }
     };
 
     UnorderedSegmentedMap<int, HeapArray<LuaGuiMessage>> guiCommandBuffer;
-    UnorderedSegmentedMap<int, moodycamel::ReaderWriterQueue<LuaGuiMessage>> guiMessageQueue;
+    moodycamel::ReaderWriterQueue<LuaGuiMessage> guiMessageQueue;
 
     static inline auto allDrawTargets = UnorderedMap<t_pdlua*, SmallArray<LuaObject*>>();
 
@@ -76,7 +107,9 @@ public:
     {
         if (auto pdlua = ptr.get<t_pdlua>()) {
             pdlua->gfx.plugdata_draw_callback = &drawCallback;
+            pd->lockAudioThread();
             allDrawTargets[pdlua.get()].add(this);
+            pd->unlockAudioThread();
 
             libpd_set_instance(&pd_maininstance);
             pdluaxSymbol = gensym("pdluax");
@@ -90,8 +123,15 @@ public:
     ~LuaObject() override
     {
         pd->lockAudioThread();
-        auto& listeners = allDrawTargets[ptr.getRawUnchecked<t_pdlua>()];
-        listeners.erase(std::ranges::remove(listeners, this).begin(), listeners.end());
+        auto* pdlua = ptr.getRawUnchecked<t_pdlua>();
+        auto const it = allDrawTargets.find(pdlua);
+        if (it != allDrawTargets.end()) {
+            auto& listeners = it->second;
+            listeners.erase(std::ranges::remove(listeners, this).begin(), listeners.end());
+            if (listeners.empty()) {
+                allDrawTargets.erase(it);
+            }
+        }
         pd->unlockAudioThread();
 
         zoomScale.removeListener(this);
@@ -187,8 +227,16 @@ public:
         });
     }
 
+    double lastMouseDragTime = 0.0;
+    double lastMouseMoveTime = 0.0;
+
     void mouseDrag(MouseEvent const& e) override
     {
+        auto const now = Time::getMillisecondCounterHiRes();
+        if (now - lastMouseDragTime < 16.0)
+            return;
+        lastMouseDragTime = now;
+
         pd->enqueueFunctionAsync<t_pdlua>(ptr, [x = e.x, y = e.y](t_pdlua* pdlua) {
             sys_lock();
             pdlua_gfx_mouse_drag(pdlua, x, y);
@@ -198,6 +246,11 @@ public:
 
     void mouseMove(MouseEvent const& e) override
     {
+        auto const now = Time::getMillisecondCounterHiRes();
+        if (now - lastMouseMoveTime < 16.0)
+            return;
+        lastMouseMoveTime = now;
+
         pd->enqueueFunctionAsync<t_pdlua>(ptr, [x = e.x, y = e.y](t_pdlua* pdlua) {
             sys_lock();
             pdlua_gfx_mouse_move(pdlua, x, y);
@@ -323,7 +376,7 @@ public:
             break;
         }
         case hash("lua_stroke_line"): {
-            if (argc >= 4) {
+            if (argc >= 5) {
                 float const x1 = atom_getfloat(argv);
                 float const y1 = atom_getfloat(argv + 1);
                 float const x2 = atom_getfloat(argv + 2);
@@ -339,7 +392,7 @@ public:
             break;
         }
         case hash("lua_fill_ellipse"): {
-            if (argc >= 3) {
+            if (argc >= 4) {
                 float const x = atom_getfloat(argv);
                 float const y = atom_getfloat(argv + 1);
                 float const w = atom_getfloat(argv + 2);
@@ -352,7 +405,7 @@ public:
             break;
         }
         case hash("lua_stroke_ellipse"): {
-            if (argc >= 4) {
+            if (argc >= 5) {
                 float const x = atom_getfloat(argv);
                 float const y = atom_getfloat(argv + 1);
                 float const w = atom_getfloat(argv + 2);
@@ -391,7 +444,7 @@ public:
             break;
         }
         case hash("lua_fill_rounded_rect"): {
-            if (argc >= 4) {
+            if (argc >= 5) {
                 float const x = atom_getfloat(argv);
                 float const y = atom_getfloat(argv + 1);
                 float const w = atom_getfloat(argv + 2);
@@ -420,7 +473,7 @@ public:
             break;
         }
         case hash("lua_draw_line"): {
-            if (argc >= 4) {
+            if (argc >= 5) {
                 float const x1 = atom_getfloat(argv);
                 float const y1 = atom_getfloat(argv + 1);
                 float const x2 = atom_getfloat(argv + 2);
@@ -436,7 +489,7 @@ public:
             break;
         }
         case hash("lua_draw_text"): {
-            if (argc >= 4) {
+            if (argc >= 5) {
                 float const x = atom_getfloat(argv + 1);
                 float const y = atom_getfloat(argv + 2);
                 float const w = atom_getfloat(argv + 3);
@@ -450,32 +503,36 @@ public:
             break;
         }
         case hash("lua_fill_path"): {
-            nvgBeginPath(nvg);
-            nvgMoveTo(nvg, atom_getfloat(argv), atom_getfloat(argv + 1));
-            for (int i = 1; i < argc / 2; i++) {
-                float const x = atom_getfloat(argv + i * 2);
-                float const y = atom_getfloat(argv + i * 2 + 1);
-                nvgLineTo(nvg, x, y);
-            }
+            if (argc >= 2) {
+                nvgBeginPath(nvg);
+                nvgMoveTo(nvg, atom_getfloat(argv), atom_getfloat(argv + 1));
+                for (int i = 1; i < argc / 2; i++) {
+                    float const x = atom_getfloat(argv + i * 2);
+                    float const y = atom_getfloat(argv + i * 2 + 1);
+                    nvgLineTo(nvg, x, y);
+                }
 
-            nvgClosePath(nvg);
-            nvgFill(nvg);
+                nvgClosePath(nvg);
+                nvgFill(nvg);
+            }
             break;
         }
         case hash("lua_stroke_path"): {
-            nvgBeginPath(nvg);
-            auto const strokeWidth = atom_getfloat(argv);
+            if (argc >= 3) {
+                nvgBeginPath(nvg);
+                auto const strokeWidth = atom_getfloat(argv);
 
-            int const numPoints = (argc - 1) / 2;
-            nvgMoveTo(nvg, atom_getfloat(argv + 1), atom_getfloat(argv + 2));
-            for (int i = 1; i < numPoints; i++) {
-                float const x = atom_getfloat(argv + i * 2 + 1);
-                float const y = atom_getfloat(argv + i * 2 + 2);
-                nvgLineTo(nvg, x, y);
+                int const numPoints = (argc - 1) / 2;
+                nvgMoveTo(nvg, atom_getfloat(argv + 1), atom_getfloat(argv + 2));
+                for (int i = 1; i < numPoints; i++) {
+                    float const x = atom_getfloat(argv + i * 2 + 1);
+                    float const y = atom_getfloat(argv + i * 2 + 2);
+                    nvgLineTo(nvg, x, y);
+                }
+
+                nvgStrokeWidth(nvg, strokeWidth);
+                nvgStroke(nvg);
             }
-
-            nvgStrokeWidth(nvg, strokeWidth);
-            nvgStroke(nvg);
             break;
         }
         case hash("lua_fill_all"): {
@@ -518,28 +575,25 @@ public:
     void updateFramebuffers(NVGcontext* nvg) override
     {
         LuaGuiMessage guiMessage;
-        for (auto& [layer, layerQueue] : guiMessageQueue) {
-            if (layer == -1) // non-layer related messages
+        while (guiMessageQueue.try_dequeue(guiMessage)) {
+            if (guiMessage.layer == -1) // non-layer related messages
             {
-                while (layerQueue.try_dequeue(guiMessage)) {
-                    handleGuiMessage(nvg, layer, guiMessage.symbol, guiMessage.size, guiMessage.data.data());
-                }
-                continue;
+                handleGuiMessage(nvg, guiMessage.layer, guiMessage.symbol, guiMessage.size, guiMessage.data.data());
+            } else {
+                guiCommandBuffer[guiMessage.layer].add(std::move(guiMessage));
             }
+        }
 
-            while (layerQueue.try_dequeue(guiMessage)) {
-                guiCommandBuffer[layer].add(guiMessage);
-            }
-
+        for (auto& [layer, cmdBuf] : guiCommandBuffer) {
             auto const* startMesage = pd->generateSymbol("lua_start_paint");
             auto const* endMessage = pd->generateSymbol("lua_end_paint");
 
             int startIdx = -1, endIdx = -1;
             bool updateScene = false;
-            for (int i = guiCommandBuffer[layer].size() - 1; i >= 0; i--) {
-                if (guiCommandBuffer[layer][i].symbol == startMesage)
+            for (int i = cmdBuf.size() - 1; i >= 0; i--) {
+                if (cmdBuf[i].symbol == startMesage)
                     startIdx = i;
-                if (guiCommandBuffer[layer][i].symbol == endMessage)
+                if (cmdBuf[i].symbol == endMessage)
                     endIdx = i + 1;
 
                 if (startIdx != -1 && endIdx != -1) {
@@ -551,10 +605,10 @@ public:
             if (updateScene) {
                 if (endIdx > startIdx) {
                     for (int i = startIdx; i < endIdx; i++) {
-                        handleGuiMessage(nvg, layer, guiCommandBuffer[layer][i].symbol, guiCommandBuffer[layer][i].size, guiCommandBuffer[layer][i].data.data());
+                        handleGuiMessage(nvg, layer, cmdBuf[i].symbol, cmdBuf[i].size, cmdBuf[i].data.data());
                     }
                 }
-                guiCommandBuffer[layer].erase(guiCommandBuffer[layer].begin(), guiCommandBuffer[layer].begin() + endIdx);
+                cmdBuf.erase(cmdBuf.begin(), cmdBuf.begin() + endIdx);
             }
 
             if (isSelected != object->isSelected() || !framebuffers[layer].isValid()) {
@@ -566,8 +620,14 @@ public:
 
     static void drawCallback(void* target, int const layer, t_symbol* sym, int argc, t_atom* argv)
     {
-        for (auto* object : allDrawTargets[static_cast<t_pdlua*>(target)]) {
-            object->guiMessageQueue[layer].enqueue({ sym, argc, argv });
+        if (!target)
+            return;
+
+        auto const it = allDrawTargets.find(static_cast<t_pdlua*>(target));
+        if (it != allDrawTargets.end()) {
+            for (auto* object : it->second) {
+                object->guiMessageQueue.enqueue(LuaGuiMessage(layer, sym, argc, argv));
+            }
         }
     }
 

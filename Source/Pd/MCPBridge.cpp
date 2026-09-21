@@ -4989,7 +4989,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             // thread (fire-and-forget); TS verifies via `tabs`/census.
             sendReply(replyAddr, juce::String("opening: " + srcFile.getFullPathName()));
 
-            processor->enqueueFunctionAsync(
+            juce::MessageManager::callAsync(
                 [p = processor, fileStr = srcFile.getFullPathName(), sidecar]() {
                 bool opened = false;
                 for (auto* editor : p->getEditors()) {
@@ -5094,7 +5094,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         auto correlationId = msg.size() > 0 ? getArgString(msg[0]) : "0";
         juce::String replyAddr = "/pd/list_tabs/reply/" + correlationId;
 
-        processor->enqueueFunctionAsync([p = processor, bridge = this, replyAddr]() {
+        juce::MessageManager::callAsync([p = processor, bridge = this, replyAddr]() {
             juce::Array<juce::var> list;
             for (auto* editor : p->getEditors()) {
                 if (!editor) continue;
@@ -5131,7 +5131,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : "0";
         juce::String replyAddr = "/pd/focus_tab/reply/" + correlationId;
 
-        processor->enqueueFunctionAsync([p = processor, bridge = this, target, replyAddr]() {
+        juce::MessageManager::callAsync([p = processor, bridge = this, target, replyAddr]() {
             juce::File f(target);
             for (auto* editor : p->getEditors()) {
                 if (!editor) continue;
@@ -5162,7 +5162,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         auto correlationId = msg.size() > 2 ? getArgString(msg[2]) : "0";
         juce::String replyAddr = "/pd/close_tab/reply/" + correlationId;
 
-        processor->enqueueFunctionAsync([p = processor, bridge = this, target, force, replyAddr]() {
+        juce::MessageManager::callAsync([p = processor, bridge = this, target, force, replyAddr]() {
             juce::File f(target);
             for (auto* editor : p->getEditors()) {
                 if (!editor) continue;
@@ -5948,6 +5948,43 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             }
             if (auto* cc = getOrCreateCanvasComponent(proc, cnv)) cc->repaint();
             bridge->sendReply("/pd/ai_region/reply/" + correlationId, static_cast<float>(proc->mcpRegions.size()));
+        });
+        return;
+    }
+
+    // /pd/ai_hud <canvas> <corrId> <jsonObject>
+    //   active: bool, chapter: string, tool: string, latency: string, prompt: string, receipt: string, telemetry: string
+    // Reply: /pd/ai_hud/reply/<corrId> 1.0f
+    if (action == "ai_hud") {
+        if (msg.size() < 3 || !processor) {
+            sendReply("/pd/ai_hud/reply/invalid", 0.0f);
+            return;
+        }
+        auto canvasName = normalizeCanvas(getArgString(msg[0]));
+        auto correlationId = getArgString(msg[1]);
+        auto jsonStr = getArgString(msg[2]);
+
+        t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+        if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
+
+        auto parsed = juce::JSON::parse(jsonStr);
+
+        juce::MessageManager::callAsync([proc = processor, cnv, correlationId, bridge = this, parsed]() {
+            juce::ScopedLock overlaySl(proc->mcpOverlayLock);
+            proc->mcpHud = PluginProcessor::McpHud();
+            if (auto* o = parsed.getDynamicObject()) {
+                proc->mcpHud.active = o->hasProperty("active") ? static_cast<bool>(o->getProperty("active")) : true;
+                proc->mcpHud.chapter = o->getProperty("chapter").toString();
+                proc->mcpHud.tool = o->getProperty("tool").toString();
+                proc->mcpHud.latency = o->getProperty("latency").toString();
+                proc->mcpHud.prompt = o->getProperty("prompt").toString();
+                proc->mcpHud.receipt = o->getProperty("receipt").toString();
+                proc->mcpHud.telemetry = o->getProperty("telemetry").toString();
+            }
+            if (cnv) {
+                if (auto* cc = getOrCreateCanvasComponent(proc, cnv)) cc->repaint();
+            }
+            bridge->sendReply("/pd/ai_hud/reply/" + correlationId, proc->mcpHud.active ? 1.0f : 0.0f);
         });
         return;
     }
@@ -8639,6 +8676,8 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
         reply.addArgument(juce::String("ai_annotate"));
         // PRD overlay: titled regions grouping objects (structure at a glance)
         reply.addArgument(juce::String("ai_region"));
+        // Cinematic Viewport HUD & Subtitle overlay for video/tutorial capture
+        reply.addArgument(juce::String("ai_hud"));
         // Labeled screenshots: GUI-widget name chips painted on the bitmap only
         reply.addArgument(juce::String("screenshot_labels"));
         // Offline faster-than-realtime render to WAV (background DSP bake)
