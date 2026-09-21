@@ -115,8 +115,13 @@ public:
     bool shouldShowObjectActivity() const;
     bool shouldShowIndex() const;
     bool shouldShowAIState() const;
+    bool shouldShowAIRegions() const;
+    bool shouldShowAIAnnotations() const;
+    bool shouldShowAIGhosts() const;
+    bool shouldShowAIHud() const;
     bool shouldShowConnectionDirection() const;
     bool shouldShowConnectionActivity() const;
+    void setOverlayMask(int mask);
 
     void save(std::function<void()> const& nestedCallback = [] { });
     void saveAs(std::function<void()> const& nestedCallback = [] { });
@@ -237,6 +242,10 @@ public:
     bool showObjectActivity : 1 = false;
     bool showIndex : 1 = false;
     bool showAiState : 1 = false;
+    bool showAiRegions : 1 = true;
+    bool showAiAnnotations : 1 = true;
+    bool showAiGhosts : 1 = true;
+    bool showAiHud : 1 = true;
     bool showConnectionDirection : 1 = false;
     bool showConnectionActivity : 1 = false;
 

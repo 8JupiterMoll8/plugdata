@@ -644,7 +644,7 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
     currentRenderArea = invalidRegion;
 
     // PRD overlay: titled regions drawn BEHIND the objects (structure at a glance).
-    if (pd && !pd->getMcpRegions().empty()) {
+    if (pd && shouldShowAIRegions() && !pd->getMcpRegions().empty()) {
         for (auto const& r : pd->getMcpRegions()) {
             NVGScopedState scopedRegion(nvg);
             float const rx = canvasOrigin.x + r.x, ry = canvasOrigin.y + r.y;
@@ -816,7 +816,7 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
 
     // PRD overlay: short in-place AI annotations — a translucent tag near the
     // object it explains, so the reason lives on the patch, not in chat.
-    if (pd && !pd->getMcpAnnotations().empty()) {
+    if (pd && shouldShowAIAnnotations() && !pd->getMcpAnnotations().empty()) {
         int noteIdx = 0;
         for (auto const& a : pd->getMcpAnnotations()) {
             if (a.text.isEmpty()) continue;
@@ -886,7 +886,7 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
     }
     // PRD overlay: ghost/preview of PROPOSED (uncommitted) changes. Drawn above
     // the patch, never part of it — the artist sees the change before it's real.
-    if (pd && !pd->getMcpGhosts().empty()) {
+    if (pd && shouldShowAIGhosts() && !pd->getMcpGhosts().empty()) {
         for (auto const& g : pd->getMcpGhosts()) {
             NVGScopedState scopedGhost(nvg);
             if (g.kind == 0) {
@@ -970,7 +970,7 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
     // Rendered in screen coordinates (unscaled/unpanned) — zero cord collisions.
     if (pd) {
         auto hud = pd->getMcpHud();
-        if (hud.active) {
+        if (hud.active && shouldShowAIHud()) {
             NVGScopedState scopedHud(nvg);
             float const vw = static_cast<float>(viewport ? viewport->getWidth() : getWidth());
             float const vh = static_cast<float>(viewport ? viewport->getHeight() : getHeight());
@@ -1144,6 +1144,26 @@ bool Canvas::shouldShowAIState() const
     return showAiState && !presentationMode.getValue();
 }
 
+bool Canvas::shouldShowAIRegions() const
+{
+    return showAiRegions && !presentationMode.getValue();
+}
+
+bool Canvas::shouldShowAIAnnotations() const
+{
+    return showAiAnnotations && !presentationMode.getValue();
+}
+
+bool Canvas::shouldShowAIGhosts() const
+{
+    return showAiGhosts && !presentationMode.getValue();
+}
+
+bool Canvas::shouldShowAIHud() const
+{
+    return showAiHud && !presentationMode.getValue();
+}
+
 bool Canvas::shouldShowConnectionDirection() const
 {
     return showConnectionDirection;
@@ -1152,6 +1172,16 @@ bool Canvas::shouldShowConnectionDirection() const
 bool Canvas::shouldShowConnectionActivity() const
 {
     return showConnectionActivity;
+}
+
+void Canvas::setOverlayMask(int mask)
+{
+    auto overlaysTree = SettingsFile::getInstance()->getValueTree().getChildWithName("Overlays");
+    if (overlaysTree.isValid()) {
+        auto const key = (locked.getValue() || commandLocked.getValue()) ? "lock" : "edit";
+        overlaysTree.setProperty(key, mask, nullptr);
+    }
+    updateOverlays();
 }
 
 int Canvas::getOverlays() const
@@ -1186,6 +1216,10 @@ void Canvas::updateOverlays()
     showObjectActivity = overlayState & ActivationState;
     showIndex = overlayState & Index;
     showAiState = overlayState & AIState;
+    showAiRegions = overlayState & AIRegions;
+    showAiAnnotations = overlayState & AIAnnotations;
+    showAiGhosts = overlayState & AIGhosts;
+    showAiHud = overlayState & AIHud;
     showConnectionDirection = overlayState & Direction;
     showConnectionActivity = overlayState & ConnectionActivity;
 

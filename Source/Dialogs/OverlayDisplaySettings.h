@@ -128,17 +128,26 @@ public:
         connectionLabel.setFont(Fonts::getSemiBoldFont().withHeight(14));
         addAndMakeVisible(connectionLabel);
 
+        aiLabel.setText("AI Copilot", dontSendNotification);
+        aiLabel.setFont(Fonts::getSemiBoldFont().withHeight(14));
+        addAndMakeVisible(aiLabel);
+
         canvas.add(new OverlaySelector(overlayTree, Origin, "origin", "Origin", "Origin point of canvas"));
         canvas.add(new OverlaySelector(overlayTree, Border, "border", "Border", "Plugin / window workspace size"));
 
         object.add(new OverlaySelector(overlayTree, ActivationState, "activation_state", "Activity", "Object activity"));
         object.add(new OverlaySelector(overlayTree, Index, "index", "Index", "Object index in patch"));
-        object.add(new OverlaySelector(overlayTree, AIState, "ai_state", "AI", "AI change markers (changed / proposed / error)"));
+        object.add(new OverlaySelector(overlayTree, AIState, "ai_state", "Markers", "AI change markers (changed / proposed / error)"));
 
         connection.add(new OverlaySelector(overlayTree, ConnectionActivity, "connection_activity", "Activity", "Connection activity"));
         connection.add(new OverlaySelector(overlayTree, Direction, "direction", "Direction", "Direction of connections"));
         connection.add(new OverlaySelector(overlayTree, Order, "order", "Order", "Trigger order of multiple outlets"));
         connection.add(new OverlaySelector(overlayTree, Behind, "behind", "Behind", "Connection cables behind objects"));
+
+        aiGroup.add(new OverlaySelector(overlayTree, AIRegions, "ai_regions", "Regions", "Titled modular bay backplates"));
+        aiGroup.add(new OverlaySelector(overlayTree, AIAnnotations, "ai_annotations", "Notes", "In-canvas explanation tags"));
+        aiGroup.add(new OverlaySelector(overlayTree, AIGhosts, "ai_ghosts", "Ghosts", "Proposed uncommitted changes"));
+        aiGroup.add(new OverlaySelector(overlayTree, AIHud, "ai_hud", "Cinema HUD", "Cinema subtitle & status bar"));
 
         debugModeValue.referTo(SettingsFile::getInstance()->getPropertyAsValue("debug_connections"));
         debugModeValue.addListener(this);
@@ -149,13 +158,14 @@ public:
         groups[0] = &canvas;
         groups[1] = &object;
         groups[2] = &connection;
+        groups[3] = &aiGroup;
 
         for (auto const& group : groups) {
             for (auto const& item : *group) {
                 addAndMakeVisible(item);
             }
         }
-        setSize(335, 200);
+        setSize(500, 220);
     }
 
     void valueChanged(Value& v) override
@@ -169,31 +179,38 @@ public:
 
     void resized() override
     {
-        auto bounds = getLocalBounds().reduced(4, 0).withTrimmedTop(24);
+        auto bounds = getLocalBounds().reduced(6, 0).withTrimmedTop(24);
 
         constexpr auto labelHeight = 26;
         constexpr auto itemHeight = 28;
 
-        auto leftSide = bounds.removeFromLeft(bounds.proportionOfWidth(0.5f)).withTrimmedRight(4);
-        auto rightSide = bounds.withTrimmedLeft(4);
+        auto colWidth = bounds.getWidth() / 3;
+        auto col1 = bounds.removeFromLeft(colWidth).withTrimmedRight(4);
+        auto col2 = bounds.removeFromLeft(colWidth).withTrimmedLeft(2).withTrimmedRight(2);
+        auto col3 = bounds.withTrimmedLeft(4);
 
-        canvasLabel.setBounds(leftSide.removeFromTop(labelHeight));
+        canvasLabel.setBounds(col1.removeFromTop(labelHeight));
         for (auto const& item : canvas) {
-            item->setBounds(leftSide.removeFromTop(itemHeight));
+            item->setBounds(col1.removeFromTop(itemHeight));
         }
 
-        leftSide.removeFromTop(2);
-        objectLabel.setBounds(leftSide.removeFromTop(labelHeight));
+        col1.removeFromTop(2);
+        objectLabel.setBounds(col1.removeFromTop(labelHeight));
         for (auto const& item : object) {
-            item->setBounds(leftSide.removeFromTop(itemHeight));
+            item->setBounds(col1.removeFromTop(itemHeight));
         }
 
-        connectionLabel.setBounds(rightSide.removeFromTop(labelHeight));
+        connectionLabel.setBounds(col2.removeFromTop(labelHeight));
         for (auto const& item : connection) {
-            item->setBounds(rightSide.removeFromTop(itemHeight));
+            item->setBounds(col2.removeFromTop(itemHeight));
         }
 
-        connectionDebugToggle->setBounds(rightSide.removeFromTop(itemHeight));
+        connectionDebugToggle->setBounds(col2.removeFromTop(itemHeight));
+
+        aiLabel.setBounds(col3.removeFromTop(labelHeight));
+        for (auto const& item : aiGroup) {
+            item->setBounds(col3.removeFromTop(itemHeight));
+        }
     }
 
     void paint(Graphics& g) override
@@ -206,6 +223,7 @@ public:
         g.drawLine(4, 24, getWidth() - 8, 24);
 
         for (auto const& group : groups) {
+            if (group->isEmpty()) continue;
             auto groupBounds = group->getFirst()->getBounds().getUnion(group->getLast()->getBounds());
 
             bool const isConnectionGroup = group == &connection;
@@ -248,13 +266,14 @@ public:
 private:
     static inline bool isShowing = false;
 
-    Label canvasLabel, objectLabel, connectionLabel;
+    Label canvasLabel, objectLabel, connectionLabel, aiLabel;
 
-    StackArray<OwnedArray<OverlaySelector>*, 3> groups;
+    StackArray<OwnedArray<OverlaySelector>*, 4> groups;
 
     OwnedArray<OverlaySelector> canvas;
     OwnedArray<OverlaySelector> object;
     OwnedArray<OverlaySelector> connection;
+    OwnedArray<OverlaySelector> aiGroup;
 
     Value debugModeValue;
     std::unique_ptr<PropertiesPanel::BoolComponent> connectionDebugToggle;

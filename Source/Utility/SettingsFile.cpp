@@ -507,11 +507,12 @@ void SettingsFile::initialiseThemesTree()
 
 void SettingsFile::initialiseOverlayTree()
 {
+    int const aiDefaultFlags = AIState | AIRegions | AIAnnotations | AIGhosts | AIHud;
     UnorderedMap<String, int> defaults = {
-        { "edit", Origin | ActivationState | AIState },
-        { "lock", Behind | AIState },
+        { "edit", Origin | ActivationState | aiDefaultFlags },
+        { "lock", Behind | aiDefaultFlags },
         { "run", None },
-        { "alt", Origin | Border | ActivationState | Index | Coordinate | Order | Direction | AIState }
+        { "alt", Origin | Border | ActivationState | Index | Coordinate | Order | Direction | aiDefaultFlags }
     };
 
     auto overlayTree = settingsTree.getChildWithName("Overlays");
@@ -524,13 +525,12 @@ void SettingsFile::initialiseOverlayTree()
         }
 
         settingsTree.appendChild(overlayTree, nullptr);
-    } else if (!overlayTree.hasProperty("ai_seeded")) {
-        // PRD overlay: seed the AI overlay ON once for existing installs, then
-        // respect the user's toggle afterwards ("Don't Make Me Think").
+    } else if (!overlayTree.hasProperty("ai_granular_seeded")) {
+        // Seed granular AI overlay flags ON once for existing installs
         for (auto const& mode : { String("edit"), String("lock"), String("alt") }) {
-            overlayTree.setProperty(mode, static_cast<int>(overlayTree.getProperty(mode)) | AIState, nullptr);
+            overlayTree.setProperty(mode, static_cast<int>(overlayTree.getProperty(mode)) | aiDefaultFlags, nullptr);
         }
-        overlayTree.setProperty("ai_seeded", 1, nullptr);
+        overlayTree.setProperty("ai_granular_seeded", 1, nullptr);
     }
 }
 

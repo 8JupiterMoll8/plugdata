@@ -6050,6 +6050,111 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         return;
     }
 
+    // /pd/get_overlays <canvas> <corrId>
+    // Reply: /pd/get_overlays/reply/<corrId> <jsonState>
+    if (action == "get_overlays") {
+        auto canvasName    = normalizeCanvas(getArgString(msg[0]));
+        auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : "0";
+
+        t_canvas* cnv = processor ? processor->getCanvasBySymbol(canvasName) : nullptr;
+        if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
+
+        juce::MessageManager::callAsync([proc = processor, cnv, correlationId, bridge = this]() {
+            auto* cc = getOrCreateCanvasComponent(proc, cnv);
+            int mask = cc ? cc->getOverlays() : 0;
+            juce::DynamicObject::Ptr obj = new juce::DynamicObject();
+            obj->setProperty("mask", mask);
+            obj->setProperty("origin", static_cast<bool>(mask & Origin));
+            obj->setProperty("border", static_cast<bool>(mask & Border));
+            obj->setProperty("index", static_cast<bool>(mask & Index));
+            obj->setProperty("coordinate", static_cast<bool>(mask & Coordinate));
+            obj->setProperty("objectActivity", static_cast<bool>(mask & ActivationState));
+            obj->setProperty("connectionActivity", static_cast<bool>(mask & ConnectionActivity));
+            obj->setProperty("order", static_cast<bool>(mask & Order));
+            obj->setProperty("direction", static_cast<bool>(mask & Direction));
+            obj->setProperty("behind", static_cast<bool>(mask & Behind));
+            obj->setProperty("aiState", static_cast<bool>(mask & AIState));
+            obj->setProperty("aiRegions", static_cast<bool>(mask & AIRegions));
+            obj->setProperty("aiAnnotations", static_cast<bool>(mask & AIAnnotations));
+            obj->setProperty("aiGhosts", static_cast<bool>(mask & AIGhosts));
+            obj->setProperty("aiHud", static_cast<bool>(mask & AIHud));
+
+            juce::String jsonStr = juce::JSON::toString(juce::var(obj.get()));
+            bridge->sendReply("/pd/get_overlays/reply/" + correlationId, jsonStr);
+        });
+        return;
+    }
+
+    // /pd/set_overlays <canvas> <corrId> <jsonArgsOrBitmask>
+    // Reply: /pd/set_overlays/reply/<corrId> <jsonState>
+    if (action == "set_overlays") {
+        auto canvasName    = normalizeCanvas(getArgString(msg[0]));
+        auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : "0";
+        auto argStr        = msg.size() > 2 ? getArgString(msg[2]) : "{}";
+
+        t_canvas* cnv = processor ? processor->getCanvasBySymbol(canvasName) : nullptr;
+        if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
+
+        juce::MessageManager::callAsync([proc = processor, cnv, argStr, correlationId, bridge = this]() {
+            auto* cc = getOrCreateCanvasComponent(proc, cnv);
+            if (!cc) {
+                bridge->sendReply("/pd/set_overlays/reply/" + correlationId, juce::String("{}"));
+                return;
+            }
+            int currentMask = cc->getOverlays();
+            auto parsed = juce::JSON::parse(argStr);
+            if (parsed.isObject()) {
+                auto* o = parsed.getDynamicObject();
+                auto updateBit = [&](const char* prop, int flag) {
+                    if (o->hasProperty(prop)) {
+                        bool enable = static_cast<bool>(o->getProperty(prop));
+                        if (enable) currentMask |= flag;
+                        else currentMask &= ~flag;
+                    }
+                };
+                updateBit("origin", Origin);
+                updateBit("border", Border);
+                updateBit("index", Index);
+                updateBit("coordinate", Coordinate);
+                updateBit("objectActivity", ActivationState);
+                updateBit("connectionActivity", ConnectionActivity);
+                updateBit("order", Order);
+                updateBit("direction", Direction);
+                updateBit("behind", Behind);
+                updateBit("aiState", AIState);
+                updateBit("aiRegions", AIRegions);
+                updateBit("aiAnnotations", AIAnnotations);
+                updateBit("aiGhosts", AIGhosts);
+                updateBit("aiHud", AIHud);
+            } else if (parsed.isInt() || parsed.isInt64()) {
+                currentMask = static_cast<int>(parsed);
+            }
+
+            cc->setOverlayMask(currentMask);
+
+            juce::DynamicObject::Ptr obj = new juce::DynamicObject();
+            obj->setProperty("mask", currentMask);
+            obj->setProperty("origin", static_cast<bool>(currentMask & Origin));
+            obj->setProperty("border", static_cast<bool>(currentMask & Border));
+            obj->setProperty("index", static_cast<bool>(currentMask & Index));
+            obj->setProperty("coordinate", static_cast<bool>(currentMask & Coordinate));
+            obj->setProperty("objectActivity", static_cast<bool>(currentMask & ActivationState));
+            obj->setProperty("connectionActivity", static_cast<bool>(currentMask & ConnectionActivity));
+            obj->setProperty("order", static_cast<bool>(currentMask & Order));
+            obj->setProperty("direction", static_cast<bool>(currentMask & Direction));
+            obj->setProperty("behind", static_cast<bool>(currentMask & Behind));
+            obj->setProperty("aiState", static_cast<bool>(currentMask & AIState));
+            obj->setProperty("aiRegions", static_cast<bool>(currentMask & AIRegions));
+            obj->setProperty("aiAnnotations", static_cast<bool>(currentMask & AIAnnotations));
+            obj->setProperty("aiGhosts", static_cast<bool>(currentMask & AIGhosts));
+            obj->setProperty("aiHud", static_cast<bool>(currentMask & AIHud));
+
+            juce::String jsonStr = juce::JSON::toString(juce::var(obj.get()));
+            bridge->sendReply("/pd/set_overlays/reply/" + correlationId, jsonStr);
+        });
+        return;
+    }
+
     if (action == "clear_ids") {
         if (msg.size() >= 2 && processor) {
             SmallArray<pd::Atom> atoms;
@@ -8754,6 +8859,8 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
         reply.addArgument(juce::String("ai_region"));
         // Cinematic Viewport HUD & Subtitle overlay for video/tutorial capture
         reply.addArgument(juce::String("ai_hud"));
+        // Native & AI overlay control: query and set overlay flags from MCP
+        reply.addArgument(juce::String("overlays_control"));
         // Labeled screenshots: GUI-widget name chips painted on the bitmap only
         reply.addArgument(juce::String("screenshot_labels"));
         // Offline faster-than-realtime render to WAV (background DSP bake)

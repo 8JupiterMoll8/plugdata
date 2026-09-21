@@ -444,7 +444,11 @@ enum Overlay {
     Order = 1 << 6,
     Direction = 1 << 7,
     Behind = 1 << 8,
-    AIState = 1 << 9
+    AIState = 1 << 9,
+    AIRegions = 1 << 10,
+    AIAnnotations = 1 << 11,
+    AIGhosts = 1 << 12,
+    AIHud = 1 << 13
 };
 
 enum Align {
