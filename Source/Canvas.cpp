@@ -819,6 +819,7 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
     if (pd && !pd->getMcpAnnotations().empty()) {
         int noteIdx = 0;
         for (auto const& a : pd->getMcpAnnotations()) {
+            if (a.text.isEmpty()) continue;
             NVGScopedState scopedAnn(nvg);
             float const ax = canvasOrigin.x + a.x;
             float const ay = canvasOrigin.y + a.y;
@@ -1662,10 +1663,14 @@ bool Canvas::handleNoteClick(Point<int> canvasPt)
                 if (pd) {
                     juce::ScopedLock sl(pd->mcpOverlayLock);
                     if (mcpNoteEditIndex < static_cast<int>(pd->mcpAnnotations.size())) {
-                        auto& ann = pd->mcpAnnotations[static_cast<size_t>(mcpNoteEditIndex)];
-                        ann.text = txt;
-                        ann.kind = "artist";
-                        targetId = ann.targetId;
+                        if (txt.isEmpty()) {
+                            pd->mcpAnnotations.erase(pd->mcpAnnotations.begin() + mcpNoteEditIndex);
+                        } else {
+                            auto& ann = pd->mcpAnnotations[static_cast<size_t>(mcpNoteEditIndex)];
+                            ann.text = txt;
+                            ann.kind = "artist";
+                            targetId = ann.targetId;
+                        }
                     }
                 }
                 mcpNoteEditIndex = -1;

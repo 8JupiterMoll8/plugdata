@@ -1544,6 +1544,16 @@ static bool mcpHasCollisions(PluginProcessor* processor, t_canvas* cnv, int pad)
             if (a.x < b.x + b.w + pad && a.x + a.w + pad > b.x
              && a.y < b.y + b.h + pad && a.y + a.h + pad > b.y) return true;
         }
+    for (auto const& rg : processor->mcpRegions) {
+        if (rg.title.isEmpty()) continue;
+        int rx = static_cast<int>(rg.x), ry = static_cast<int>(rg.y);
+        int rw = static_cast<int>(rg.w), rh = 26;
+        for (size_t i = 0; i < rects.size(); ++i) {
+            auto& a = rects[i];
+            if (a.x < rx + rw + pad && a.x + a.w + pad > rx
+             && a.y < ry + rh + pad && a.y + a.h + pad > ry) return true;
+        }
+    }
     return false;
 }
 
@@ -1832,6 +1842,22 @@ int MCPBridge::sanitizeLayout(PluginProcessor* processor, t_canvas* cnv, int pad
                     int acy = a.y + a.h / 2, bcy = b.y + b.h / 2;
                     int dy = std::max(snap, snapTo(overlapY + snap - 1));
                     b.y += (bcy >= acy ? dy : -dy);
+                }
+            }
+        }
+        // De-overlap objects that overlap region title bars
+        for (auto const& rg : processor->mcpRegions) {
+            if (rg.title.isEmpty()) continue;
+            int rx = static_cast<int>(rg.x), ry = static_cast<int>(rg.y);
+            int rw = static_cast<int>(rg.w), rh = 26;
+            for (auto& r : rects) {
+                if (r.x < rx + rw + PAD && r.x + r.w + PAD > rx
+                 && r.y < ry + rh + PAD && r.y + r.h + PAD > ry) {
+                    anyHit = true;
+                    int targetY = ry + rh + PAD;
+                    int snappedY = snapTo(targetY + snap - 1);
+                    if (snappedY <= targetY) snappedY += snap;
+                    r.y = snappedY;
                 }
             }
         }
@@ -5447,6 +5473,21 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     }
                 }
             }
+            for (auto const& rg : processor->mcpRegions) {
+                if (rg.title.isEmpty()) continue;
+                int rx = static_cast<int>(rg.x), ry = static_cast<int>(rg.y);
+                int rw = static_cast<int>(rg.w), rh = 26;
+                for (size_t i = 0; i < rects.size(); ++i) {
+                    const auto& a = rects[i];
+                    bool hit = a.x < rx + rw + PAD && a.x + a.w + PAD > rx
+                            && a.y < ry + rh + PAD && a.y + a.h + PAD > ry;
+                    if (hit) {
+                        if (!first) json += ",";
+                        json += "{\"a\":\"" + a.tid + "\",\"b\":\"region_title:" + rg.title.replace("\"", "\\\"") + "\"}";
+                        first = false;
+                    }
+                }
+            }
             json += "]}";
         }
         sys_unlock();
@@ -7653,6 +7694,21 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                             int dy = snap10(overlapY + 9);
                             if (dy < 10) dy = 10;
                             b.y += (bcy >= acy ? dy : -dy);
+                        }
+                    }
+                }
+                for (auto const& rg : processor->mcpRegions) {
+                    if (rg.title.isEmpty()) continue;
+                    int rx = static_cast<int>(rg.x), ry = static_cast<int>(rg.y);
+                    int rw = static_cast<int>(rg.w), rh = 26;
+                    for (auto& r : rects) {
+                        if (r.x < rx + rw + PAD && r.x + r.w + PAD > rx
+                         && r.y < ry + rh + PAD && r.y + r.h + PAD > ry) {
+                            anyHit = true;
+                            int targetY = ry + rh + PAD;
+                            int snappedY = snap10(targetY + 9);
+                            if (snappedY <= targetY) snappedY += 10;
+                            r.y = snappedY;
                         }
                     }
                 }
