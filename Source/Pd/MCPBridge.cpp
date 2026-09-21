@@ -5887,7 +5887,23 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 sys_unlock();
             }
             if (auto* cc = getOrCreateCanvasComponent(proc, cnv)) cc->repaint();
-            bridge->sendReply("/pd/ai_annotate/reply/" + correlationId, static_cast<float>(proc->mcpAnnotations.size()));
+            juce::var details = juce::Array<juce::var>();
+            for (auto const& an : proc->mcpAnnotations) {
+                auto* d = new juce::DynamicObject();
+                d->setProperty("targetId", an.targetId);
+                d->setProperty("text", an.text);
+                d->setProperty("kind", an.kind);
+                d->setProperty("x", an.x);
+                d->setProperty("y", an.y);
+                d->setProperty("hasLeader", an.hasLeader);
+                d->setProperty("leaderX", an.leaderX);
+                d->setProperty("leaderY", an.leaderY);
+                details.append(d);
+            }
+            juce::Array<juce::var> replyArgs;
+            replyArgs.add(static_cast<float>(proc->mcpAnnotations.size()));
+            replyArgs.add(juce::JSON::toString(details, true));
+            bridge->sendReply("/pd/ai_annotate/reply/" + correlationId, replyArgs);
         });
         return;
     }
