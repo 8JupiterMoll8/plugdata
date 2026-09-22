@@ -17,7 +17,9 @@
 #include "Objects/GemCapture.h" // PRD 1.4: native GEM window capture
 #include <g_all_guis.h>       // t_slider live fields (x_min/x_max/x_fval) for obj_get
 #include "Pd/Interface.h"
+#include "McpIemArgs.h" // IEM GUI short-form creation-arg guard (shared)
 #include "Utility/Fonts.h"
+#include "Utility/SettingsFile.h" // compiledMode (hvcc_mode) in /pd/perf
 #include "../../Libraries/fftw3/api/fftw3.h"
 
 #include <set>
@@ -457,6 +459,8 @@ static juce::String buildObjectText(const juce::String& kind, const juce::String
         if (!t.isEmpty() && (t[0] == "symbolatom" || t[0] == "symbolbox")) t.remove(0);
         return "symbolbox " + t.joinIntoString(" ");
     }
+    // IEM GUI short-form guard (see McpIemArgs.h).
+    t = mcp::expandIemGuiShortForm(t);
     return t.joinIntoString(" ");
 }
 
@@ -598,6 +602,10 @@ static juce::String formatAsPdLine(const juce::String& kind,
         return "#X symbolatom " + juce::String(x) + " " + juce::String(y)
                + " " + t.joinIntoString(" ").trim() + ";";
     }
+
+    // IEM GUI short-form guard: `hsl 128 15 0 1000 0` and friends must be
+    // expanded to Pd's full 17-arg form or the range/init is silently dropped.
+    t = mcp::expandIemGuiShortForm(t);
 
     if (!t.isEmpty() && t[0] == "+") t.set(0, "\\+");
     return "#X obj " + juce::String(x) + " " + juce::String(y)
@@ -1790,6 +1798,13 @@ juce::String MCPBridge::computePerfFacts(PluginProcessor* processor, t_canvas* c
     root->setProperty("canvases", static_cast<int>(nodes.size()));
     root->setProperty("signalObjects", totalSignal);
     root->setProperty("estimatedWeight", totalWeight);
+    // Compiled Mode (hvcc) — expose it so MCP tools can warn: heavy ELSE /
+    // MERDA abstractions + a DSP recompile can crash in Compiled Mode.
+    {
+        auto& st = SettingsFile::getInstance()->getValueTree();
+        bool compiled = st.hasProperty("hvcc_mode") && static_cast<bool>(st.getProperty("hvcc_mode"));
+        root->setProperty("compiledMode", compiled);
+    }
     root->setProperty("top", topArr);
     root->setProperty("note", "cpu is live host load; weight is an object-census estimate (kernels weighted heavier)");
 
@@ -4735,6 +4750,25 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 }
 
                 if (content.isNotEmpty()) {
+                    // Strip stray "#A saved" lines leaked by ELSE savestate
+                    // objects inside GOP abstractions (the same defect
+                    // pasteDirect guards against). They are not real array data
+                    // — legitimate arrays carry their own name (e.g. "#A gtab")
+                    // — and they break hvcc and external Pd. Filtering on save
+                    // keeps the written .pd valid for Heavy / vanilla Pd.
+                    {
+                        juce::StringArray contentLines;
+                        contentLines.addLines(content);
+                        juce::String clean;
+                        for (auto& ln : contentLines) {
+                            auto trimmed = ln.trimStart();
+                            if (trimmed.startsWith("#A saved")) continue;
+                            clean += ln;
+                            clean += "\n";
+                        }
+                        content = clean;
+                    }
+
                     // Identity sidecar: reverse map (gobj → tempId) per canvas
                     auto buildIdArray = [&](const juce::String& mapKey, t_canvas* c) -> juce::var {
                         juce::Array<juce::var> arr;
@@ -5164,7 +5198,9 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 for (auto* canvas : editor->getCanvases()) {
                     if (!canvas) continue;
                     bool match = canvas->patch.getCurrentFile() == f
-                        || canvas->patch.getCurrentFile().getFileName() == target;
+                        || canvas->patch.getCurrentFile().getFileName() == target
+                        || canvas->patch.getTitle() == target
+                        || canvas->patch.getTitle().equalsIgnoreCase(target);
                     if (match) {
                         editor->getTabComponent().showTab(canvas, canvas->patch.splitViewIndex);
                         editor->getTabComponent().setActiveSplit(canvas);
@@ -5195,7 +5231,9 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 for (auto* canvas : editor->getCanvases()) {
                     if (!canvas) continue;
                     bool match = canvas->patch.getCurrentFile() == f
-                        || canvas->patch.getCurrentFile().getFileName() == target;
+                        || canvas->patch.getCurrentFile().getFileName() == target
+                        || canvas->patch.getTitle() == target
+                        || canvas->patch.getTitle().equalsIgnoreCase(target);
                     if (match) {
                         if (canvas->patch.isDirty() && force < 0.5f) {
                             bridge->sendReply(replyAddr, juce::String(
@@ -6763,6 +6801,27 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         }
                     }
 
+                    // Capture (tempId → class+text) BEFORE encapsulation so we can
+                    // re-attach the ORIGINAL tempIds to the recreated inner objects.
+                    // encapsulateSelection copy+RECREATES them, so pointers (and the
+                    // identity entries) would otherwise be lost and the objects
+                    // auto-adopted under new gui_/osc_sig_ names.
+                    struct EncRec { juce::String id, cls, text; bool used = false; };
+                    std::vector<EncRec> encRecs;
+                    for (auto const& id : targetIds) {
+                        t_gobj* g = proc->resolveStableId(canvasName, id);
+                        if (!g) continue;
+                        EncRec r;
+                        r.id = id;
+                        r.cls = juce::String::fromUTF8(class_getname(pd_class(&g->g_pd)));
+                        if (auto* ob = pd_checkobject(&g->g_pd)) {
+                            char* tb = nullptr; int ts = 0;
+                            pd::Interface::getObjectText(ob, &tb, &ts);
+                            if (tb && ts > 0) { r.text = juce::String::fromUTF8(tb, ts).trim(); freebytes(tb, ts); }
+                        }
+                        encRecs.push_back(r);
+                    }
+
                     // Snapshot the parent object count so we can verify the net effect
                     // (N objects out, 1 [pd] in). Encapsulation copy+RECREATES the objects
                     // inside the subpatch — pointers change — so we verify by COUNT.
@@ -6803,6 +6862,31 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         proc->mcpStableObjectMap[canvasName.toStdString()][subpatchName.toStdString()] = newestObj;
                         proc->mcpStableSerialMap[newestObj] = proc->mcpSerialCounter++;
                         proc->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+
+                        // Re-attach the original tempIds to the recreated inner
+                        // objects (match by class + object text; greedy, best-effort).
+                        auto* innerCnv = reinterpret_cast<t_canvas*>(newestObj);
+                        auto& parentMap = proc->mcpStableObjectMap[canvasName.toStdString()];
+                        auto& childMap = proc->mcpStableObjectMap[normalizeCanvas(subpatchName).toStdString()];
+                        for (t_gobj* y = innerCnv->gl_list; y; y = y->g_next) {
+                            juce::String cls = juce::String::fromUTF8(class_getname(pd_class(&y->g_pd)));
+                            juce::String txt;
+                            if (auto* ob = pd_checkobject(&y->g_pd)) {
+                                char* tb = nullptr; int ts = 0;
+                                pd::Interface::getObjectText(ob, &tb, &ts);
+                                if (tb && ts > 0) { txt = juce::String::fromUTF8(tb, ts).trim(); freebytes(tb, ts); }
+                            }
+                            for (auto& r : encRecs) {
+                                if (r.used || r.cls != cls) continue;
+                                if (r.text.isNotEmpty() && txt.isNotEmpty() && r.text != txt) continue;
+                                r.used = true;
+                                childMap[r.id.toStdString()] = y;
+                                parentMap.erase(r.id.toStdString());
+                                proc->mcpStableSerialMap[y] = proc->mcpSerialCounter++;
+                                proc->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+                                break;
+                            }
+                        }
                     }
 
                     // Encapsulation removed objects from the parent canvas and

@@ -15,6 +15,7 @@
 #include "PluginProcessor.h"
 #include "Pd/Library.h"
 #include "Pd/MCPBridge.h"
+#include "Pd/McpIemArgs.h"
 
 #include "Utility/Config.h"
 #include "Utility/Fonts.h"
@@ -2418,6 +2419,9 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
                         cursor++;
                     }
 
+                    // IEM GUI short-form guard (see Pd/McpIemArgs.h).
+                    tokens = mcp::expandIemGuiShortForm(tokens);
+
                     String objectText;
                     if (kind == "msg") {
                         if (!tokens.isEmpty() && tokens[0] == "msg") tokens.remove(0);
@@ -2491,6 +2495,9 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
             for (int i = 6; i < list.size(); i++) {
                 tokens.add(list[i].toString());
             }
+
+            // IEM GUI short-form guard (see Pd/McpIemArgs.h).
+            tokens = mcp::expandIemGuiShortForm(tokens);
 
             String objectText;
             if (kind == "msg") {
@@ -2855,10 +2862,11 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
 
             String jsonString;
             sys_lock();
-            t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
-            if (!canvas && canvas_symbol == "pd-main") {
-                canvas = pd_this->pd_canvaslist;
-            }
+            // STRICT: an unknown canvas name must NOT silently fall back to the
+            // root canvas (that returned the root's objects under a bogus
+            // subpatch label with re-minted tempIds, e.g.
+            // osc_sig_pd_<typo>_0). 'main'/'pd-main'/'' aliases still resolve.
+            t_canvas* canvas = getCanvasBySymbolStrict(canvas_symbol);
 
             if (canvas) {
                 auto* rootObj = new DynamicObject();
