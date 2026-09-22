@@ -3313,6 +3313,9 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             struct ConnectFailure { std::string srcId; std::string destId; std::string reason; };
             std::vector<CreateFailure> createFailures;
             std::vector<ConnectFailure> connectFailures;
+            // Guard 2: control->signal connections are legal (Pd sets the inlet
+            // scalar) but step per DSP block. Advisory only — never rejected.
+            std::vector<ConnectFailure> connectAdvisories;
             std::vector<std::string> createdIds;
             std::vector<t_gobj*> createdPtrs;
             std::vector<int32> mappingIndices;
@@ -3981,6 +3984,17 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                                           + " — Pd drops the audio; use [snapshot~] or rewire via [*~]" });
                                     continue;
                                 }
+                                // Guard 2: control outlet -> signal inlet. Pd accepts
+                                // this (sets the inlet's scalar, updated once per block)
+                                // so we do NOT reject — just advise for smoothness.
+                                if (!srcSig && destSig) {
+                                    connectAdvisories.push_back({
+                                        cc.srcId.toStdString(), cc.destId.toStdString(),
+                                        "bridge: control outlet " + std::to_string(cc.srcOut)
+                                          + " -> signal inlet " + std::to_string(cc.destIn)
+                                          + " — Pd sets the inlet scalar (works, updates per block); "
+                                            "insert [sig~] for smooth audio-rate" });
+                                }
                             }
                             // R2 — would this wire close a zero-delay signal loop?
                             // Only signal-outlet wires can close signal cycles; control
@@ -4319,6 +4333,14 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             reply.addArgument(static_cast<int32>(occlusionsFixed));
             // Fallback tail fact: 1 if the guard fell back to compose.
             reply.addArgument(static_cast<int32>(fallbackComposed ? 1 : 0));
+
+            // Guard 2 tail fact (appended LAST, old clients ignore): control->signal
+            // advisories — [count, (wire, reason)*]. Not failures; the wire connected.
+            reply.addArgument(static_cast<int32>(connectAdvisories.size()));
+            for (auto& ca : connectAdvisories) {
+                reply.addArgument(juce::String(ca.srcId) + juce::String("->") + juce::String(ca.destId));
+                reply.addArgument(juce::String(ca.reason));
+            }
 
             sender.send(reply);
             // R3a — store reply in dedup cache (LRU + TTL, for retry idempotency).
