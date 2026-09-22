@@ -2380,6 +2380,18 @@ static juce::String mcpObjSetCore(t_gobj* g, const juce::String& tempId, int inl
     if (!dest) return "error: could not resolve inlet " + juce::String(inlet);
     if (warning && mcpIsStructuralSelector(selector))
         *warning = "structural:" + selector + " (may trigger a DSP recompile — prefer edit)";
+    // Guard 1 (dead-knob safety net): a float/list sent to a signal-rate inlet is
+    // silently ignored by most objects (no scalar/float handler on that inlet).
+    // obj_issignalinlet() cannot distinguish a scalar-accepting signal inlet
+    // (e.g. lop~ inlet 1) from a pure audio inlet, so this is ADVISORY, not a fix
+    // and never a redirect — misrouting (e.g. osc~ phase) would be worse.
+    if (warning && inlet >= 0 && (selector == "float" || selector == "list")
+        && obj_issignalinlet(o, inlet) != 0) {
+        juce::String g1 = "inlet-signal: '" + selector + "' -> signal inlet " + juce::String(inlet)
+            + " — if this inlet has no scalar/float handler the message is silently ignored; "
+              "verify the param inlet (often inlet 1, varies by object)";
+        *warning = warning->isEmpty() ? g1 : (*warning + "; " + g1);
+    }
     pd_typedmess(dest, gensym(selector.toRawUTF8()), static_cast<int>(atoms.size()),
                  atoms.empty() ? nullptr : atoms.data());
     return {};
