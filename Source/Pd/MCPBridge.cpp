@@ -425,6 +425,29 @@ juce::String MCPBridge::normalizeCanvas(const juce::String& name)
     return "pd-" + s;
 }
 
+juce::String MCPBridge::canonicalCanvasKey(t_canvas* cnv)
+{
+    if (!cnv) return {};
+
+    // Named subcanvases (gl_owner != nullptr) keep "pd-<gl_name>"
+    if (cnv->gl_owner != nullptr) {
+        juce::String name = cnv->gl_name ? juce::String::fromUTF8(cnv->gl_name->s_name) : juce::String();
+        if (name.startsWith("pd-")) return name;
+        if (name.isNotEmpty()) return "pd-" + name;
+        return juce::String::formatted("pd-%p", cnv);
+    }
+
+    // Root canvas: bound file name (its gl_name, e.g. "X.pd") when bound
+    if (cnv->gl_name && cnv->gl_name->s_name && cnv->gl_name->s_name[0] != '\0') {
+        juce::String name = juce::String::fromUTF8(cnv->gl_name->s_name);
+        if (name != "main" && name != "pd-main")
+            return name;
+    }
+
+    // Fallback pointer-derived stable key
+    return juce::String::formatted("canvas-%p", cnv);
+}
+
 static juce::String getArgString(const juce::OSCArgument& arg);
 static float getArgFloat(const juce::OSCArgument& arg);
 
@@ -950,7 +973,8 @@ juce::String MCPBridge::computeDiagnoseFacts(PluginProcessor* processor, t_canva
     std::vector<juce::String> names;
     std::vector<juce::String> classNames;
     std::unordered_map<t_gobj*, juce::String> ptrToId;
-    auto mapIt = processor->mcpStableObjectMap.find(canvasName.toStdString());
+    auto canonKey = canonicalCanvasKey(cnv);
+    auto mapIt = processor->mcpStableObjectMap.find(canonKey.toStdString());
     if (mapIt != processor->mcpStableObjectMap.end())
         for (auto& [tid, ptr] : mapIt->second)
             if (ptr) ptrToId[ptr] = juce::String(tid);
@@ -1293,7 +1317,8 @@ juce::String MCPBridge::computeSignalTrace(PluginProcessor* processor, t_canvas*
     std::vector<juce::String> names;
     std::vector<juce::String> classNames;
     std::unordered_map<t_gobj*, juce::String> ptrToId;
-    auto mapIt = processor->mcpStableObjectMap.find(canvasName.toStdString());
+    auto canonKey = canonicalCanvasKey(cnv);
+    auto mapIt = processor->mcpStableObjectMap.find(canonKey.toStdString());
     if (mapIt != processor->mcpStableObjectMap.end())
         for (auto& [tid, ptr] : mapIt->second)
             if (ptr) ptrToId[ptr] = juce::String(tid);
@@ -1590,7 +1615,8 @@ juce::String MCPBridge::computeClusters(PluginProcessor* processor, t_canvas* cn
     std::unordered_map<t_gobj*, int> ptrToIdx;
 
     std::unordered_map<t_gobj*, juce::String> ptrToId;
-    auto mapIt = processor->mcpStableObjectMap.find(canvasName.toStdString());
+    auto canonKey = canonicalCanvasKey(cnv);
+    auto mapIt = processor->mcpStableObjectMap.find(canonKey.toStdString());
     if (mapIt != processor->mcpStableObjectMap.end())
         for (auto& [tid, ptr] : mapIt->second)
             if (ptr) ptrToId[ptr] = juce::String(tid);
@@ -2284,9 +2310,11 @@ int MCPBridge::mcpApplyIdentitySidecar(PluginProcessor* processor, juce::Dynamic
         return restored;
     };
 
-    int restored = registerArray(sidecarObj->getProperty("root"), rootKey, cnv);
+    juce::String canonRoot = canonicalCanvasKey(cnv);
+    if (canonRoot.isEmpty()) canonRoot = rootKey;
+    int restored = registerArray(sidecarObj->getProperty("root"), canonRoot, cnv);
 
-    // Named subcanvases: key "pd-<gl_name>" matches bridge map-key convention
+    // Named subcanvases: canonicalCanvasKey matches bridge map-key convention ("pd-<gl_name>")
     if (auto* subObj = sidecarObj->getProperty("sub").getDynamicObject()) {
         for (t_gobj* g = cnv->gl_list; g; g = g->g_next) {
             if (pd_class(&g->g_pd) != canvas_class) continue;
@@ -2295,8 +2323,9 @@ int MCPBridge::mcpApplyIdentitySidecar(PluginProcessor* processor, juce::Dynamic
             juce::String childName = juce::String::fromUTF8(child->gl_name->s_name);
             auto childIds = subObj->getProperty(juce::Identifier(childName));
             if (childIds.getArray() != nullptr && childIds.getArray()->size() > 0) {
-                processor->mcpStableObjectMap[("pd-" + childName).toStdString()].clear();
-                restored += registerArray(childIds, "pd-" + childName, child);
+                juce::String childKey = canonicalCanvasKey(child);
+                processor->mcpStableObjectMap[childKey.toStdString()].clear();
+                restored += registerArray(childIds, childKey, child);
             }
         }
     }
@@ -2854,7 +2883,8 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 if (!cnv && (canvasName == "pd-main" || canvasName == "main" || canvasName.isEmpty()))
                     cnv = pd_this->pd_canvaslist;
                 if (cnv) {
-                    auto& map = processor->mcpStableObjectMap[canvasName.toStdString()];
+                    auto canonKey = canonicalCanvasKey(cnv);
+                    auto& map = processor->mcpStableObjectMap[canonKey.toStdString()];
                     for (t_gobj* y = cnv->gl_list; y; y = y->g_next) {
                         juce::String cn = juce::String::fromUTF8(class_getname(pd_class(&y->g_pd))).toLowerCase();
                         if (cn != "knob" && cn != "else/knob") continue;
@@ -3197,7 +3227,8 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             int totalObjects = idx;
 
             // Step 2: Walk the identity map and validate each entry (O(m))
-            auto canvasStr = canvasName.toStdString();
+            auto canonKey = canonicalCanvasKey(cnv);
+            auto canvasStr = canonKey.toStdString();
             auto& canvasMap = processor->mcpStableObjectMap[canvasStr];
             uint64_t version = processor->mcpIdentityVersion.load(std::memory_order_relaxed);
 
@@ -3526,6 +3557,8 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
                 if (cnv) {
                     dsp_update_deferred = 1;
+                    auto canonKey = MCPBridge::canonicalCanvasKey(cnv);
+                    auto canonStr = canonKey.toStdString();
 
                     // PHASE 0: PRE-FLIGHT AUTO-RECONCILE
                     // Single walk of gl_list to sync identity map with live canvas.
@@ -3533,7 +3566,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     // fixes the map BEFORE any mutation — zero extra OSC round-trips,
                     // zero audio dropout (runs inside the same audio-thread lambda).
                     {
-                        auto canvasStr = canvasName.toStdString();
+                        auto canvasStr = canonStr;
                         auto& canvasMap = processor->mcpStableObjectMap[canvasStr];
 
                         // Step A: Build set of all live pointers from gl_list (O(n))
@@ -3641,7 +3674,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     // Capture each doomed object's creation text + bounds + wires
                     // FIRST so the inverse can recreate it (message-delta, no pointers).
                     {
-                        auto& delMap = processor->mcpStableObjectMap[canvasName.toStdString()];
+                        auto& delMap = processor->mcpStableObjectMap[canonStr];
                         std::unordered_map<t_gobj*, std::string> ptrToTempId;
                         for (auto& [tid, ptr] : delMap)
                             if (ptr) ptrToTempId[ptr] = tid;
@@ -3702,7 +3735,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     for (auto& pd : preDeletes) {
                         t_gobj* obj = processor->resolveStableId(canvasName, pd.objectId);
                         if (obj) {
-                            processor->mcpStableObjectMap[canvasName.toStdString()].erase(pd.objectId.toStdString());
+                            processor->mcpStableObjectMap[canonStr].erase(pd.objectId.toStdString());
                             processor->mcpStableSerialMap.erase(obj);
                             processor->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
                             toDelete.add(obj);
@@ -3738,7 +3771,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                                     if (y == obj) { still = true; break; }
                                 newObj = still ? obj : pd::Interface::getNewest(cnv);
                                 if (newObj) {
-                                    processor->mcpStableObjectMap[canvasName.toStdString()][pe.objectId.toStdString()] = newObj;
+                                    processor->mcpStableObjectMap[canonStr][pe.objectId.toStdString()] = newObj;
                                     if (newObj != obj) processor->mcpStableSerialMap.erase(obj);
                                     processor->mcpStableSerialMap[newObj] = processor->mcpSerialCounter++;
                                     processor->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
@@ -3902,7 +3935,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                                 redBoxes.add(no.ptr);
                             } else {
                                 // Map the stable tempId to the live gobj pointer
-                                processor->mcpStableObjectMap[canvasName.toStdString()][pc.tempId.toStdString()] = no.ptr;
+                                processor->mcpStableObjectMap[canonStr][pc.tempId.toStdString()] = no.ptr;
                                 processor->mcpStableSerialMap[no.ptr] = processor->mcpSerialCounter++;
                                 processor->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
 
@@ -4126,7 +4159,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     // for GUI objects; PHASE 4 registered new creates; deletes
                     // were erased — every live wire endpoint resolves.
                     {
-                        auto canvasStr = canvasName.toStdString();
+                        auto canvasStr = canonStr;
                         auto& canvasMap = processor->mcpStableObjectMap[canvasStr];
                         std::unordered_map<t_gobj*, std::string> ptrToTempId;
                         for (auto& [tid, ptr] : canvasMap)
@@ -4956,17 +4989,17 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     root->setProperty("v", 1);
                     root->setProperty("identity_version",
                         (double)processor->mcpIdentityVersion.load(std::memory_order_relaxed));
-                    root->setProperty("root", buildIdArray(canvasName, cnv));
+                    root->setProperty("root", buildIdArray(canonicalCanvasKey(cnv), cnv));
 
-                    // Named subcanvases: key "pd-<gl_name>" matches the map keys
-                    // the bridge uses for subpatch census/mutations.
+                    // Named subcanvases: canonicalCanvasKey matches the map keys
+                    // the bridge uses for subpatch census/mutations ("pd-<gl_name>").
                     auto* subObj = new juce::DynamicObject();
                     for (t_gobj* g = cnv->gl_list; g; g = g->g_next) {
                         if (pd_class(&g->g_pd) != canvas_class) continue;
                         t_canvas* child = reinterpret_cast<t_canvas*>(g);
                         if (!child->gl_name) continue;
                         juce::String childName = juce::String::fromUTF8(child->gl_name->s_name);
-                        auto childIds = buildIdArray("pd-" + childName, child);
+                        auto childIds = buildIdArray(canonicalCanvasKey(child), child);
                         if (childIds.getArray() != nullptr && childIds.getArray()->size() > 0)
                             subObj->setProperty(childName, childIds);
                     }
@@ -4996,8 +5029,17 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             // also runs reloadAbstractions() (recreates abstraction instances)
             // and crashed when a queued close_tab tore the canvas down mid-
             // reload. Title derives from currentFile; pd-side state untouched.
-            processor->enqueueFunctionAsync([p = processor, cnv, destFilePath]() {
+            // Compute the canonical key NOW, on this (valid) thread — the async
+            // lambda must NOT dereference the raw `cnv` pointer (it may be torn
+            // down before the lambda runs; the original code only compared it).
+            const std::string oldKey = MCPBridge::canonicalCanvasKey(cnv).toStdString();
+            const std::string newKey = juce::File(destFilePath).getFileName().toStdString();
+            processor->enqueueFunctionAsync([p = processor, cnv, destFilePath, oldKey, newKey]() {
                 juce::File f(destFilePath);
+                if (oldKey != newKey && p->mcpStableObjectMap.count(oldKey)) {
+                    p->mcpStableObjectMap[newKey] = std::move(p->mcpStableObjectMap[oldKey]);
+                    p->mcpStableObjectMap.erase(oldKey);
+                }
                 for (auto* editor : p->getEditors()) {
                     if (!editor) continue;
                     for (auto* canvas : editor->getCanvases()) {
@@ -5095,8 +5137,9 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     t_canvas* cnv = proc->getCanvasBySymbol(canvasName);
                     if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
                     if (cnv) {
+                        auto canonKey = MCPBridge::canonicalCanvasKey(cnv);
                         // 0. Reset identity for this canvas tree BEFORE re-registering
-                        proc->mcpStableObjectMap[canvasName.toStdString()].clear();
+                        proc->mcpStableObjectMap[canonKey.toStdString()].clear();
 
                         // 1. Clear existing objects (message-thread-safe)
                         pd::Interface::clearCanvas(cnv);
@@ -5116,7 +5159,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
                         // 5. Re-register sidecar identities
                         if (auto* sidecarObj = sidecar.getDynamicObject())
-                            MCPBridge::mcpApplyIdentitySidecar(proc, sidecarObj, canvasName, cnv);
+                            MCPBridge::mcpApplyIdentitySidecar(proc, sidecarObj, canonKey, cnv);
 
                         for (t_gobj* g = cnv->gl_list; g; g = g->g_next)
                             objectCount++;
@@ -5273,23 +5316,8 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         for (auto* canvas : editor->getCanvases()) {
                             if (!canvas || canvas->patch.getCurrentFile() != f) continue;
                             if (auto* cnv = canvas->patch.getPointer().get()) {
-                                // PRD Phase 3.1: register under the tab's bound
-                                // name (gl_name = file name) so named-tab
-                                // addressing finds these identities.
-                                juce::String boundName = cnv->gl_name
-                                    ? juce::String::fromUTF8(cnv->gl_name->s_name)
-                                    : juce::String(f.getFileName());
-                                queueRegisters(sidecarObj->getProperty("root"), boundName, cnv);
-                                // ALSO register the root under the default "pd-main"
-                                // alias. normalizeCanvas("main") -> "pd-main", and the
-                                // identity map is keyed by THAT — so registering only the
-                                // bound file name left the SAME canvas with two identity
-                                // namespaces (default addressing auto-generated gui_*/
-                                // type_* names while named-tab addressing found the real
-                                // ids). load_patch already keys by canvasName. Register
-                                // twice so BOTH addressings resolve the same ids.
-                                if (reinterpret_cast<t_glist*>(cnv)->gl_owner == nullptr && boundName != "pd-main")
-                                    queueRegisters(sidecarObj->getProperty("root"), "pd-main", cnv);
+                                juce::String canonKey = MCPBridge::canonicalCanvasKey(cnv);
+                                queueRegisters(sidecarObj->getProperty("root"), canonKey, cnv);
                                 // named subcanvases
                                 if (auto* subObj = sidecarObj->getProperty("sub").getDynamicObject()) {
                                     for (t_gobj* g = cnv->gl_list; g; g = g->g_next) {
@@ -5299,7 +5327,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                                         juce::String childName = juce::String::fromUTF8(child->gl_name->s_name);
                                         auto childIds = subObj->getProperty(juce::Identifier(childName));
                                         if (childIds.getArray() != nullptr && childIds.getArray()->size() > 0)
-                                            queueRegisters(childIds, "pd-" + childName, child);
+                                            queueRegisters(childIds, MCPBridge::canonicalCanvasKey(child), child);
                                     }
                                 }
                             }
@@ -5536,7 +5564,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         if (cnv) {
             hasCanvas = true;
             std::unordered_map<t_gobj*, juce::String> ptrToId;
-            auto mapIt = processor->mcpStableObjectMap.find(canvasName.toStdString());
+            auto mapIt = processor->mcpStableObjectMap.find(canonicalCanvasKey(cnv).toStdString());
             if (mapIt != processor->mcpStableObjectMap.end())
                 for (auto& [tid, ptr] : mapIt->second)
                     if (ptr) ptrToId[ptr] = juce::String(tid);
@@ -5650,7 +5678,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             struct R { juce::String tid; int x, y, w, h; };
             std::vector<R> rects;
             std::unordered_map<t_gobj*, juce::String> ptrToId;
-            auto mapIt = processor->mcpStableObjectMap.find(canvasName.toStdString());
+            auto mapIt = processor->mcpStableObjectMap.find(canonicalCanvasKey(cnv).toStdString());
             if (mapIt != processor->mcpStableObjectMap.end())
                 for (auto& [tid, ptr] : mapIt->second)
                     if (ptr) ptrToId[ptr] = juce::String(tid);
@@ -5728,7 +5756,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
     std::vector<juce::String> classNames;
             std::unordered_map<t_gobj*, int> ptrToIdx;
             std::unordered_map<t_gobj*, juce::String> ptrToId;
-            auto mapIt = processor->mcpStableObjectMap.find(canvasName.toStdString());
+            auto mapIt = processor->mcpStableObjectMap.find(canonicalCanvasKey(cnv).toStdString());
             if (mapIt != processor->mcpStableObjectMap.end())
                 for (auto& [tid, ptr] : mapIt->second)
                     if (ptr) ptrToId[ptr] = juce::String(tid);
@@ -6826,7 +6854,9 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             auto newId = getArgString(msg[3]).toStdString();
 
             bool success = false;
-            auto& map = processor->mcpStableObjectMap[canvasName.toStdString()];
+            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            auto mapKey = (cnv ? canonicalCanvasKey(cnv) : canvasName).toStdString();
+            auto& map = processor->mcpStableObjectMap[mapKey];
             auto it = map.find(oldId);
             if (it != map.end()) {
                 map[newId] = it->second;
@@ -6851,7 +6881,9 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             int renamed = 0;
 
             // Inline rename — directly mutates mcpStableObjectMap, no queue.
-            auto& map = processor->mcpStableObjectMap[canvasName.toStdString()];
+            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            auto mapKey = (cnv ? canonicalCanvasKey(cnv) : canvasName).toStdString();
+            auto& map = processor->mcpStableObjectMap[mapKey];
             for (int i = 0; i < count && (cursor + 1) < msg.size(); i++) {
                 auto oldId = getArgString(msg[cursor++]).toStdString();
                 auto newId = getArgString(msg[cursor++]).toStdString();
@@ -7032,15 +7064,15 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     }
 
                     if (newestObj) {
-                        proc->mcpStableObjectMap[canvasName.toStdString()][subpatchName.toStdString()] = newestObj;
+                        proc->mcpStableObjectMap[canonicalCanvasKey(cnv).toStdString()][subpatchName.toStdString()] = newestObj;
                         proc->mcpStableSerialMap[newestObj] = proc->mcpSerialCounter++;
                         proc->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
 
                         // Re-attach the original tempIds to the recreated inner
                         // objects (match by class + object text; greedy, best-effort).
                         auto* innerCnv = reinterpret_cast<t_canvas*>(newestObj);
-                        auto& parentMap = proc->mcpStableObjectMap[canvasName.toStdString()];
-                        auto& childMap = proc->mcpStableObjectMap[normalizeCanvas(subpatchName).toStdString()];
+                        auto& parentMap = proc->mcpStableObjectMap[canonicalCanvasKey(cnv).toStdString()];
+                        auto& childMap = proc->mcpStableObjectMap[canonicalCanvasKey(innerCnv).toStdString()];
                         for (t_gobj* y = innerCnv->gl_list; y; y = y->g_next) {
                             juce::String cls = juce::String::fromUTF8(class_getname(pd_class(&y->g_pd)));
                             juce::String txt;
@@ -7280,7 +7312,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     // ── Step 5: Register new abstraction object in identity map
                     t_gobj* newObj = pd::Interface::getNewest(cnv);
                     if (newObj) {
-                        proc->mcpStableObjectMap[canvasName.toStdString()][abstrName.toStdString()] = newObj;
+                        proc->mcpStableObjectMap[canonicalCanvasKey(cnv).toStdString()][abstrName.toStdString()] = newObj;
                         proc->mcpStableSerialMap[newObj] = proc->mcpSerialCounter++;
                         proc->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
                     }
@@ -7447,13 +7479,14 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                                 canvas_update_dsp();
                                 bridge->sendReply(replyAddr, "{\"ok\":false,\"error\":\"GOP_CREATE_FAILED\",\"detail\":\"[" + safeName + "] couldn't create (red box)\"}");
                             } else {
+                                auto gopKey = canonicalCanvasKey(cnv).toStdString();
                                 // 2. Delete originals via the message-thread-safe
                                 // remover. removeObjects() clears selection first (noselect),
                                 // opens UNDO_SEQUENCE_START, records UNDO_CUT, and suspends DSP around free.
                                 for (auto* g : toDelete) {
-                                    proc->mcpStableObjectMap[canvasName.toStdString()].erase(
+                                    proc->mcpStableObjectMap[gopKey].erase(
                                         [&]() -> std::string {
-                                            for (auto& [tid, ptr] : proc->mcpStableObjectMap[canvasName.toStdString()])
+                                            for (auto& [tid, ptr] : proc->mcpStableObjectMap[gopKey])
                                                 if (ptr == g) return tid;
                                             return "";
                                         }());
@@ -7486,7 +7519,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                                 undoAtoms.add(pd::Atom(proc->generateSymbol(canvasName)));
                                 proc->receiveSysMessage("mcp_clear_undo", undoAtoms);
                                 for (auto& e : staleErrs) connErrs.add(e);
-                                proc->mcpStableObjectMap[canvasName.toStdString()][safeName.toStdString()] = newObj;
+                                proc->mcpStableObjectMap[gopKey][safeName.toStdString()] = newObj;
                                 proc->mcpSerialCounter++;
                                 proc->mcpStableSerialMap[newObj] = proc->mcpSerialCounter;
                                 proc->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
@@ -7840,7 +7873,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     // ptrToId from mcpStableObjectMap for tempId fallback naming
                     std::unordered_map<t_gobj*, juce::String> ptrToId;
                     if (proc) {
-                        auto mapIt = proc->mcpStableObjectMap.find(canvasName.toStdString());
+                        auto mapIt = proc->mcpStableObjectMap.find((liveCnv ? canonicalCanvasKey(liveCnv) : canvasName).toStdString());
                         if (mapIt != proc->mcpStableObjectMap.end())
                             for (auto& [tid, ptr] : mapIt->second)
                                 if (ptr) ptrToId[ptr] = juce::String(tid);

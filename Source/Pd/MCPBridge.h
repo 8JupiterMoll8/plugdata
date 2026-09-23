@@ -227,6 +227,7 @@ public:
 
     // Canvas & Table Helpers
     static juce::String normalizeCanvas(const juce::String& name);
+    static juce::String canonicalCanvasKey(t_canvas* cnv);
 
     friend class ProbeManager;
     friend class PluginProcessor;

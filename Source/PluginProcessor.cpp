@@ -1982,13 +1982,16 @@ void PluginProcessor::synchroniseCanvases()
 
 t_gobj* PluginProcessor::resolveStableId(const String& canvasName, const String& objectId)
 {
-    auto canvasStr = canvasName.toStdString();
+    // Identity is keyed by the canvas's CANONICAL key. "main" is a
+    // focus-dependent ALIAS, never a stored key — resolve the canvas first and
+    // derive its canonical key so both sides of the map agree.
+    t_canvas* canvas = getCanvasBySymbol(canvasName);
+    auto canvasStr = (canvas ? MCPBridge::canonicalCanvasKey(canvas) : canvasName).toStdString();
     auto idStr = objectId.toStdString();
     
     auto& canvasMap = mcpStableObjectMap[canvasStr];
     auto it = canvasMap.find(idStr);
     if (it != canvasMap.end()) {
-        t_canvas* canvas = getCanvasBySymbol(canvasName);
         if (canvas) {
             uint64_t expectedSerial = 0;
             auto serialIt = mcpStableSerialMap.find(it->second);
@@ -2027,7 +2030,6 @@ t_gobj* PluginProcessor::resolveStableId(const String& canvasName, const String&
     // Index-based fallback: "0", "1", "obj_0", "obj_1", etc.
     if (objectId.startsWith("obj_") || objectId.containsOnly("0123456789")) {
         int idx = objectId.startsWith("obj_") ? objectId.substring(4).getIntValue() : objectId.getIntValue();
-        t_canvas* canvas = getCanvasBySymbol(canvasName);
         if (!canvas && canvasName == "pd-main") canvas = pd_this->pd_canvaslist;
         if (canvas) {
             int cur = 0;
@@ -2048,7 +2050,7 @@ void PluginProcessor::reconcileIdentity(const String& canvasName)
     if (!canvas)
         return;
 
-    auto canvasStr = canvasName.toStdString();
+    auto canvasStr = MCPBridge::canonicalCanvasKey(canvas).toStdString();
     auto& canvasMap = mcpStableObjectMap[canvasStr];
 
     // Step A: live pointer set from gl_list (the ground truth).
@@ -2329,7 +2331,8 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
             auto canvas_symbol = list[0].toString();
             auto correlation_id = list[1].toString();
 
-            auto canvasStr = canvas_symbol.toStdString();
+            t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
+            auto canvasStr = (canvas ? MCPBridge::canonicalCanvasKey(canvas) : canvas_symbol).toStdString();
             // Purge serials for this canvas entries before erasing the map
             auto it = mcpStableObjectMap.find(canvasStr);
             if (it != mcpStableObjectMap.end()) {
@@ -2401,6 +2404,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
             sys_lock();
             t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
             if (canvas) {
+                auto canonStr = MCPBridge::canonicalCanvasKey(canvas).toStdString();
                 int const dspstate = canvas_suspend_dsp();
                 pd::Patch patchWrapper(pd::WeakReference(canvas, this), this, false);
                 for (int o = 0; o < count; o++) {
@@ -2441,7 +2445,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
 
                     t_gobj* targetObj = patchWrapper.createObject(x, y, objectText);
                     if (targetObj) {
-                        mcpStableObjectMap[canvas_symbol.toStdString()][object_id.toStdString()] = targetObj;
+                        mcpStableObjectMap[canonStr][object_id.toStdString()] = targetObj;
                         mcpStableSerialMap[targetObj] = mcpSerialCounter++;
                         mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
                         createdIds.push_back(object_id.toStdString());
@@ -2520,10 +2524,11 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
             t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
             bool success = false;
             if (canvas) {
+                auto canonStr = MCPBridge::canonicalCanvasKey(canvas).toStdString();
                 pd::Patch patchWrapper(pd::WeakReference(canvas, this), this, false);
                 t_gobj* targetObj = patchWrapper.createObject(x, y, objectText);
                 if (targetObj) {
-                    mcpStableObjectMap[canvas_symbol.toStdString()][object_id.toStdString()] = targetObj;
+                    mcpStableObjectMap[canonStr][object_id.toStdString()] = targetObj;
                     mcpStableSerialMap[targetObj] = mcpSerialCounter++;
                     mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
                     success = true;
@@ -2558,6 +2563,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
             t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
             bool success = false;
             if (canvas) {
+                auto canonStr = MCPBridge::canonicalCanvasKey(canvas).toStdString();
                 t_gobj* targetObj = nullptr;
                 if (object_index == -1) {
                     targetObj = pd::Interface::getNewest(canvas);
@@ -2573,7 +2579,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
                 }
 
                 if (targetObj) {
-                    mcpStableObjectMap[canvas_symbol.toStdString()][object_id.toStdString()] = targetObj;
+                    mcpStableObjectMap[canonStr][object_id.toStdString()] = targetObj;
                     mcpStableSerialMap[targetObj] = mcpSerialCounter++;
                     mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
                     success = true;
@@ -2675,12 +2681,13 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
             t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
             bool success = false;
             if (canvas) {
+                auto canonStr = MCPBridge::canonicalCanvasKey(canvas).toStdString();
                 t_gobj* targetObj = resolveStableId(canvas_symbol, object_id);
                 if (targetObj) {
                     SmallArray<t_gobj*> objectsToDelete;
                     objectsToDelete.add(targetObj);
                     pd::Interface::removeObjects(canvas, objectsToDelete);
-                    mcpStableObjectMap[canvas_symbol.toStdString()].erase(object_id.toStdString());
+                    mcpStableObjectMap[canonStr].erase(object_id.toStdString());
                     mcpStableSerialMap.erase(targetObj);
                     mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
                     success = true;
@@ -2716,7 +2723,9 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
 
             sys_lock();
             bool success = false;
-            auto& map = mcpStableObjectMap[canvas_symbol.toStdString()];
+            t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
+            auto canvasStr = (canvas ? MCPBridge::canonicalCanvasKey(canvas) : canvas_symbol).toStdString();
+            auto& map = mcpStableObjectMap[canvasStr];
             auto it = map.find(old_id.toStdString());
             if (it != map.end()) {
                 map[new_id.toStdString()] = it->second;
@@ -2781,6 +2790,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
             t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
             bool success = false;
             if (canvas) {
+                auto canonStr = MCPBridge::canonicalCanvasKey(canvas).toStdString();
                 t_gobj* targetObj = resolveStableId(canvas_symbol, object_id);
                 if (targetObj) {
                     pd::Interface::renameObject(canvas, targetObj, new_text.toRawUTF8(), new_text.getNumBytesAsUTF8());
@@ -2802,7 +2812,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
                     }
                     
                     if (newObj) {
-                        mcpStableObjectMap[canvas_symbol.toStdString()][object_id.toStdString()] = newObj;
+                        mcpStableObjectMap[canonStr][object_id.toStdString()] = newObj;
                         if (newObj != targetObj) {
                             mcpStableSerialMap.erase(targetObj);
                         }
@@ -2831,7 +2841,8 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
             t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
             SmallArray<pd::Atom> atoms;
             if (canvas) {
-                auto& canvasMap = mcpStableObjectMap[canvas_symbol.toStdString()];
+                auto canonStr = MCPBridge::canonicalCanvasKey(canvas).toStdString();
+                auto& canvasMap = mcpStableObjectMap[canonStr];
                 
                 // For each ID in the map, find its current index in gl_list
                 for (auto it = canvasMap.begin(); it != canvasMap.end();) {
@@ -2869,13 +2880,20 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
             t_canvas* canvas = getCanvasBySymbolStrict(canvas_symbol);
 
             if (canvas) {
+                // One canonical key for this canvas — the SAME key every
+                // identity site (bridge sidecar/load/create) stores under.
+                // The caller's raw symbol ("main", focus-dependent) is only an
+                // addressing alias, never the map key.
+                juce::String canonKey = MCPBridge::canonicalCanvasKey(canvas);
+                auto canonStr = canonKey.toStdString();
+
                 auto* rootObj = new DynamicObject();
                 rootObj->setProperty("canvas", canvas_symbol);
 
                 // Build reverse map of gobj* -> tempId
                 std::unordered_map<t_gobj*, String> ptrToId;
-                if (mcpStableObjectMap.count(canvas_symbol.toStdString())) {
-                    for (auto const& [id, ptr] : mcpStableObjectMap[canvas_symbol.toStdString()]) {
+                if (mcpStableObjectMap.count(canonStr)) {
+                    for (auto const& [id, ptr] : mcpStableObjectMap[canonStr]) {
                         if (ptr) ptrToId[ptr] = String(id);
                     }
                 }
@@ -3008,6 +3026,24 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
                             if (rcvSym.isNotEmpty()) o->setProperty("rcv", rcvSym);
                             if (sndSym.isNotEmpty()) o->setProperty("snd", sndSym);
                         } else {
+                            // Only genuine iemgui objects share the t_iemgui
+                            // layout. nbx/gatom (and other custom widgets) do
+                            // NOT — reading x_fsf/x_rcv/x_snd from them reads
+                            // out-of-layout garbage (a dangling t_symbol*),
+                            // which crashed the census nondeterministically.
+                            // Guard by class name before the reinterpret_cast.
+                            static const std::unordered_set<std::string> iemGuiClasses = {
+                                "hsl", "vsl", "tgl", "bng", "vu",
+                                "hradio", "vradio", "cnv", "iemgui"
+                            };
+                            if (iemGuiClasses.count(type.toStdString()) == 0) {
+                                o->setProperty("kind", kind);
+                                o->setProperty("type", type);
+                                if (abstractName.isNotEmpty()) o->setProperty("node_class", abstractName);
+                                o->setProperty("args", argsList);
+                                objArray.add(var(o));
+                                continue;
+                            }
                             auto* iem = reinterpret_cast<t_iemgui*>(y_obj);
                             // Guard with x_fsf — raw pointers are garbage when not set (vu bug: "nosndno")
                             bool hasRcv = iem->x_fsf.x_rcv_able;
@@ -3034,14 +3070,14 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
                     // registration.
                     if (tempId.isEmpty()) {
                         juce::String classSrc = abstractName.isNotEmpty() ? abstractName : type;
-                        // Canvas key: the bridge normalizes "main" → "pd-main"
-                        // (the legacy Lua-bridge convention). Minted tempIds use
-                        // the plain "main" spelling so C++-minted names match
-                        // the TS-era convention (plate_rev_main_34, not
-                        // plate_rev_pd_main_34).
-                        auto canvasKeySymbol = (canvas_symbol == "pd-main" || canvas_symbol == "main")
-                                                   ? juce::String("main")
-                                                   : canvas_symbol;
+                        // Minted tempIds use the CANONICAL canvas key as their
+                        // base — never the caller's raw alias — so a miss after
+                        // a focus switch reads sig_ident_test_pd_3, never
+                        // sig_main_3. Subcanvases drop the "pd-" prefix to keep
+                        // names clean (pd-mysub → mysub).
+                        juce::String canvasKeySymbol = canonKey;
+                        if (canvasKeySymbol.startsWith("pd-"))
+                            canvasKeySymbol = canvasKeySymbol.substring(3);
                         juce::String canvasKey;
                         for (auto ch : canvasKeySymbol)
                             canvasKey << (juce::CharacterFunctions::isLetterOrDigit(ch) || ch == '_'
@@ -3050,7 +3086,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
                         juce::String minted = pd::sanitizeClassNameForTempId(classSrc)
                                                   + "_" + canvasKey + "_" + String(objectIndex);
 
-                        auto& canvasIdMap = mcpStableObjectMap[canvas_symbol.toStdString()];
+                        auto& canvasIdMap = mcpStableObjectMap[canonStr];
                         auto existing = canvasIdMap.find(minted.toStdString());
                         if (existing == canvasIdMap.end()) {
                             canvasIdMap[minted.toStdString()] = y_obj;
