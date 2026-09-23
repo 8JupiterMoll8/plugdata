@@ -454,11 +454,16 @@ static juce::String buildObjectText(const juce::String& kind, const juce::String
     }
     if (kind == "floatatom" || kind == "floatbox") {
         if (!t.isEmpty() && (t[0] == "floatatom" || t[0] == "floatbox")) t.remove(0);
-        return "floatbox " + t.joinIntoString(" ");
+        while (!t.isEmpty() && t[0].isEmpty()) t.remove(0);
+        // Match the batch_atomic substitution: emit [nbx]. "floatbox" here maps
+        // back to the crashy floatatom via Patch::createObject (and "numbox" is
+        // not a Pd class at all).
+        return "nbx " + t.joinIntoString(" ");
     }
     if (kind == "symbolatom" || kind == "symbolbox") {
         if (!t.isEmpty() && (t[0] == "symbolatom" || t[0] == "symbolbox")) t.remove(0);
-        return "symbolbox " + t.joinIntoString(" ");
+        while (!t.isEmpty() && t[0].isEmpty()) t.remove(0);
+        return "symbolatom " + t.joinIntoString(" ");
     }
     // IEM GUI short-form guard (see McpIemArgs.h).
     t = mcp::expandIemGuiShortForm(t);
@@ -589,17 +594,26 @@ static juce::String formatAsPdLine(const juce::String& kind,
     }
     if (kind == "floatatom" || kind == "floatbox") {
         if (!t.isEmpty() && (t[0] == "floatatom" || t[0] == "floatbox")) t.remove(0);
+        // The TS sends type:"" for kind floatatom/symbolatom, so t may START with
+        // an empty token. Strip it (like the msg/text branches) or the paste
+        // binbuf gets a stray empty atom that shifts the IEM arg count and the
+        // object fails to create ("couldn't create — red box rolled back").
+        while (!t.isEmpty() && t[0].isEmpty()) t.remove(0);
         // PlugData's FloatAtomObject has a GUI-component lifecycle bug that
         // crashes the renderer when a [floatatom] is created/destroyed via the
         // MCP mutation engine (reproduced by the GUI stress gauntlet). [numbox]
         // is the equivalent numeric display/input with a stable component and
-        // identical gatom argument layout, so substitute it.
-        t.insert(0, "numbox");
+        // identical gatom argument layout, so substitute it. NOTE: the Pd class
+        // name is "nbx" (g_numbox.c class_new(gensym("nbx"))) — "numbox" is only
+        // an MCP-side alias and does NOT resolve in the paste/object-maker, which
+        // is why '#X obj … numbox …' failed to create.
+        t.insert(0, "nbx");
         return "#X obj " + juce::String(x) + " " + juce::String(y)
                + " " + escapePdObjArgs(t.joinIntoString(" ").trim()) + ";";
     }
     if (kind == "symbolatom" || kind == "symbolbox") {
         if (!t.isEmpty() && (t[0] == "symbolatom" || t[0] == "symbolbox")) t.remove(0);
+        while (!t.isEmpty() && t[0].isEmpty()) t.remove(0);
         return "#X symbolatom " + juce::String(x) + " " + juce::String(y)
                + " " + t.joinIntoString(" ").trim() + ";";
     }
