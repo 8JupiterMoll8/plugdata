@@ -3385,6 +3385,21 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 if (ot.isNotEmpty()) tk.add(ot);
                 for (int a = 0; a < na && cursor < msg.size(); a++) tk.add(getArgString(msg[cursor++]));
 
+                // tempId theft guard (authoritative — the bridge OWNS the id map).
+                // A create whose tempId already resolves to a LIVE object would
+                // silently overwrite mcpStableObjectMap (below), orphaning the
+                // original as gui_* and misrouting every later op on that id.
+                // Refuse it here; skip the paste + registration entirely.
+                if (ot.isNotEmpty() && !oid.isEmpty()
+                    && processor->resolveStableId(canvasName, oid) != nullptr) {
+                    CreateFailure cf;
+                    cf.tempId = oid.toStdString();
+                    cf.type = ot.toStdString();
+                    cf.reason = "tempId already exists on canvas — refusing to steal it (pick a new id or rename)";
+                    createFailures.push_back(cf);
+                    continue;
+                }
+
                 // line~ in this fork takes NO creation arguments (line_tilde_new(void)),
                 // so `[line~ 0.057]` is silently created at 0. Capture a numeric init
                 // arg here and re-seed it onto the object right after paste, so
@@ -3579,7 +3594,10 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         if (sg && dg) {
                             t_object* so = pd::Interface::checkObject(sg);
                             t_object* d_o = pd::Interface::checkObject(dg);
-                            if (so && d_o) {
+                            // Only count wires that ACTUALLY existed. obj_disconnect
+                            // is a silent no-op for a missing wire, but we counted
+                            // the attempt ("1 disconnect(s)" while removing nothing).
+                            if (so && d_o && pd::Interface::hasConnection(cnv, so, pdc.srcOut, d_o, pdc.destIn)) {
                                 obj_disconnect(so, pdc.srcOut, d_o, pdc.destIn);
                                 disconnected++;
                             }
@@ -8406,13 +8424,18 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         proc->undoMcpTransaction(cnv);
                         proc->synchroniseCanvases();
                         bridge->sendReply("/pd/undo/reply/" + correlationId, 1.0f);
-                    } else if (canvasComp) {
+                    } else if (canvasComp && canvasComp->canUndo()) {
                         canvasComp->undo();
                         bridge->sendReply("/pd/undo/reply/" + correlationId, 1.0f);
-                    } else {
+                    } else if (!canvasComp) {
                         pd::Interface::undo(cnv);
                         proc->synchroniseCanvases();
                         bridge->sendReply("/pd/undo/reply/" + correlationId, 1.0f);
+                    } else {
+                        // Canvas present but the undo stack is EMPTY (e.g. after a
+                        // GOP/refactor/encapsulate flush) — report the truth so the
+                        // server stops claiming "undo succeeded" on a no-op.
+                        bridge->sendReply("/pd/undo/reply/" + correlationId, 0.0f);
                     }
                 });
             } else {

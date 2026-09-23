@@ -166,6 +166,10 @@ public:
 
     void undo();
     void redo();
+    /** True if undo() would actually change something (an MCP transaction or a
+     *  non-empty native undo stack). Lets the bridge report an honest no-op
+     *  instead of always claiming success. */
+    bool canUndo();
 
     void jumpToOrigin();
     void restoreViewportState();

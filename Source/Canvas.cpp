@@ -3046,6 +3046,12 @@ void Canvas::undo()
     // Nothing to undo
 }
 
+bool Canvas::canUndo()
+{
+    if (pd && pd->hasMcpTransaction(patch.getUncheckedPointer())) return true;
+    return patch.canUndo();
+}
+
 void Canvas::redo()
 {
     // 1. If an AI transaction was undone, redo that first to recreate objects before redoing manual edits on them
