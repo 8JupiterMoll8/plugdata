@@ -2546,6 +2546,65 @@ static juce::DynamicObject* mcpBuildGuiProps(const juce::String& className, t_ob
     return props;
 }
 
+// A named, float-settable GUI parameter.
+struct McpGuiParam { juce::String name; double min = 0, max = 1, value = 0; };
+
+// Derive a named param from ANY scalar GUI widget — not just knobs. The NAME
+// comes from the widget's MERDA `$0-<sym>` send (else/knob also honors
+// @param/x_param); a resolved "1003-freq" send is stripped of its instance id.
+// Used by /pd/params + param_set_name so props params / set[param] cover
+// hsl/vsl/tgl/bng/button/hradio/vradio/nbx, not only else/knob.
+static bool mcpGetGuiParam(const juce::String& className, t_object* obj, McpGuiParam& out)
+{
+    if (!obj) return false;
+    juce::String cls = className.toLowerCase();
+    t_symbol* raw = nullptr;
+    if (cls == "knob" || cls == "else/knob") {
+        knob_get_snd(reinterpret_cast<void*>(obj));
+        auto* k = reinterpret_cast<t_fake_knob*>(obj);
+        if (k->x_param && k->x_param != gensym("empty"))
+            out.name = juce::String::fromUTF8(k->x_param->s_name);
+        raw = k->x_snd_raw;
+        out.min = (double) k->x_min; out.max = (double) k->x_max; out.value = (double) k->x_fval;
+    } else if (cls == "hsl" || cls == "vsl") {
+        auto* s = reinterpret_cast<t_slider*>(obj);
+        raw = s->x_gui.x_snd_unexpanded;
+        out.min = (double) s->x_min; out.max = (double) s->x_max; out.value = (double) s->x_fval;
+    } else if (cls == "tgl") {
+        auto* t = reinterpret_cast<t_toggle*>(obj);
+        raw = t->x_gui.x_snd_unexpanded;
+        out.min = 0; out.max = 1; out.value = (double) t->x_on;
+    } else if (cls == "hradio" || cls == "vradio") {
+        auto* r = reinterpret_cast<t_radio*>(obj);
+        raw = r->x_gui.x_snd_unexpanded;
+        out.max = (double) (r->x_number > 0 ? r->x_number - 1 : 1); out.value = (double) r->x_fval;
+    } else if (cls == "nbx") {
+        // numbox is t_my_numbox (NOT t_fake_gatom — mis-casting crashed).
+        auto* n = reinterpret_cast<t_my_numbox*>(obj);
+        raw = n->x_gui.x_snd_unexpanded;
+        out.min = n->x_min; out.max = n->x_max; out.value = n->x_val;
+    } else if (cls == "floatatom" || cls == "numbox") {
+        auto* g = reinterpret_cast<t_fake_gatom*>(obj);
+        raw = g->a_symto;
+        out.min = (double) g->a_draglo; out.max = (double) g->a_draghi;
+    } else {
+        return false;
+    }
+    if (out.name.isEmpty() && raw && raw->s_name && raw->s_name[0]) {
+        juce::String s = juce::String::fromUTF8(raw->s_name);
+        if (s.startsWith("\\$0-")) s = s.substring(4);
+        else if (s.startsWith("$0-")) s = s.substring(3);
+        else {
+            int dash = s.indexOfChar('-');
+            if (dash > 0 && s.substring(0, dash).containsOnly("0123456789")) s = s.substring(dash + 1);
+            else return false;
+        }
+        if (s.startsWith("set-")) s = s.substring(4);
+        out.name = s;
+    }
+    return out.name.isNotEmpty();
+}
+
 // ── Tier-2 value read ──────────────────────────────────────────────────
 // For arg-objects the parameter IS the creation arg, and our set[] convention
 // adds `relabel`, so the printed text stays truthful to the live value. Map a
@@ -2906,33 +2965,16 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                                     continue;
                                 }
                                 juce::String cn = juce::String::fromUTF8(class_getname(pd_class(&y->g_pd))).toLowerCase();
-                                if (cn != "knob" && cn != "else/knob") continue;
-                                auto* k = reinterpret_cast<t_fake_knob*>(y);
-                                // Name = x_param if set; else derive from the
-                                // MERDA/GOP `\$0-<sym>` send symbol (official MERDA
-                                // modules leave x_param EMPTY — they identify params
-                                // by the variable, not '@param'). This avoids
-                                // setting x_param (which triggers the noisy param
-                                // notification, #68).
-                                juce::String nm;
-                                if (k->x_param && k->x_param != gensym("empty")) {
-                                    nm = juce::String::fromUTF8(k->x_param->s_name);
-                                } else if (k->x_snd_raw && k->x_snd_raw->s_name) {
-                                    juce::String s = juce::String::fromUTF8(k->x_snd_raw->s_name);
-                                    if (s.startsWith("\\$0-")) s = s.substring(4);
-                                    else if (s.startsWith("$0-")) s = s.substring(3);
-                                    else s.clear();
-                                    if (s.startsWith("set-")) s = s.substring(4);
-                                    nm = s;
-                                }
-                                if (nm.isEmpty()) continue;
+                                t_object* guiObj = pd::Interface::checkObject(y);
+                                McpGuiParam gp;
+                                if (!guiObj || !mcpGetGuiParam(cn, guiObj, gp)) continue;
                                 auto* o = new juce::DynamicObject();
                                 o->setProperty("tempId", findTempId(y));
                                 o->setProperty("owner", owner);
-                                o->setProperty("name", nm);
-                                o->setProperty("value", (double) k->x_fval);
-                                o->setProperty("min", (double) k->x_min);
-                                o->setProperty("max", (double) k->x_max);
+                                o->setProperty("name", gp.name);
+                                o->setProperty("value", gp.value);
+                                o->setProperty("min", gp.min);
+                                o->setProperty("max", gp.max);
                                 arr.add(juce::var(o));
                             }
                         };
@@ -2983,29 +3025,13 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                                 }
                                 if (ownerFilter.isNotEmpty() && owner != ownerFilter) continue;
                                 juce::String cn = juce::String::fromUTF8(class_getname(pd_class(&y->g_pd))).toLowerCase();
-                                if (cn != "knob" && cn != "else/knob") continue;
-                                auto* k = reinterpret_cast<t_fake_knob*>(y);
-                                // Same naming rule as /pd/params (x_param or the
-                                // MERDA \$0-<sym> send) so set[param] by name works
-                                // on MERDA/GOP modules without x_param (#43/#68).
-                                juce::String nm;
-                                if (k->x_param && k->x_param != gensym("empty")) {
-                                    nm = juce::String::fromUTF8(k->x_param->s_name);
-                                } else if (k->x_snd_raw && k->x_snd_raw->s_name) {
-                                    juce::String s = juce::String::fromUTF8(k->x_snd_raw->s_name);
-                                    if (s.startsWith("\\$0-")) s = s.substring(4);
-                                    else if (s.startsWith("$0-")) s = s.substring(3);
-                                    else s.clear();
-                                    if (s.startsWith("set-")) s = s.substring(4);
-                                    nm = s;
-                                }
-                                if (nm != name) continue;
                                 t_object* o = pd::Interface::checkObject(y);
-                                if (o) {
-                                    t_atom a; SETFLOAT(&a, value);
-                                    pd_typedmess(reinterpret_cast<t_pd*>(o), gensym("float"), 1, &a);
-                                    applied++;
-                                }
+                                McpGuiParam gp;
+                                if (!o || !mcpGetGuiParam(cn, o, gp)) continue;
+                                if (gp.name != name) continue;
+                                t_atom a; SETFLOAT(&a, value);
+                                pd_typedmess(reinterpret_cast<t_pd*>(o), gensym("float"), 1, &a);
+                                applied++;
                             }
                         };
                     applyParam(cnv, 0, {});
