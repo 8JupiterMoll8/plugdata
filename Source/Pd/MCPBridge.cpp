@@ -2883,25 +2883,45 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 if (!cnv && (canvasName == "pd-main" || canvasName == "main" || canvasName.isEmpty()))
                     cnv = pd_this->pd_canvaslist;
                 if (cnv) {
-                    auto canonKey = canonicalCanvasKey(cnv);
-                    auto& map = processor->mcpStableObjectMap[canonKey.toStdString()];
-                    for (t_gobj* y = cnv->gl_list; y; y = y->g_next) {
-                        juce::String cn = juce::String::fromUTF8(class_getname(pd_class(&y->g_pd))).toLowerCase();
-                        if (cn != "knob" && cn != "else/knob") continue;
-                        auto* k = reinterpret_cast<t_fake_knob*>(y);
-                        if (!k->x_param || k->x_param == gensym("empty")) continue;
-                        juce::String nm = juce::String::fromUTF8(k->x_param->s_name);
-                        if (nm.isEmpty()) continue;
-                        juce::String tempId;
-                        for (auto& [id, ptr] : map) if (ptr == y) { tempId = id; break; }
-                        auto* o = new juce::DynamicObject();
-                        o->setProperty("tempId", tempId);
-                        o->setProperty("name", nm);
-                        o->setProperty("value", (double) k->x_fval);
-                        o->setProperty("min", (double) k->x_min);
-                        o->setProperty("max", (double) k->x_max);
-                        arr.add(juce::var(o));
-                    }
+                    // Collect knob-bound params, DESCENDING into placed
+                    // subpatches / abstractions (GOP/MERDA modules keep their
+                    // knobs inside the abstraction canvas, not on the root).
+                    // #43: without recursion, props params found 0 for every
+                    // generated module. Each descended param is tagged with its
+                    // OWNING module tempId so callers (auto_map) can scope to a
+                    // single module — C++ is the truth, TS must not re-derive.
+                    auto findTempId = [&](t_gobj* y) -> juce::String {
+                        for (auto& [key, m] : processor->mcpStableObjectMap)
+                            for (auto& [id, ptr] : m) if (ptr == y) return id;
+                        return {};
+                    };
+                    std::function<void(t_canvas*, int, juce::String)> collect =
+                        [&](t_canvas* c, int depth, juce::String owner) {
+                            if (!c || depth > 4) return;
+                            for (t_gobj* y = c->gl_list; y; y = y->g_next) {
+                                if (pd_class(&y->g_pd) == canvas_class) {
+                                    juce::String subId = findTempId(y);
+                                    collect(reinterpret_cast<t_canvas*>(y), depth + 1,
+                                            owner.isNotEmpty() ? owner : subId);
+                                    continue;
+                                }
+                                juce::String cn = juce::String::fromUTF8(class_getname(pd_class(&y->g_pd))).toLowerCase();
+                                if (cn != "knob" && cn != "else/knob") continue;
+                                auto* k = reinterpret_cast<t_fake_knob*>(y);
+                                if (!k->x_param || k->x_param == gensym("empty")) continue;
+                                juce::String nm = juce::String::fromUTF8(k->x_param->s_name);
+                                if (nm.isEmpty()) continue;
+                                auto* o = new juce::DynamicObject();
+                                o->setProperty("tempId", findTempId(y));
+                                o->setProperty("owner", owner);
+                                o->setProperty("name", nm);
+                                o->setProperty("value", (double) k->x_fval);
+                                o->setProperty("min", (double) k->x_min);
+                                o->setProperty("max", (double) k->x_max);
+                                arr.add(juce::var(o));
+                            }
+                        };
+                    collect(cnv, 0, {});
                 }
                 sys_unlock();
             }
@@ -2926,19 +2946,30 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 if (!cnv && (canvasName == "pd-main" || canvasName == "main" || canvasName.isEmpty()))
                     cnv = pd_this->pd_canvaslist;
                 if (cnv) {
-                    for (t_gobj* y = cnv->gl_list; y; y = y->g_next) {
-                        juce::String cn = juce::String::fromUTF8(class_getname(pd_class(&y->g_pd))).toLowerCase();
-                        if (cn != "knob" && cn != "else/knob") continue;
-                        auto* k = reinterpret_cast<t_fake_knob*>(y);
-                        if (!k->x_param) continue;
-                        if (juce::String::fromUTF8(k->x_param->s_name) != name) continue;
-                        t_object* o = pd::Interface::checkObject(y);
-                        if (o) {
-                            t_atom a; SETFLOAT(&a, value);
-                            pd_typedmess(reinterpret_cast<t_pd*>(o), gensym("float"), 1, &a);
-                            applied++;
-                        }
-                    }
+                    // Descend into placed subpatches/abstractions so a param
+                    // INSIDE a GOP/MERDA module can be set by name (#43).
+                    std::function<void(t_canvas*, int)> applyParam =
+                        [&](t_canvas* c, int depth) {
+                            if (!c || depth > 4) return;
+                            for (t_gobj* y = c->gl_list; y; y = y->g_next) {
+                                if (pd_class(&y->g_pd) == canvas_class) {
+                                    applyParam(reinterpret_cast<t_canvas*>(y), depth + 1);
+                                    continue;
+                                }
+                                juce::String cn = juce::String::fromUTF8(class_getname(pd_class(&y->g_pd))).toLowerCase();
+                                if (cn != "knob" && cn != "else/knob") continue;
+                                auto* k = reinterpret_cast<t_fake_knob*>(y);
+                                if (!k->x_param) continue;
+                                if (juce::String::fromUTF8(k->x_param->s_name) != name) continue;
+                                t_object* o = pd::Interface::checkObject(y);
+                                if (o) {
+                                    t_atom a; SETFLOAT(&a, value);
+                                    pd_typedmess(reinterpret_cast<t_pd*>(o), gensym("float"), 1, &a);
+                                    applied++;
+                                }
+                            }
+                        };
+                    applyParam(cnv, 0);
                 }
                 sys_unlock();
             }
