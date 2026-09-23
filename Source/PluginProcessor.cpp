@@ -2364,17 +2364,29 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
             }
         };
 
+        // #28b: the MCP transaction stacks are a SEPARATE undo layer from the
+        // native canvas undo. Wiping only the native queue (canvas_undo_free)
+        // left stale MCP transactions armed — the next undo then replayed a
+        // pre-restructure inverse against a canvas it no longer matched (silent
+        // no-op) yet still reported success ("undo succeeded" while the
+        // encapsulate stood). Clear BOTH layers together, so after any op that
+        // flushes the native stack (encapsulate / GOP / refactor / clear / load)
+        // undo is honest — empty → reply 0.0 — instead of a false success.
         if (list.size() >= 1) {
             auto canvas_symbol = list[0].toString();
             t_canvas* cnv = getCanvasBySymbol(canvas_symbol);
             if (!cnv && (canvas_symbol == "pd-main")) cnv = pd_this->pd_canvaslist;
-            if (cnv) wipeCanvasUndo(cnv);
+            if (cnv) {
+                wipeCanvasUndo(cnv);
+                clearMcpTransactions(cnv);
+            }
         }
 
         // Always also wipe undo on top-level root patch and all open canvas roots
         // so subpatch mutations never leave armed undo actions on the parent canvas.
         for (t_canvas* root = pd_this->pd_canvaslist; root; root = root->gl_next) {
             wipeCanvasUndo(root);
+            clearMcpTransactions(root);
         }
         break;
     }
