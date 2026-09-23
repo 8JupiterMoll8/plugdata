@@ -5188,6 +5188,16 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                                     ? juce::String::fromUTF8(cnv->gl_name->s_name)
                                     : juce::String(f.getFileName());
                                 queueRegisters(sidecarObj->getProperty("root"), boundName, cnv);
+                                // ALSO register the root under the default "pd-main"
+                                // alias. normalizeCanvas("main") -> "pd-main", and the
+                                // identity map is keyed by THAT — so registering only the
+                                // bound file name left the SAME canvas with two identity
+                                // namespaces (default addressing auto-generated gui_*/
+                                // type_* names while named-tab addressing found the real
+                                // ids). load_patch already keys by canvasName. Register
+                                // twice so BOTH addressings resolve the same ids.
+                                if (reinterpret_cast<t_glist*>(cnv)->gl_owner == nullptr && boundName != "pd-main")
+                                    queueRegisters(sidecarObj->getProperty("root"), "pd-main", cnv);
                                 // named subcanvases
                                 if (auto* subObj = sidecarObj->getProperty("sub").getDynamicObject()) {
                                     for (t_gobj* g = cnv->gl_list; g; g = g->g_next) {
