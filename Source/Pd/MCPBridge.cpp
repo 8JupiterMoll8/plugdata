@@ -4241,6 +4241,38 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 }
             }
 
+            // Auto-frame newly-created objects: if a CREATED object landed outside
+            // the current viewport, frame the canvas so the artist SEES it (the
+            // "I don't see any object" trap when the AI places far from the view).
+            // Only counts objects created in THIS batch, so panning around never
+            // triggers it; a creation inside the view never yanks the camera.
+            if (cnv && created > 0 && !canvasNotFound) {
+                auto frameIfCreateOffscreen = [p = processor, cnv, ptrs = createdPtrs]() {
+                    auto* cc = mcpFindGuiCanvasFor(p, cnv);
+                    if (!cc || !cc->viewport) return;
+                    float z = std::sqrt(std::abs(cc->getTransform().getDeterminant()));
+                    if (z <= 0.0f) z = 1.0f;
+                    auto view = cc->viewport->getViewArea().toFloat() / z;
+                    bool offscreen = false;
+                    sys_lock();
+                    for (auto* g : ptrs) {
+                        if (!g) continue;
+                        int x = 0, y = 0, w = 0, h = 0;
+                        pd::Interface::getObjectBounds(cnv, g, &x, &y, &w, &h);
+                        if (!view.contains(juce::Rectangle<float>((float)x, (float)y, (float)w, (float)h).getCentre())) {
+                            offscreen = true; break;
+                        }
+                    }
+                    sys_unlock();
+                    if (offscreen) cc->zoomToFitAll();
+                };
+                if (juce::MessageManager::getInstance()->isThisTheMessageThread()) {
+                    frameIfCreateOffscreen();
+                } else {
+                    juce::MessageManager::callAsync(frameIfCreateOffscreen);
+                }
+            }
+
             // MCP mutations never register correct Pd undo actions, yet they
             // still reorder/free objects that pre-existing index-based undo
             // entries point at (delete shifts indices; encapsulate/GOP/refactor
