@@ -1413,7 +1413,13 @@ juce::String MCPBridge::computeSignalTrace(PluginProcessor* processor, t_canvas*
 
     for (int i = 0; i < numObjs; ++i) {
         const juce::String& c = classNames[i];
-        if (c == "dac~" || c == "throw~" || c == "out~") continue;
+        // dac~/out~ are sinks; throw~/send~ are bus SENDERS with no signal
+        // outlet — their signal continues at the matching catch~/receive~.
+        // Measuring a bus sender's outlet reads silence, so an [s~] with live
+        // input and an (empty) outlet was falsely reported as a choke on every
+        // working send~. Skip them; a genuinely dangling send~ (no matching
+        // receiver) still surfaces via the "never reaches dac~" fallback below.
+        if (c == "dac~" || c == "throw~" || c == "out~" || c == "send~" || c == "s~") continue;
 
         if (maxInPeak[i] >= ALIVE_THRESH && maxOutPeak[i] < ALIVE_THRESH) {
             chokeIndex = i;
