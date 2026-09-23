@@ -1812,6 +1812,21 @@ juce::String MCPBridge::computePerfFacts(PluginProcessor* processor, t_canvas* c
     return juce::JSON::toString(juce::var(root));
 }
 
+// ── mcpIoletX — true Pd iolet anchor X ──────────────────────────────────
+// Ports sit at  objX + (objW - IOWIDTH) * index / (count-1) + IOMIDDLE  (see
+// pure-data g_canvas.c drawline / Interface.h), i.e. a single-port object's
+// port is at its LEFT edge — NOT its centre. Modelling a cord as centre→centre
+// therefore MISSES occlusions whenever the real port is off-centre (most
+// objects) and could also report false ones — the "C++ says 0 occlusions but
+// the wire clearly runs through the box" false negative.
+static inline double mcpIoletX(int objX, int objW, int index, int count)
+{
+    int plus = (count <= 1 ? 1 : count - 1);
+    return static_cast<double>(objX)
+         + (static_cast<double>(objW - IOWIDTH) * index) / plus
+         + IOMIDDLE;
+}
+
 // ── sanitizeLayout — inline minimal-deoverlap post-guard ────────────────
 // Same algorithm as /pd/deoverlap (PAD 5, 10px snap, minimal-axis push) but
 // using Pd-only bounds so it is safe to call inline under sys_lock from the
@@ -1938,7 +1953,8 @@ int MCPBridge::fixOcclusions(PluginProcessor* processor, t_canvas* cnv, int pad,
             ptrToIdx[objs[i]] = static_cast<int>(i);
         }
 
-        std::vector<std::pair<int, int>> edges;
+        struct Edge { int si, di, outno, nout, inno, nin; };
+        std::vector<Edge> edges;
         t_linetraverser lt;
         t_outconnect* oc = nullptr;
         linetraverser_start(&lt, cnv);
@@ -1946,16 +1962,16 @@ int MCPBridge::fixOcclusions(PluginProcessor* processor, t_canvas* cnv, int pad,
             auto si = ptrToIdx.find(&lt.tr_ob->ob_g);
             auto di = ptrToIdx.find(&lt.tr_ob2->ob_g);
             if (si == ptrToIdx.end() || di == ptrToIdx.end()) continue;
-            edges.emplace_back(si->second, di->second);
+            edges.push_back({ si->second, di->second, lt.tr_outno, lt.tr_nout, lt.tr_inno, lt.tr_nin });
         }
 
         auto snapUp = [snap](int v) { return ((v + snap - 1) / snap) * snap; };
         bool anyMove = false;
         for (auto& e : edges) {
-            int si = e.first, di = e.second;
-            double x1 = rects[si].x + rects[si].w / 2.0;
+            int si = e.si, di = e.di;
+            double x1 = mcpIoletX(rects[si].x, rects[si].w, e.outno, e.nout);
             double y1 = rects[si].y + rects[si].h;
-            double x2 = rects[di].x + rects[di].w / 2.0;
+            double x2 = mcpIoletX(rects[di].x, rects[di].w, e.inno, e.nin);
             double y2 = rects[di].y;
             for (size_t k = 0; k < objs.size(); ++k) {
                 if ((int)k == si || (int)k == di) continue;
@@ -5660,7 +5676,8 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             }
 
             // Edges via one linetraverser walk (same as diagnose §2).
-            std::vector<std::pair<int, int>> edges;
+            struct Edge { int si, di, outno, nout, inno, nin; };
+            std::vector<Edge> edges;
             t_linetraverser lt;
             t_outconnect* oc = nullptr;
             linetraverser_start(&lt, cnv);
@@ -5668,7 +5685,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 auto si = ptrToIdx.find(&lt.tr_ob->ob_g);
                 auto di = ptrToIdx.find(&lt.tr_ob2->ob_g);
                 if (si == ptrToIdx.end() || di == ptrToIdx.end()) continue;
-                edges.emplace_back(si->second, di->second);
+                edges.push_back({ si->second, di->second, lt.tr_outno, lt.tr_nout, lt.tr_inno, lt.tr_nin });
             }
 
             // Anchor-line vs box test (Liang-Barsky, same as TS rule so
@@ -5694,10 +5711,11 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
             json = "{\"canvas\":\"" + canvasName + "\",\"model\":\"anchor-line\",\"occlusions\":[";
             bool first = true;
-            for (auto& [si, di] : edges) {
-                double x1 = rects[si].x + rects[si].w / 2.0;
+            for (auto& e : edges) {
+                int si = e.si, di = e.di;
+                double x1 = mcpIoletX(rects[si].x, rects[si].w, e.outno, e.nout);
                 double y1 = rects[si].y + rects[si].h;
-                double x2 = rects[di].x + rects[di].w / 2.0;
+                double x2 = mcpIoletX(rects[di].x, rects[di].w, e.inno, e.nin);
                 double y2 = rects[di].y;
                 for (size_t k = 0; k < objs.size(); ++k) {
                     if ((int)k == si || (int)k == di) continue;
