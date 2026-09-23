@@ -8073,6 +8073,46 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         return;
     }
 
+    // ── /pd/layout_guard — full inline C++ layout guard ─────────────────
+    // /pd/layout_guard <canvas> <pad> <snap> <fixOccl> <corrId>
+    // PRD_CONTEXT_LAYOUT_GUARD: the SAME guard batch_atomic runs inline —
+    // sanitizeLayout (minimal-axis de-overlap, region-title aware) then
+    // fixOcclusions (nudge boxes off wire paths). Context-preserving: keeps
+    // the semantic placement and only pushes what clashes, so it reads as
+    // "tidy up my arrangement" rather than a full re-layout.
+    // Reply: <moved> <occlusionsFixed>.
+    if (action == "layout_guard") {
+        auto canvasName = normalizeCanvas(getArgString(msg[0]));
+        int guardPad  = msg.size() > 1 ? static_cast<int>(getArgFloat(msg[1])) : 20;
+        int guardSnap = msg.size() > 2 ? static_cast<int>(getArgFloat(msg[2])) : 10;
+        bool fixOccl  = msg.size() > 3 ? (getArgFloat(msg[3]) != 0.0f) : true;
+        auto correlationId = msg.size() > 4 ? getArgString(msg[4]) : "0";
+        juce::String replyAddr = "/pd/layout_guard/reply/" + correlationId;
+
+        t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+        if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
+        if (!cnv) {
+            juce::Array<juce::var> none;
+            none.add(0.0f);
+            none.add(0.0f);
+            sendReply(replyAddr, none);
+            return;
+        }
+
+        sys_lock();
+        int moved = sanitizeLayout(processor, cnv, guardPad, guardSnap);
+        int occlusions = fixOccl ? fixOcclusions(processor, cnv, guardPad, guardSnap) : 0;
+        if (moved > 0 || occlusions > 0) resetCanvasUndo(processor, canvasName);
+        sys_unlock();
+
+        processor->enqueueFunctionAsync([p = processor] { p->synchroniseCanvases(); });
+        juce::Array<juce::var> guardReply;
+        guardReply.add(static_cast<float>(moved));
+        guardReply.add(static_cast<float>(occlusions));
+        sendReply(replyAddr, guardReply);
+        return;
+    }
+
     // ── /pd/compose — P4 role-based composition ─────────────────────────
     // /pd/compose <canvas> <pad> <snap> <corrId>
     if (action == "compose") {
@@ -9072,6 +9112,7 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
         reply.addArgument(juce::String("wire_occlusions"));
         // PRD layout-v2 Phase B1/B2: native writers on the zero-drop move path
         reply.addArgument(juce::String("deoverlap"));
+        reply.addArgument(juce::String("layout_guard"));
         reply.addArgument(juce::String("compose"));
         reply.addArgument(juce::String("flow"));
         reply.addArgument(juce::String("pillars"));
