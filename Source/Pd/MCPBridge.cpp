@@ -12,6 +12,7 @@
 #include "Canvas.h"
 #include "TabComponent.h"
 #include "Object.h"
+#include "Connection.h" // Connection inobj/outobj + inIdx/outIdx (encapsulate_to_file rewire)
 #include "Objects/ObjectBase.h"
 #include "Objects/AllGuis.h" // t_fake_knob raw snd/rcv fields for screenshot labels
 #include "Objects/GemCapture.h" // PRD 1.4: native GEM window capture
@@ -2378,6 +2379,20 @@ static juce::String mcpObjSetCore(t_gobj* g, const juce::String& tempId, int inl
     if (!o) return "error: object not resolvable '" + tempId + "'";
     t_pd* dest = mcpResolveInlet(o, inlet);
     if (!dest) return "error: could not resolve inlet " + juce::String(inlet);
+    // Guard 1.5 (connective rename): Pd's [receive]/[send] are CLASS_NOINLET and
+    // register no runtime `set` method (see Libraries/pure-data/src/x_connective.c
+    // — only bang/float/symbol/list/pointer/anything). A `receive`/`send`/`set`
+    // selector therefore falls through to the class `anything` handler, which
+    // FORWARDS the message out the receiver's outlet — a silent misroute that
+    // surfaces as a confusing downstream error (e.g. "osc~: no method for
+    // 'receive'"). Refuse clearly instead of leaking.
+    {
+        juce::String clsName = juce::String::fromUTF8(class_getname(pd_class(&o->ob_pd)));
+        if ((clsName == "receive" || clsName == "send")
+            && (selector == "receive" || selector == "send" || selector == "set")) {
+            return "error: Pd's [" + clsName + "] cannot be renamed at runtime — use retype/edit to recreate it with the new name";
+        }
+    }
     if (warning && mcpIsStructuralSelector(selector))
         *warning = "structural:" + selector + " (may trigger a DSP recompile — prefer edit)";
     // Guard 1 (dead-knob safety net): a float/list sent to a signal-rate inlet is
@@ -3986,14 +4001,16 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                                 }
                                 // Guard 2: control outlet -> signal inlet. Pd accepts
                                 // this (sets the inlet's scalar, updated once per block)
-                                // so we do NOT reject — just advise for smoothness.
+                                // so we do NOT reject — and it is NOT a required bridge.
+                                // Wording matches the TS rate-advisory (canonicalFix):
+                                // "legal in Pd (no bridge needed)".
                                 if (!srcSig && destSig) {
                                     connectAdvisories.push_back({
                                         cc.srcId.toStdString(), cc.destId.toStdString(),
-                                        "bridge: control outlet " + std::to_string(cc.srcOut)
+                                        "control outlet " + std::to_string(cc.srcOut)
                                           + " -> signal inlet " + std::to_string(cc.destIn)
-                                          + " — Pd sets the inlet scalar (works, updates per block); "
-                                            "insert [sig~] for smooth audio-rate" });
+                                          + " — legal in Pd (the float sets the signal inlet; no bridge needed). "
+                                            "Optional: [sig~] only if you want audio-rate smoothing" });
                                 }
                             }
                             // R2 — would this wire close a zero-delay signal loop?
@@ -7079,6 +7096,39 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
                     // ── Step 4: Replace [pd abstrName] with [abstrName] ref ──
                     // Delete the inline subpatch, create abstraction reference.
+                    //
+                    // CRITICAL: encapsulateSelection rewired the parent's external
+                    // wires onto the inline [pd abstrName] box, but glist_delete
+                    // frees that box AND its connections. Snapshot the boundary
+                    // wires first, then re-attach them to the [abstrName] reference
+                    // — otherwise the extraction silently disconnects the chain.
+                    struct BoundaryWire { t_gobj* far; int farPort; int boxPort; };
+                    std::vector<BoundaryWire> inWires, outWires;
+                    {
+                        Object* subComp = nullptr;
+                        for (auto* o : canvasComp->objects) {
+                            if (o && o->getPointer() == newestObj) { subComp = o; break; }
+                        }
+                        if (subComp) {
+                            for (auto* c : canvasComp->connections) {
+                                if (!c) continue;
+                                if (c->inobj.get() == subComp) {
+                                    // far -> box (inbound): far's outlet -> box inlet
+                                    if (auto* farO = c->outobj.get()) {
+                                        if (t_gobj* fg = farO->getPointer())
+                                            inWires.push_back({ fg, c->outIdx, c->inIdx });
+                                    }
+                                } else if (c->outobj.get() == subComp) {
+                                    // box -> far (outbound): box outlet -> far's inlet
+                                    if (auto* farO = c->inobj.get()) {
+                                        if (t_gobj* fg = farO->getPointer())
+                                            outWires.push_back({ fg, c->inIdx, c->outIdx });
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     sys_lock();
                     {
                         // Delete the [pd abstrName] subpatch object
@@ -7087,6 +7137,19 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         // using pasteDirect — same path as batch_atomic PHASE 4
                         juce::String objLine = "#X obj " + juce::String(posX) + " " + juce::String(posY) + " " + abstrName + ";";
                         pasteDirect(cnv, objLine.toRawUTF8());
+                        // Re-attach the parent boundary wires to the new reference.
+                        t_gobj* rewired = pd::Interface::getNewest(cnv);
+                        t_object* rewiredOb = rewired ? pd::Interface::checkObject(rewired) : nullptr;
+                        if (rewiredOb) {
+                            for (auto& w : inWires) {
+                                if (t_object* fo = pd::Interface::checkObject(w.far))
+                                    pd::Interface::createConnection(cnv, fo, w.farPort, rewiredOb, w.boxPort);
+                            }
+                            for (auto& w : outWires) {
+                                if (t_object* fo = pd::Interface::checkObject(w.far))
+                                    pd::Interface::createConnection(cnv, rewiredOb, w.boxPort, fo, w.farPort);
+                            }
+                        }
                         // Single DSP recompile
                         canvas_update_dsp();
                     }
