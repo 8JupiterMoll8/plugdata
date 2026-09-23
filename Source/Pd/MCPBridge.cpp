@@ -3342,8 +3342,10 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             // named failures instead of silent skips (see PRD §2.1).
             struct CreateFailure { std::string tempId; std::string type; std::string reason; };
             struct ConnectFailure { std::string srcId; std::string destId; std::string reason; };
+            struct EditFailure { std::string tempId; std::string type; std::string reason; };
             std::vector<CreateFailure> createFailures;
             std::vector<ConnectFailure> connectFailures;
+            std::vector<EditFailure> editFailures;
             // Guard 2: control->signal connections are legal (Pd sets the inlet
             // scalar) but step per DSP block. Advisory only — never rejected.
             std::vector<ConnectFailure> connectAdvisories;
@@ -3726,7 +3728,24 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                                     if (newObj != obj) processor->mcpStableSerialMap.erase(obj);
                                     processor->mcpStableSerialMap[newObj] = processor->mcpSerialCounter++;
                                     processor->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
-                                    edited++;
+                                    // C++ truth: when a class can't be instantiated Pd
+                                    // substitutes text_class (g_text.c canvas_objtext,
+                                    // "... couldn't create") and leaves an ERROR BOX — the
+                                    // object still exists, so counting it as `edited` was a
+                                    // FALSE SUCCESS (a bogus retype reported ok:true). Detect
+                                    // the substitution and report an edit failure instead.
+                                    juce::String wantCls = pe.newText.upToFirstOccurrenceOf(" ", false, false).trim().toLowerCase();
+                                    t_object* no = pd::Interface::checkObject(newObj);
+                                    juce::String gotCls = no
+                                        ? juce::String::fromUTF8(class_getname(pd_class(&no->ob_pd))).toLowerCase()
+                                        : juce::String();
+                                    if (!no || (gotCls == "text" && wantCls != "text" && wantCls != "comment")) {
+                                        editFailures.push_back({ pe.objectId.toStdString(),
+                                            pe.newText.toStdString(),
+                                            "class could not be created — object left as an error box (check the external/library)" });
+                                    } else {
+                                        edited++;
+                                    }
                                 }
                             }
                         }
@@ -4391,6 +4410,17 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             for (auto& ca : connectAdvisories) {
                 reply.addArgument(juce::String(ca.srcId) + juce::String("->") + juce::String(ca.destId));
                 reply.addArgument(juce::String(ca.reason));
+            }
+
+            // Edit-failure tail fact (appended LAST, old clients ignore): edits whose
+            // RECREATE failed (class couldn't be created → Pd leaves an error box).
+            // Format: [count, (tempId, type, reason)*]. These are counted OUT of
+            // `edited`, so the header count is truthfully short (no false success).
+            reply.addArgument(static_cast<int32>(editFailures.size()));
+            for (auto& ef : editFailures) {
+                reply.addArgument(juce::String(ef.tempId));
+                reply.addArgument(juce::String(ef.type));
+                reply.addArgument(juce::String(ef.reason));
             }
 
             sender.send(reply);
