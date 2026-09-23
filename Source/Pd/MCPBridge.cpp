@@ -2908,8 +2908,23 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                                 juce::String cn = juce::String::fromUTF8(class_getname(pd_class(&y->g_pd))).toLowerCase();
                                 if (cn != "knob" && cn != "else/knob") continue;
                                 auto* k = reinterpret_cast<t_fake_knob*>(y);
-                                if (!k->x_param || k->x_param == gensym("empty")) continue;
-                                juce::String nm = juce::String::fromUTF8(k->x_param->s_name);
+                                // Name = x_param if set; else derive from the
+                                // MERDA/GOP `\$0-<sym>` send symbol (official MERDA
+                                // modules leave x_param EMPTY — they identify params
+                                // by the variable, not '@param'). This avoids
+                                // setting x_param (which triggers the noisy param
+                                // notification, #68).
+                                juce::String nm;
+                                if (k->x_param && k->x_param != gensym("empty")) {
+                                    nm = juce::String::fromUTF8(k->x_param->s_name);
+                                } else if (k->x_snd_raw && k->x_snd_raw->s_name) {
+                                    juce::String s = juce::String::fromUTF8(k->x_snd_raw->s_name);
+                                    if (s.startsWith("\\$0-")) s = s.substring(4);
+                                    else if (s.startsWith("$0-")) s = s.substring(3);
+                                    else s.clear();
+                                    if (s.startsWith("set-")) s = s.substring(4);
+                                    nm = s;
+                                }
                                 if (nm.isEmpty()) continue;
                                 auto* o = new juce::DynamicObject();
                                 o->setProperty("tempId", findTempId(y));
@@ -2959,8 +2974,21 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                                 juce::String cn = juce::String::fromUTF8(class_getname(pd_class(&y->g_pd))).toLowerCase();
                                 if (cn != "knob" && cn != "else/knob") continue;
                                 auto* k = reinterpret_cast<t_fake_knob*>(y);
-                                if (!k->x_param) continue;
-                                if (juce::String::fromUTF8(k->x_param->s_name) != name) continue;
+                                // Same naming rule as /pd/params (x_param or the
+                                // MERDA \$0-<sym> send) so set[param] by name works
+                                // on MERDA/GOP modules without x_param (#43/#68).
+                                juce::String nm;
+                                if (k->x_param && k->x_param != gensym("empty")) {
+                                    nm = juce::String::fromUTF8(k->x_param->s_name);
+                                } else if (k->x_snd_raw && k->x_snd_raw->s_name) {
+                                    juce::String s = juce::String::fromUTF8(k->x_snd_raw->s_name);
+                                    if (s.startsWith("\\$0-")) s = s.substring(4);
+                                    else if (s.startsWith("$0-")) s = s.substring(3);
+                                    else s.clear();
+                                    if (s.startsWith("set-")) s = s.substring(4);
+                                    nm = s;
+                                }
+                                if (nm != name) continue;
                                 t_object* o = pd::Interface::checkObject(y);
                                 if (o) {
                                     t_atom a; SETFLOAT(&a, value);
