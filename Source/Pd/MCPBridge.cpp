@@ -2954,6 +2954,9 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             auto correlationId = getArgString(msg[1]);
             auto name = getArgString(msg[2]);
             float value = getArgFloat(msg[3]);
+            // Optional owner scope: when given, only knobs in THAT module are
+            // set (avoids fan-out across modules sharing a param name).
+            juce::String ownerFilter = msg.size() > 4 ? getArgString(msg[4]) : juce::String();
             int applied = 0;
             {
                 sys_lock();
@@ -2963,14 +2966,22 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 if (cnv) {
                     // Descend into placed subpatches/abstractions so a param
                     // INSIDE a GOP/MERDA module can be set by name (#43).
-                    std::function<void(t_canvas*, int)> applyParam =
-                        [&](t_canvas* c, int depth) {
+                    auto findTempId = [&](t_gobj* y) -> juce::String {
+                        for (auto& [key, m] : processor->mcpStableObjectMap)
+                            for (auto& [id, ptr] : m) if (ptr == y) return id;
+                        return {};
+                    };
+                    std::function<void(t_canvas*, int, juce::String)> applyParam =
+                        [&](t_canvas* c, int depth, juce::String owner) {
                             if (!c || depth > 4) return;
                             for (t_gobj* y = c->gl_list; y; y = y->g_next) {
                                 if (pd_class(&y->g_pd) == canvas_class) {
-                                    applyParam(reinterpret_cast<t_canvas*>(y), depth + 1);
+                                    juce::String subId = findTempId(y);
+                                    applyParam(reinterpret_cast<t_canvas*>(y), depth + 1,
+                                               owner.isNotEmpty() ? owner : subId);
                                     continue;
                                 }
+                                if (ownerFilter.isNotEmpty() && owner != ownerFilter) continue;
                                 juce::String cn = juce::String::fromUTF8(class_getname(pd_class(&y->g_pd))).toLowerCase();
                                 if (cn != "knob" && cn != "else/knob") continue;
                                 auto* k = reinterpret_cast<t_fake_knob*>(y);
@@ -2997,7 +3008,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                                 }
                             }
                         };
-                    applyParam(cnv, 0);
+                    applyParam(cnv, 0, {});
                 }
                 sys_unlock();
             }
