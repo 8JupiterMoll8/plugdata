@@ -8754,7 +8754,11 @@ void MCPBridge::handleArrayDomain(const juce::String& arrayAction, const juce::O
         } else if (arrayAction == "write_bulk" && msg.size() >= 4) {
             int offset = static_cast<int>(getArgFloat(msg[3]));
             int dataCount = msg.size() - 4;
-            reqSize = std::max(2048, offset + dataCount);
+            // A FULL write (offset 0) into a missing array is sized to the DATA so a
+            // 2^n+3 wavetable stays tabosc4~-valid (the fixed 2048 floor produced an
+            // invalid 2048-point table). The floor only remains a size ESTIMATE for a
+            // PARTIAL write (offset > 0) into an array that does not exist yet.
+            reqSize = offset > 0 ? std::max(2048, offset + dataCount) : std::max(1, dataCount);
         }
 
         t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
