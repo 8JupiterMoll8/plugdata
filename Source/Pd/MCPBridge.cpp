@@ -2465,6 +2465,14 @@ static juce::String mcpObjSetCore(t_gobj* g, const juce::String& tempId, int inl
     // obj_issignalinlet() cannot distinguish a scalar-accepting signal inlet
     // (e.g. lop~ inlet 1) from a pure audio inlet, so this is ADVISORY, not a fix
     // and never a redirect — misrouting (e.g. osc~ phase) would be worse.
+    // KNOWN GAP (#72): `inlet` is the MCP from-the-end index (0 = the object;
+    // N>=1 = the N-th inlet from the LAST), while obj_issignalinlet() wants a
+    // 0-based PHYSICAL index. They only coincide when the resolved inlet IS the
+    // last one, so a float to a NON-last signal inlet (e.g. set{inlet:1} on a
+    // 1-inlet osc~) can still no-op with no warning. A correct physical-index
+    // derivation needs the real explicit-inlet count (obj_ninlets() is NOT it —
+    // CLASS_MAINSIGNALIN inlets are implicit); left open rather than ship a
+    // guard whose premise is unverified.
     if (warning && inlet >= 0 && (selector == "float" || selector == "list")
         && obj_issignalinlet(o, inlet) != 0) {
         juce::String g1 = "inlet-signal: '" + selector + "' -> signal inlet " + juce::String(inlet)
