@@ -85,7 +85,14 @@ inline juce::StringArray expandIemGuiShortForm(const juce::StringArray& tokens)
         full.add(mn);                   // 2  min
         full.add(mx);                   // 3  max
         full.add(log);                  // 4  log
-        full.add(hasInit ? "1" : "0");  // 5  loadinit (1 so init takes effect)
+        // 5 loadinit: ALWAYS on. Pd's slider_save writes the current value ONLY
+        // when x_loadinit is set (`x_loadinit ? x_val : 0`, g_slider.c), and
+        // slider_loadbang re-sends it on load only when set. With loadinit off
+        // (the old default when no init arg was given) every MCP-created knob
+        // silently reset to min on reload AND stayed silent — the "slider went
+        // down / patch came up silent" trap. Init ON makes runtime values
+        // persist and wakes the knob→line~ chain on load.
+        full.add("1");
         full.add("empty");              // 6  send
         full.add("empty");              // 7  receive
         full.add("empty");              // 8  label

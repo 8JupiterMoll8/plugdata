@@ -506,6 +506,19 @@ private:
     std::atomic<int> mcpSpecCapacity { 0 };
     std::vector<float> mcpSpecBuffer;
 
+    // --- Armed-capture DIAGNOSTICS (#83) -------------------------------------
+    // Evidence for the "armed reads silent while live reads audible" failure.
+    // On arm we snapshot mcpAudioBlocks and zero the two window counters; the
+    // audio thread bumps them at the processBlock tail. On read the elapsed
+    // counts split the three candidate causes:
+    //   blocksElapsed == 0                    → the audio thread isn't ticking
+    //   blocksElapsed > 0, armedTailRuns == 0 → the armed tail isn't reached
+    //   armedTailRuns > 0, tailPeak ~ 0       → the JUCE output buffer is silent
+    std::atomic<uint64_t> mcpAudioBlocks { 0 };      // ++ every processBlock
+    std::atomic<uint64_t> mcpArmBlocksAtArm { 0 };   // snapshot taken on arm
+    std::atomic<uint64_t> mcpArmedTailRuns { 0 };    // armed-tail executions this window
+    std::atomic<float>    mcpArmedTailPeak { 0.0f }; // peak seen at the tail this window
+
     // Writes the current output block into the active WAV writer, if recording.
     // Must be called from the audio thread on the final output buffer.
     void writeRecorderTap(dsp::AudioBlock<float> const& buffer);

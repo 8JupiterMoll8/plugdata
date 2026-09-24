@@ -893,6 +893,7 @@ void PluginProcessor::processBlockBypassed(AudioBuffer<float>& buffer, MidiBuffe
 void PluginProcessor::processBlock(AudioBuffer<float>& buffer, MidiBuffer& midiBuffer)
 {
     isProcessingAudio = true;
+    mcpAudioBlocks.fetch_add(1, std::memory_order_relaxed); // #83 audio-thread liveness
     
     ScopedNoDenormals noDenormals;
     AudioProcessLoadMeasurer::ScopedTimer cpuTimer(cpuLoadMeasurer, buffer.getNumSamples());
@@ -1010,6 +1011,7 @@ void PluginProcessor::processBlock(AudioBuffer<float>& buffer, MidiBuffer& midiB
     // opens BEFORE the trigger (arm) and is read AFTER it, so a one-shot can never
     // fall outside it. No-op when not armed.
     if (mcpArmActive.load(std::memory_order_relaxed)) {
+        mcpArmedTailRuns.fetch_add(1, std::memory_order_relaxed); // #83 diagnostics
         float p = 0.0f;
         for (int ch = 0; ch < buffer.getNumChannels(); ++ch) {
             auto* d = buffer.getReadPointer(ch);
@@ -1018,6 +1020,8 @@ void PluginProcessor::processBlock(AudioBuffer<float>& buffer, MidiBuffer& midiB
                 if (a > p) p = a;
             }
         }
+        float prevTail = mcpArmedTailPeak.load(std::memory_order_relaxed);
+        while (p > prevTail && !mcpArmedTailPeak.compare_exchange_weak(prevTail, p, std::memory_order_relaxed)) {}
         float prev = mcpArmPeak.load(std::memory_order_relaxed);
         while (p > prev && !mcpArmPeak.compare_exchange_weak(prev, p, std::memory_order_relaxed)) {}
     }

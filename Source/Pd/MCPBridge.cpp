@@ -677,7 +677,7 @@ struct RenderGuard {
 // mono data). Shared by the render path (final 1024 samples), the /meter/spectral
 // probe path, and the Phase-5 armed-capture path. JSON keys match what the
 // server already parses.
-static juce::String spectralJsonFromSamples(float const* samples, int N, double sampleRate)
+static juce::var spectralVarFromSamples(float const* samples, int N, double sampleRate)
 {
     if (!samples || N <= 1 || sampleRate <= 0.0)
         return {};
@@ -712,6 +712,14 @@ static juce::String spectralJsonFromSamples(float const* samples, int N, double 
 
     float const binHz = (float)sampleRate / (float)N;
 
+    // Normalize magnitudes by N so bin levels are on the same scale as the
+    // live probe path (collectResults, which does `/ N`). Without this the two
+    // spectral surfaces disagreed by 20*log10(N) (~60 dB at 1024) for the SAME
+    // spectrum — measure_spectral reported positive "dB" peaks (e.g. +37.9) while
+    // analyze_spectrum/analyze_acoustics reported the same bins at ~-22 dB.
+    // Centroid/flatness/rolloff are scale-invariant, so only the peak dB changes.
+    float const fftNorm = 1.0f / (float)N;
+
     double sumWeightedFreq = 0.0, sumMag = 0.0;
     double logSum = 0.0;
     int magCount = 0;
@@ -720,7 +728,7 @@ static juce::String spectralJsonFromSamples(float const* samples, int N, double 
     for (int i = 1; i < NBINS; ++i) { // skip DC
         float const re = fftOutput[i][0];
         float const im = fftOutput[i][1];
-        float const mag = std::sqrt(re * re + im * im);
+        float const mag = std::sqrt(re * re + im * im) * fftNorm;
         float const freq = i * binHz;
         sumWeightedFreq += (double)(mag * freq);
         sumMag += (double)mag;
@@ -766,7 +774,7 @@ static juce::String spectralJsonFromSamples(float const* samples, int N, double 
     juce::Array<juce::var> peaksArr;
     for (int i = 2; i < NBINS - 1 && peaksArr.size() < 8; ++i) {
         auto magAt = [&](int k) {
-            return std::sqrt(fftOutput[k][0] * fftOutput[k][0] + fftOutput[k][1] * fftOutput[k][1]);
+            return std::sqrt(fftOutput[k][0] * fftOutput[k][0] + fftOutput[k][1] * fftOutput[k][1]) * fftNorm;
         };
         float const m = magAt(i);
         if (m > 0.01f * maxMag && m >= magAt(i - 1) && m >= magAt(i + 1)) {
@@ -798,7 +806,18 @@ static juce::String spectralJsonFromSamples(float const* samples, int N, double 
     root->setProperty("fftSize", N);
     root->setProperty("binHz", binHz);
     root->setProperty("peaks", peaksArr);
-    return juce::JSON::toString(juce::var(root), true);
+    return juce::var(root);
+}
+
+// JSON string form of the SAME analysis (render + armed-capture callers).
+// One FFT implementation lives in spectralVarFromSamples; this is a thin
+// wrapper so no caller carries a second copy that can drift (see #78).
+static juce::String spectralJsonFromSamples(float const* samples, int N, double sampleRate)
+{
+    auto v = spectralVarFromSamples(samples, N, sampleRate);
+    if (v.isVoid())
+        return {};
+    return juce::JSON::toString(v, true);
 }
 
 // Spectral analysis over the baked render buffer (final 1024 samples).
@@ -1394,7 +1413,13 @@ juce::String MCPBridge::computeSignalTrace(PluginProcessor* processor, t_canvas*
         if (isGen) {
             if (maxOutPeak[i] >= ALIVE_THRESH) {
                 liveSources.push_back(names[i]);
-                loudestLivePeak = std::max(loudestLivePeak, maxOutPeak[i]);
+                // [sig~] is a DC/control generator — its "peak" is a constant
+                // (e.g. [sig~ 700] -> 700), not an audio level. Counting it as
+                // the loudest live source reported an impossible +56.9 dBFS
+                // "input level" (20*log10(700)) that contradicted /meter/master
+                // (-7.1 dBFS). It still counts as a live source for path detection.
+                if (c != "sig~")
+                    loudestLivePeak = std::max(loudestLivePeak, maxOutPeak[i]);
             } else if (outgoingSigWires[i] > 0) {
                 silentGenerators.push_back(names[i]);
             }
@@ -2435,9 +2460,28 @@ static bool mcpIsStructuralSelector(const juce::String& sel)
 
 // Shared live-property set core (obj_set / obj_set_batch). Caller holds sys_lock.
 // Returns "" on success, else an error string. Sets *warning on structural hit.
+// Mark an IEM GUI scalar widget as "persist my value". Pd's iemgui savefns
+// (slider_save / toggle_save / …) write the current value ONLY when x_loadinit
+// is set; otherwise they write 0 and the widget resets to min on reload — the
+// "slider went down / patch came up silent" trap. New MCP widgets default Init
+// ON (McpIemArgs.h); this flips it on for widgets set via set[] so an EXISTING
+// patch's knobs (created before the fix, Init off) start persisting too.
+static void mcpMarkGuiLoadinit(t_object* o, const juce::String& clsLower)
+{
+    if (!o) return;
+    if (clsLower == "hsl" || clsLower == "vsl")
+        reinterpret_cast<t_slider*>(o)->x_gui.x_isa.x_loadinit = 1;
+    else if (clsLower == "tgl")
+        reinterpret_cast<t_toggle*>(o)->x_gui.x_isa.x_loadinit = 1;
+    else if (clsLower == "hradio" || clsLower == "vradio")
+        reinterpret_cast<t_radio*>(o)->x_gui.x_isa.x_loadinit = 1;
+    else if (clsLower == "nbx")
+        reinterpret_cast<t_my_numbox*>(o)->x_gui.x_isa.x_loadinit = 1;
+}
+
 static juce::String mcpObjSetCore(t_gobj* g, const juce::String& tempId, int inlet,
-                                  const juce::String& selector, std::vector<t_atom>& atoms,
-                                  juce::String* warning)
+                                   const juce::String& selector, std::vector<t_atom>& atoms,
+                                   juce::String* warning)
 {
     if (!g) return "error: unknown tempId '" + tempId + "'";
     t_object* o = pd::Interface::checkObject(g);
@@ -2460,25 +2504,33 @@ static juce::String mcpObjSetCore(t_gobj* g, const juce::String& tempId, int inl
     }
     if (warning && mcpIsStructuralSelector(selector))
         *warning = "structural:" + selector + " (may trigger a DSP recompile — prefer edit)";
-    // Guard 1 (dead-knob safety net): a float/list sent to a signal-rate inlet is
-    // silently ignored by most objects (no scalar/float handler on that inlet).
+    // Guard 1 (dead-knob safety net): a float/list sent to a signal-rate inlet
+    // may be ignored by objects with no scalar/float handler on that inlet.
     // obj_issignalinlet() cannot distinguish a scalar-accepting signal inlet
     // (e.g. lop~ inlet 1) from a pure audio inlet, so this is ADVISORY, not a fix
     // and never a redirect — misrouting (e.g. osc~ phase) would be worse.
-    // KNOWN GAP (#72): `inlet` is the MCP from-the-end index (0 = the object;
-    // N>=1 = the N-th inlet from the LAST), while obj_issignalinlet() wants a
-    // 0-based PHYSICAL index. They only coincide when the resolved inlet IS the
-    // last one, so a float to a NON-last signal inlet (e.g. set{inlet:1} on a
-    // 1-inlet osc~) can still no-op with no warning. A correct physical-index
-    // derivation needs the real explicit-inlet count (obj_ninlets() is NOT it —
-    // CLASS_MAINSIGNALIN inlets are implicit); left open rather than ship a
-    // guard whose premise is unverified.
+    // INDEX SPACE (R25, live-verified): `inlet` (N>=1) is the N-th EXPLICIT
+    // inlet in physical order — mcpResolveInlet() walks ob_inlet, the same list
+    // Pd lays out left-to-right (inlet_new appends), so it already IS the
+    // 0-based physical index obj_issignalinlet() wants. The old "#72 known gap"
+    // (from-the-end index) was a misdiagnosis: `set{inlet:1, 440}` on osc~ hits
+    // the float PHASE inlet (d_osc.c osc_new: inlet_new(&ob_pd, &s_float, ft1)),
+    // which accepts the float — a pitch probe just can't see the phase change.
+    // Live proof: set{inlet:1, 200} on [bp~ 1000 5] moved the band 1kHz→215Hz
+    // (center frequency = physical inlet 1), not Q.
     if (warning && inlet >= 0 && (selector == "float" || selector == "list")
         && obj_issignalinlet(o, inlet) != 0) {
         juce::String g1 = "inlet-signal: '" + selector + "' -> signal inlet " + juce::String(inlet)
             + " — if this inlet has no scalar/float handler the message is silently ignored; "
               "verify the param inlet (often inlet 1, varies by object)";
         *warning = warning->isEmpty() ? g1 : (*warning + "; " + g1);
+    }
+    // Persist-on-set: a GUI value set through the message lane must survive a
+    // save/reload. Flip the widget's Init flag before dispatching the float so
+    // the next save writes the live value (see mcpMarkGuiLoadinit).
+    if (inlet == 0 && (selector == "float" || selector == "list")) {
+        juce::String clsLower = juce::String::fromUTF8(class_getname(pd_class(&o->ob_pd))).toLowerCase();
+        mcpMarkGuiLoadinit(o, clsLower);
     }
     pd_typedmess(dest, gensym(selector.toRawUTF8()), static_cast<int>(atoms.size()),
                  atoms.empty() ? nullptr : atoms.data());
@@ -4975,11 +5027,13 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 }
                 binbuf_free(b);
 
-                // 3. Fire loadbangs on any newly created subpatches
-                for (t_gobj* g = cnv->gl_list; g; g = g->g_next) {
-                    if (pd_class(&g->g_pd) == canvas_class)
-                         canvas_loadbang(reinterpret_cast<t_canvas*>(g));
-                }
+                // 3. Fire loadbang on the ROOT canvas (canvas_loadbang recurses
+                // into child subpatches). Previously only direct child subpatches
+                // were banged, so the root's own [loadbang] objects and iemgui
+                // widgets never received LB_LOAD — a reloaded patch's sliders
+                // never re-sent their values downstream (line~) and it came up
+                // SILENT even though the saved values were correct. #81.
+                canvas_loadbang(cnv);
 
                 // 4. DSP graph recompile
                 canvas_update_dsp();
@@ -5258,11 +5312,11 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         if (bodyText.isNotEmpty())
                             pasteDirect(cnv, bodyText.toRawUTF8());
 
-                        // 3. Loadbangs on newly created subpatches
-                        for (t_gobj* g = cnv->gl_list; g; g = g->g_next) {
-                            if (pd_class(&g->g_pd) == canvas_class)
-                                canvas_loadbang(reinterpret_cast<t_canvas*>(g));
-                        }
+                        // 3. Fire loadbang on the ROOT canvas (recurses into
+                        // subpatches) — see #81: banging only child subpatches
+                        // left top-level [loadbang]/sliders un-fired, so reloads
+                        // came up silent.
+                        canvas_loadbang(cnv);
 
                         // 4. DSP graph recompile
                         canvas_update_dsp();
@@ -9880,131 +9934,27 @@ void ProbeManager::collectResults()
             float freq = estimateFrequency(linearBuf.data(), PROBE_RING_SIZE, sampleRate);
 
             if (probe.spectral && bridge) {
-                // === SPECTRAL ANALYSIS (Phase 7) ===
-                // Apply Hann window
-                constexpr int N = PROBE_RING_SIZE;
-                std::array<float, N> windowed;
-                for (int i = 0; i < N; i++) {
-                    float w = 0.5f * (1.0f - std::cos(2.0f * juce::MathConstants<float>::pi * static_cast<float>(i) / static_cast<float>(N - 1)));
-                    windowed[i] = linearBuf[i] * w;
+                // ONE FFT implementation: delegate to the shared helper (#78),
+                // then overlay the probe's own windowed loudness/pitch + metadata
+                // so the spectral result stays consistent with the non-spectral
+                // /meter/result path (same rmsDb/peakDb/fundamental).
+                juce::var specVar = spectralVarFromSamples(linearBuf.data(), PROBE_RING_SIZE, sampleRate);
+                if (auto* rootObj = specVar.getDynamicObject()) {
+                    rootObj->setProperty("rmsDb", rmsDb);
+                    rootObj->setProperty("peakDb", peakDb);
+                    rootObj->setProperty("fundamental", freq);
+                    rootObj->setProperty("sampleRate", sampleRate);
+                    rootObj->setProperty("blocks", static_cast<int>(probe.accBlocks));
+
+                    juce::String jsonString = juce::JSON::toString(specVar, true);
+                    juce::OSCMessage rep { juce::OSCAddressPattern("/meter/spectral/result/" + probe.correlationId) };
+                    rep.addArgument(jsonString);
+                    bridge->sender.send(rep);
+                } else {
+                    bridge->sendReply("/meter/spectral/error/" + probe.correlationId, "spectral analysis failed");
                 }
-
-                // Run real FFT via FFTW3
-                constexpr int NBINS = N / 2 + 1;
-                std::array<float, N> fftInput;
-                std::copy(windowed.begin(), windowed.end(), fftInput.begin());
-
-                // Use fftwf (single precision)
-                std::array<fftwf_complex, NBINS> fftOutput;
-                fftwf_plan plan = fftwf_plan_dft_r2c_1d(N, fftInput.data(),
-                    reinterpret_cast<fftwf_complex*>(fftOutput.data()), FFTW_ESTIMATE);
-                fftwf_execute(plan);
-                fftwf_destroy_plan(plan);
-
-                // Compute magnitude spectrum (dB)
-                std::array<float, NBINS> magnitudes;
-                float binHz = sampleRate / static_cast<float>(N);
-                float sumMag = 0.0f;
-                float sumWeightedFreq = 0.0f;
-                float sumLogMag = 0.0f;
-                float maxMag = 0.0f;
-                int maxBin = 0;
-
-                for (int i = 0; i < NBINS; i++) {
-                    float re = fftOutput[i][0];
-                    float im = fftOutput[i][1];
-                    float mag = std::sqrt(re * re + im * im) / static_cast<float>(N);
-                    magnitudes[i] = mag;
-
-                    if (i > 0) { // Skip DC bin for spectral features
-                        sumMag += mag;
-                        sumWeightedFreq += mag * (static_cast<float>(i) * binHz);
-                        if (mag > 1e-10f) sumLogMag += std::log(mag);
-                        else sumLogMag += std::log(1e-10f);
-                        if (mag > maxMag) { maxMag = mag; maxBin = i; }
-                    }
-                }
-
-                // Spectral centroid (Hz)
-                float spectralCentroid = (sumMag > 1e-10f) ? (sumWeightedFreq / sumMag) : 0.0f;
-
-                // Spectral flatness (0 = tonal, 1 = noise)
-                int numBins = NBINS - 1; // exclude DC
-                float geometricMean = std::exp(sumLogMag / static_cast<float>(numBins));
-                float arithmeticMean = sumMag / static_cast<float>(numBins);
-                float spectralFlatness = (arithmeticMean > 1e-10f) ? (geometricMean / arithmeticMean) : 0.0f;
-                spectralFlatness = std::min(1.0f, std::max(0.0f, spectralFlatness));
-
-                // Crest factor (peak / RMS)
-                float crestFactor = (meanRms > 1e-7f) ? (peakVal / meanRms) : 0.0f;
-
-                // Peak frequency bin
-                float peakFreq = static_cast<float>(maxBin) * binHz;
-
-                // Spectral rolloff (frequency below which 85% of energy lives)
-                float totalEnergy = 0.0f;
-                for (int i = 1; i < NBINS; i++) totalEnergy += magnitudes[i] * magnitudes[i];
-                float rolloffThreshold = totalEnergy * 0.85f;
-                float accumEnergy = 0.0f;
-                float rolloffFreq = 0.0f;
-                for (int i = 1; i < NBINS; i++) {
-                    accumEnergy += magnitudes[i] * magnitudes[i];
-                    if (accumEnergy >= rolloffThreshold) {
-                        rolloffFreq = static_cast<float>(i) * binHz;
-                        break;
-                    }
-                }
-
-                // Top 8 frequency peaks (for harmonic analysis)
-                struct FreqPeak { float freq; float magDb; };
-                std::array<FreqPeak, 8> topPeaks {};
-                std::array<float, NBINS> magCopy;
-                std::copy(magnitudes.begin(), magnitudes.end(), magCopy.begin());
-                for (int p = 0; p < 8; p++) {
-                    int best = 1;
-                    for (int i = 2; i < NBINS - 1; i++) {
-                        if (magCopy[i] > magCopy[best]) best = i;
-                    }
-                    if (magCopy[best] < 1e-10f) break;
-                    topPeaks[p].freq = static_cast<float>(best) * binHz;
-                    topPeaks[p].magDb = 20.0f * std::log10(magCopy[best]);
-                    // Zero out neighborhood to find next peak
-                    for (int k = std::max(1, best - 3); k <= std::min(NBINS - 1, best + 3); k++) {
-                        magCopy[k] = 0.0f;
-                    }
-                }
-
-                // Build JSON response
-                auto* rootObj = new juce::DynamicObject();
-                rootObj->setProperty("rmsDb", rmsDb);
-                rootObj->setProperty("peakDb", peakDb);
-                rootObj->setProperty("fundamental", freq);
-                rootObj->setProperty("spectralCentroid", spectralCentroid);
-                rootObj->setProperty("spectralFlatness", spectralFlatness);
-                rootObj->setProperty("spectralRolloff", rolloffFreq);
-                rootObj->setProperty("crestFactor", crestFactor);
-                rootObj->setProperty("peakFrequency", peakFreq);
-                rootObj->setProperty("sampleRate", sampleRate);
-                rootObj->setProperty("fftSize", N);
-                rootObj->setProperty("binHz", binHz);
-                rootObj->setProperty("blocks", probe.accBlocks);
-
-                juce::Array<juce::var> peaksArray;
-                for (int p = 0; p < 8 && topPeaks[p].freq > 0.0f; p++) {
-                    auto* pk = new juce::DynamicObject();
-                    pk->setProperty("freq", topPeaks[p].freq);
-                    pk->setProperty("dB", topPeaks[p].magDb);
-                    peaksArray.add(juce::var(pk));
-                }
-                rootObj->setProperty("peaks", peaksArray);
-
-                juce::String jsonString = juce::JSON::toString(juce::var(rootObj), true);
-
-                juce::OSCMessage rep { juce::OSCAddressPattern("/meter/spectral/result/" + probe.correlationId) };
-                rep.addArgument(jsonString);
-                bridge->sender.send(rep);
-
                 probe.spectral = false;
+
             } else if (bridge) {
                 juce::OSCMessage rep { juce::OSCAddressPattern("/meter/result/" + probe.correlationId) };
                 rep.addArgument(rmsDb);
@@ -10312,6 +10262,11 @@ void MCPBridge::handleMeterDomain(const juce::String& meterAction, const juce::O
         auto correlationId = msg.size() > 0 ? getArgString(msg[0]) : juce::String("0");
         if (processor) {
             processor->mcpArmPeak.store(0.0f, std::memory_order_relaxed);
+            // #83 diagnostics: snapshot the audio-block counter and zero the
+            // window counters so `read` can split the failure causes.
+            processor->mcpArmBlocksAtArm.store(processor->mcpAudioBlocks.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            processor->mcpArmedTailRuns.store(0, std::memory_order_relaxed);
+            processor->mcpArmedTailPeak.store(0.0f, std::memory_order_relaxed);
             processor->mcpArmActive.store(true, std::memory_order_release);
         }
         sendRawReply("/meter/arm/reply/" + correlationId);
@@ -10326,9 +10281,26 @@ void MCPBridge::handleMeterDomain(const juce::String& meterAction, const juce::O
         if (processor) processor->mcpArmActive.store(false, std::memory_order_release);
         float const peak = processor ? processor->mcpArmPeak.load(std::memory_order_relaxed) : 0.0f;
         float const peakDb = (peak > 1e-7f) ? (20.0f * std::log10(peak)) : -100.0f;
+        // #83 diagnostics — split the three causes of "armed read silent":
+        //   blocksElapsed == 0                    → audio thread isn't ticking
+        //   blocksElapsed > 0, armedTailRuns == 0 → the armed tail isn't reached
+        //   armedTailRuns > 0, tailPeak ~ 0       → JUCE output buffer is silent
+        int64_t blocksElapsed = 0, armedTailRuns = 0;
+        float tailPeak = 0.0f;
+        if (processor) {
+            blocksElapsed = (int64_t)(processor->mcpAudioBlocks.load(std::memory_order_relaxed)
+                                      - processor->mcpArmBlocksAtArm.load(std::memory_order_relaxed));
+            armedTailRuns = (int64_t)processor->mcpArmedTailRuns.load(std::memory_order_relaxed);
+            tailPeak = processor->mcpArmedTailPeak.load(std::memory_order_relaxed);
+            post("MCP-ARM-DIAG read: peak=%.6f blocksElapsed=%lld armedTailRuns=%lld tailPeak=%.6f",
+                 (double)peak, (long long)blocksElapsed, (long long)armedTailRuns, (double)tailPeak);
+        }
         juce::OSCMessage rep { juce::OSCAddressPattern("/meter/read/reply/" + correlationId) };
         rep.addArgument(peakDb);
         rep.addArgument(peak);
+        rep.addArgument(static_cast<int32>(blocksElapsed));
+        rep.addArgument(static_cast<int32>(armedTailRuns));
+        rep.addArgument(tailPeak);
         sender.send(rep);
         return;
     }
@@ -10441,13 +10413,24 @@ void MCPBridge::handleMeterDomain(const juce::String& meterAction, const juce::O
         }
         int const n = processor->mcpSpecWritePos.load(std::memory_order_acquire);
         double const sr = processor->getSampleRate() > 0.0 ? processor->getSampleRate() : 44100.0;
+        // #83 diagnostics — same split as /meter/read (audio thread / armed tail / buffer).
+        int64_t blocksElapsed = (int64_t)(processor->mcpAudioBlocks.load(std::memory_order_relaxed)
+                                  - processor->mcpArmBlocksAtArm.load(std::memory_order_relaxed));
+        int64_t armedTailRuns = (int64_t)processor->mcpArmedTailRuns.load(std::memory_order_relaxed);
+        float tailPeak = processor->mcpArmedTailPeak.load(std::memory_order_relaxed);
+        juce::String diag = ",\"blocksElapsed\":" + juce::String((int)blocksElapsed)
+                          + ",\"armedTailRuns\":" + juce::String((int)armedTailRuns)
+                          + ",\"tailPeak\":" + juce::String(tailPeak, 6);
+        post("MCP-ARM-DIAG read_spectral: samples=%d blocksElapsed=%lld armedTailRuns=%lld tailPeak=%.6f",
+             n, (long long)blocksElapsed, (long long)armedTailRuns, (double)tailPeak);
         juce::String json = armedSpectralJson(processor->mcpSpecBuffer.data(), n, sr);
         processor->mcpSpecWritePos.store(0, std::memory_order_relaxed);
         if (json.isEmpty()) {
             sendReply("/meter/read_spectral/reply/" + correlationId,
-                      juce::String("{\"error\":\"insufficient capture\",\"samples\":") + juce::String(n) + "}");
+                      juce::String("{\"error\":\"insufficient capture\",\"samples\":") + juce::String(n) + diag + "}");
             return;
         }
+        if (json.endsWithChar('}')) json = json.dropLastCharacters(1) + diag + "}";
         sendReply("/meter/read_spectral/reply/" + correlationId, json);
         return;
     }
