@@ -184,6 +184,16 @@ public:
     static int mcpApplyIdentitySidecar(PluginProcessor* processor, juce::DynamicObject* sidecarObj,
                                        const juce::String& rootKey, t_canvas* cnv);
 
+    // Identity sidecar (<file>.mcpids.json) writer, shared by the MCP save and
+    // by plugdata's own GUI save (via Instance::onCanvasSaved). It MUST be
+    // written in the same operation as the .pd: the sidecar is index-keyed, so
+    // a stale copy would map tempIds onto the wrong objects.
+    // buildIdentitySidecar: CALLER HOLDS sys_lock.
+    static juce::var buildIdentitySidecar(PluginProcessor* processor, t_canvas* cnv);
+    // Takes sys_lock itself. Returns "" on success, an error string otherwise.
+    static juce::String writeIdentitySidecar(PluginProcessor* processor, t_canvas* cnv,
+                                             const juce::String& destFilePath);
+
     bool start();
     void stop();
     bool isConnected() const;

@@ -233,6 +233,17 @@ public:
 
     void enqueueGuiMessage(Message const& fn);
 
+    // Set by MCPBridge: invoked right after a canvas is written to disk, so the
+    // MCP identity sidecar (<file>.mcpids.json) is written ATOMICALLY with the
+    // .pd — no matter who saved (GUI Ctrl+S, Save-As, or the MCP save_patch).
+    //
+    // Why it must be atomic: the sidecar is index-keyed ({i, id} pairs), so it
+    // is only valid for the exact object order of the file beside it. Written
+    // separately it would drift and map tempIds onto the WRONG objects. Without
+    // this hook a manual save left the sidecar stale, and on reload every
+    // object added since the last MCP save lost its semantic tempId.
+    std::function<void(t_glist*, juce::String const&)> onCanvasSaved;
+
     // Enqueue a message to an pd::WeakReference
     // This will first check if the weakreference is valid before triggering the callback
     template<typename T>

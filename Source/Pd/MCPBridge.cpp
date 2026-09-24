@@ -317,6 +317,16 @@ MCPBridge::MCPBridge(PluginProcessor* proc, int inPort, int outPort)
     controlWindow = std::make_unique<McpControlWindow>();
     bootToken = juce::String(juce::Time::getMillisecondCounter()) + "-"
         + juce::String::toHexString(juce::Random::getSystemRandom().nextInt());
+
+    // Persist the identity sidecar on ANY save — GUI Ctrl+S, Save-As, or the
+    // MCP save. Without this a manual save left the sidecar stale and every
+    // object added since the last MCP save lost its tempId on reload.
+    if (processor) {
+        processor->onCanvasSaved = [p = processor](t_glist* g, juce::String const& path) {
+            writeIdentitySidecar(p, reinterpret_cast<t_canvas*>(g), path);
+        };
+    }
+
     start();
 }
 
@@ -1602,6 +1612,20 @@ static void mcpGetTrueObjectBounds(t_canvas* c, t_gobj* y, Canvas* guiCanvas, in
     if (*h <= 0) *h = 20;
 }
 
+// Decorative/background objects are NEVER collision sources: a faceplate [pic]
+// intentionally overlaps every widget placed on it, and [cnv] boxes/lines are
+// the same category. Including them shoved a console's whole GUI off its
+// background image on every layout pass.
+static bool mcpIsDecorativeBackground(t_gobj* g)
+{
+    if (!g) return false;
+    t_class* cl = pd_class(&g->g_pd);
+    if (!cl) return false;
+    juce::String name = juce::String::fromUTF8(class_getname(cl));
+    return name == "pic" || name.endsWithIgnoreCase("/pic")
+        || name == "cnv" || name.endsWithIgnoreCase("/cnv");
+}
+
 // True-rect collision check (message thread) — same measurement as the
 // /pd/collisions X-ray, so the guard and the verifier agree.
 static bool mcpHasCollisions(PluginProcessor* processor, t_canvas* cnv, int pad)
@@ -1609,7 +1633,7 @@ static bool mcpHasCollisions(PluginProcessor* processor, t_canvas* cnv, int pad)
     if (!processor || !cnv) return false;
     Canvas* gui = mcpFindGuiCanvasFor(processor, cnv);
     std::vector<t_gobj*> objs;
-    for (t_gobj* y = cnv->gl_list; y; y = y->g_next) objs.push_back(y);
+    for (t_gobj* y = cnv->gl_list; y; y = y->g_next) { if (mcpIsDecorativeBackground(y)) continue; objs.push_back(y); }
     struct R { int x, y, w, h; };
     std::vector<R> rects(objs.size());
     for (size_t i = 0; i < objs.size(); ++i) {
@@ -1909,7 +1933,10 @@ int MCPBridge::sanitizeLayout(PluginProcessor* processor, t_canvas* cnv, int pad
     if (snap < 1) snap = 1;
 
     std::vector<t_gobj*> objs;
-    for (t_gobj* y = cnv->gl_list; y; y = y->g_next) objs.push_back(y);
+    for (t_gobj* y = cnv->gl_list; y; y = y->g_next) {
+        if (mcpIsDecorativeBackground(y)) continue;
+        objs.push_back(y);
+    }
     if (objs.size() < 2) return 0;
 
     struct DR { t_gobj* g; int x, y, w, h; };
@@ -2011,7 +2038,7 @@ int MCPBridge::fixOcclusions(PluginProcessor* processor, t_canvas* cnv, int pad,
     int totalMoved = 0;
     for (int pass = 0; pass < 3; pass++) {
         std::vector<t_gobj*> objs;
-        for (t_gobj* y = cnv->gl_list; y; y = y->g_next) objs.push_back(y);
+        for (t_gobj* y = cnv->gl_list; y; y = y->g_next) { if (mcpIsDecorativeBackground(y)) continue; objs.push_back(y); }
         if (objs.size() < 3) break;
 
         struct R { int x, y, w, h; };
@@ -2312,6 +2339,79 @@ static float getArgFloat(const juce::OSCArgument& arg)
 // ─── PRD Phase 3 §2.2: identity sidecar applier ──────────────────────────
 // Re-registers sidecar identities (root + named subcanvases) for a freshly
 // loaded/opened canvas. Caller must hold sys_lock. Returns tempIds restored.
+// ─── Identity sidecar writer (shared by the MCP save + plugdata's GUI save) ──
+// The sidecar is index-keyed ({i, id} per canvas), so it is only valid for the
+// exact object order of the .pd written beside it. That is why it is written in
+// the SAME operation as the file, from BOTH save paths. A manual Ctrl+S used to
+// leave it stale, so every object added since the last MCP save lost its
+// semantic tempId on reload (auto-adopt re-minted <class>_<canvas>_<n>).
+// buildIdentitySidecar: CALLER MUST HOLD sys_lock.
+juce::var MCPBridge::buildIdentitySidecar(PluginProcessor* processor, t_canvas* cnv)
+{
+    if (!processor || !cnv) return {};
+
+    auto buildIdArray = [&](const juce::String& mapKey, t_canvas* c) -> juce::var {
+        juce::Array<juce::var> arr;
+        std::unordered_map<t_gobj*, juce::String> ptrToId;
+        auto mapIt = processor->mcpStableObjectMap.find(mapKey.toStdString());
+        if (mapIt != processor->mcpStableObjectMap.end()) {
+            for (auto const& [id, ptr] : mapIt->second)
+                if (ptr) ptrToId[ptr] = juce::String(id);
+        }
+        int idx = 0;
+        for (t_gobj* g = c->gl_list; g; g = g->g_next, ++idx) {
+            auto it = ptrToId.find(g);
+            if (it == ptrToId.end()) continue;
+            auto* o = new juce::DynamicObject();
+            o->setProperty("i", idx);
+            o->setProperty("id", it->second);
+            arr.add(juce::var(o));
+        }
+        return juce::var(arr);
+    };
+
+    auto* root = new juce::DynamicObject();
+    root->setProperty("format", juce::String("MCP-IDENTITY"));
+    root->setProperty("v", 1);
+    root->setProperty("identity_version",
+        (double)processor->mcpIdentityVersion.load(std::memory_order_relaxed));
+    root->setProperty("root", buildIdArray(canonicalCanvasKey(cnv), cnv));
+
+    // Named subcanvases: canonicalCanvasKey matches the map keys the bridge uses
+    // for subpatch census/mutations ("pd-<gl_name>").
+    auto* subObj = new juce::DynamicObject();
+    for (t_gobj* g = cnv->gl_list; g; g = g->g_next) {
+        if (pd_class(&g->g_pd) != canvas_class) continue;
+        t_canvas* child = reinterpret_cast<t_canvas*>(g);
+        if (!child->gl_name) continue;
+        juce::String childName = juce::String::fromUTF8(child->gl_name->s_name);
+        auto childIds = buildIdArray(canonicalCanvasKey(child), child);
+        if (childIds.getArray() != nullptr && childIds.getArray()->size() > 0)
+            subObj->setProperty(childName, childIds);
+    }
+    root->setProperty("sub", juce::var(subObj));
+    return juce::var(root);
+}
+
+juce::String MCPBridge::writeIdentitySidecar(PluginProcessor* processor, t_canvas* cnv,
+                                             const juce::String& destFilePath)
+{
+    if (!processor || !cnv) return "error: canvas not found";
+
+    juce::var sidecar;
+    sys_lock();
+    sidecar = buildIdentitySidecar(processor, cnv);
+    sys_unlock();
+
+    if (sidecar.isVoid()) return "error: could not build identity sidecar";
+
+    // Sidecar next to the .pd — engine-private, invisible to vanilla Pd
+    juce::File sidecarFile(destFilePath + ".mcpids.json");
+    if (!sidecarFile.replaceWithText(juce::JSON::toString(sidecar, true)))
+        return "error: could not write " + destFilePath + ".mcpids.json";
+    return {};
+}
+
 int MCPBridge::mcpApplyIdentitySidecar(PluginProcessor* processor, juce::DynamicObject* sidecarObj,
                                    const juce::String& rootKey, t_canvas* cnv)
 {
@@ -5127,48 +5227,10 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         content = clean;
                     }
 
-                    // Identity sidecar: reverse map (gobj → tempId) per canvas
-                    auto buildIdArray = [&](const juce::String& mapKey, t_canvas* c) -> juce::var {
-                        juce::Array<juce::var> arr;
-                        std::unordered_map<t_gobj*, juce::String> ptrToId;
-                        auto mapIt = processor->mcpStableObjectMap.find(mapKey.toStdString());
-                        if (mapIt != processor->mcpStableObjectMap.end()) {
-                            for (auto const& [id, ptr] : mapIt->second)
-                                if (ptr) ptrToId[ptr] = juce::String(id);
-                        }
-                        int idx = 0;
-                        for (t_gobj* g = c->gl_list; g; g = g->g_next, ++idx) {
-                            auto it = ptrToId.find(g);
-                            if (it == ptrToId.end()) continue;
-                            auto* o = new juce::DynamicObject();
-                            o->setProperty("i", idx);
-                            o->setProperty("id", it->second);
-                            arr.add(juce::var(o));
-                        }
-                        return juce::var(arr);
-                    };
-
-                    auto* root = new juce::DynamicObject();
-                    root->setProperty("format", juce::String("MCP-IDENTITY"));
-                    root->setProperty("v", 1);
-                    root->setProperty("identity_version",
-                        (double)processor->mcpIdentityVersion.load(std::memory_order_relaxed));
-                    root->setProperty("root", buildIdArray(canonicalCanvasKey(cnv), cnv));
-
-                    // Named subcanvases: canonicalCanvasKey matches the map keys
-                    // the bridge uses for subpatch census/mutations ("pd-<gl_name>").
-                    auto* subObj = new juce::DynamicObject();
-                    for (t_gobj* g = cnv->gl_list; g; g = g->g_next) {
-                        if (pd_class(&g->g_pd) != canvas_class) continue;
-                        t_canvas* child = reinterpret_cast<t_canvas*>(g);
-                        if (!child->gl_name) continue;
-                        juce::String childName = juce::String::fromUTF8(child->gl_name->s_name);
-                        auto childIds = buildIdArray(canonicalCanvasKey(child), child);
-                        if (childIds.getArray() != nullptr && childIds.getArray()->size() > 0)
-                            subObj->setProperty(childName, childIds);
-                    }
-                    root->setProperty("sub", juce::var(subObj));
-                    sidecar = juce::var(root);
+                    // Identity sidecar: reverse map (gobj → tempId) per canvas.
+                    // Built under THIS sys_lock (cnv is only guaranteed valid
+                    // here); the shared writer is used by the GUI-save hook.
+                    sidecar = buildIdentitySidecar(processor, cnv);
                 }
             }
             sys_unlock();
@@ -8277,7 +8339,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     if (g) objs.push_back(g);
                 }
             } else {
-                for (t_gobj* y = cnv->gl_list; y; y = y->g_next) objs.push_back(y);
+                for (t_gobj* y = cnv->gl_list; y; y = y->g_next) { if (mcpIsDecorativeBackground(y)) continue; objs.push_back(y); }
             }
             if (objs.empty()) {
                 sys_unlock();
@@ -8458,7 +8520,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     if (g) objs.push_back(g);
                 }
             } else {
-                for (t_gobj* y = cnv->gl_list; y; y = y->g_next) objs.push_back(y);
+                for (t_gobj* y = cnv->gl_list; y; y = y->g_next) { if (mcpIsDecorativeBackground(y)) continue; objs.push_back(y); }
             }
             if (objs.empty()) {
                 sys_unlock();
@@ -8550,7 +8612,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     if (g) objs.push_back(g);
                 }
             } else {
-                for (t_gobj* y = cnv->gl_list; y; y = y->g_next) objs.push_back(y);
+                for (t_gobj* y = cnv->gl_list; y; y = y->g_next) { if (mcpIsDecorativeBackground(y)) continue; objs.push_back(y); }
             }
             if (objs.empty()) {
                 sys_unlock();
