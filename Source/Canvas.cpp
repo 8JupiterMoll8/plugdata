@@ -1094,6 +1094,58 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
             mcpPillDrawerFrame = {};
         }
     }
+
+    // Tier-2 approval chips — a destructive op waits for the artist's yes.
+    // Drawn in CANVAS coords (same space as the pill) so clicks hit-test free.
+    if (isApprovalRequested()) {
+        juce::Rectangle<int> anchor;
+        if (mcpSelectionPill && mcpSelectionPill->isVisible() && !mcpSelectionPillFrame.isEmpty()) {
+            anchor = mcpSelectionPillFrame;
+        } else {
+            auto const sel = getSelectionOfType<Object>();
+            juce::Rectangle<int> b;
+            bool first = true;
+            for (auto* o : sel) {
+                if (!o) continue;
+                auto const ob = o->getBounds();
+                b = first ? ob : b.getUnion(ob);
+                first = false;
+            }
+            if (!first) anchor = b;
+            if (anchor.isEmpty())
+                anchor = juce::Rectangle<int>(canvasOrigin.x - 210, canvasOrigin.y + 40, 420, 1);
+        }
+        constexpr int barW = 420;
+        constexpr int barH = 46;
+        int const bx = anchor.getCentreX() - barW / 2;
+        int const by = anchor.getBottom() + 14;
+        mcpApprovalFrame = juce::Rectangle<int>(bx, by, barW, barH);
+        int const half = (barW - 24) / 2;
+        mcpApprovalYes = juce::Rectangle<int>(bx + 8, by + 8, half, barH - 16);
+        mcpApprovalNo = juce::Rectangle<int>(bx + 8 + half + 8, by + 8, half, barH - 16);
+
+        NVGScopedState scopedAppr(nvg);
+        nvgTranslate(nvg, static_cast<float>(bx), static_cast<float>(by));
+        nvgDrawRoundedRect(nvg, 0, 0, static_cast<float>(barW), static_cast<float>(barH),
+                           nvgRGBA(28, 16, 16, 250), nvgRGBA(255, 90, 70, 225), 10.0f);
+        nvgFontFace(nvg, "Inter");
+        nvgFontSize(nvg, 15.0f);
+        nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+        // Approve (green)
+        nvgDrawRoundedRect(nvg, 8, 8, static_cast<float>(half), static_cast<float>(barH - 16),
+                           nvgRGBA(40, 170, 90, 235), nvgRGBA(90, 225, 140, 255), 6.0f);
+        nvgFillColor(nvg, nvgRGBA(255, 255, 255, 255));
+        nvgText(nvg, 8 + half * 0.5f, barH * 0.5f, "Approve", nullptr);
+        // Cancel (grey)
+        nvgDrawRoundedRect(nvg, 8 + half + 8, 8, static_cast<float>(half), static_cast<float>(barH - 16),
+                           nvgRGBA(40, 44, 52, 235), nvgRGBA(90, 98, 112, 255), 6.0f);
+        nvgFillColor(nvg, nvgRGBA(210, 220, 235, 235));
+        nvgText(nvg, 8 + half + 8 + half * 0.5f, barH * 0.5f, "Cancel", nullptr);
+    } else {
+        mcpApprovalFrame = {};
+        mcpApprovalYes = {};
+        mcpApprovalNo = {};
+    }
     // PRD overlay: ghost/preview of PROPOSED (uncommitted) changes. Drawn above
     // the patch, never part of it — the artist sees the change before it's real.
     if (pd && shouldShowAIGhosts() && !pd->getMcpGhosts().empty()) {
@@ -1372,6 +1424,26 @@ bool Canvas::shouldShowAIGhosts() const
 bool Canvas::shouldShowAIHud() const
 {
     return showAiHud && !presentationMode.getValue();
+}
+
+// The server signals a pending destructive op via the HUD chapter ("APPROVE?").
+bool Canvas::isApprovalRequested() const
+{
+    if (!pd) return false;
+    auto const hud = pd->getMcpHud();
+    return hud.active && hud.chapter.containsIgnoreCase("APPROVE");
+}
+
+// Artist clicked [Approve] / [Cancel] (or pressed Enter / Esc). The pill prompt
+// path carries it to the server, which holds the token inert until this yes.
+void Canvas::sendApproval(bool approve)
+{
+    mcpApprovalFrame = {};
+    mcpApprovalYes = {};
+    mcpApprovalNo = {};
+    sendPillPrompt(approve ? "approve" : "deny");
+    repaint();
+    if (editor) editor->nvgSurface.renderAll();
 }
 
 bool Canvas::shouldShowConnectionDirection() const
@@ -1899,6 +1971,13 @@ bool Canvas::isPointOverNote(Point<int> canvasPt) const
 
 bool Canvas::handleNoteClick(Point<int> canvasPt)
 {
+    // Tier-2 approval chips take priority — they float above the pill.
+    if (!mcpApprovalFrame.isEmpty() && mcpApprovalFrame.contains(canvasPt)) {
+        if (mcpApprovalYes.contains(canvasPt)) sendApproval(true);
+        else if (mcpApprovalNo.contains(canvasPt)) sendApproval(false);
+        return true;
+    }
+
     if (mcpSelectionPill && mcpSelectionPill->isVisible()) {
         // 1. Drawer clicks (Lenses or Tools)
         if (mcpPillDrawerMode != 0 && mcpPillDrawerFrame.contains(canvasPt)) {
@@ -2411,6 +2490,18 @@ bool Canvas::keyPressed(KeyPress const& key)
 {
     if (mcpSelectionPill && mcpSelectionPill->hasKeyboardFocus(true))
         return false;
+
+    // Tier-2 approval: Enter approves the pending destructive op, Esc cancels.
+    if (isApprovalRequested()) {
+        if (key == juce::KeyPress::returnKey) {
+            sendApproval(true);
+            return true;
+        }
+        if (key == juce::KeyPress::escapeKey) {
+            sendApproval(false);
+            return true;
+        }
+    }
 
     if (editor->getCurrentCanvas() != this || isGraph)
         return false;

@@ -310,6 +310,16 @@ public:
     juce::LookAndFeel_V4 mcpPillLookAndFeel;    // dark menu skin matching the pill
     void configurePillLookAndFeel();
 
+    // Tier-2 artist approval: a destructive op from the agent surfaces as two
+    // in-canvas chips [Approve] [Cancel] (Enter/Esc). Sends "approve"/"deny" —
+    // the server holds the token inert until this human yes. Drawn in CANVAS
+    // coords (like the pill) so click hit-testing is transform-free.
+    bool isApprovalRequested() const;
+    void sendApproval(bool approve);
+    juce::Rectangle<int> mcpApprovalFrame; // full bar
+    juce::Rectangle<int> mcpApprovalYes;   // Approve chip
+    juce::Rectangle<int> mcpApprovalNo;    // Cancel chip
+
     Value isGraphChild = SynchronousValue(var(false));
     Value hideNameAndArgs = SynchronousValue(var(false));
     Value xRange = SynchronousValue();
