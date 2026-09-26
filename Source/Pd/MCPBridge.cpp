@@ -21,6 +21,7 @@
 #include "McpIemArgs.h" // IEM GUI short-form creation-arg guard (shared)
 #include "Utility/Fonts.h"
 #include "Utility/SettingsFile.h" // compiledMode (hvcc_mode) in /pd/perf
+#include "Utility/Config.h"
 #include "../../Libraries/fftw3/api/fftw3.h"
 
 #include <set>
@@ -315,6 +316,7 @@ MCPBridge::MCPBridge(PluginProcessor* proc, int inPort, int outPort)
     , probeManager(this)
 {
     controlWindow = std::make_unique<McpControlWindow>();
+    voiceCaptureBuffer.resize(MAX_VOICE_CAPTURE_SAMPLES, 0.0f);
     bootToken = juce::String(juce::Time::getMillisecondCounter()) + "-"
         + juce::String::toHexString(juce::Random::getSystemRandom().nextInt());
 
@@ -805,6 +807,8 @@ static juce::var spectralVarFromSamples(float const* samples, int N, double samp
     float const fundamental = estimateFrequency(samples, N, (float)sampleRate);
 
     auto* root = new juce::DynamicObject();
+    root->setProperty("rms", rms);
+    root->setProperty("maxPeak", maxPeak);
     root->setProperty("rmsDb", rmsDb);
     root->setProperty("peakDb", peakDb);
     root->setProperty("fundamental", fundamental);
@@ -6431,8 +6435,11 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         auto parsed = juce::JSON::parse(jsonStr);
 
         juce::MessageManager::callAsync([proc = processor, cnv, canvasName, correlationId, bridge = this, parsed]() {
-            juce::ScopedLock overlaySl(proc->mcpOverlayLock);
-            proc->mcpRegions.clear();
+            // DEADLOCK FIX: resolve bounds under the Pd lock WITHOUT holding
+            // mcpOverlayLock. The GUI/render path takes sys_lock -> mcpOverlayLock;
+            // holding BOTH here in the opposite order deadlocked and froze the UI.
+            // Build into a local vector, then swap it in under mcpOverlayLock only.
+            std::vector<PluginProcessor::McpRegion> built;
             if (auto* arr = parsed.getArray()) {
                 sys_lock();
                 for (auto const& v : *arr) {
@@ -6468,9 +6475,13 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         r.w = static_cast<float>(o->getProperty("w"));
                         r.h = static_cast<float>(o->getProperty("h"));
                     }
-                    proc->mcpRegions.push_back(r);
+                    built.push_back(r);
                 }
                 sys_unlock();
+            }
+            {
+                juce::ScopedLock overlaySl(proc->mcpOverlayLock);
+                proc->mcpRegions = std::move(built);
             }
             if (auto* cc = getOrCreateCanvasComponent(proc, cnv)) cc->repaint();
             bridge->sendReply("/pd/ai_region/reply/" + correlationId, static_cast<float>(proc->mcpRegions.size()));
@@ -9829,6 +9840,295 @@ static float estimateFrequency(const float* buf, int n, float sampleRate)
     return 0.0f;
 }
 
+void MCPBridge::voiceInputTick(float const* inputSamples, int numSamples)
+{
+    if (!inputSamples || numSamples <= 0) return;
+
+    // Track input peak for live UI meter
+    float maxSample = 0.0f;
+    for (int i = 0; i < numSamples; ++i) {
+        float const s = std::abs(inputSamples[i]);
+        if (s > maxSample) maxSample = s;
+    }
+    float const prevLevel = voiceLiveLevel.load(std::memory_order_relaxed);
+    float const newLevel = (maxSample > prevLevel) ? maxSample : (prevLevel * 0.88f + maxSample * 0.12f);
+    voiceLiveLevel.store(newLevel, std::memory_order_relaxed);
+
+    if (!voiceCapturing.load(std::memory_order_relaxed))
+        return;
+
+    int const writePos = voiceCaptureWritePos.load(std::memory_order_relaxed);
+    int const maxSamples = static_cast<int>(voiceCaptureBuffer.size());
+    if (writePos + numSamples > maxSamples) {
+        voiceCapturing.store(false, std::memory_order_release);
+        juce::MessageManager::callAsync([this] {
+            stopVoiceCaptureAndAnalyze();
+        });
+        return;
+    }
+
+    std::memcpy(voiceCaptureBuffer.data() + writePos, inputSamples, static_cast<size_t>(numSamples) * sizeof(float));
+    voiceCaptureWritePos.store(writePos + numSamples, std::memory_order_release);
+}
+
+void MCPBridge::startVoiceCapture(int maxSeconds)
+{
+    if (auto* dm = ProjectInfo::getDeviceManager()) {
+        auto setup = dm->getAudioDeviceSetup();
+        if (setup.inputChannels.isZero() || !setup.useDefaultInputChannels) {
+            setup.useDefaultInputChannels = true;
+            setup.inputChannels.setRange(0, 2, true);
+            dm->setAudioDeviceSetup(setup, true);
+        }
+    }
+
+    int const sr = processor ? static_cast<int>(processor->getSampleRate()) : 48000;
+    int const neededSamples = juce::jlimit(48000, 48000 * 8, sr * maxSeconds);
+    if (static_cast<int>(voiceCaptureBuffer.size()) < neededSamples)
+        voiceCaptureBuffer.resize(neededSamples, 0.0f);
+
+    voiceCaptureWritePos.store(0, std::memory_order_release);
+    voiceLiveLevel.store(0.0f, std::memory_order_release);
+    voiceCapturing.store(true, std::memory_order_release);
+    sendConsoleLog("MCP: Voice recording started (hum melody or beatbox)", false);
+}
+
+void MCPBridge::stopVoiceCaptureAndAnalyze()
+{
+    if (!voiceCapturing.exchange(false))
+        return;
+
+    int const totalSamples = voiceCaptureWritePos.load(std::memory_order_acquire);
+    if (totalSamples < 2048) {
+        sendConsoleLog("MCP: Voice recording too short (<50ms)", false);
+        return;
+    }
+
+    double const sampleRate = processor ? processor->getSampleRate() : 48000.0;
+    sendConsoleLog("MCP: Analyzing voice take (" + juce::String(totalSamples) + " samples)...", false);
+
+    std::thread([this, totalSamples, sampleRate] {
+        parseVoiceBufferToJson(voiceCaptureBuffer.data(), totalSamples, sampleRate);
+    }).detach();
+}
+
+void MCPBridge::parseVoiceBufferToJson(float const* buffer, int totalSamples, double sampleRate)
+{
+    if (!buffer || totalSamples < 1024 || sampleRate <= 0.0) return;
+
+    int const N = 1024;
+    int const HOP = 512;
+    int const numFrames = (totalSamples - N) / HOP;
+    if (numFrames <= 0) return;
+
+    // Global stats pass
+    double sumSq = 0.0;
+    float globalPeak = 0.0f;
+    for (int i = 0; i < totalSamples; ++i) {
+        float const s = std::abs(buffer[i]);
+        sumSq += static_cast<double>(buffer[i] * buffer[i]);
+        if (s > globalPeak) globalPeak = s;
+    }
+    float const globalRms = static_cast<float>(std::sqrt(sumSq / totalSamples));
+
+    if (globalRms < 0.001f) {
+        auto* rep = new juce::DynamicObject();
+        rep->setProperty("status", "silent");
+        rep->setProperty("rms", globalRms);
+        rep->setProperty("message", "No audio detected from microphone");
+        juce::String const jsonStr = juce::JSON::toString(juce::var(rep));
+        sendReply("/pd/voice/event", jsonStr);
+        juce::File("/home/alphi/Desktop/plugdata/mcp-server/voice-take.json").replaceWithText(jsonStr);
+        sendConsoleLog("MCP: Voice recording silent (RMS: " + juce::String(globalRms, 4) + ")", true);
+        return;
+    }
+
+    std::vector<float> frameRms(numFrames, 0.0f);
+    std::vector<float> framePitch(numFrames, 0.0f);
+    std::vector<float> frameCentroid(numFrames, 0.0f);
+    std::vector<float> frameFlatness(numFrames, 0.0f);
+
+    for (int f = 0; f < numFrames; ++f) {
+        float const* framePtr = buffer + f * HOP;
+        double frameSumSq = 0.0;
+        for (int i = 0; i < N; ++i) {
+            frameSumSq += static_cast<double>(framePtr[i] * framePtr[i]);
+        }
+        frameRms[f] = static_cast<float>(std::sqrt(frameSumSq / N));
+
+        auto specVar = spectralVarFromSamples(framePtr, N, sampleRate);
+        if (auto* specObj = specVar.getDynamicObject()) {
+            frameCentroid[f] = static_cast<float>(specObj->getProperty("spectralCentroid"));
+            frameFlatness[f] = static_cast<float>(specObj->getProperty("spectralFlatness"));
+        }
+        framePitch[f] = estimateFrequency(framePtr, N, static_cast<float>(sampleRate));
+    }
+
+    // Adaptive noise/onset thresholds relative to recording
+    float const rmsFloor = std::max(0.003f, globalRms * 0.20f);
+    float const diffFloor = std::max(0.003f, globalRms * 0.15f);
+
+    // Onset detection (transient / energy jump)
+    struct OnsetHit {
+        double timeSec;
+        float velocity;
+        float centroid;
+        juce::String type;
+    };
+    std::vector<OnsetHit> hits;
+
+    for (int f = 1; f < numFrames; ++f) {
+        float const diff = frameRms[f] - frameRms[f - 1];
+        if (diff > diffFloor && frameRms[f] > rmsFloor) {
+            double const t = (f * HOP) / sampleRate;
+            if (hits.empty() || (t - hits.back().timeSec > 0.08)) {
+                OnsetHit h;
+                h.timeSec = t;
+                h.velocity = juce::jlimit(0.1f, 1.0f, (frameRms[f] / std::max(0.01f, globalPeak)) * 1.2f);
+                h.centroid = frameCentroid[f];
+                if (h.centroid < 450.0f)
+                    h.type = "kick";
+                else if (h.centroid > 2600.0f && frameFlatness[f] > 0.20f)
+                    h.type = "hat";
+                else
+                    h.type = "snare";
+                hits.push_back(h);
+            }
+        }
+    }
+
+    // Melodic note segmentation
+    struct MelodicNote {
+        int midiNote;
+        float freqHz;
+        double startSec;
+        double durationSec;
+        float velocity;
+    };
+    std::vector<MelodicNote> notes;
+
+    int noteStartFrame = -1;
+    float noteAccumPitch = 0.0f;
+    int noteFrameCount = 0;
+    float noteMaxRms = 0.0f;
+
+    for (int f = 0; f < numFrames; ++f) {
+        float const pitch = framePitch[f];
+        bool const isVoiced = (pitch >= 50.0f && pitch <= 1400.0f && frameRms[f] > rmsFloor);
+
+        if (isVoiced) {
+            if (noteStartFrame < 0) {
+                noteStartFrame = f;
+                noteAccumPitch = pitch;
+                noteFrameCount = 1;
+                noteMaxRms = frameRms[f];
+            } else {
+                float const avgPitch = noteAccumPitch / noteFrameCount;
+                float const semitoneDiff = std::abs(12.0f * std::log2(pitch / avgPitch));
+                if (semitoneDiff < 1.5f) {
+                    noteAccumPitch += pitch;
+                    noteFrameCount++;
+                    if (frameRms[f] > noteMaxRms) noteMaxRms = frameRms[f];
+                } else {
+                    if (noteFrameCount >= 3) {
+                        float const finalHz = noteAccumPitch / noteFrameCount;
+                        int const midi = juce::jlimit(24, 96, static_cast<int>(std::round(69.0 + 12.0 * std::log2(finalHz / 440.0))));
+                        notes.push_back({ midi, finalHz, (noteStartFrame * HOP) / sampleRate, (noteFrameCount * HOP) / sampleRate, juce::jlimit(0.2f, 1.0f, (noteMaxRms / std::max(0.01f, globalPeak)) * 1.2f) });
+                    }
+                    noteStartFrame = f;
+                    noteAccumPitch = pitch;
+                    noteFrameCount = 1;
+                    noteMaxRms = frameRms[f];
+                }
+            }
+        } else {
+            if (noteStartFrame >= 0) {
+                if (noteFrameCount >= 3) {
+                    float const finalHz = noteAccumPitch / noteFrameCount;
+                    int const midi = juce::jlimit(24, 96, static_cast<int>(std::round(69.0 + 12.0 * std::log2(finalHz / 440.0))));
+                    notes.push_back({ midi, finalHz, (noteStartFrame * HOP) / sampleRate, (noteFrameCount * HOP) / sampleRate, juce::jlimit(0.2f, 1.0f, (noteMaxRms / std::max(0.01f, globalPeak)) * 1.2f) });
+                }
+                noteStartFrame = -1;
+            }
+        }
+    }
+    if (noteStartFrame >= 0 && noteFrameCount >= 3) {
+        float const finalHz = noteAccumPitch / noteFrameCount;
+        int const midi = juce::jlimit(24, 96, static_cast<int>(std::round(69.0 + 12.0 * std::log2(finalHz / 440.0))));
+        notes.push_back({ midi, finalHz, (noteStartFrame * HOP) / sampleRate, (noteFrameCount * HOP) / sampleRate, juce::jlimit(0.2f, 1.0f, (noteMaxRms / std::max(0.01f, globalPeak)) * 1.2f) });
+    }
+
+    juce::String mode = "beatbox";
+    if (notes.size() >= 2) {
+        double totalNoteDuration = 0.0;
+        for (auto const& n : notes) totalNoteDuration += n.durationSec;
+        if (totalNoteDuration > 0.35)
+            mode = "melody";
+    }
+
+    int estimatedBpm = 120;
+    if (hits.size() >= 3) {
+        std::vector<double> intervals;
+        for (size_t i = 1; i < hits.size(); ++i) {
+            double const dt = hits[i].timeSec - hits[i-1].timeSec;
+            if (dt > 0.1 && dt < 1.5)
+                intervals.push_back(dt);
+        }
+        if (!intervals.empty()) {
+            double avgDt = 0.0;
+            for (auto dt : intervals) avgDt += dt;
+            avgDt /= static_cast<double>(intervals.size());
+            double bpm = 60.0 / avgDt;
+            while (bpm < 75.0) bpm *= 2.0;
+            while (bpm > 165.0) bpm /= 2.0;
+            estimatedBpm = juce::jlimit(60, 200, static_cast<int>(std::round(bpm)));
+        }
+    }
+
+    auto* root = new juce::DynamicObject();
+    root->setProperty("mode", mode);
+    root->setProperty("bpm", estimatedBpm);
+    root->setProperty("durationSec", static_cast<float>(totalSamples / sampleRate));
+    root->setProperty("peak", globalPeak);
+    root->setProperty("rms", globalRms);
+
+    juce::Array<juce::var> hitsArray;
+    for (auto const& h : hits) {
+        auto* hitObj = new juce::DynamicObject();
+        hitObj->setProperty("type", h.type);
+        hitObj->setProperty("time", static_cast<float>(h.timeSec));
+        hitObj->setProperty("vel", h.velocity);
+        hitObj->setProperty("centroid", h.centroid);
+        hitsArray.add(juce::var(hitObj));
+    }
+    root->setProperty("hits", hitsArray);
+
+    juce::Array<juce::var> notesArray;
+    for (auto const& n : notes) {
+        auto* noteObj = new juce::DynamicObject();
+        noteObj->setProperty("midi", n.midiNote);
+        noteObj->setProperty("freq", n.freqHz);
+        noteObj->setProperty("start", static_cast<float>(n.startSec));
+        noteObj->setProperty("duration", static_cast<float>(n.durationSec));
+        noteObj->setProperty("vel", n.velocity);
+        notesArray.add(juce::var(noteObj));
+    }
+    root->setProperty("notes", notesArray);
+
+    juce::String const jsonStr = juce::JSON::toString(juce::var(root));
+
+    // Save directly to disk
+    juce::File("/home/alphi/Desktop/plugdata/mcp-server/voice-take.json").replaceWithText(jsonStr);
+
+    sendReply("/pd/voice/event", jsonStr);
+    sendConsoleLog("MCP: Voice take analyzed -> mode: " + mode + " (" + juce::String(hits.size()) + " hits, " + juce::String(notes.size()) + " notes, " + juce::String(estimatedBpm) + " BPM)", false);
+
+    // Also dispatch as prompt so AI Copilot mutates the patch automatically!
+    juce::StringArray targets;
+    juce::String const promptText = "[VOICE:" + mode.toUpperCase() + "] " + jsonStr;
+    sendSelectionPrompt(promptText, targets, false);
+}
+
 ProbeManager::ProbeManager(MCPBridge* owner)
     : bridge(owner)
 {
@@ -10661,6 +10961,31 @@ void MCPBridge::sendPrompt(const juce::String& promptText)
 
     juce::OSCMessage msg { juce::OSCAddressPattern("/pd/mcp_prompt") };
     msg.addArgument(promptText);
+    sender.send(msg);
+}
+
+void MCPBridge::sendLens(const juce::String& lens)
+{
+    if (!active.load()) return;
+    juce::OSCMessage msg { juce::OSCAddressPattern("/pd/lens") };
+    msg.addArgument(lens);
+    sender.send(msg);
+}
+
+void MCPBridge::sendSelectionPrompt(const juce::String& promptText, const juce::StringArray& targetTempIds, bool queue)
+{
+    if (!active.load()) return;
+
+    // /pd/ui/prompt <prompt> <mode> <count> <id...>
+    // mode: "spawn" (default, Enter) = run the headless canvas agent now;
+    //       "queue" (Shift+Enter) = leave it for the interactive chat to read.
+    juce::OSCMessage msg { juce::OSCAddressPattern("/pd/ui/prompt") };
+    msg.addArgument(promptText);
+    msg.addArgument(queue ? juce::String("queue") : juce::String("spawn"));
+    msg.addArgument(static_cast<int>(targetTempIds.size()));
+    for (auto const& id : targetTempIds) {
+        msg.addArgument(id);
+    }
     sender.send(msg);
 }
 

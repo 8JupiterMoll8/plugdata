@@ -274,6 +274,42 @@ public:
     int mcpNoteHover = -1;             // hovered note index (-1 = none)
     bool mcpNoteHoverClose = false;    // hovering the dismiss "x"
 
+    // PRD Copilot: floating selection prompt pill (the "sculptor's chisel").
+    // A glass prompt field that blooms under the selection; Enter sends it via
+    // bridge->sendPrompt() and the MCP server resolves the selection. It never
+    // grabs keyboard focus until the artist clicks it, so canvas hotkeys
+    // (o/m/c/b) keep working while the pill is visible.
+    std::unique_ptr<juce::TextEditor> mcpSelectionPill;
+    NVGImage mcpSelectionPillRenderer; // draws the prompt field into the GPU frame
+    // After the artist sends/dismisses, briefly suppress re-showing so an
+    // immediate sidebar refresh can't re-pop the pill. Time-based, NOT keyed
+    // to the selection — re-selecting the same object must show it again.
+    std::uint32_t mcpSelectionPillHideUntil = 0;
+    void updateSelectionPill();
+    void hideSelectionPill();
+    void dismissSelectionPill();
+    // Enter = live (spawn), Shift+Enter = queue for chat. TextEditor only fires
+    // onReturnKey for a PLAIN Return (Shift+Return fails its key comparison), so
+    // a KeyListener catches the Shift variant before the editor swallows it.
+    void submitSelectionPill(bool queueForChat);
+    struct SelectionPillKeyListener : public juce::KeyListener {
+        explicit SelectionPillKeyListener(Canvas* c) : canvas(c) {}
+        bool keyPressed(const juce::KeyPress& key, juce::Component* origin) override;
+        Canvas* canvas;
+    };
+    std::unique_ptr<SelectionPillKeyListener> mcpSelectionPillKeys;
+    // On-demand tool drawer (pressing "/" in the pill). Tools, not orders:
+    // a native popup of neutral capabilities. Never shown unless asked.
+    void showPillToolsMenu();
+    void showPillLensesMenu();
+    void sendPillPrompt(const juce::String& prompt, bool queueForChat = false);
+    juce::String mcpActiveLens; // "" = free / no lens
+    juce::Rectangle<int> mcpSelectionPillFrame; // full visual panel (LED + field + send)
+    int mcpPillDrawerMode = 0; // 0 = closed, 1 = lenses, 2 = tools
+    juce::Rectangle<int> mcpPillDrawerFrame;
+    juce::LookAndFeel_V4 mcpPillLookAndFeel;    // dark menu skin matching the pill
+    void configurePillLookAndFeel();
+
     Value isGraphChild = SynchronousValue(var(false));
     Value hideNameAndArgs = SynchronousValue(var(false));
     Value xRange = SynchronousValue();

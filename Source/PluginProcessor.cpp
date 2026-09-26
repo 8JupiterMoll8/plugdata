@@ -1092,8 +1092,10 @@ void PluginProcessor::processConstant(dsp::AudioBlock<float> buffer)
         if (connectionListener && plugdata_debugging_enabled())
             connectionListener.load()->updateSignalData();
 
-        if (mcpBridge)
+        if (mcpBridge) {
             mcpBridge->audioTick();
+            mcpBridge->voiceInputTick(audioVectorIn.data(), pdBlockSize);
+        }
 
         for (int ch = 0; ch < buffer.getNumChannels(); ch++) {
             // Use FloatVectorOperations to copy the vector data into the audioBuffer
@@ -1159,8 +1161,10 @@ void PluginProcessor::processVariable(dsp::AudioBlock<float> buffer, MidiBuffer&
         if (connectionListener && plugdata_debugging_enabled())
             connectionListener.load()->updateSignalData();
 
-        if (mcpBridge)
+        if (mcpBridge) {
             mcpBridge->audioTick();
+            mcpBridge->voiceInputTick(audioVectorIn.data(), pdBlockSize);
+        }
 
         for (int channel = 0; channel < numChannels; channel++) {
             // Use FloatVectorOperations to copy the vector data into the audioBuffer
@@ -1982,6 +1986,17 @@ void PluginProcessor::synchroniseCanvases()
             }
         }
     }
+}
+
+juce::String PluginProcessor::getStableId(t_gobj* g) const
+{
+    if (!g) return {};
+    for (auto const& [canvasKey, canvasMap] : mcpStableObjectMap) {
+        for (auto const& [id, ptr] : canvasMap) {
+            if (ptr == g) return juce::String(id);
+        }
+    }
+    return {};
 }
 
 t_gobj* PluginProcessor::resolveStableId(const String& canvasName, const String& objectId)

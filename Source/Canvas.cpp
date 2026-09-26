@@ -436,6 +436,7 @@ void Canvas::changeListenerCallback(ChangeBroadcaster* c)
         if (isSelectedDifferent(selectedComponents, previousSelectedComponents)) {
             previousSelectedComponents = selectedComponents;
             editor->updateSelection(this);
+            updateSelectionPill();
         }
     }
 }
@@ -883,6 +884,215 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
         nvgDrawRoundedRect(nvg, 0, 0, static_cast<float>(nb.getWidth()), static_cast<float>(nb.getHeight()),
                            nvgRGBA(22, 22, 28, 255), nvgRGBA(74, 158, 255, 255), 4.0f);
         mcpNoteRenderer.renderJUCEComponent(nvg, *mcpNoteEditor, zoom * editor->getRenderScale());
+    }
+
+    // PRD Copilot: the floating selection prompt pill — glass panel drawn in NVG,
+    // live TextEditor composited on top (same trick as the note editor).
+    if (mcpSelectionPill && mcpSelectionPill->isVisible()) {
+        auto const panel = mcpSelectionPillFrame.isEmpty() ? mcpSelectionPill->getBounds() : mcpSelectionPillFrame;
+        float const w = static_cast<float>(panel.getWidth());
+        float const h = static_cast<float>(panel.getHeight());
+        {
+            // TE-lite hardware look: matte dark panel, top bevel, ✦ Lenses, / Tools, ▶ Send.
+            NVGScopedState scopedPanel(nvg);
+            nvgTranslate(nvg, static_cast<float>(panel.getX()), static_cast<float>(panel.getY()));
+            nvgDrawRoundedRect(nvg, 0, 0, w, h, nvgRGBA(24, 26, 30, 250), nvgRGBA(55, 60, 72, 220), 8.0f);
+
+            // Audio-reactive border glow while recording voice / beatbox
+            if (pd) {
+                if (auto* br = pd->getMCPBridge()) {
+                    if (br->isVoiceCapturing()) {
+                        float const lvl = br->getVoiceLiveLevel();
+                        nvgBeginPath(nvg);
+                        nvgRoundedRect(nvg, -1.0f, -1.0f, w + 2.0f, h + 2.0f, 9.0f);
+                        nvgStrokeColor(nvg, nvgRGBA(255, 59, 48, static_cast<unsigned char>(130 + juce::jlimit(0.0f, 125.0f, lvl * 350.0f))));
+                        nvgStrokeWidth(nvg, 1.5f + lvl * 3.5f);
+                        nvgStroke(nvg);
+                    }
+                }
+            }
+
+            // Subtle top highlight line
+            nvgBeginPath(nvg);
+            nvgMoveTo(nvg, 8.0f, 1.0f);
+            nvgLineTo(nvg, w - 8.0f, 1.0f);
+            nvgStrokeColor(nvg, nvgRGBA(255, 255, 255, 25));
+            nvgStrokeWidth(nvg, 1.0f);
+            nvgStroke(nvg);
+
+            // Left: ✦ Lenses button (Pure vector sparkle — never missing glyph!)
+            float const lw = 24.0f;
+            float const lh = 20.0f;
+            float const lx = 6.0f;
+            float const ly = (h - lh) * 0.5f;
+            nvgDrawRoundedRect(nvg, lx, ly, lw, lh,
+                               (mcpPillDrawerMode == 1) ? nvgRGBA(74, 158, 255, 80) : nvgRGBA(38, 42, 50, 230),
+                               nvgRGBA(74, 158, 255, (mcpPillDrawerMode == 1) ? 240 : 120), 4.0f);
+            float const cx = lx + lw * 0.5f;
+            float const cy = ly + lh * 0.5f;
+            nvgBeginPath(nvg);
+            nvgMoveTo(nvg, cx, cy - 5.5f);
+            nvgQuadTo(nvg, cx, cy, cx + 5.5f, cy);
+            nvgQuadTo(nvg, cx, cy, cx, cy + 5.5f);
+            nvgQuadTo(nvg, cx, cy, cx - 5.5f, cy);
+            nvgQuadTo(nvg, cx, cy, cx, cy - 5.5f);
+            nvgClosePath(nvg);
+            nvgFillColor(nvg, (mcpPillDrawerMode == 1 || mcpActiveLens.isNotEmpty()) ? nvgRGBA(74, 180, 255, 255) : nvgRGBA(74, 158, 255, 230));
+            nvgFill(nvg);
+
+            // Right: / Tools button
+            float const tw = 22.0f;
+            float const th = 20.0f;
+            float const tx = w - 88.0f;
+            float const ty = (h - th) * 0.5f;
+            nvgDrawRoundedRect(nvg, tx, ty, tw, th,
+                               (mcpPillDrawerMode == 2) ? nvgRGBA(74, 158, 255, 80) : nvgRGBA(38, 42, 50, 230),
+                               nvgRGBA(160, 175, 200, (mcpPillDrawerMode == 2) ? 220 : 80), 4.0f);
+            nvgFontFace(nvg, "Inter");
+            nvgFontSize(nvg, 11.0f);
+            nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+            nvgFillColor(nvg, nvgRGBA(200, 210, 230, 220));
+            nvgText(nvg, tx + tw * 0.5f, ty + th * 0.5f, "/", nullptr);
+
+            // Right: 🎙️ Mic / Voice button
+            float const mw = 24.0f;
+            float const mh = 20.0f;
+            float const mx = w - 62.0f;
+            float const my = (h - mh) * 0.5f;
+
+            bool isVoiceRec = false;
+            float voiceLvl = 0.0f;
+            if (pd) {
+                if (auto* br = pd->getMCPBridge()) {
+                    isVoiceRec = br->isVoiceCapturing();
+                    voiceLvl = br->getVoiceLiveLevel();
+                }
+            }
+
+            if (isVoiceRec) {
+                nvgDrawRoundedRect(nvg, mx, my, mw, mh, nvgRGBA(255, 59, 48, 235), nvgRGBA(255, 120, 100, 255), 4.0f);
+            } else {
+                nvgDrawRoundedRect(nvg, mx, my, mw, mh, nvgRGBA(38, 42, 50, 230), nvgRGBA(160, 175, 200, 80), 4.0f);
+            }
+
+            // Crisp vector microphone icon
+            float const mcx = mx + mw * 0.5f;
+            float const mcy = my + mh * 0.5f - 1.0f;
+            nvgBeginPath(nvg);
+            nvgRoundedRect(nvg, mcx - 2.5f, mcy - 5.0f, 5.0f, 8.0f, 2.5f);
+            nvgFillColor(nvg, isVoiceRec ? nvgRGBA(255, 255, 255, 255) : nvgRGBA(200, 215, 235, 220));
+            nvgFill(nvg);
+            nvgBeginPath(nvg);
+            nvgArc(nvg, mcx, mcy, 4.5f, 0.0f, juce::MathConstants<float>::pi, NVG_HOLE);
+            nvgStrokeColor(nvg, isVoiceRec ? nvgRGBA(255, 255, 255, 255) : nvgRGBA(200, 215, 235, 220));
+            nvgStrokeWidth(nvg, 1.2f);
+            nvgStroke(nvg);
+            nvgBeginPath(nvg);
+            nvgMoveTo(nvg, mcx, mcy + 4.5f);
+            nvgLineTo(nvg, mcx, mcy + 7.5f);
+            nvgMoveTo(nvg, mcx - 3.0f, mcy + 7.5f);
+            nvgLineTo(nvg, mcx + 3.0f, mcy + 7.5f);
+            nvgStrokeColor(nvg, isVoiceRec ? nvgRGBA(255, 255, 255, 255) : nvgRGBA(200, 215, 235, 220));
+            nvgStrokeWidth(nvg, 1.2f);
+            nvgStroke(nvg);
+
+            // Right: ▶ Send button
+            float const bw = 24.0f;
+            float const bh = 20.0f;
+            float const bx = w - bw - 6.0f;
+            float const by = (h - bh) * 0.5f;
+            nvgDrawRoundedRect(nvg, bx, by, bw, bh, nvgRGBA(255, 102, 0, 235), nvgRGBA(255, 150, 60, 255), 4.0f);
+            nvgBeginPath(nvg);
+            nvgMoveTo(nvg, bx + 8.5f, by + 5.5f);
+            nvgLineTo(nvg, bx + 16.5f, by + bh * 0.5f);
+            nvgLineTo(nvg, bx + 8.5f, by + bh - 5.5f);
+            nvgClosePath(nvg);
+            nvgFillColor(nvg, nvgRGBA(20, 20, 22, 255));
+            nvgFill(nvg);
+        }
+
+        // Crisp on-canvas placeholder when empty (subtle dim when focused)
+        if (mcpSelectionPill && mcpSelectionPill->getText().isEmpty()) {
+            NVGScopedState scopedHint(nvg);
+            nvgFontFace(nvg, "Inter");
+            nvgFontSize(nvg, 12.0f);
+            nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+            nvgFillColor(nvg, nvgRGBA(140, 155, 175, mcpSelectionPill->hasKeyboardFocus(true) ? 90 : 170));
+            juce::String const hint = mcpActiveLens.isNotEmpty()
+                ? "[" + mcpActiveLens.toUpperCase() + "] Ask AI on selection..."
+                : "Ask AI on selection...  (/ tools  |  * lenses)";
+            nvgText(nvg, panel.getX() + 38.0f, panel.getY() + panel.getHeight() * 0.5f, hint.toRawUTF8(), nullptr);
+        }
+
+        {
+            NVGScopedState scopedField(nvg);
+            auto const fb = mcpSelectionPill->getBounds();
+            nvgTranslate(nvg, static_cast<float>(fb.getX()), static_cast<float>(fb.getY()));
+            mcpSelectionPillRenderer.renderJUCEComponent(nvg, *mcpSelectionPill, zoom * editor->getRenderScale());
+        }
+
+        // Native Horizontal Card Drawer (Sleek hardware card — ZERO OS menus!)
+        if (mcpPillDrawerMode != 0) {
+            float const dw = w;
+            float const dh = 30.0f;
+            float const dx = static_cast<float>(panel.getX());
+            float const dy = static_cast<float>(panel.getY() + panel.getHeight()) + 5.0f;
+            mcpPillDrawerFrame = juce::Rectangle<int>(roundToInt(dx), roundToInt(dy), roundToInt(dw), roundToInt(dh));
+
+            NVGScopedState scopedDrawer(nvg);
+            nvgTranslate(nvg, dx, dy);
+            // Frosted dark card background with soft border
+            nvgDrawRoundedRect(nvg, 0, 0, dw, dh, nvgRGBA(18, 20, 24, 250), nvgRGBA(55, 62, 75, 230), 6.0f);
+
+            // Subtle top highlight line
+            nvgBeginPath(nvg);
+            nvgMoveTo(nvg, 6.0f, 1.0f);
+            nvgLineTo(nvg, dw - 6.0f, 1.0f);
+            nvgStrokeColor(nvg, nvgRGBA(255, 255, 255, 20));
+            nvgStrokeWidth(nvg, 1.0f);
+            nvgStroke(nvg);
+
+            nvgFontFace(nvg, "Inter");
+            nvgFontSize(nvg, 11.5f);
+            nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+
+            if (mcpPillDrawerMode == 1) {
+                // Lenses: Doctor | Jam | Genesis | Modular | Free
+                const char* lenses[] = { "Doctor", "Jam", "Genesis", "Modular", "Free" };
+                const char* lensKeys[] = { "doctor", "jam", "genesis", "modular", "free" };
+                float const itemW = (dw - 8.0f) / 5.0f;
+                for (int i = 0; i < 5; ++i) {
+                    float const ix = 4.0f + i * itemW;
+                    float const iy = 3.0f;
+                    float const iw = itemW - 3.0f;
+                    float const ih = dh - 6.0f;
+                    bool const isActive = (mcpActiveLens == lensKeys[i]) || (mcpActiveLens.isEmpty() && i == 4);
+                    if (isActive) {
+                        nvgDrawRoundedRect(nvg, ix, iy, iw, ih, nvgRGBA(255, 102, 0, 235), nvgRGBA(255, 150, 60, 255), 4.0f);
+                        nvgFillColor(nvg, nvgRGBA(18, 18, 20, 255));
+                    } else {
+                        nvgDrawRoundedRect(nvg, ix, iy, iw, ih, nvgRGBA(30, 34, 42, 220), nvgRGBA(50, 58, 70, 180), 4.0f);
+                        nvgFillColor(nvg, nvgRGBA(210, 220, 235, 230));
+                    }
+                    nvgText(nvg, ix + iw * 0.5f, iy + ih * 0.5f, lenses[i], nullptr);
+                }
+            } else if (mcpPillDrawerMode == 2) {
+                // Tools: Explain | Drive | Filter | Reverb | Pack GOP | Tidy
+                const char* tools[] = { "Explain", "Drive", "Filter", "Reverb", "Pack GOP", "Tidy" };
+                float const itemW = (dw - 8.0f) / 6.0f;
+                for (int i = 0; i < 6; ++i) {
+                    float const ix = 4.0f + i * itemW;
+                    float const iy = 3.0f;
+                    float const iw = itemW - 3.0f;
+                    float const ih = dh - 6.0f;
+                    nvgDrawRoundedRect(nvg, ix, iy, iw, ih, nvgRGBA(30, 34, 42, 220), nvgRGBA(50, 58, 70, 180), 4.0f);
+                    nvgFillColor(nvg, nvgRGBA(210, 220, 235, 230));
+                    nvgText(nvg, ix + iw * 0.5f, iy + ih * 0.5f, tools[i], nullptr);
+                }
+            }
+        } else {
+            mcpPillDrawerFrame = {};
+        }
     }
     // PRD overlay: ghost/preview of PROPOSED (uncommitted) changes. Drawn above
     // the patch, never part of it — the artist sees the change before it's real.
@@ -1667,6 +1877,11 @@ void Canvas::mouseExit(MouseEvent const& e)
 
 bool Canvas::isPointOverNote(Point<int> canvasPt) const
 {
+    if (mcpSelectionPill && mcpSelectionPill->isVisible()) {
+        auto const panel = mcpSelectionPillFrame.isEmpty() ? mcpSelectionPill->getBounds() : mcpSelectionPillFrame;
+        if (panel.contains(canvasPt)) return true;
+        if (mcpPillDrawerMode != 0 && mcpPillDrawerFrame.contains(canvasPt)) return true;
+    }
     if (!pd || pd->getMcpAnnotations().empty()) return false;
     auto const pt = canvasPt.toFloat();
     auto anns = pd->getMcpAnnotations();
@@ -1684,6 +1899,89 @@ bool Canvas::isPointOverNote(Point<int> canvasPt) const
 
 bool Canvas::handleNoteClick(Point<int> canvasPt)
 {
+    if (mcpSelectionPill && mcpSelectionPill->isVisible()) {
+        // 1. Drawer clicks (Lenses or Tools)
+        if (mcpPillDrawerMode != 0 && mcpPillDrawerFrame.contains(canvasPt)) {
+            int const relX = canvasPt.x - mcpPillDrawerFrame.getX();
+            int const dw = mcpPillDrawerFrame.getWidth();
+            if (mcpPillDrawerMode == 1) {
+                // Lenses: Doctor | Jam | Genesis | Modular | Free
+                const char* lensKeys[] = { "doctor", "jam", "genesis", "modular", "free" };
+                float const itemW = (static_cast<float>(dw) - 8.0f) / 5.0f;
+                int idx = static_cast<int>((relX - 4) / itemW);
+                if (idx >= 0 && idx < 5) {
+                    juce::String const lens = (idx == 4) ? juce::String() : juce::String(lensKeys[idx]);
+                    mcpActiveLens = lens;
+                    if (pd) {
+                        if (auto* br = pd->getMCPBridge()) br->sendLens(lens.isEmpty() ? "free" : lens);
+                    }
+                    mcpPillDrawerMode = 0;
+                    mcpPillDrawerFrame = {};
+                    repaint();
+                    if (editor) editor->nvgSurface.renderAll();
+                    return true;
+                }
+            } else if (mcpPillDrawerMode == 2) {
+                // Tools: Explain | Drive | Filter | Reverb | Pack GOP | Tidy
+                const char* toolPrompts[] = {
+                    "explain this",
+                    "add tanh~ saturation",
+                    "add lowpass filter",
+                    "add reverb space",
+                    "pack this into gop module",
+                    "tidy layout"
+                };
+                float const itemW = (static_cast<float>(dw) - 8.0f) / 6.0f;
+                int idx = static_cast<int>((relX - 4) / itemW);
+                if (idx >= 0 && idx < 6) {
+                    mcpPillDrawerMode = 0;
+                    mcpPillDrawerFrame = {};
+                    sendPillPrompt(toolPrompts[idx]);
+                    dismissSelectionPill();
+                    return true;
+                }
+            }
+            return true;
+        }
+
+        // 2. Pill clicks
+        auto const panel = mcpSelectionPillFrame.isEmpty() ? mcpSelectionPill->getBounds() : mcpSelectionPillFrame;
+        if (panel.contains(canvasPt)) {
+            int const relX = canvasPt.x - panel.getX();
+            // Left ~34px: ✦ Lenses button
+            if (relX <= 34) {
+                showPillLensesMenu();
+                return true;
+            }
+            // Right ~32px: ▶ Submit button
+            if (relX >= panel.getWidth() - 32) {
+                submitSelectionPill(false);
+                return true;
+            }
+            // Right 33-62px: 🎙️ Mic / Voice button
+            if (relX >= panel.getWidth() - 62) {
+                if (pd) {
+                    if (auto* br = pd->getMCPBridge()) {
+                        if (br->isVoiceCapturing())
+                            br->stopVoiceCaptureAndAnalyze();
+                        else
+                            br->startVoiceCapture(5);
+                        repaint();
+                        if (editor) editor->nvgSurface.renderAll();
+                    }
+                }
+                return true;
+            }
+            // Right 63-90px: / Tools button
+            if (relX >= panel.getWidth() - 90) {
+                showPillToolsMenu();
+                return true;
+            }
+            // Middle: Text field focus!
+            mcpSelectionPill->grabKeyboardFocus();
+            return true;
+        }
+    }
     if (!pd || pd->getMcpAnnotations().empty()) return false;
     auto const pt = canvasPt.toFloat();
     auto anns = pd->getMcpAnnotations();
@@ -2105,11 +2403,15 @@ void Canvas::updateSidebarSelection()
         }
 
         editor->sidebar->showParameters(toShow, allParameters, showOnSelect);
+        updateSelectionPill();
     });
 }
 
 bool Canvas::keyPressed(KeyPress const& key)
 {
+    if (mcpSelectionPill && mcpSelectionPill->hasKeyboardFocus(true))
+        return false;
+
     if (editor->getCurrentCanvas() != this || isGraph)
         return false;
 
@@ -2204,6 +2506,7 @@ void Canvas::deselectAll(bool const broadcastChange)
 
     selectedComponents.deselectAll();
     editor->sidebar->hideParameters();
+    hideSelectionPill();
 
     if (!broadcastChange) {
         // Add back the listener, but make sure it's added back 'after' the last event on the message queue
@@ -2213,9 +2516,216 @@ void Canvas::deselectAll(bool const broadcastChange)
 
 void Canvas::hideAllActiveEditors()
 {
+    hideSelectionPill();
     for (auto* object : objects) {
         object->hideEditor();
     }
+}
+
+void Canvas::updateSelectionPill()
+{
+    if (isGraph || getValue<bool>(locked) || presentationMode.getValue()) {
+        hideSelectionPill();
+        return;
+    }
+
+    auto selectedObjects = getSelectionOfType<Object>();
+    if (selectedObjects.empty()) {
+        hideSelectionPill();
+        return;
+    }
+
+    // Brief grace window after a send/dismiss so an immediate sidebar/selection
+    // refresh can't re-pop the pill. Time-based (not keyed to the selection), so
+    // re-selecting the SAME object later always brings it back.
+    if (juce::Time::getMillisecondCounter() < mcpSelectionPillHideUntil) return;
+
+    // Object::getBounds() is already in Canvas component coordinates, so the pill
+    // scrolls/zooms with the patch for free (canvasOrigin is constant).
+    Rectangle<int> bounds;
+    bool first = true;
+    for (auto const* obj : selectedObjects) {
+        if (!obj) continue;
+        auto const ob = obj->getBounds();
+        bounds = first ? ob : bounds.getUnion(ob);
+        first = false;
+    }
+    if (first) {
+        hideSelectionPill();
+        return;
+    }
+
+    constexpr int pillW = 380;
+    constexpr int pillH = 34;
+    // Position purely in CANVAS content coords (same space as obj->getBounds()).
+    // Do NOT clamp against viewport->getViewArea(): that returns zoomed/screen
+    // coords, so at any zoom != 100% it threw the pill off-screen.
+    int pillX = bounds.getCentreX() - pillW / 2;
+    int pillY = bounds.getBottom() + 12;
+    mcpSelectionPillFrame = juce::Rectangle<int>(pillX, pillY, pillW, pillH);
+    if (mcpPillDrawerMode != 0) {
+        mcpPillDrawerFrame = juce::Rectangle<int>(pillX, pillY + pillH + 5, pillW, 30);
+    } else {
+        mcpPillDrawerFrame = {};
+    }
+
+    if (!mcpSelectionPill) {
+        mcpSelectionPill = std::make_unique<juce::TextEditor>();
+        mcpSelectionPill->setMultiLine(false);
+        mcpSelectionPill->setReturnKeyStartsNewLine(false);
+        mcpSelectionPill->setWantsKeyboardFocus(true);
+        mcpSelectionPill->setColour(juce::TextEditor::backgroundColourId, juce::Colours::transparentBlack);
+        mcpSelectionPill->setColour(juce::TextEditor::textColourId, juce::Colours::white);
+        mcpSelectionPill->setColour(juce::TextEditor::outlineColourId, juce::Colours::transparentBlack);
+        mcpSelectionPill->setColour(juce::TextEditor::focusedOutlineColourId, juce::Colours::transparentBlack);
+        mcpSelectionPill->setColour(juce::TextEditor::highlightColourId, juce::Colour(0xff4a9eff));
+        mcpSelectionPill->setColour(juce::CaretComponent::caretColourId, juce::Colours::white);
+        mcpSelectionPill->setFont(juce::Font("Inter", 13.0f, juce::Font::plain));
+        mcpSelectionPill->setBorder(juce::BorderSize<int>(0, 0, 0, 0));
+        mcpSelectionPill->setIndents(2, 0);
+        mcpSelectionPill->setJustification(juce::Justification::centredLeft);
+
+        mcpSelectionPill->onReturnKey = [this] { submitSelectionPill(false); };
+        mcpSelectionPillKeys = std::make_unique<SelectionPillKeyListener>(this);
+        mcpSelectionPill->addKeyListener(mcpSelectionPillKeys.get());
+        mcpSelectionPill->onEscapeKey = [this] {
+            if (mcpPillDrawerMode != 0) {
+                mcpPillDrawerMode = 0;
+                mcpPillDrawerFrame = {};
+                repaint();
+                if (editor) editor->nvgSurface.renderAll();
+                return;
+            }
+            if (mcpSelectionPill) mcpSelectionPill->setText(juce::String(), false);
+            dismissSelectionPill();
+        };
+        mcpSelectionPill->onTextChange = [this] {
+            repaint();
+            if (editor) editor->nvgSurface.renderAll();
+        };
+        mcpSelectionPill->onFocusLost = [this] {
+            // Keep a typed prompt, but if it's empty and drawer is closed get out of the way.
+            if (mcpSelectionPill && mcpSelectionPill->getText().trim().isEmpty() && mcpPillDrawerMode == 0)
+                dismissSelectionPill();
+        };
+        addAndMakeVisible(*mcpSelectionPill);
+    }
+
+    // Leave room on the left for the ✦ Lenses button and on the right for / Tools, 🎙️ Mic, and ▶ Send.
+    int const edH = 24;
+    int const edY = pillY + (pillH - edH) / 2;
+    mcpSelectionPill->setBounds(pillX + 36, edY, pillW - 36 - 92, edH);
+    mcpSelectionPill->setVisible(true);
+    // toFront(false), NOT true: bringing it forward must never steal keyboard
+    // focus, or typing 'o'/'m'/'c'/'b' on the canvas would land in the prompt
+    // instead of creating/editing objects.
+    mcpSelectionPill->toFront(false);
+    repaint();
+    if (editor) editor->nvgSurface.renderAll();
+}
+
+void Canvas::hideSelectionPill()
+{
+    mcpPillDrawerMode = 0;
+    mcpPillDrawerFrame = {};
+    if (mcpSelectionPill && mcpSelectionPill->isVisible()) {
+        mcpSelectionPill->setVisible(false);
+        repaint();
+        if (editor) editor->nvgSurface.renderAll();
+    }
+}
+
+void Canvas::dismissSelectionPill()
+{
+    mcpPillDrawerMode = 0;
+    mcpPillDrawerFrame = {};
+    // Artist dismissed (send / Esc / empty focus-out): suppress re-show for a
+    // short window so the immediate refresh can't re-pop it. Time-based, so
+    // re-selecting the same object later always brings it back.
+    mcpSelectionPillHideUntil = juce::Time::getMillisecondCounter() + 700;
+    hideSelectionPill();
+}
+
+void Canvas::submitSelectionPill(bool queueForChat)
+{
+    mcpPillDrawerMode = 0;
+    mcpPillDrawerFrame = {};
+    if (!mcpSelectionPill) return;
+    // C++ truth: sendPillPrompt resolves the selection's stable tempIds from the
+    // bridge-owned map — the server never guesses from its identity mirror.
+    sendPillPrompt(mcpSelectionPill->getText().trim(), queueForChat);
+    mcpSelectionPill->setText(juce::String(), false);
+    dismissSelectionPill();
+}
+
+bool Canvas::SelectionPillKeyListener::keyPressed(const juce::KeyPress& key, juce::Component*)
+{
+    // Shift+Enter = queue for the interactive chat. TextEditor only fires
+    // onReturnKey for a plain Return, so consume the Shift variant here.
+    if (key.getKeyCode() == juce::KeyPress::returnKey && key.getModifiers().isShiftDown()) {
+        if (canvas) canvas->submitSelectionPill(true);
+        return true;
+    }
+    // "/" opens the on-demand tool drawer if input is empty
+    if (key.getTextCharacter() == '/' || key.getKeyCode() == '/') {
+        if (canvas && canvas->mcpSelectionPill && canvas->mcpSelectionPill->getText().trim().isEmpty()) {
+            canvas->showPillToolsMenu();
+            return true;
+        }
+    }
+    // "*" (the ✦ key) opens the Lenses drawer if input is empty
+    if (key.getTextCharacter() == '*') {
+        if (canvas && canvas->mcpSelectionPill && canvas->mcpSelectionPill->getText().trim().isEmpty()) {
+            canvas->showPillLensesMenu();
+            return true;
+        }
+    }
+    return false;
+}
+
+void Canvas::showPillLensesMenu()
+{
+    if (!mcpSelectionPill || !mcpSelectionPill->isVisible()) return;
+    mcpPillDrawerMode = (mcpPillDrawerMode == 1 ? 0 : 1);
+    if (mcpPillDrawerMode != 0) {
+        auto const p = mcpSelectionPillFrame.isEmpty() ? mcpSelectionPill->getBounds() : mcpSelectionPillFrame;
+        mcpPillDrawerFrame = juce::Rectangle<int>(p.getX(), p.getBottom() + 5, p.getWidth(), 30);
+    } else {
+        mcpPillDrawerFrame = {};
+    }
+    repaint();
+    if (editor) editor->nvgSurface.renderAll();
+}
+
+void Canvas::configurePillLookAndFeel()
+{
+}
+
+void Canvas::showPillToolsMenu()
+{
+    if (!mcpSelectionPill || !mcpSelectionPill->isVisible()) return;
+    mcpPillDrawerMode = (mcpPillDrawerMode == 2 ? 0 : 2);
+    if (mcpPillDrawerMode != 0) {
+        auto const p = mcpSelectionPillFrame.isEmpty() ? mcpSelectionPill->getBounds() : mcpSelectionPillFrame;
+        mcpPillDrawerFrame = juce::Rectangle<int>(p.getX(), p.getBottom() + 5, p.getWidth(), 30);
+    } else {
+        mcpPillDrawerFrame = {};
+    }
+    repaint();
+    if (editor) editor->nvgSurface.renderAll();
+}
+
+void Canvas::sendPillPrompt(const juce::String& prompt, bool queueForChat)
+{
+    if (prompt.isEmpty() || !pd) return;
+    juce::StringArray targetIds;
+    for (auto* obj : getSelectionOfType<Object>()) {
+        if (auto* ptr = obj->getPointer()) {
+            auto const tid = pd->getStableId(ptr);
+            if (tid.isNotEmpty()) targetIds.add(tid);
+        }
+    }
+    if (auto* br = pd->getMCPBridge()) br->sendSelectionPrompt(prompt, targetIds, queueForChat);
 }
 
 void Canvas::copySelection()

@@ -230,6 +230,23 @@ public:
     void sendArtistNote(const juce::String& targetId, const juce::String& text);
     void sendConsoleLog(const juce::String& message, bool isError);
     void sendPrompt(const juce::String& promptText);
+    // PRD Copilot: prompt from the floating selection pill, carrying the selected
+    // objects' stable tempIds (resolved in C++ — the identity source of truth) so
+    // the MCP server never has to guess the selection from a stale mirror.
+    void sendSelectionPrompt(const juce::String& promptText, const juce::StringArray& targetTempIds, bool queue = false);
+    // PRD Copilot: the active creative Lens (Doctor / Jam Partner / Genesis /
+    // Modular Tech). Sent to the MCP server, which prepends the lens brief to
+    // subsequent agent turns. "free" clears it.
+    void sendLens(const juce::String& lens);
+
+    // Voice & Beatbox Capture Engine
+    void startVoiceCapture(int maxSeconds = 5);
+    void stopVoiceCaptureAndAnalyze();
+    bool isVoiceCapturing() const { return voiceCapturing.load(std::memory_order_relaxed); }
+    float getVoiceLiveLevel() const { return voiceLiveLevel.load(std::memory_order_relaxed); }
+    void voiceInputTick(float const* inputSamples, int numSamples);
+    void parseVoiceBufferToJson(float const* buffer, int totalSamples, double sampleRate);
+
     void sendReply(const juce::String& addressPattern, const juce::Array<juce::var>& args);
     void sendReply(const juce::String& addressPattern, float val);
     void sendReply(const juce::String& addressPattern, const juce::String& str);
@@ -379,6 +396,13 @@ private:
 
     // Phase 4 armed control-message window (native Pd receiver + atom buffer).
     std::unique_ptr<McpControlWindow> controlWindow;
+
+    // Voice & Beatbox capture state
+    static constexpr int MAX_VOICE_CAPTURE_SAMPLES = 48000 * 6; // 6 seconds at 48k
+    std::vector<float> voiceCaptureBuffer;
+    std::atomic<bool> voiceCapturing { false };
+    std::atomic<int> voiceCaptureWritePos { 0 };
+    std::atomic<float> voiceLiveLevel { 0.0f };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MCPBridge)
 };
