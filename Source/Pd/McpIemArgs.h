@@ -26,7 +26,8 @@ namespace mcp
 inline bool isIemGuiClass(const juce::String& c)
 {
     return c == "hsl" || c == "vsl" || c == "nbx" || c == "numbox"
-        || c == "hradio" || c == "vradio" || c == "tgl" || c == "bng";
+        || c == "hradio" || c == "vradio" || c == "tgl" || c == "bng"
+        || c == "knob";
 }
 
 // Full arg count + a full default argument template for the classes whose short
@@ -104,6 +105,55 @@ inline juce::StringArray expandIemGuiShortForm(const juce::StringArray& tokens)
         full.add("0");                  // 14 fg colour
         full.add("0");                  // 15 label colour
         full.add(init);                 // 16 init value
+        return full;
+    }
+
+    // ── ELSE knob: <size> <min> <max> <exp> <load> <snd> <rcv> <bg> <mg> <fg>
+    //    <square> <circular> <steps> <discrete> <arc> <angle> <offset> <jump>
+    //    <arcstart> <param> <var> <number_mode> <n_size> <xpos> <ypos> <savestate>
+    //    <lb> <ticks> <readonly>.  A short form (e.g. `knob 40 -50 50`) leaves
+    //    arg 14 (arc) at 0 → the value indicator is HIDDEN (knob.c hides the arc
+    //    unless arc && fval != arcstart) → the artist sees an EMPTY CIRCLE that
+    //    shows no value. Pad to the canonical full form with arc=1.
+    if (cls == "knob" || cls == "else/knob")
+    {
+        if (given == 0 || given > 5) return tokens; // full/other form
+        const juce::String size = tokens[1];
+        const juce::String mn   = given >= 2 ? tokens[2] : "0";
+        const juce::String mx   = given >= 3 ? tokens[3] : "127";
+        const juce::String exp  = given >= 4 ? tokens[4] : "0";
+        const juce::String load = given >= 5 ? tokens[5] : "0";
+        juce::StringArray full;
+        full.add(tokens[0]);            // class
+        full.add(size);                 // 0  size
+        full.add(mn);                   // 1  min
+        full.add(mx);                   // 2  max
+        full.add(exp);                  // 3  exp
+        full.add(load);                 // 4  load value
+        full.add("empty");              // 5  send
+        full.add("empty");              // 6  receive
+        full.add("#dfdfdf");            // 7  background
+        full.add("#7c7c7c");            // 8  arc colour
+        full.add("black");              // 9  foreground
+        full.add("0");                  // 10 square
+        full.add("0");                  // 11 circular
+        full.add("0");                  // 12 steps
+        full.add("0");                  // 13 discrete
+        full.add("1");                  // 14 ARC — 1 shows the value indicator
+        full.add("320");                // 15 angle
+        full.add("0");                  // 16 offset
+        full.add("0");                  // 17 jump
+        full.add(mn);                   // 18 arcstart (arc fills from min)
+        full.add("empty");              // 19 param
+        full.add("empty");              // 20 var
+        full.add("0");                  // 21 number_mode
+        full.add("12");                 // 22 n_size
+        full.add("6");                  // 23 xpos
+        full.add("-15");                // 24 ypos
+        full.add("0");                  // 25 savestate
+        full.add("1");                  // 26 loadbang
+        full.add("0");                  // 27 ticks
+        full.add("0");                  // 28 readonly
         return full;
     }
 
