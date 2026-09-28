@@ -3772,6 +3772,16 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                                 + " — invalid range: swap min/max" });
                         }
                     }
+                    if (cls == "knob") {
+                        // ELSE knob args: knob <size> <min> <max> [exp] [load] …
+                        // With fewer than 3 args Pd reads the missing min/max as 0,
+                        // giving a 0→0 range = a knob that controls NOTHING (the
+                        // artist turns it and hears no change).
+                        if (tk.size() < 4) {
+                            createAdvisories.push_back({ oid,
+                                "knob '" + oid + "' has only a size — min/max default to 0 (range 0→0, controls NOTHING). Use knob <size> <min> <max> [exp] [load], e.g. knob 40 20 20000 1 220" });
+                        }
+                    }
                 }
 
                 // line~ in this fork takes NO creation arguments (line_tilde_new(void)),
