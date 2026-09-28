@@ -3663,6 +3663,12 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             // Guard 2: control->signal connections are legal (Pd sets the inlet
             // scalar) but step per DSP block. Advisory only — never rejected.
             std::vector<ConnectFailure> connectAdvisories;
+            // Control-kind advisories (PRD preflight): a GUI control can render
+            // wrong (inverted geometry → reads as "no slider") or carry an invalid
+            // range. Advisory only — the create succeeds; the artist still gets a
+            // working object. Format: {tempId, reason}. Emitted as a tail fact.
+            struct CreateAdvisory { juce::String tempId; juce::String reason; };
+            std::vector<CreateAdvisory> createAdvisories;
             std::vector<std::string> createdIds;
             std::vector<t_gobj*> createdPtrs;
             std::vector<int32> mappingIndices;
@@ -3730,6 +3736,42 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     cf.reason = "tempId already exists on canvas — refusing to steal it (pick a new id or rename)";
                     createFailures.push_back(cf);
                     continue;
+                }
+
+                // ── Control-kind preflight (PRD): detect the two SILENT GUI
+                // failures straight from the creation args — inverted geometry
+                // (an hsl built 15x120 reads as "no slider") and an invalid
+                // range. The object still gets created; this only advises.
+                // Arg positions match Source/analysis patch-analyzer
+                // parseGuiProperties: tk[0]=class, tk[1]=width, tk[2]=height,
+                // tk[3]=min, tk[4]=max (for hsl/vsl/nbx).
+                {
+                    const juce::String cls = ot.toLowerCase();
+                    if (cls == "hsl" || cls == "vsl" || cls == "nbx") {
+                        auto num = [&tk](int i, double& out) -> bool {
+                            if (i < 0 || i >= tk.size()) return false;
+                            if (tk[i].isEmpty()) return false;
+                            out = tk[i].getDoubleValue();
+                            return true;
+                        };
+                        double w = 0, h = 0, lo = 0, hi = 0;
+                        if ((cls == "hsl" || cls == "vsl")
+                            && num(1, w) && num(2, h) && w > 0 && h > 0) {
+                            const bool inverted = (cls == "hsl") ? (h >= w) : (w >= h);
+                            if (inverted) {
+                                createAdvisories.push_back({ oid,
+                                    cls + " " + juce::String(w) + "x" + juce::String(h)
+                                    + (cls == "hsl"
+                                        ? " — width/height look inverted: hsl wants width>height (wide+short), e.g. [128,15]"
+                                        : " — width/height look inverted: vsl wants height>width (narrow+tall), e.g. [15,128]") });
+                            }
+                        }
+                        if (num(3, lo) && num(4, hi) && lo > hi) {
+                            createAdvisories.push_back({ oid,
+                                cls + " min " + juce::String(lo) + " > max " + juce::String(hi)
+                                + " — invalid range: swap min/max" });
+                        }
+                    }
                 }
 
                 // line~ in this fork takes NO creation arguments (line_tilde_new(void)),
@@ -4769,6 +4811,14 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 reply.addArgument(juce::String(ef.tempId));
                 reply.addArgument(juce::String(ef.type));
                 reply.addArgument(juce::String(ef.reason));
+            }
+
+            // Control-kind advisory tail fact (appended LAST, old clients ignore):
+            // [count, (tempId, reason)*]. Not failures — the object was created.
+            reply.addArgument(static_cast<int32>(createAdvisories.size()));
+            for (auto& ca : createAdvisories) {
+                reply.addArgument(juce::String(ca.tempId));
+                reply.addArgument(juce::String(ca.reason));
             }
 
             sender.send(reply);
