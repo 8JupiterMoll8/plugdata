@@ -305,10 +305,28 @@ public:
     void sendPillPrompt(const juce::String& prompt, bool queueForChat = false);
     juce::String mcpActiveLens; // "" = free / no lens
     juce::Rectangle<int> mcpSelectionPillFrame; // full visual panel (LED + field + send)
-    int mcpPillDrawerMode = 0; // 0 = closed, 1 = lenses, 2 = tools
+    int mcpPillDrawerMode = 0; // 0 = closed, 1 = lenses, 2 = tools, 3 = smart palette
     juce::Rectangle<int> mcpPillDrawerFrame;
     juce::LookAndFeel_V4 mcpPillLookAndFeel;    // dark menu skin matching the pill
     void configurePillLookAndFeel();
+
+    // Antigravity-style Smart Vertical Command Palette
+    struct PillPaletteItem {
+        juce::String id;
+        juce::String title;
+        juce::String category;
+        juce::String desc;
+        juce::String icon;
+        juce::String prompt;
+    };
+    std::vector<PillPaletteItem> mcpPaletteItems;
+    std::vector<int> mcpFilteredPaletteIndices;
+    int mcpPaletteSelectedIndex = 0;
+    juce::Rectangle<int> mcpPaletteFrame;
+    void initPaletteItems();
+    void filterPaletteItems(const juce::String& query);
+    void showPillPalette();
+    void triggerPaletteItem(int index);
 
     // Tier-2 artist approval: a destructive op from the agent surfaces as two
     // in-canvas chips [Approve] [Cancel] (Enter/Esc). Sends "approve"/"deny" —

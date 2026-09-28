@@ -2310,6 +2310,9 @@ void MCPBridge::oscMessageReceived(const juce::OSCMessage& message)
     } else if (domain == "seq") {
         auto action = parts.size() > 1 ? parts[1] : (message.size() > 0 ? getArgString(message[0]) : "");
         handleSeqDomain(action, message);
+    } else if (domain == "chat") {
+        auto action = parts.size() > 1 ? parts[1] : (message.size() > 0 ? getArgString(message[0]) : "");
+        handleChatDomain(action, message);
     }
 }
 
@@ -5594,6 +5597,11 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     o->setProperty("title", canvas->patch.getTitle());
                     o->setProperty("file", canvas->patch.getCurrentFile().getFullPathName());
                     o->setProperty("focused", canvas == focused);
+                    // C++ TRUTH: the canonical canvas key (the same key the
+                    // identity map uses). TS derives receiver-namespace suffixes
+                    // from THIS so creation and triggering agree by construction.
+                    if (auto* cnvp = canvas->patch.getPointer().get())
+                        o->setProperty("key", canonicalCanvasKey(cnvp));
                     int count = 0;
                     sys_lock();
                     if (auto* cnv = canvas->patch.getPointer().get()) {
@@ -9686,6 +9694,16 @@ void MCPBridge::handleSeqDomain(const juce::String& action, const juce::OSCMessa
     }
 }
 
+void MCPBridge::handleChatDomain(const juce::String& action, const juce::OSCMessage& msg)
+{
+    // /chat/msg <role> <text>
+    if (msg.size() >= 2) {
+        auto role = getArgString(msg[0]);
+        auto text = getArgString(msg[1]);
+        postChatMessage(role, text);
+    }
+}
+
 void MCPBridge::advanceSequencer(int blockSize)
 {
     double const sampleRate = (processor && processor->getSampleRate() > 0.0) ? processor->getSampleRate() : 44100.0;
@@ -9873,12 +9891,13 @@ void MCPBridge::voiceInputTick(float const* inputSamples, int numSamples)
 
 void MCPBridge::startVoiceCapture(int maxSeconds)
 {
+    // NEVER re-open the audio device here. setAudioDeviceSetup() can BLOCK the
+    // message thread on flaky hardware (e.g. the ALC298 mic-jack bug) and freeze
+    // the whole UI. Capture from whatever input the device already provides;
+    // the watchdog reports clearly when nothing arrives.
     if (auto* dm = ProjectInfo::getDeviceManager()) {
-        auto setup = dm->getAudioDeviceSetup();
-        if (setup.inputChannels.isZero() || !setup.useDefaultInputChannels) {
-            setup.useDefaultInputChannels = true;
-            setup.inputChannels.setRange(0, 2, true);
-            dm->setAudioDeviceSetup(setup, true);
+        if (dm->getAudioDeviceSetup().inputChannels.isZero()) {
+            sendConsoleLog("MCP: audio device has no input channels - enable an input in Audio settings", false);
         }
     }
 
@@ -9891,6 +9910,20 @@ void MCPBridge::startVoiceCapture(int maxSeconds)
     voiceLiveLevel.store(0.0f, std::memory_order_release);
     voiceCapturing.store(true, std::memory_order_release);
     sendConsoleLog("MCP: Voice recording started (hum melody or beatbox)", false);
+
+    // Watchdog: the buffer auto-stops+analyzes once filled, but if NO input
+    // samples ever arrive (mic muted / input device not running) it would hang
+    // forever. After 1.6s with the write head still at 0, say exactly what's
+    // wrong and release the capture — never a silent hang.
+    juce::Timer::callAfterDelay(1600, [this] {
+        if (voiceCapturing.load(std::memory_order_relaxed) &&
+            voiceCaptureWritePos.load(std::memory_order_relaxed) == 0) {
+            voiceCapturing.store(false, std::memory_order_relaxed);
+            sendConsoleLog("MCP: No microphone input detected - check the audio input device", true);
+            sendReply("/pd/voice/event",
+                      "{\"status\":\"no_input\",\"message\":\"No microphone input detected - check the audio input device (mic muted / input not running)\"}");
+        }
+    });
 }
 
 void MCPBridge::stopVoiceCaptureAndAnalyze()
@@ -10955,9 +10988,27 @@ void MCPBridge::sendConsoleLog(const juce::String& message, bool isError)
     sender.send(msg);
 }
 
+void MCPBridge::setChatCallback(std::function<void(const juce::String& role, const juce::String& text)> cb)
+{
+    juce::ScopedLock sl(chatLock);
+    chatCallback = std::move(cb);
+}
+
+void MCPBridge::postChatMessage(const juce::String& role, const juce::String& text)
+{
+    juce::MessageManager::callAsync([this, role, text]() {
+        juce::ScopedLock sl(chatLock);
+        if (chatCallback) {
+            chatCallback(role, text);
+        }
+    });
+}
+
 void MCPBridge::sendPrompt(const juce::String& promptText)
 {
     if (!active.load()) return;
+
+    postChatMessage("user", promptText);
 
     juce::OSCMessage msg { juce::OSCAddressPattern("/pd/mcp_prompt") };
     msg.addArgument(promptText);
@@ -10975,6 +11026,8 @@ void MCPBridge::sendLens(const juce::String& lens)
 void MCPBridge::sendSelectionPrompt(const juce::String& promptText, const juce::StringArray& targetTempIds, bool queue)
 {
     if (!active.load()) return;
+
+    postChatMessage("user", promptText);
 
     // /pd/ui/prompt <prompt> <mode> <count> <id...>
     // mode: "spawn" (default, Enter) = run the headless canvas agent now;

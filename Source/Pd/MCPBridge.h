@@ -238,7 +238,9 @@ public:
     // Modular Tech). Sent to the MCP server, which prepends the lens brief to
     // subsequent agent turns. "free" clears it.
     void sendLens(const juce::String& lens);
-
+    // AI Copilot Chat callback: role ("user", "ai", "thought", "error"), text
+    void setChatCallback(std::function<void(const juce::String& role, const juce::String& text)> cb);
+    void postChatMessage(const juce::String& role, const juce::String& text);
     // Voice & Beatbox Capture Engine
     void startVoiceCapture(int maxSeconds = 5);
     void stopVoiceCaptureAndAnalyze();
@@ -270,6 +272,7 @@ private:
     void handleMeterDomain(const juce::String& meterAction, const juce::OSCMessage& msg);
     void handleTransportDomain(const juce::String& action, const juce::OSCMessage& msg);
     void handleSeqDomain(const juce::String& action, const juce::OSCMessage& msg);
+    void handleChatDomain(const juce::String& action, const juce::OSCMessage& msg);
     void advanceSequencer(int blockSize);
     void enqueueSeqFire(bool isBang, const juce::String& name, float value);
 
@@ -403,6 +406,9 @@ private:
     std::atomic<bool> voiceCapturing { false };
     std::atomic<int> voiceCaptureWritePos { 0 };
     std::atomic<float> voiceLiveLevel { 0.0f };
+
+    std::function<void(const juce::String&, const juce::String&)> chatCallback;
+    juce::CriticalSection chatLock;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MCPBridge)
 };

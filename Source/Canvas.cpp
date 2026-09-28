@@ -892,6 +892,15 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
         auto const panel = mcpSelectionPillFrame.isEmpty() ? mcpSelectionPill->getBounds() : mcpSelectionPillFrame;
         float const w = static_cast<float>(panel.getWidth());
         float const h = static_cast<float>(panel.getHeight());
+        bool isVoiceRec = false;
+        float voiceLvl = 0.0f;
+        if (pd) {
+            if (auto* br = pd->getMCPBridge()) {
+                isVoiceRec = br->isVoiceCapturing();
+                voiceLvl = br->getVoiceLiveLevel();
+            }
+        }
+
         {
             // TE-lite hardware look: matte dark panel, top bevel, ✦ Lenses, / Tools, ▶ Send.
             NVGScopedState scopedPanel(nvg);
@@ -899,17 +908,13 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
             nvgDrawRoundedRect(nvg, 0, 0, w, h, nvgRGBA(24, 26, 30, 250), nvgRGBA(55, 60, 72, 220), 8.0f);
 
             // Audio-reactive border glow while recording voice / beatbox
-            if (pd) {
-                if (auto* br = pd->getMCPBridge()) {
-                    if (br->isVoiceCapturing()) {
-                        float const lvl = br->getVoiceLiveLevel();
-                        nvgBeginPath(nvg);
-                        nvgRoundedRect(nvg, -1.0f, -1.0f, w + 2.0f, h + 2.0f, 9.0f);
-                        nvgStrokeColor(nvg, nvgRGBA(255, 59, 48, static_cast<unsigned char>(130 + juce::jlimit(0.0f, 125.0f, lvl * 350.0f))));
-                        nvgStrokeWidth(nvg, 1.5f + lvl * 3.5f);
-                        nvgStroke(nvg);
-                    }
-                }
+            if (isVoiceRec) {
+                float const lvl = voiceLvl;
+                nvgBeginPath(nvg);
+                nvgRoundedRect(nvg, -1.0f, -1.0f, w + 2.0f, h + 2.0f, 9.0f);
+                nvgStrokeColor(nvg, nvgRGBA(255, 59, 48, static_cast<unsigned char>(130 + juce::jlimit(0.0f, 125.0f, lvl * 350.0f))));
+                nvgStrokeWidth(nvg, 1.5f + lvl * 3.5f);
+                nvgStroke(nvg);
             }
 
             // Subtle top highlight line
@@ -920,25 +925,25 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
             nvgStrokeWidth(nvg, 1.0f);
             nvgStroke(nvg);
 
-            // Left: ✦ Lenses button (Pure vector sparkle — never missing glyph!)
+            // Left: + Add Context & Actions button (Antigravity vector plus!)
             float const lw = 24.0f;
             float const lh = 20.0f;
             float const lx = 6.0f;
             float const ly = (h - lh) * 0.5f;
+            bool const isPlusActive = (mcpPillDrawerMode == 3);
             nvgDrawRoundedRect(nvg, lx, ly, lw, lh,
-                               (mcpPillDrawerMode == 1) ? nvgRGBA(74, 158, 255, 80) : nvgRGBA(38, 42, 50, 230),
-                               nvgRGBA(74, 158, 255, (mcpPillDrawerMode == 1) ? 240 : 120), 4.0f);
+                               isPlusActive ? nvgRGBA(74, 158, 255, 80) : nvgRGBA(38, 42, 50, 230),
+                               isPlusActive ? nvgRGBA(74, 158, 255, 240) : nvgRGBA(160, 175, 200, 100), 4.0f);
             float const cx = lx + lw * 0.5f;
             float const cy = ly + lh * 0.5f;
             nvgBeginPath(nvg);
-            nvgMoveTo(nvg, cx, cy - 5.5f);
-            nvgQuadTo(nvg, cx, cy, cx + 5.5f, cy);
-            nvgQuadTo(nvg, cx, cy, cx, cy + 5.5f);
-            nvgQuadTo(nvg, cx, cy, cx - 5.5f, cy);
-            nvgQuadTo(nvg, cx, cy, cx, cy - 5.5f);
-            nvgClosePath(nvg);
-            nvgFillColor(nvg, (mcpPillDrawerMode == 1 || mcpActiveLens.isNotEmpty()) ? nvgRGBA(74, 180, 255, 255) : nvgRGBA(74, 158, 255, 230));
-            nvgFill(nvg);
+            nvgMoveTo(nvg, cx - 4.5f, cy);
+            nvgLineTo(nvg, cx + 4.5f, cy);
+            nvgMoveTo(nvg, cx, cy - 4.5f);
+            nvgLineTo(nvg, cx, cy + 4.5f);
+            nvgStrokeColor(nvg, isPlusActive ? nvgRGBA(74, 180, 255, 255) : nvgRGBA(220, 230, 245, 230));
+            nvgStrokeWidth(nvg, 1.6f);
+            nvgStroke(nvg);
 
             // Right: / Tools button
             float const tw = 22.0f;
@@ -960,17 +965,15 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
             float const mx = w - 62.0f;
             float const my = (h - mh) * 0.5f;
 
-            bool isVoiceRec = false;
-            float voiceLvl = 0.0f;
-            if (pd) {
-                if (auto* br = pd->getMCPBridge()) {
-                    isVoiceRec = br->isVoiceCapturing();
-                    voiceLvl = br->getVoiceLiveLevel();
-                }
-            }
-
             if (isVoiceRec) {
-                nvgDrawRoundedRect(nvg, mx, my, mw, mh, nvgRGBA(255, 59, 48, 235), nvgRGBA(255, 120, 100, 255), 4.0f);
+                float const pulse = 0.8f + 0.2f * std::sin(static_cast<float>(juce::Time::getMillisecondCounter()) * 0.008f);
+                float const levelExp = juce::jlimit(0.0f, 1.0f, voiceLvl * 3.5f);
+                // Glowing outer aura reacting to live mic input level
+                nvgDrawRoundedRect(nvg, mx - 2.0f - levelExp * 3.0f, my - 2.0f - levelExp * 3.0f,
+                                   mw + 4.0f + levelExp * 6.0f, mh + 4.0f + levelExp * 6.0f,
+                                   nvgRGBA(255, 45, 35, static_cast<int>(50 * pulse + levelExp * 100)),
+                                   nvgRGBA(255, 60, 45, static_cast<int>(180 * pulse)), 5.0f);
+                nvgDrawRoundedRect(nvg, mx, my, mw, mh, nvgRGBA(255, 50, 35, 240), nvgRGBA(255, 140, 120, 255), 4.0f);
             } else {
                 nvgDrawRoundedRect(nvg, mx, my, mw, mh, nvgRGBA(38, 42, 50, 230), nvgRGBA(160, 175, 200, 80), 4.0f);
             }
@@ -1017,10 +1020,17 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
             nvgFontFace(nvg, "Inter");
             nvgFontSize(nvg, 12.0f);
             nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
-            nvgFillColor(nvg, nvgRGBA(140, 155, 175, mcpSelectionPill->hasKeyboardFocus(true) ? 90 : 170));
-            juce::String const hint = mcpActiveLens.isNotEmpty()
-                ? "[" + mcpActiveLens.toUpperCase() + "] Ask AI on selection..."
-                : "Ask AI on selection...  (/ tools  |  * lenses)";
+            juce::String hint;
+            if (isVoiceRec) {
+                hint = "Listening... (speak prompt or beatbox groove)";
+                nvgFillColor(nvg, nvgRGBA(255, 110, 95, 240));
+            } else if (mcpActiveLens.isNotEmpty()) {
+                hint = "[" + mcpActiveLens.toUpperCase() + "] Ask AI on selection...";
+                nvgFillColor(nvg, nvgRGBA(140, 155, 175, mcpSelectionPill->hasKeyboardFocus(true) ? 90 : 170));
+            } else {
+                hint = "Ask AI on selection...  (/ skills & actions)";
+                nvgFillColor(nvg, nvgRGBA(140, 155, 175, mcpSelectionPill->hasKeyboardFocus(true) ? 90 : 170));
+            }
             nvgText(nvg, panel.getX() + 38.0f, panel.getY() + panel.getHeight() * 0.5f, hint.toRawUTF8(), nullptr);
         }
 
@@ -1031,67 +1041,155 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
             mcpSelectionPillRenderer.renderJUCEComponent(nvg, *mcpSelectionPill, zoom * editor->getRenderScale());
         }
 
-        // Native Horizontal Card Drawer (Sleek hardware card — ZERO OS menus!)
+        // Native Horizontal Card Drawer or Smart Command Palette
         if (mcpPillDrawerMode != 0) {
-            float const dw = w;
-            float const dh = 30.0f;
-            float const dx = static_cast<float>(panel.getX());
-            float const dy = static_cast<float>(panel.getY() + panel.getHeight()) + 5.0f;
-            mcpPillDrawerFrame = juce::Rectangle<int>(roundToInt(dx), roundToInt(dy), roundToInt(dw), roundToInt(dh));
+            if (mcpPillDrawerMode == 3) {
+                const_cast<Canvas*>(this)->initPaletteItems();
+                float const pw = std::max(static_cast<float>(panel.getWidth()), 390.0f);
+                float const rowH = 30.0f;
+                int const totalCount = static_cast<int>(mcpFilteredPaletteIndices.size());
+                int const visibleCount = std::min(8, totalCount);
+                float const ph = 28.0f + visibleCount * rowH + 6.0f;
+                float const px = static_cast<float>(panel.getX());
+                float py = static_cast<float>(panel.getY() + panel.getHeight()) + 5.0f;
+                if (py + ph > static_cast<float>(getHeight()) - 20.0f) {
+                    py = static_cast<float>(panel.getY()) - ph - 5.0f;
+                }
+                const_cast<Canvas*>(this)->mcpPaletteFrame = juce::Rectangle<int>(roundToInt(px), roundToInt(py), roundToInt(pw), roundToInt(ph));
 
-            NVGScopedState scopedDrawer(nvg);
-            nvgTranslate(nvg, dx, dy);
-            // Frosted dark card background with soft border
-            nvgDrawRoundedRect(nvg, 0, 0, dw, dh, nvgRGBA(18, 20, 24, 250), nvgRGBA(55, 62, 75, 230), 6.0f);
+                NVGScopedState scopedPalette(nvg);
+                nvgTranslate(nvg, px, py);
+                // Frosted dark card container
+                nvgDrawRoundedRect(nvg, 0, 0, pw, ph, nvgRGBA(16, 18, 22, 252), nvgRGBA(55, 62, 75, 240), 7.0f);
 
-            // Subtle top highlight line
-            nvgBeginPath(nvg);
-            nvgMoveTo(nvg, 6.0f, 1.0f);
-            nvgLineTo(nvg, dw - 6.0f, 1.0f);
-            nvgStrokeColor(nvg, nvgRGBA(255, 255, 255, 20));
-            nvgStrokeWidth(nvg, 1.0f);
-            nvgStroke(nvg);
+                // Subtle top highlight
+                nvgBeginPath(nvg);
+                nvgMoveTo(nvg, 6.0f, 1.0f);
+                nvgLineTo(nvg, pw - 6.0f, 1.0f);
+                nvgStrokeColor(nvg, nvgRGBA(255, 255, 255, 25));
+                nvgStrokeWidth(nvg, 1.0f);
+                nvgStroke(nvg);
 
-            nvgFontFace(nvg, "Inter");
-            nvgFontSize(nvg, 11.5f);
-            nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+                // Header title
+                nvgFontFace(nvg, "Inter");
+                nvgFontSize(nvg, 10.0f);
+                nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+                nvgFillColor(nvg, nvgRGBA(140, 155, 180, 220));
+                nvgText(nvg, 12.0f, 14.0f, "ADD CONTEXT & ACTIONS (+)", nullptr);
 
-            if (mcpPillDrawerMode == 1) {
-                // Lenses: Doctor | Jam | Genesis | Modular | Free
-                const char* lenses[] = { "Doctor", "Jam", "Genesis", "Modular", "Free" };
-                const char* lensKeys[] = { "doctor", "jam", "genesis", "modular", "free" };
-                float const itemW = (dw - 8.0f) / 5.0f;
-                for (int i = 0; i < 5; ++i) {
-                    float const ix = 4.0f + i * itemW;
-                    float const iy = 3.0f;
-                    float const iw = itemW - 3.0f;
-                    float const ih = dh - 6.0f;
-                    bool const isActive = (mcpActiveLens == lensKeys[i]) || (mcpActiveLens.isEmpty() && i == 4);
-                    if (isActive) {
-                        nvgDrawRoundedRect(nvg, ix, iy, iw, ih, nvgRGBA(255, 102, 0, 235), nvgRGBA(255, 150, 60, 255), 4.0f);
-                        nvgFillColor(nvg, nvgRGBA(18, 18, 20, 255));
-                    } else {
+                for (int i = 0; i < visibleCount; ++i) {
+                    int const itemIdx = mcpFilteredPaletteIndices[static_cast<size_t>(i)];
+                    auto const& item = mcpPaletteItems[static_cast<size_t>(itemIdx)];
+                    float const ry = 26.0f + i * rowH;
+                    bool const isSelected = (i == mcpPaletteSelectedIndex);
+
+                    if (isSelected) {
+                        nvgDrawRoundedRect(nvg, 4.0f, ry, pw - 8.0f, rowH - 2.0f,
+                                           nvgRGBA(74, 158, 255, 55), nvgRGBA(74, 158, 255, 210), 4.0f);
+                    }
+
+                    // Icon / Prefix
+                    nvgFontSize(nvg, 11.5f);
+                    nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+                    nvgFillColor(nvg, isSelected ? nvgRGBA(74, 180, 255, 255) : nvgRGBA(150, 165, 190, 220));
+                    nvgText(nvg, 18.0f, ry + (rowH - 2.0f) * 0.5f, item.icon.toRawUTF8(), nullptr);
+
+                    // Category badge chip (Action, Skill, Lens)
+                    float const chipW = 42.0f;
+                    float const chipH = 14.0f;
+                    float const chipX = 30.0f;
+                    float const chipY = ry + (rowH - 2.0f - chipH) * 0.5f;
+                    NVGcolor chipBg = nvgRGBA(40, 48, 62, 200);
+                    NVGcolor chipFg = nvgRGBA(160, 180, 210, 220);
+                    if (item.category == "Action") {
+                        chipBg = nvgRGBA(30, 90, 60, 150);
+                        chipFg = nvgRGBA(100, 240, 160, 240);
+                    } else if (item.category == "Skill") {
+                        chipBg = nvgRGBA(90, 40, 110, 150);
+                        chipFg = nvgRGBA(220, 140, 255, 240);
+                    } else if (item.category == "Lens") {
+                        chipBg = nvgRGBA(30, 70, 110, 150);
+                        chipFg = nvgRGBA(100, 190, 255, 240);
+                    }
+                    nvgDrawRoundedRect(nvg, chipX, chipY, chipW, chipH, chipBg, chipFg, 3.0f);
+                    nvgFontSize(nvg, 8.5f);
+                    nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+                    nvgFillColor(nvg, chipFg);
+                    nvgText(nvg, chipX + chipW * 0.5f, chipY + chipH * 0.5f, item.category.toRawUTF8(), nullptr);
+
+                    // Title
+                    nvgFontSize(nvg, 11.0f);
+                    nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+                    nvgFillColor(nvg, isSelected ? nvgRGBA(255, 255, 255, 255) : nvgRGBA(215, 225, 240, 230));
+                    nvgText(nvg, chipX + chipW + 8.0f, ry + (rowH - 2.0f) * 0.5f, item.title.toRawUTF8(), nullptr);
+
+                    // Description (dimmed)
+                    nvgFontSize(nvg, 10.0f);
+                    nvgFillColor(nvg, isSelected ? nvgRGBA(180, 205, 240, 240) : nvgRGBA(120, 135, 155, 200));
+                    nvgText(nvg, chipX + chipW + 130.0f, ry + (rowH - 2.0f) * 0.5f, item.desc.toRawUTF8(), nullptr);
+                }
+            } else {
+                float const dw = w;
+                float const dh = 30.0f;
+                float const dx = static_cast<float>(panel.getX());
+                float const dy = static_cast<float>(panel.getY() + panel.getHeight()) + 5.0f;
+                mcpPillDrawerFrame = juce::Rectangle<int>(roundToInt(dx), roundToInt(dy), roundToInt(dw), roundToInt(dh));
+
+                NVGScopedState scopedDrawer(nvg);
+                nvgTranslate(nvg, dx, dy);
+                // Frosted dark card background with soft border
+                nvgDrawRoundedRect(nvg, 0, 0, dw, dh, nvgRGBA(18, 20, 24, 250), nvgRGBA(55, 62, 75, 230), 6.0f);
+
+                // Subtle top highlight line
+                nvgBeginPath(nvg);
+                nvgMoveTo(nvg, 6.0f, 1.0f);
+                nvgLineTo(nvg, dw - 6.0f, 1.0f);
+                nvgStrokeColor(nvg, nvgRGBA(255, 255, 255, 20));
+                nvgStrokeWidth(nvg, 1.0f);
+                nvgStroke(nvg);
+
+                nvgFontFace(nvg, "Inter");
+                nvgFontSize(nvg, 11.5f);
+                nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+
+                if (mcpPillDrawerMode == 1) {
+                    // Lenses: Doctor | Jam | Genesis | Modular | Free
+                    const char* lenses[] = { "Doctor", "Jam", "Genesis", "Modular", "Free" };
+                    const char* lensKeys[] = { "doctor", "jam", "genesis", "modular", "free" };
+                    float const itemW = (dw - 8.0f) / 5.0f;
+                    for (int i = 0; i < 5; ++i) {
+                        float const ix = 4.0f + i * itemW;
+                        float const iy = 3.0f;
+                        float const iw = itemW - 3.0f;
+                        float const ih = dh - 6.0f;
+                        bool const isActive = (mcpActiveLens == lensKeys[i]) || (mcpActiveLens.isEmpty() && i == 4);
+                        if (isActive) {
+                            nvgDrawRoundedRect(nvg, ix, iy, iw, ih, nvgRGBA(255, 102, 0, 235), nvgRGBA(255, 150, 60, 255), 4.0f);
+                            nvgFillColor(nvg, nvgRGBA(18, 18, 20, 255));
+                        } else {
+                            nvgDrawRoundedRect(nvg, ix, iy, iw, ih, nvgRGBA(30, 34, 42, 220), nvgRGBA(50, 58, 70, 180), 4.0f);
+                            nvgFillColor(nvg, nvgRGBA(210, 220, 235, 230));
+                        }
+                        nvgText(nvg, ix + iw * 0.5f, iy + ih * 0.5f, lenses[i], nullptr);
+                    }
+                } else if (mcpPillDrawerMode == 2) {
+                    // Tools: Explain | Drive | Filter | Reverb | Pack GOP | Tidy
+                    const char* tools[] = { "Explain", "Drive", "Filter", "Reverb", "Pack GOP", "Tidy" };
+                    float const itemW = (dw - 8.0f) / 6.0f;
+                    for (int i = 0; i < 6; ++i) {
+                        float const ix = 4.0f + i * itemW;
+                        float const iy = 3.0f;
+                        float const iw = itemW - 3.0f;
+                        float const ih = dh - 6.0f;
                         nvgDrawRoundedRect(nvg, ix, iy, iw, ih, nvgRGBA(30, 34, 42, 220), nvgRGBA(50, 58, 70, 180), 4.0f);
                         nvgFillColor(nvg, nvgRGBA(210, 220, 235, 230));
+                        nvgText(nvg, ix + iw * 0.5f, iy + ih * 0.5f, tools[i], nullptr);
                     }
-                    nvgText(nvg, ix + iw * 0.5f, iy + ih * 0.5f, lenses[i], nullptr);
-                }
-            } else if (mcpPillDrawerMode == 2) {
-                // Tools: Explain | Drive | Filter | Reverb | Pack GOP | Tidy
-                const char* tools[] = { "Explain", "Drive", "Filter", "Reverb", "Pack GOP", "Tidy" };
-                float const itemW = (dw - 8.0f) / 6.0f;
-                for (int i = 0; i < 6; ++i) {
-                    float const ix = 4.0f + i * itemW;
-                    float const iy = 3.0f;
-                    float const iw = itemW - 3.0f;
-                    float const ih = dh - 6.0f;
-                    nvgDrawRoundedRect(nvg, ix, iy, iw, ih, nvgRGBA(30, 34, 42, 220), nvgRGBA(50, 58, 70, 180), 4.0f);
-                    nvgFillColor(nvg, nvgRGBA(210, 220, 235, 230));
-                    nvgText(nvg, ix + iw * 0.5f, iy + ih * 0.5f, tools[i], nullptr);
                 }
             }
         } else {
             mcpPillDrawerFrame = {};
+            mcpPaletteFrame = {};
         }
     }
 
@@ -1953,6 +2051,7 @@ bool Canvas::isPointOverNote(Point<int> canvasPt) const
         auto const panel = mcpSelectionPillFrame.isEmpty() ? mcpSelectionPill->getBounds() : mcpSelectionPillFrame;
         if (panel.contains(canvasPt)) return true;
         if (mcpPillDrawerMode != 0 && mcpPillDrawerFrame.contains(canvasPt)) return true;
+        if (mcpPillDrawerMode == 3 && mcpPaletteFrame.contains(canvasPt)) return true;
     }
     if (!pd || pd->getMcpAnnotations().empty()) return false;
     auto const pt = canvasPt.toFloat();
@@ -1979,6 +2078,17 @@ bool Canvas::handleNoteClick(Point<int> canvasPt)
     }
 
     if (mcpSelectionPill && mcpSelectionPill->isVisible()) {
+        // Smart Command Palette clicks
+        if (mcpPillDrawerMode == 3 && mcpPaletteFrame.contains(canvasPt)) {
+            int const relY = canvasPt.y - (mcpPaletteFrame.getY() + 24);
+            int const rowH = 30;
+            if (relY >= 0) {
+                int const clickedRow = relY / rowH;
+                triggerPaletteItem(clickedRow);
+                return true;
+            }
+        }
+
         // 1. Drawer clicks (Lenses or Tools)
         if (mcpPillDrawerMode != 0 && mcpPillDrawerFrame.contains(canvasPt)) {
             int const relX = canvasPt.x - mcpPillDrawerFrame.getX();
@@ -2027,9 +2137,9 @@ bool Canvas::handleNoteClick(Point<int> canvasPt)
         auto const panel = mcpSelectionPillFrame.isEmpty() ? mcpSelectionPill->getBounds() : mcpSelectionPillFrame;
         if (panel.contains(canvasPt)) {
             int const relX = canvasPt.x - panel.getX();
-            // Left ~34px: ✦ Lenses button
+            // Left ~34px: + button (toggles Antigravity Actions/Skills popover!)
             if (relX <= 34) {
-                showPillLensesMenu();
+                showPillPalette();
                 return true;
             }
             // Right ~32px: ▶ Submit button
@@ -2683,6 +2793,7 @@ void Canvas::updateSelectionPill()
             if (mcpPillDrawerMode != 0) {
                 mcpPillDrawerMode = 0;
                 mcpPillDrawerFrame = {};
+                mcpPaletteFrame = {};
                 repaint();
                 if (editor) editor->nvgSurface.renderAll();
                 return;
@@ -2691,6 +2802,19 @@ void Canvas::updateSelectionPill()
             dismissSelectionPill();
         };
         mcpSelectionPill->onTextChange = [this] {
+            if (mcpSelectionPill) {
+                auto const t = mcpSelectionPill->getText().trimStart();
+                if (t.startsWithChar('/')) {
+                    if (mcpPillDrawerMode != 3) {
+                        initPaletteItems();
+                        mcpPillDrawerMode = 3;
+                    }
+                    filterPaletteItems(t.substring(1));
+                } else if (mcpPillDrawerMode == 3) {
+                    mcpPillDrawerMode = 0;
+                    mcpPaletteFrame = {};
+                }
+            }
             repaint();
             if (editor) editor->nvgSurface.renderAll();
         };
@@ -2719,6 +2843,7 @@ void Canvas::hideSelectionPill()
 {
     mcpPillDrawerMode = 0;
     mcpPillDrawerFrame = {};
+    mcpPaletteFrame = {};
     if (mcpSelectionPill && mcpSelectionPill->isVisible()) {
         mcpSelectionPill->setVisible(false);
         repaint();
@@ -2730,6 +2855,7 @@ void Canvas::dismissSelectionPill()
 {
     mcpPillDrawerMode = 0;
     mcpPillDrawerFrame = {};
+    mcpPaletteFrame = {};
     // Artist dismissed (send / Esc / empty focus-out): suppress re-show for a
     // short window so the immediate refresh can't re-pop it. Time-based, so
     // re-selecting the same object later always brings it back.
@@ -2741,6 +2867,7 @@ void Canvas::submitSelectionPill(bool queueForChat)
 {
     mcpPillDrawerMode = 0;
     mcpPillDrawerFrame = {};
+    mcpPaletteFrame = {};
     if (!mcpSelectionPill) return;
     // C++ truth: sendPillPrompt resolves the selection's stable tempIds from the
     // bridge-owned map — the server never guesses from its identity mirror.
@@ -2751,13 +2878,39 @@ void Canvas::submitSelectionPill(bool queueForChat)
 
 bool Canvas::SelectionPillKeyListener::keyPressed(const juce::KeyPress& key, juce::Component*)
 {
+    if (canvas && canvas->mcpPillDrawerMode == 3) {
+        auto const count = static_cast<int>(canvas->mcpFilteredPaletteIndices.size());
+        if (key.getKeyCode() == juce::KeyPress::upKey && count > 0) {
+            canvas->mcpPaletteSelectedIndex = (canvas->mcpPaletteSelectedIndex - 1 + count) % count;
+            canvas->repaint();
+            if (canvas->editor) canvas->editor->nvgSurface.renderAll();
+            return true;
+        }
+        if (key.getKeyCode() == juce::KeyPress::downKey && count > 0) {
+            canvas->mcpPaletteSelectedIndex = (canvas->mcpPaletteSelectedIndex + 1) % count;
+            canvas->repaint();
+            if (canvas->editor) canvas->editor->nvgSurface.renderAll();
+            return true;
+        }
+        if (key.getKeyCode() == juce::KeyPress::returnKey && !key.getModifiers().isShiftDown() && count > 0) {
+            canvas->triggerPaletteItem(canvas->mcpPaletteSelectedIndex);
+            return true;
+        }
+        if (key.getKeyCode() == juce::KeyPress::escapeKey) {
+            canvas->mcpPillDrawerMode = 0;
+            canvas->mcpPaletteFrame = {};
+            canvas->repaint();
+            if (canvas->editor) canvas->editor->nvgSurface.renderAll();
+            return true;
+        }
+    }
     // Shift+Enter = queue for the interactive chat. TextEditor only fires
     // onReturnKey for a plain Return, so consume the Shift variant here.
     if (key.getKeyCode() == juce::KeyPress::returnKey && key.getModifiers().isShiftDown()) {
         if (canvas) canvas->submitSelectionPill(true);
         return true;
     }
-    // "/" opens the on-demand tool drawer if input is empty
+    // "/" opens the on-demand smart command palette if input is empty
     if (key.getTextCharacter() == '/' || key.getKeyCode() == '/') {
         if (canvas && canvas->mcpSelectionPill && canvas->mcpSelectionPill->getText().trim().isEmpty()) {
             canvas->showPillToolsMenu();
@@ -2794,16 +2947,94 @@ void Canvas::configurePillLookAndFeel()
 
 void Canvas::showPillToolsMenu()
 {
+    showPillPalette();
+}
+
+void Canvas::initPaletteItems()
+{
+    if (!mcpPaletteItems.empty()) return;
+
+    // ⚡ Actions (FastPath - 0 Tokens, 5 ms)
+    mcpPaletteItems.push_back({ "tidy", "Tidy Layout", "Action", "Begradigt Kabel & Spalten (0 Tokens)", "⚡", "[@action:tidy]" });
+    mcpPaletteItems.push_back({ "pack-gop", "Pack into GOP", "Action", "Erstellt Eurorack-Modul mit Faceplate", "📦", "[@action:pack-gop]" });
+    mcpPaletteItems.push_back({ "array10", "10x Osc Array", "Action", "Boilerplate-Bank mit Gain-Schutz", "🔢", "[@action:array10]" });
+    mcpPaletteItems.push_back({ "add-knobs", "Add Controls", "Action", "Regler fuer Signal-Inlets erzeugen", "🎛️", "[@action:add-knobs]" });
+    mcpPaletteItems.push_back({ "undo", "Undo Step", "Action", "Letzte Aenderung sofort rueckgaengig", "↩️", "[@action:undo]" });
+
+    // 🧬 Skills (AI Sounddesign)
+    mcpPaletteItems.push_back({ "kick-drum", "Punchy 909 Kick", "Skill", "Pitch-Sweep & [tanh~] Saettigung", "🥁", "[@skill:kick-drum]" });
+    mcpPaletteItems.push_back({ "acid-bass", "Acid 303 Bass", "Skill", "Resonanz-Filter mit Slide & Envelope", "🎛️", "[@skill:acid-bass]" });
+    mcpPaletteItems.push_back({ "ambient-verb", "Ambient Space Verb", "Skill", "Schwebende Hallfahne mit Resonator", "🌌", "[@skill:ambient-verb]" });
+    mcpPaletteItems.push_back({ "tape-drive", "Lo-Fi Tape Saturator", "Skill", "Analoger Bandschmutz mit Wow/Flutter", "📻", "[@skill:tape-drive]" });
+    mcpPaletteItems.push_back({ "genesis", "Chaos Genesis", "Skill", "Experimentelle ELSE-Kreuzmodulation", "🧬", "[@skill:genesis]" });
+
+    // ✦ Lenses (Personas)
+    mcpPaletteItems.push_back({ "doctor", "Doctor Lens", "Lens", "Röntgenblick auf Stille, Fehler & Klicks", "🩺", "[@lens:doctor]" });
+    mcpPaletteItems.push_back({ "jam", "Jam Lens", "Lens", "Schneller, kreativer Co-Produzent", "⚡", "[@lens:jam]" });
+    mcpPaletteItems.push_back({ "modular", "Modular Lens", "Lens", "Eurorack CV & Voltage Routing", "🔌", "[@lens:modular]" });
+
+    filterPaletteItems({});
+}
+
+void Canvas::filterPaletteItems(const juce::String& query)
+{
+    mcpFilteredPaletteIndices.clear();
+    auto q = query.trim().toLowerCase();
+    if (q.startsWithChar('/')) q = q.substring(1).trim();
+
+    for (size_t i = 0; i < mcpPaletteItems.size(); ++i) {
+        if (q.isEmpty() ||
+            mcpPaletteItems[i].title.toLowerCase().contains(q) ||
+            mcpPaletteItems[i].desc.toLowerCase().contains(q) ||
+            mcpPaletteItems[i].category.toLowerCase().contains(q)) {
+            mcpFilteredPaletteIndices.push_back(static_cast<int>(i));
+        }
+    }
+    mcpPaletteSelectedIndex = 0;
+}
+
+void Canvas::showPillPalette()
+{
     if (!mcpSelectionPill || !mcpSelectionPill->isVisible()) return;
-    mcpPillDrawerMode = (mcpPillDrawerMode == 2 ? 0 : 2);
-    if (mcpPillDrawerMode != 0) {
-        auto const p = mcpSelectionPillFrame.isEmpty() ? mcpSelectionPill->getBounds() : mcpSelectionPillFrame;
-        mcpPillDrawerFrame = juce::Rectangle<int>(p.getX(), p.getBottom() + 5, p.getWidth(), 30);
+    initPaletteItems();
+    mcpPillDrawerMode = (mcpPillDrawerMode == 3 ? 0 : 3);
+    if (mcpPillDrawerMode == 3) {
+        filterPaletteItems({});
     } else {
-        mcpPillDrawerFrame = {};
+        mcpPaletteFrame = {};
     }
     repaint();
     if (editor) editor->nvgSurface.renderAll();
+}
+
+void Canvas::triggerPaletteItem(int index)
+{
+    if (index >= 0 && index < static_cast<int>(mcpFilteredPaletteIndices.size())) {
+        auto const& item = mcpPaletteItems[static_cast<size_t>(mcpFilteredPaletteIndices[static_cast<size_t>(index)])];
+        mcpPillDrawerMode = 0;
+        mcpPaletteFrame = {};
+
+        juce::String currentText = mcpSelectionPill ? mcpSelectionPill->getText().trim() : juce::String();
+
+        // 1-Click FastPath convenience:
+        // If the text editor was completely empty and user selected a pure action (like Tidy or Undo):
+        if (currentText.isEmpty() && (item.category == "Action" && item.id != "array10")) {
+            sendPillPrompt(item.prompt, false);
+            dismissSelectionPill();
+            return;
+        }
+
+        // Composable Tag Insertion:
+        // Append tag so user can either hit Enter immediately or keep typing!
+        juce::String newText = currentText.isEmpty() ? (item.prompt + " ") : (currentText + " " + item.prompt + " ");
+        if (mcpSelectionPill) {
+            mcpSelectionPill->setText(newText, true);
+            mcpSelectionPill->setCaretPosition(newText.length());
+            mcpSelectionPill->grabKeyboardFocus();
+        }
+        repaint();
+        if (editor) editor->nvgSurface.renderAll();
+    }
 }
 
 void Canvas::sendPillPrompt(const juce::String& prompt, bool queueForChat)

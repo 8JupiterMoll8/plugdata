@@ -137,13 +137,13 @@ public:
 
         object.add(new OverlaySelector(overlayTree, ActivationState, "activation_state", "Activity", "Object activity"));
         object.add(new OverlaySelector(overlayTree, Index, "index", "Index", "Object index in patch"));
-        object.add(new OverlaySelector(overlayTree, AIState, "ai_state", "Markers", "AI change markers (changed / proposed / error)"));
 
         connection.add(new OverlaySelector(overlayTree, ConnectionActivity, "connection_activity", "Activity", "Connection activity"));
         connection.add(new OverlaySelector(overlayTree, Direction, "direction", "Direction", "Direction of connections"));
         connection.add(new OverlaySelector(overlayTree, Order, "order", "Order", "Trigger order of multiple outlets"));
         connection.add(new OverlaySelector(overlayTree, Behind, "behind", "Behind", "Connection cables behind objects"));
 
+        aiGroup.add(new OverlaySelector(overlayTree, AIState, "ai_state", "Markers", "AI change breadcrumbs: light up what changed, then fade (changed / proposed / error)"));
         aiGroup.add(new OverlaySelector(overlayTree, AIRegions, "ai_regions", "Regions", "Titled modular bay backplates"));
         aiGroup.add(new OverlaySelector(overlayTree, AIAnnotations, "ai_annotations", "Notes", "In-canvas explanation tags"));
         aiGroup.add(new OverlaySelector(overlayTree, AIGhosts, "ai_ghosts", "Ghosts", "Proposed uncommitted changes"));

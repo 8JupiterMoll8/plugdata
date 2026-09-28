@@ -23,6 +23,7 @@
 #include "DocumentationBrowser.h"
 #include "AutomationPanel.h"
 #include "SearchPanel.h"
+#include "CopilotPanel.h"
 
 Sidebar::Sidebar(PluginProcessor* instance, PluginEditor* parent)
     : pd(instance)
@@ -33,18 +34,21 @@ Sidebar::Sidebar(PluginProcessor* instance, PluginEditor* parent)
     browserPanel = std::make_unique<DocumentationBrowser>(pd);
     automationPanel = std::make_unique<AutomationPanel>(pd);
     searchPanel = std::make_unique<SearchPanel>(parent);
+    copilotPanel = std::make_unique<CopilotPanel>(pd, parent);
     inspector = std::make_unique<Inspector>();
 
     addAndMakeVisible(consolePanel.get());
     addChildComponent(browserPanel.get());
     addChildComponent(automationPanel.get());
     addChildComponent(searchPanel.get());
+    addChildComponent(copilotPanel.get());
 
     addChildComponent(inspector.get());
 
     browserPanel->addMouseListener(this, true);
     consolePanel->addMouseListener(this, true);
     automationPanel->addMouseListener(this, true);
+    copilotPanel->addMouseListener(this, true);
     inspector->addMouseListener(this, true);
     searchPanel->addMouseListener(this, true);
 
@@ -79,6 +83,14 @@ Sidebar::Sidebar(PluginProcessor* instance, PluginEditor* parent)
     };
     addAndMakeVisible(searchButton);
 
+    copilotButton.setTooltip("Open Copilot chat");
+    copilotButton.setConnectedEdges(12);
+    copilotButton.setClickingTogglesState(true);
+    copilotButton.onClick = [this] {
+        showPanel(SidePanel::CopilotPan);
+    };
+    addAndMakeVisible(copilotButton);
+
     consoleButton.setToggleState(true, dontSendNotification);
 
     addAndMakeVisible(consoleButton);
@@ -92,7 +104,8 @@ Sidebar::Sidebar(PluginProcessor* instance, PluginEditor* parent)
     panelAndButton = { PanelAndButton { consolePanel.get(), consoleButton },
         PanelAndButton { browserPanel.get(), browserButton },
         PanelAndButton { automationPanel.get(), automationButton },
-        PanelAndButton { searchPanel.get(), searchButton } };
+        PanelAndButton { searchPanel.get(), searchButton },
+        PanelAndButton { copilotPanel.get(), copilotButton } };
 
     inspector->setVisible(false);
     currentPanel = SidePanel::ConsolePan;
@@ -163,7 +176,7 @@ void Sidebar::resized()
     auto buttonBarBounds = bounds.removeFromRight(30).reduced(0, 1);
 
     if (SettingsFile::getInstance()->getProperty<bool>("centre_sidepanel_buttons")) {
-        buttonBarBounds = buttonBarBounds.withSizeKeepingCentre(30, 144 + 30 + 8 + 30);
+        buttonBarBounds = buttonBarBounds.withSizeKeepingCentre(30, 182 + 30 + 8 + 30);
     } else {
         buttonBarBounds = buttonBarBounds.withTrimmedTop(34);
     }
@@ -175,6 +188,8 @@ void Sidebar::resized()
     automationButton.setBounds(buttonBarBounds.removeFromTop(30));
     buttonBarBounds.removeFromTop(8);
     searchButton.setBounds(buttonBarBounds.removeFromTop(30));
+    buttonBarBounds.removeFromTop(8);
+    copilotButton.setBounds(buttonBarBounds.removeFromTop(30));
 
     dividerBounds = buttonBarBounds.removeFromTop(20);
 
@@ -220,6 +235,7 @@ void Sidebar::resized()
     automationPanel->setBounds(bounds);
     searchPanel->setBounds(bounds);
     consolePanel->setBounds(bounds);
+    copilotPanel->setBounds(bounds);
 }
 
 void Sidebar::mouseDown(MouseEvent const& e)
@@ -337,6 +353,9 @@ void Sidebar::showPanel(SidePanel const panelToShow)
     case SidePanel::SearchPan:
         setPanelVis(searchPanel.get(), SidePanel::SearchPan);
         searchPanel->grabFocus();
+        break;
+    case SidePanel::CopilotPan:
+        setPanelVis(copilotPanel.get(), SidePanel::CopilotPan);
         break;
     case SidePanel::InspectorPan:
         if (!sidebarHidden) {

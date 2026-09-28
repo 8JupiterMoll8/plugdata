@@ -16,6 +16,7 @@ class Inspector;
 class DocumentationBrowser;
 class AutomationPanel;
 class SearchPanel;
+class CopilotPanel;
 class PluginProcessor;
 class CommandInput;
 
@@ -276,6 +277,7 @@ public:
         DocPan,
         ParamPan,
         SearchPan,
+        CopilotPan,
         InspectorPan };
 
     void showPanel(SidePanel panelToShow);
@@ -311,6 +313,7 @@ private:
     SidebarSelectorButton browserButton = SidebarSelectorButton(Icons::Documentation);
     SidebarSelectorButton automationButton = SidebarSelectorButton(Icons::Parameters);
     SidebarSelectorButton searchButton = SidebarSelectorButton(Icons::Search);
+    SidebarSelectorButton copilotButton = SidebarSelectorButton(Icons::Message);
 
     Rectangle<int> dividerBounds;
 
@@ -322,11 +325,12 @@ private:
     std::unique_ptr<DocumentationBrowser> browserPanel;
     std::unique_ptr<AutomationPanel> automationPanel;
     std::unique_ptr<SearchPanel> searchPanel;
+    std::unique_ptr<CopilotPanel> copilotPanel;
 
     std::unique_ptr<Inspector> inspector;
     std::unique_ptr<Component> resetInspectorButton;
 
-    StringArray panelNames = { "Console", "Documentation Browser", "Automation Parameters", "Search" };
+    StringArray panelNames = { "Console", "Documentation Browser", "Automation Parameters", "Search", "Copilot" };
     int currentPanel = 0;
 
     struct PanelAndButton {
