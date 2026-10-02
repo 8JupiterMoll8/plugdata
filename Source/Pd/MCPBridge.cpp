@@ -10613,6 +10613,68 @@ void MCPBridge::handleMeterDomain(const juce::String& meterAction, const juce::O
         return;
     }
 
+    if (meterAction == "tap") {
+        // /meter/tap <canvasName> <tempId> <mode: solo|mute|off> [outletIndex] [holdMs] <correlationId>
+        // NON-DESTRUCTIVE monitor tap: the audio thread keeps only this node
+        // (solo) or removes it (mute) in the final output. Patch untouched,
+        // RAM-only, expires (default 30s, max 120s).
+        if (msg.size() < 3) return;
+        auto canvasName = normalizeCanvas(getArgString(msg[0]));
+        auto tempId = getArgString(msg[1]);
+        juce::String modeStr = getArgString(msg[2]);
+        int outletIndex = 0;
+        float holdMs = 30000.0f;
+        juce::String correlationId = "0";
+        size_t i = 3;
+        if (i < msg.size() && !msg[i].isString()) { outletIndex = static_cast<int>(getArgFloat(msg[i])); ++i; }
+        if (i < msg.size() && !msg[i].isString()) { holdMs = getArgFloat(msg[i]); ++i; }
+        if (i < msg.size()) correlationId = getArgString(msg[i]);
+
+        if (!processor) {
+            sendReply("/meter/tap/reply/" + correlationId, juce::String("error: processor unavailable"));
+            return;
+        }
+        if (modeStr == "off") {
+            processor->mcpTapMode.store(PluginProcessor::mcpTapOff, std::memory_order_relaxed);
+            processor->mcpTapSig.store(nullptr, std::memory_order_relaxed);
+            mcpTapTempId.clear();
+            sendReply("/meter/tap/reply/" + correlationId, juce::String("off"));
+            return;
+        }
+
+        int mode = (modeStr == "mute") ? PluginProcessor::mcpTapMute : PluginProcessor::mcpTapSolo;
+        sys_lock();
+        juce::String errorOut;
+        t_outconnect* oc = resolveProbeTarget(canvasName, tempId, outletIndex, errorOut);
+        t_signal* signal = oc ? outconnect_get_signal(oc) : nullptr;
+        float* vec = (signal && signal->s_vec) ? signal->s_vec : nullptr;
+        int n = (signal && signal->s_vec) ? signal->s_n : 0;
+        sys_unlock();
+
+        if (!vec || n <= 0) {
+            processor->mcpTapMode.store(PluginProcessor::mcpTapOff, std::memory_order_relaxed);
+            processor->mcpTapSig.store(nullptr, std::memory_order_relaxed);
+            mcpTapTempId.clear();
+            sendReply("/meter/tap/reply/" + correlationId,
+                      juce::String("error: ") + (errorOut.isNotEmpty() ? errorOut : juce::String("signal not ready (is DSP running?)")));
+            return;
+        }
+
+        mcpTapCanvas = canvasName;
+        mcpTapTempId = tempId;
+        mcpTapOutlet = outletIndex;
+        auto const until = juce::Time::getMillisecondCounter()
+                         + static_cast<juce::uint32>(juce::jlimit(1000.0f, 120000.0f, holdMs));
+        processor->mcpTapUntilMs.store(until, std::memory_order_relaxed);
+        processor->mcpTapSig.store(static_cast<void*>(signal), std::memory_order_relaxed);
+        processor->mcpTapMode.store(mode, std::memory_order_relaxed); // publish LAST
+        processor->mcpTapGeneration.fetch_add(1, std::memory_order_relaxed);
+        sendReply("/meter/tap/reply/" + correlationId,
+                  juce::String(mode == PluginProcessor::mcpTapMute ? "mute " : "solo ") + tempId
+                  + " " + juce::String(static_cast<int>(juce::jlimit(1000.0f, 120000.0f, holdMs))) + "ms");
+        return;
+    }
+
     if (meterAction == "query") {
         if (msg.size() < 2) return;
         auto canvasName = normalizeCanvas(getArgString(msg[0]));
@@ -11005,6 +11067,23 @@ void MCPBridge::handleMeterDomain(const juce::String& meterAction, const juce::O
 void MCPBridge::timerCallback()
 {
     probeManager.collectResults();
+
+    // Monitor tap (solo/mute): re-resolve the target each tick so a deleted or
+    // rewired node can never leave a dangling s_vec on the audio thread; if the
+    // node is gone, the tap turns itself off.
+    if (processor && processor->mcpTapMode.load(std::memory_order_relaxed) != PluginProcessor::mcpTapOff
+        && mcpTapTempId.isNotEmpty()) {
+        juce::String err;
+        t_outconnect* oc = resolveProbeTarget(mcpTapCanvas, mcpTapTempId, mcpTapOutlet, err);
+        t_signal* sig = oc ? outconnect_get_signal(oc) : nullptr;
+        if (sig && sig->s_vec) {
+            processor->mcpTapSig.store(static_cast<void*>(sig), std::memory_order_relaxed);
+        } else {
+            processor->mcpTapMode.store(PluginProcessor::mcpTapOff, std::memory_order_relaxed);
+            processor->mcpTapSig.store(nullptr, std::memory_order_relaxed);
+            mcpTapTempId.clear();
+        }
+    }
 
     std::vector<MorphJob> activeJobs;
     std::vector<juce::String> completedIds;

@@ -1057,6 +1057,45 @@ void PluginProcessor::processBlock(AudioBuffer<float>& buffer, MidiBuffer& midiB
 }
 
 // only used for standalone, and if blocksize if a multiple of 64
+// ── Monitor tap: solo / mute (NON-DESTRUCTIVE) ──────────────────────────────
+// Runs per Pd SUB-BLOCK right after performDSP, so it works for any JUCE block
+// size (Pd runs pdBlockSize sub-blocks inside a larger buffer) and the soloed
+// signal goes through the master gain/limiter exactly like it does in the mix.
+// The patch is never touched; the tap EXPIRES and a dead signal turns it off.
+void PluginProcessor::applyMonitorTap(float* out, int numSamples, int numChannels)
+{
+    if (mcpTapMode.load(std::memory_order_relaxed) == mcpTapOff) return;
+    auto const nowMs = juce::Time::getMillisecondCounter();
+    if (nowMs > mcpTapUntilMs.load(std::memory_order_relaxed)) {
+        mcpTapMode.store(mcpTapOff, std::memory_order_relaxed);
+        mcpTapSig.store(nullptr, std::memory_order_relaxed);
+        return;
+    }
+    // Re-read s_vec EVERY sub-block: Pd swaps outlet buffers per DSP tick, so a
+    // captured vector goes stale after one block.
+    auto* sig = static_cast<t_signal*>(mcpTapSig.load(std::memory_order_relaxed));
+    float* vec = (sig != nullptr && sig->s_vec != nullptr) ? sig->s_vec : nullptr;
+    int const n = (vec != nullptr) ? sig->s_n : 0;
+    if (vec == nullptr || n <= 0) {
+        mcpTapMode.store(mcpTapOff, std::memory_order_relaxed);
+        return;
+    }
+    int const mode = mcpTapMode.load(std::memory_order_relaxed);
+    float const g = mcpTapGain.load(std::memory_order_relaxed);
+    int const copy = juce::jmin(n, numSamples);
+    for (int ch = 0; ch < numChannels; ++ch) {
+        float* d = out + static_cast<size_t>(ch) * static_cast<size_t>(numSamples);
+        if (mode == mcpTapSolo) {
+            for (int i = 0; i < copy; ++i) d[i] = vec[i] * g;
+            for (int i = copy; i < numSamples; ++i) d[i] = 0.0f;
+        } else {
+            // mute: subtract the node's contribution at unity — exact on the
+            // pre-limiter path (downstream of the target, linear mixing).
+            for (int i = 0; i < copy; ++i) d[i] -= vec[i];
+        }
+    }
+}
+
 void PluginProcessor::processConstant(dsp::AudioBlock<float> buffer)
 {
     int const pdBlockSize = Instance::getBlockSize();
@@ -1096,6 +1135,10 @@ void PluginProcessor::processConstant(dsp::AudioBlock<float> buffer)
             mcpBridge->audioTick();
             mcpBridge->voiceInputTick(audioVectorIn.data(), pdBlockSize);
         }
+
+        // Monitor tap (solo/mute) — per Pd sub-block, before it lands in the
+        // JUCE buffer, so it also goes through the master gain/limiter.
+        applyMonitorTap(audioVectorOut.data(), pdBlockSize, buffer.getNumChannels());
 
         for (int ch = 0; ch < buffer.getNumChannels(); ch++) {
             // Use FloatVectorOperations to copy the vector data into the audioBuffer
@@ -1165,6 +1208,10 @@ void PluginProcessor::processVariable(dsp::AudioBlock<float> buffer, MidiBuffer&
             mcpBridge->audioTick();
             mcpBridge->voiceInputTick(audioVectorIn.data(), pdBlockSize);
         }
+
+        // Monitor tap (solo/mute) — per Pd sub-block, before it lands in the
+        // JUCE buffer, so it also goes through the master gain/limiter.
+        applyMonitorTap(audioVectorOut.data(), pdBlockSize, numChannels);
 
         for (int channel = 0; channel < numChannels; channel++) {
             // Use FloatVectorOperations to copy the vector data into the audioBuffer

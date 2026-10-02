@@ -397,6 +397,12 @@ private:
 
     ProbeManager probeManager;
 
+    // Monitor tap (solo/mute): the target is re-resolved on the timer so a
+    // deleted/rewired node can never leave a dangling s_vec on the audio thread.
+    juce::String mcpTapCanvas;
+    juce::String mcpTapTempId;
+    int mcpTapOutlet { 0 };
+
     // Phase 4 armed control-message window (native Pd receiver + atom buffer).
     std::unique_ptr<McpControlWindow> controlWindow;
 

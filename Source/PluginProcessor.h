@@ -509,6 +509,23 @@ private:
     std::atomic<int> mcpSpecCapacity { 0 };
     std::vector<float> mcpSpecBuffer;
 
+    // --- Monitor tap: solo / mute (NON-DESTRUCTIVE) --------------------------
+    // The audio thread reads the target node's outlet buffer (resolved once on
+    // the message thread via the stable object map) and either keeps ONLY it
+    // (solo) or removes it (mute) in the FINAL output. The patch is never
+    // touched, state is RAM-only, and it EXPIRES (default 30 s) — a forgotten
+    // tap can never leave the artist's mix dead. mcpTapVec is validated by a
+    // message-thread timer; a dead/null vec turns the tap off in the callback.
+    static constexpr int mcpTapOff = 0, mcpTapSolo = 1, mcpTapMute = 2;
+    std::atomic<int> mcpTapMode { 0 };
+    // Opaque t_signal* (resolved/published by the bridge). Pd swaps each
+    // outlet's s_vec per DSP block, so the audio thread must re-read
+    // sig->s_vec every block — a captured s_vec pointer goes stale.
+    std::atomic<void*> mcpTapSig { nullptr };
+    std::atomic<float> mcpTapGain { 1.0f }; // unity — the master chain applies the level
+    std::atomic<juce::uint32> mcpTapUntilMs { 0 };
+    std::atomic<juce::uint32> mcpTapGeneration { 0 }; // bumped on every set/clear
+
     // --- Armed-capture DIAGNOSTICS (#83) -------------------------------------
     // Evidence for the "armed reads silent while live reads audible" failure.
     // On arm we snapshot mcpAudioBlocks and zero the two window counters; the
@@ -525,6 +542,11 @@ private:
     // Writes the current output block into the active WAV writer, if recording.
     // Must be called from the audio thread on the final output buffer.
     void writeRecorderTap(dsp::AudioBlock<float> const& buffer);
+
+    // Applies the solo/mute monitor tap to ONE Pd sub-block of the Pd output
+    // (audio thread; runs per sub-block so it works for any JUCE block size).
+    // No-op when no tap is active. Non-destructive: the patch is untouched.
+    void applyMonitorTap(float* out, int numSamples, int numChannels);
 
     friend class MCPBridge;
 
