@@ -1544,7 +1544,43 @@ juce::String MCPBridge::computeSignalTrace(PluginProcessor* processor, t_canvas*
         if (i > 0) json += ",";
         json += "\"" + silentEnvelopes[i] + "\"";
     }
-    json += "]}";
+    json += "]";
+
+    // ── STAGES: the measured staircase along the path feeding dac~ ──────────
+    // Every value is ALREADY measured above (maxOutPeak/maxInPeak); this only
+    // orders the nodes along the signal path (source → dac~) so silence has a
+    // LOCATION, not just a choke: "osc -12 → filt -14 → vca -100 ⛔ → dac -100".
+    // Bounded to 40 rows; loops terminate via the visited set.
+    std::vector<int> stageOrder;
+    if (dacIndex >= 0 && dacIndex < numObjs) {
+        std::vector<bool> seen(numObjs, false);
+        std::vector<int> stack{dacIndex};
+        seen[dacIndex] = true;
+        while (!stack.empty() && (int)stageOrder.size() < 40) {
+            int i = stack.back(); stack.pop_back();
+            stageOrder.push_back(i);
+            for (auto& kv : inletSources[i])
+                for (int s : kv.second)
+                    if (s >= 0 && s < numObjs && !seen[s]) { seen[s] = true; stack.push_back(s); }
+        }
+        // DFS post-order reversed = source → dac order (a DAG topo order).
+        std::reverse(stageOrder.begin(), stageOrder.end());
+    }
+    json += ",\"stages\":[";
+    for (size_t k = 0; k < stageOrder.size(); ++k) {
+        int i = stageOrder[k];
+        if (k > 0) json += ",";
+        float inDbS = maxInPeak[i] > 1e-7f ? (20.0f * std::log10(maxInPeak[i])) : -100.0f;
+        bool sink = (classNames[i] == "dac~" || classNames[i] == "out~");
+        float outDbS = sink ? inDbS : (maxOutPeak[i] > 1e-7f ? (20.0f * std::log10(maxOutPeak[i])) : -100.0f);
+        json += "{\"tempId\":\"" + names[i] + "\",\"class\":\"" + classNames[i] + "\",";
+        json += "\"inDb\":" + juce::String(inDbS, 1) + ",\"outDb\":" + juce::String(outDbS, 1);
+        if (i == chokeIndex && chokeReason.isNotEmpty())
+            json += ",\"note\":\"" + chokeReason.replace("\"", "\\\"") + "\"";
+        json += "}";
+    }
+    json += "],\"stagesTruncated\":" + juce::String((int)stageOrder.size() >= 40 ? "true" : "false");
+    json += "}";
 
     return json;
 }
