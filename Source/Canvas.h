@@ -298,6 +298,12 @@ public:
         Canvas* canvas;
     };
     std::unique_ptr<SelectionPillKeyListener> mcpSelectionPillKeys;
+    struct SelectionPillAnimator : public juce::Timer {
+        explicit SelectionPillAnimator(Canvas* c) : canvas(c) {}
+        void timerCallback() override;
+        Canvas* canvas;
+    };
+    std::unique_ptr<SelectionPillAnimator> mcpPillAnimator;
     // On-demand tool drawer (pressing "/" in the pill). Tools, not orders:
     // a native popup of neutral capabilities. Never shown unless asked.
     void showPillToolsMenu();

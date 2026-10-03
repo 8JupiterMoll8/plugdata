@@ -46,11 +46,11 @@ inline juce::StringArray iemDefaultTemplate(const juce::String& c)
 {
     //        a   b   c   d   snd    rcv    label  ldx ldy  fsty fs   bg fg lc  init
     if (c == "hradio" || c == "vradio")
-        return { "0","1","0","8", "empty","empty","empty", "0","-11", "0","12", "0","0","0", "0" };
+        return { "0","1","0","8", "empty","empty","empty", "0","-11", "0","12", "#fcfcfc","#000000","#000000", "0" };
     if (c == "bng")
-        return { "15","250","50","0", "empty","empty","empty", "17","7", "0","12", "0","0","0" };
+        return { "15","250","50","0", "empty","empty","empty", "17","7", "0","12", "#fcfcfc","#000000","#000000" };
     if (c == "tgl")
-        return { "15","0", "empty","empty","empty", "17","7", "0","12", "0","0","0", "0" };
+        return { "15","0", "empty","empty","empty", "17","7", "0","12", "#fcfcfc","#000000","#000000", "0" };
     return {};
 }
 
@@ -101,9 +101,9 @@ inline juce::StringArray expandIemGuiShortForm(const juce::StringArray& tokens)
         full.add(ldy);                  // 10 label y
         full.add("0");                  // 11 font style
         full.add("12");                 // 12 font size
-        full.add("0");                  // 13 bg colour
-        full.add("0");                  // 14 fg colour
-        full.add("0");                  // 15 label colour
+        full.add("#fcfcfc");            // 13 bg colour
+        full.add("#000000");            // 14 fg colour (handle / thumb)
+        full.add("#000000");            // 15 label colour
         full.add(init);                 // 16 init value
         return full;
     }

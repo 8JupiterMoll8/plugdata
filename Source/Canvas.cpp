@@ -945,24 +945,10 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
             nvgStrokeWidth(nvg, 1.6f);
             nvgStroke(nvg);
 
-            // Right: / Tools button
-            float const tw = 22.0f;
-            float const th = 20.0f;
-            float const tx = w - 88.0f;
-            float const ty = (h - th) * 0.5f;
-            nvgDrawRoundedRect(nvg, tx, ty, tw, th,
-                               (mcpPillDrawerMode == 2) ? nvgRGBA(74, 158, 255, 80) : nvgRGBA(38, 42, 50, 230),
-                               nvgRGBA(160, 175, 200, (mcpPillDrawerMode == 2) ? 220 : 80), 4.0f);
-            nvgFontFace(nvg, "Inter");
-            nvgFontSize(nvg, 11.0f);
-            nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-            nvgFillColor(nvg, nvgRGBA(200, 210, 230, 220));
-            nvgText(nvg, tx + tw * 0.5f, ty + th * 0.5f, "/", nullptr);
-
             // Right: 🎙️ Mic / Voice button
             float const mw = 24.0f;
             float const mh = 20.0f;
-            float const mx = w - 62.0f;
+            float const mx = w - 30.0f;
             float const my = (h - mh) * 0.5f;
 
             if (isVoiceRec) {
@@ -998,20 +984,22 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
             nvgStrokeColor(nvg, isVoiceRec ? nvgRGBA(255, 255, 255, 255) : nvgRGBA(200, 215, 235, 220));
             nvgStrokeWidth(nvg, 1.2f);
             nvgStroke(nvg);
+        }
 
-            // Right: ▶ Send button
-            float const bw = 24.0f;
-            float const bh = 20.0f;
-            float const bx = w - bw - 6.0f;
-            float const by = (h - bh) * 0.5f;
-            nvgDrawRoundedRect(nvg, bx, by, bw, bh, nvgRGBA(255, 102, 0, 235), nvgRGBA(255, 150, 60, 255), 4.0f);
-            nvgBeginPath(nvg);
-            nvgMoveTo(nvg, bx + 8.5f, by + 5.5f);
-            nvgLineTo(nvg, bx + 16.5f, by + bh * 0.5f);
-            nvgLineTo(nvg, bx + 8.5f, by + bh - 5.5f);
-            nvgClosePath(nvg);
-            nvgFillColor(nvg, nvgRGBA(20, 20, 22, 255));
-            nvgFill(nvg);
+        // Ambient blinking caret when unfocused & empty to clearly signal interactive input affordance
+        if (mcpSelectionPill && !mcpSelectionPill->hasKeyboardFocus(true) && mcpSelectionPill->getText().isEmpty()) {
+            bool const caretBlink = ((juce::Time::getMillisecondCounter() / 530) % 2) == 0;
+            if (caretBlink) {
+                NVGScopedState scopedCaret(nvg);
+                float const caretX = panel.getX() + 38.0f;
+                float const caretY = panel.getY() + panel.getHeight() * 0.5f;
+                nvgBeginPath(nvg);
+                nvgMoveTo(nvg, caretX, caretY - 7.0f);
+                nvgLineTo(nvg, caretX, caretY + 7.0f);
+                nvgStrokeColor(nvg, nvgRGBA(74, 158, 255, 230));
+                nvgStrokeWidth(nvg, 1.5f);
+                nvgStroke(nvg);
+            }
         }
 
         // Crisp on-canvas placeholder when empty (subtle dim when focused)
@@ -1335,8 +1323,6 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
             float const vw = static_cast<float>(viewport ? viewport->getWidth() : getWidth());
             float const vh = static_cast<float>(viewport ? viewport->getHeight() : getHeight());
 
-            // FLOATING STUDIO ACTION CARD (Zero header bar, no conversational clutter)
-            // Distinct floating island: Big Title + Tool Tag + Direct Action Statement.
             bool const hasPrompt = hud.prompt.isNotEmpty();
             bool const hasReceipt = hud.receipt.isNotEmpty();
             bool const hasTool = hud.tool.isNotEmpty();
@@ -1347,57 +1333,166 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
             if (hasChapter) cardTitle = hud.chapter;
             else if (hasTool) cardTitle = hud.tool;
 
-            // Direct action statement (no "Artist:" or "PlugTwin:" prefixes)
+            // Direct action statement
             juce::String cardDesc;
             if (hasPrompt) cardDesc = hud.prompt;
             else if (hasReceipt) cardDesc = hud.receipt;
 
+            // Sanitize description text: strip newlines and unprintable characters that cause tofu boxes
+            juce::String cleanDesc = cardDesc.replaceCharacter('\r', ' ');
+            while (cleanDesc.contains("\n\n"))
+                cleanDesc = cleanDesc.replace("\n\n", " \xE2\x80\xA2 ");
+            cleanDesc = cleanDesc.replaceCharacter('\n', ' ').trim();
+
             // Sizing: floating centered card with title-safe margins
-            constexpr float maxCardW = 820.0f;
+            constexpr float maxCardW = 760.0f;
             float const cardW = jmin(vw - 48.0f, maxCardW);
             float const cardX = (vw - cardW) * 0.5f;
+            float const innerPadX = 18.0f;
+            float const breakWidth = cardW - (innerPadX * 2.0f);
 
-            float cardH = 54.0f;
-            if (cardTitle.isNotEmpty() && cardDesc.isNotEmpty()) {
-                cardH = 88.0f;
+            // Compute text height via nvgTextBoxBounds for multi-line wrapped text
+            float descH = 0.0f;
+            if (cleanDesc.isNotEmpty()) {
+                nvgFontSize(nvg, 14.5f);
+                nvgFontFace(nvg, "Inter");
+                float bounds[4];
+                nvgTextBoxBounds(nvg, 0, 0, breakWidth, cleanDesc.toRawUTF8(), nullptr, bounds);
+                descH = bounds[3] - bounds[1];
+                descH = jlimit(18.0f, 85.0f, descH);
             }
 
-            // Floats in bottom title-safe area (36px above bottom toolbar)
-            float const cardY = vh - cardH - 36.0f;
+            float cardH = 50.0f;
+            if (cardTitle.isNotEmpty() && cleanDesc.isNotEmpty()) {
+                cardH = 13.0f + 22.0f + 9.0f + descH + 14.0f;
+            } else if (cleanDesc.isNotEmpty()) {
+                cardH = 14.0f + descH + 14.0f;
+            }
+            float const cardY = vh - cardH - 34.0f;
 
-            // 1. Frosted Deep Glass Background
+            // Determine status accent color based on chapter
+            juce::String const upperChapter = hud.chapter.toUpperCase();
+            NVGcolor accentCol = nvgRGBA(56, 189, 248, 255);    // Electric Cyan default (THINKING / WORKING / BUILDING)
+            NVGcolor badgeBg = nvgRGBA(56, 189, 248, 30);
+            NVGcolor badgeBorder = nvgRGBA(56, 189, 248, 110);
+
+            if (upperChapter.contains("DONE") || upperChapter.contains("APPROVED") || upperChapter.contains("VOICE")) {
+                accentCol = nvgRGBA(16, 185, 129, 255);          // Emerald Green
+                badgeBg = nvgRGBA(16, 185, 129, 32);
+                badgeBorder = nvgRGBA(16, 185, 129, 120);
+            } else if (upperChapter.contains("APPROVE")) {
+                accentCol = nvgRGBA(245, 158, 11, 255);          // Amber Gold
+                badgeBg = nvgRGBA(245, 158, 11, 40);
+                badgeBorder = nvgRGBA(245, 158, 11, 140);
+            } else if (upperChapter.contains("ERROR") || upperChapter.contains("DENIED") || upperChapter.contains("FAIL")) {
+                accentCol = nvgRGBA(244, 63, 94, 255);           // Coral Red
+                badgeBg = nvgRGBA(244, 63, 94, 40);
+                badgeBorder = nvgRGBA(244, 63, 94, 140);
+            }
+
+            // 1. Soft Ambient Box-Gradient Shadow
+            NVGpaint shadowPaint = nvgBoxGradient(nvg, cardX, cardY + 5.0f, cardW, cardH, 14.0f, 24.0f, nvgRGBA(0, 0, 0, 160), nvgRGBA(0, 0, 0, 0));
             nvgBeginPath(nvg);
-            nvgRoundedRect(nvg, cardX, cardY, cardW, cardH, 14.0f);
-            nvgFillColor(nvg, nvgRGBA(12, 14, 18, 246));
+            nvgRect(nvg, cardX - 20.0f, cardY - 12.0f, cardW + 40.0f, cardH + 44.0f);
+            nvgFillPaint(nvg, shadowPaint);
             nvgFill(nvg);
 
-            // Specular luminous cyan border
+            // 2. Obsidian Glass Body with subtle linear gradient
+            NVGpaint bodyPaint = nvgLinearGradient(nvg, cardX, cardY, cardX, cardY + cardH,
+                                                   nvgRGBA(18, 22, 32, 246),
+                                                   nvgRGBA(10, 12, 17, 252));
             nvgBeginPath(nvg);
-            nvgRoundedRect(nvg, cardX, cardY, cardW, cardH, 14.0f);
-            nvgStrokeColor(nvg, nvgRGBA(74, 158, 255, 175));
-            nvgStrokeWidth(nvg, 1.5f);
+            nvgRoundedRect(nvg, cardX, cardY, cardW, cardH, 13.0f);
+            nvgFillPaint(nvg, bodyPaint);
+            nvgFill(nvg);
+
+            // 3. Subtle Frosted Border
+            nvgBeginPath(nvg);
+            nvgRoundedRect(nvg, cardX, cardY, cardW, cardH, 13.0f);
+            nvgStrokeColor(nvg, nvgRGBA(255, 255, 255, 30));
+            nvgStrokeWidth(nvg, 1.0f);
             nvgStroke(nvg);
 
-            float currentY = cardY + 16.0f;
+            // 4. Specular Top Highlight
+            nvgBeginPath(nvg);
+            nvgRoundedRect(nvg, cardX + 1.5f, cardY + 1.0f, cardW - 3.0f, 1.5f, 1.0f);
+            nvgFillColor(nvg, nvgRGBA(255, 255, 255, 45));
+            nvgFill(nvg);
 
-            // 2. TOP ROW: BIG TITLE
+            // 5. Header Row (LED Capsule Badge + Tool Tag + Meta)
+            float const headerY = cardY + 13.0f;
+            float nextHeaderX = cardX + innerPadX;
+
             if (cardTitle.isNotEmpty()) {
-                nvgFontSize(nvg, 21.0f);
-                nvgFontFace(nvg, "Inter");
-                nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
-                nvgFillColor(nvg, nvgRGBA(255, 255, 255, 255));
-                nvgText(nvg, cardX + 22.0f, currentY, cardTitle.toRawUTF8(), nullptr);
+                nvgFontSize(nvg, 11.5f);
+                nvgFontFace(nvg, "Inter-Bold");
+                float titleBounds[4];
+                nvgTextBounds(nvg, 0, 0, cardTitle.toRawUTF8(), nullptr, titleBounds);
+                float const pillTextW = titleBounds[2] - titleBounds[0];
+                float const pillH = 22.0f;
+                float const pillW = pillTextW + 28.0f;
 
-                currentY += 32.0f;
+                // Pill Background
+                nvgBeginPath(nvg);
+                nvgRoundedRect(nvg, nextHeaderX, headerY, pillW, pillH, 11.0f);
+                nvgFillColor(nvg, badgeBg);
+                nvgFill(nvg);
+                nvgStrokeColor(nvg, badgeBorder);
+                nvgStrokeWidth(nvg, 1.0f);
+                nvgStroke(nvg);
+
+                // Glowing LED Dot
+                float const ledX = nextHeaderX + 10.0f;
+                float const ledY = headerY + pillH * 0.5f;
+                NVGpaint ledGlow = nvgRadialGradient(nvg, ledX, ledY, 1.5f, 6.5f, accentCol, nvgRGBA(0, 0, 0, 0));
+                nvgBeginPath(nvg);
+                nvgCircle(nvg, ledX, ledY, 6.5f);
+                nvgFillPaint(nvg, ledGlow);
+                nvgFill(nvg);
+
+                nvgBeginPath(nvg);
+                nvgCircle(nvg, ledX, ledY, 3.0f);
+                nvgFillColor(nvg, accentCol);
+                nvgFill(nvg);
+
+                // Title Text inside Pill
+                nvgFontSize(nvg, 11.0f);
+                nvgFontFace(nvg, "Inter-Bold");
+                nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+                nvgFillColor(nvg, nvgRGBA(248, 250, 252, 255));
+                nvgText(nvg, nextHeaderX + 18.0f, headerY + pillH * 0.5f + 0.5f, cardTitle.toRawUTF8(), nullptr);
+
+                nextHeaderX += pillW + 10.0f;
             }
 
-            // 3. BOTTOM ROW: DIRECT DESCRIPTION (Big 17px typography, no chat labels)
-            if (cardDesc.isNotEmpty()) {
-                nvgFontSize(nvg, 17.0f);
+            // Secondary Tool Tag
+            if (hasTool && hud.tool != cardTitle) {
+                nvgFontSize(nvg, 12.0f);
+                nvgFontFace(nvg, "Inter");
+                nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+                nvgFillColor(nvg, nvgRGBA(148, 163, 184, 210));
+                juce::String const toolStr = "// " + hud.tool;
+                nvgText(nvg, nextHeaderX, headerY + 11.0f, toolStr.toRawUTF8(), nullptr);
+            }
+
+            // Right-aligned Telemetry / Latency
+            juce::String const metaRight = hud.latency.isNotEmpty() ? hud.latency : hud.telemetry;
+            if (metaRight.isNotEmpty()) {
+                nvgFontSize(nvg, 11.5f);
+                nvgFontFace(nvg, "Inter-Tabular");
+                nvgTextAlign(nvg, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
+                nvgFillColor(nvg, nvgRGBA(100, 116, 139, 230));
+                nvgText(nvg, cardX + cardW - innerPadX, headerY + 11.0f, metaRight.toRawUTF8(), nullptr);
+            }
+
+            // 6. Direct Description with Word Wrapping (nvgTextBox)
+            if (cleanDesc.isNotEmpty()) {
+                float const descY = cardTitle.isNotEmpty() ? (headerY + 22.0f + 8.0f) : (cardY + 13.0f);
+                nvgFontSize(nvg, 14.5f);
                 nvgFontFace(nvg, "Inter");
                 nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
-                nvgFillColor(nvg, nvgRGBA(230, 235, 245, 255));
-                nvgText(nvg, cardX + 22.0f, currentY + 2.0f, cardDesc.toRawUTF8(), nullptr);
+                nvgFillColor(nvg, nvgRGBA(226, 232, 240, 245));
+                nvgTextBox(nvg, cardX + innerPadX, descY, breakWidth, cleanDesc.toRawUTF8(), nullptr);
             }
         }
     }
@@ -2142,13 +2237,10 @@ bool Canvas::handleNoteClick(Point<int> canvasPt)
                 showPillPalette();
                 return true;
             }
-            // Right ~32px: ▶ Submit button
-            if (relX >= panel.getWidth() - 32) {
-                submitSelectionPill(false);
-                return true;
-            }
-            // Right 33-62px: 🎙️ Mic / Voice button
-            if (relX >= panel.getWidth() - 62) {
+            // Right ~36px: 🎙️ Mic / Voice button (the only right-side control;
+            // Enter sends, '+' opens the palette — so the old / and send buttons
+            // were redundant and are removed)
+            if (relX >= panel.getWidth() - 36) {
                 if (pd) {
                     if (auto* br = pd->getMCPBridge()) {
                         if (br->isVoiceCapturing())
@@ -2159,11 +2251,6 @@ bool Canvas::handleNoteClick(Point<int> canvasPt)
                         if (editor) editor->nvgSurface.renderAll();
                     }
                 }
-                return true;
-            }
-            // Right 63-90px: / Tools button
-            if (relX >= panel.getWidth() - 90) {
-                showPillToolsMenu();
                 return true;
             }
             // Middle: Text field focus!
@@ -2616,6 +2703,26 @@ bool Canvas::keyPressed(KeyPress const& key)
     if (editor->getCurrentCanvas() != this || isGraph)
         return false;
 
+    // Fast-focus / hotkey handling when the selection pill is visible but unfocused:
+    // - '/' opens the smart command palette or tools menu
+    // - Tab or Enter focuses the prompt text field immediately
+    // - Esc dismisses the pill
+    // All other keys (o, m, c, b, Delete, arrows) pass through to the canvas patch!
+    if (mcpSelectionPill && mcpSelectionPill->isVisible()) {
+        if (key.getTextCharacter() == '/' || key.getKeyCode() == '/') {
+            showPillToolsMenu();
+            return true;
+        }
+        if (key.getKeyCode() == juce::KeyPress::tabKey || key.getKeyCode() == juce::KeyPress::returnKey) {
+            mcpSelectionPill->grabKeyboardFocus();
+            return true;
+        }
+        if (key.getKeyCode() == juce::KeyPress::escapeKey) {
+            dismissSelectionPill();
+            return true;
+        }
+    }
+
     int const keycode = key.getKeyCode();
 
     auto moveSelection = [this](int const x, int const y) {
@@ -2772,6 +2879,8 @@ void Canvas::updateSelectionPill()
 
     if (!mcpSelectionPill) {
         mcpSelectionPill = std::make_unique<juce::TextEditor>();
+        mcpSelectionPill->getProperties().set("NoBackground", true);
+        mcpSelectionPill->getProperties().set("NoOutline", true);
         mcpSelectionPill->setMultiLine(false);
         mcpSelectionPill->setReturnKeyStartsNewLine(false);
         mcpSelectionPill->setWantsKeyboardFocus(true);
@@ -2782,6 +2891,7 @@ void Canvas::updateSelectionPill()
         mcpSelectionPill->setColour(juce::TextEditor::highlightColourId, juce::Colour(0xff4a9eff));
         mcpSelectionPill->setColour(juce::CaretComponent::caretColourId, juce::Colours::white);
         mcpSelectionPill->setFont(juce::Font("Inter", 13.0f, juce::Font::plain));
+        mcpSelectionPill->applyFontToAllText(juce::Font("Inter", 13.0f, juce::Font::plain));
         mcpSelectionPill->setBorder(juce::BorderSize<int>(0, 0, 0, 0));
         mcpSelectionPill->setIndents(2, 0);
         mcpSelectionPill->setJustification(juce::Justification::centredLeft);
@@ -2826,21 +2936,29 @@ void Canvas::updateSelectionPill()
         addAndMakeVisible(*mcpSelectionPill);
     }
 
-    // Leave room on the left for the ✦ Lenses button and on the right for / Tools, 🎙️ Mic, and ▶ Send.
-    int const edH = 24;
+    // Leave room on the left for the + button and on the right for 🎙️ Mic.
+    // edH = 30 gives generous headroom and descender room so text is never clipped at the bottom.
+    int const edH = 30;
     int const edY = pillY + (pillH - edH) / 2;
-    mcpSelectionPill->setBounds(pillX + 36, edY, pillW - 36 - 92, edH);
+    mcpSelectionPill->setBounds(pillX + 36, edY, pillW - 36 - 40, edH);
     mcpSelectionPill->setVisible(true);
     // toFront(false), NOT true: bringing it forward must never steal keyboard
     // focus, or typing 'o'/'m'/'c'/'b' on the canvas would land in the prompt
     // instead of creating/editing objects.
     mcpSelectionPill->toFront(false);
+    if (!mcpPillAnimator) {
+        mcpPillAnimator = std::make_unique<SelectionPillAnimator>(this);
+    }
+    mcpPillAnimator->startTimerHz(6);
     repaint();
     if (editor) editor->nvgSurface.renderAll();
 }
 
 void Canvas::hideSelectionPill()
 {
+    if (mcpPillAnimator) {
+        mcpPillAnimator->stopTimer();
+    }
     mcpPillDrawerMode = 0;
     mcpPillDrawerFrame = {};
     mcpPaletteFrame = {};
@@ -2925,6 +3043,16 @@ bool Canvas::SelectionPillKeyListener::keyPressed(const juce::KeyPress& key, juc
         }
     }
     return false;
+}
+
+void Canvas::SelectionPillAnimator::timerCallback()
+{
+    if (canvas && canvas->mcpSelectionPill && canvas->mcpSelectionPill->isVisible()) {
+        canvas->repaint();
+        if (canvas->editor) canvas->editor->nvgSurface.renderAll();
+    } else {
+        stopTimer();
+    }
 }
 
 void Canvas::showPillLensesMenu()
