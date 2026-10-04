@@ -6554,6 +6554,9 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     r.kind = o->getProperty("kind").toString();
                     auto* targets = o->getProperty("targets").getArray();
                     if (targets && !targets->isEmpty()) {
+                        for (auto const& tv : *targets) {
+                            r.targetIds.add(tv.toString());
+                        }
                         bool first = true;
                         int minX = 0, minY = 0, maxX = 0, maxY = 0;
                         for (auto const& tv : *targets) {

@@ -87,6 +87,8 @@ public:
     // by objects (so notes overlaying objects stay clickable).
     bool handleNoteClick(Point<int> canvasPt);
     bool isPointOverNote(Point<int> canvasPt) const;
+    Object* findObjectByStableId(juce::String const& targetId) const;
+    bool getAnnotationLiveBounds(juce::String const& targetId, float fallbackX, float fallbackY, float fallbackLx, float fallbackLy, bool fallbackHasLeader, float& outAx, float& outAy, float& outLx, float& outLy, bool& outHasLeader) const;
     void mouseDrag(MouseEvent const& e) override;
     void mouseUp(MouseEvent const& e) override;
     bool hitTest(int x, int y) override;

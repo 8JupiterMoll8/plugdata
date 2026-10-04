@@ -647,8 +647,41 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
     // PRD overlay: titled regions drawn BEHIND the objects (structure at a glance).
     if (pd && shouldShowAIRegions() && !pd->getMcpRegions().empty()) {
         for (auto const& r : pd->getMcpRegions()) {
+            float rx = 0.0f, ry = 0.0f, rw = 0.0f, rh = 0.0f;
+            if (r.targetIds.size() > 0) {
+                bool first = true;
+                int minX = 0, minY = 0, maxX = 0, maxY = 0;
+                for (auto const& tid : r.targetIds) {
+                    if (auto* obj = findObjectByStableId(tid)) {
+                        auto const b = obj->getObjectBounds();
+                        if (first) {
+                            minX = b.getX();
+                            minY = b.getY();
+                            maxX = b.getRight();
+                            maxY = b.getBottom();
+                            first = false;
+                        } else {
+                            minX = std::min(minX, b.getX());
+                            minY = std::min(minY, b.getY());
+                            maxX = std::max(maxX, b.getRight());
+                            maxY = std::max(maxY, b.getBottom());
+                        }
+                    }
+                }
+                if (first) continue; // All member objects deleted -> auto-prune
+                constexpr int pad = 22;
+                rx = canvasOrigin.x + static_cast<float>(minX - pad);
+                ry = canvasOrigin.y + static_cast<float>(minY - pad - 16);
+                rw = static_cast<float>(maxX - minX + pad * 2);
+                rh = static_cast<float>(maxY - minY + pad * 2 + 16);
+            } else {
+                rx = canvasOrigin.x + r.x;
+                ry = canvasOrigin.y + r.y;
+                rw = r.w;
+                rh = r.h;
+            }
+
             NVGScopedState scopedRegion(nvg);
-            float const rx = canvasOrigin.x + r.x, ry = canvasOrigin.y + r.y;
             juce::String const k = r.kind.isNotEmpty() ? r.kind : juce::String("group");
             int ar = 0x8a, ag = 0x93, ab = 0xa6;
             if (k == "source") { ar = 0x3d; ag = 0xdd; ab = 0x8a; }
@@ -656,7 +689,7 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
             else if (k == "loop") { ar = 0xff; ag = 0xbe; ab = 0x50; }
             else if (k == "output") { ar = 0xff; ag = 0x5a; ab = 0x5a; }
             nvgBeginPath(nvg);
-            nvgRoundedRect(nvg, rx, ry, r.w, r.h, 8.0f);
+            nvgRoundedRect(nvg, rx, ry, rw, rh, 8.0f);
             nvgFillColor(nvg, nvgRGBA(ar, ag, ab, 26));
             nvgFill(nvg);
             nvgStrokeColor(nvg, nvgRGBA(ar, ag, ab, 150));
@@ -821,9 +854,14 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
         int noteIdx = 0;
         for (auto const& a : pd->getMcpAnnotations()) {
             if (a.text.isEmpty()) continue;
+            float rawAx = 0.0f, rawAy = 0.0f, rawLx = 0.0f, rawLy = 0.0f;
+            bool hasLead = false;
+            if (!getAnnotationLiveBounds(a.targetId, a.x, a.y, a.leaderX, a.leaderY, a.hasLeader, rawAx, rawAy, rawLx, rawLy, hasLead))
+                continue;
+
             NVGScopedState scopedAnn(nvg);
-            float const ax = canvasOrigin.x + a.x;
-            float const ay = canvasOrigin.y + a.y;
+            float const ax = canvasOrigin.x + rawAx;
+            float const ay = canvasOrigin.y + rawAy;
             // Colour by kind so the artist can tell notes apart at a glance.
             juce::String const k = a.kind.isNotEmpty() ? a.kind : juce::String("info");
             int ar = 0x4a, ag = 0x9e, ab = 0xff;
@@ -832,10 +870,10 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
             else if (k == "artist") { ar = 0xff; ag = 0xbe; ab = 0x50; }
             NVGcolor const accent = nvgRGBA(ar, ag, ab, 255);
             // Leader line from the note (in the margin) to the object it explains.
-            if (a.hasLeader) {
+            if (hasLead) {
                 NVGScopedState scopedLeader(nvg);
                 nvgBeginPath(nvg);
-                nvgMoveTo(nvg, canvasOrigin.x + a.leaderX, canvasOrigin.y + a.leaderY);
+                nvgMoveTo(nvg, canvasOrigin.x + rawLx, canvasOrigin.y + rawLy);
                 nvgLineTo(nvg, ax - 6.0f, ay);
                 nvgStrokeColor(nvg, nvgRGBA(ar, ag, ab, 120));
                 nvgStrokeWidth(nvg, 1.0f);
@@ -2111,6 +2149,46 @@ void Canvas::altKeyChanged(bool const isHeld)
     }
 }
 
+Object* Canvas::findObjectByStableId(juce::String const& targetId) const
+{
+    if (targetId.isEmpty() || !pd) return nullptr;
+    for (auto* obj : objects) {
+        if (!obj) continue;
+        if (auto* ptr = obj->getPointer()) {
+            if (pd->getStableId(ptr) == targetId)
+                return obj;
+        }
+    }
+    return nullptr;
+}
+
+bool Canvas::getAnnotationLiveBounds(juce::String const& targetId, float fallbackX, float fallbackY, float fallbackLx, float fallbackLy, bool fallbackHasLeader, float& outAx, float& outAy, float& outLx, float& outLy, bool& outHasLeader) const
+{
+    if (targetId.isNotEmpty()) {
+        if (auto* obj = findObjectByStableId(targetId)) {
+            auto const b = obj->getObjectBounds();
+            float const ox = static_cast<float>(b.getX());
+            float const oy = static_cast<float>(b.getY());
+            float const ow = static_cast<float>(b.getWidth());
+            float const oh = static_cast<float>(b.getHeight());
+            outLx = ox + ow;
+            outLy = oy + oh * 0.5f;
+            outAx = outLx + 20.0f;
+            outAy = outLy;
+            outHasLeader = true;
+            return true;
+        }
+        // Attached to an object that was deleted -> auto-prune
+        return false;
+    }
+    outAx = fallbackX;
+    outAy = fallbackY;
+    outLx = fallbackLx;
+    outLy = fallbackLy;
+    outHasLeader = fallbackHasLeader;
+    return true;
+}
+
 void Canvas::mouseMove(MouseEvent const& e)
 {
     // Hover feedback: brighten the note under the cursor.
@@ -2120,8 +2198,12 @@ void Canvas::mouseMove(MouseEvent const& e)
         auto anns = pd->getMcpAnnotations();
         for (int i = static_cast<int>(anns.size()) - 1; i >= 0; --i) {
             auto const& a = anns[static_cast<size_t>(i)];
-            float const tx = canvasOrigin.x + a.x - 6.0f;
-            float const ty = canvasOrigin.y + a.y - 9.0f;
+            float rawAx = 0.0f, rawAy = 0.0f, rawLx = 0.0f, rawLy = 0.0f;
+            bool hasLead = false;
+            if (!getAnnotationLiveBounds(a.targetId, a.x, a.y, a.leaderX, a.leaderY, a.hasLeader, rawAx, rawAy, rawLx, rawLy, hasLead))
+                continue;
+            float const tx = canvasOrigin.x + rawAx - 6.0f;
+            float const ty = canvasOrigin.y + rawAy - 9.0f;
             float const tw = a.text.length() * 7.0f + 28.0f;
             if (Rectangle<float>(tx, ty, tw, 18.0f).contains(pt)) { hoverIdx = i; break; }
         }
@@ -2152,8 +2234,12 @@ bool Canvas::isPointOverNote(Point<int> canvasPt) const
     auto const pt = canvasPt.toFloat();
     auto anns = pd->getMcpAnnotations();
     for (auto const& a : anns) {
-        float const tx = canvasOrigin.x + a.x - 6.0f;
-        float const ty = canvasOrigin.y + a.y - 9.0f;
+        float rawAx = 0.0f, rawAy = 0.0f, rawLx = 0.0f, rawLy = 0.0f;
+        bool hasLead = false;
+        if (!getAnnotationLiveBounds(a.targetId, a.x, a.y, a.leaderX, a.leaderY, a.hasLeader, rawAx, rawAy, rawLx, rawLy, hasLead))
+            continue;
+        float const tx = canvasOrigin.x + rawAx - 6.0f;
+        float const ty = canvasOrigin.y + rawAy - 9.0f;
         float const tw = a.text.length() * 7.0f + 28.0f;
         if (Rectangle<float>(tx, ty, tw, 18.0f).contains(pt))
             return true;
@@ -2263,8 +2349,12 @@ bool Canvas::handleNoteClick(Point<int> canvasPt)
     auto anns = pd->getMcpAnnotations();
     for (int i = static_cast<int>(anns.size()) - 1; i >= 0; --i) {
         auto const& a = anns[static_cast<size_t>(i)];
-        float const tx = canvasOrigin.x + a.x - 6.0f;
-        float const ty = canvasOrigin.y + a.y - 9.0f;
+        float rawAx = 0.0f, rawAy = 0.0f, rawLx = 0.0f, rawLy = 0.0f;
+        bool hasLead = false;
+        if (!getAnnotationLiveBounds(a.targetId, a.x, a.y, a.leaderX, a.leaderY, a.hasLeader, rawAx, rawAy, rawLx, rawLy, hasLead))
+            continue;
+        float const tx = canvasOrigin.x + rawAx - 6.0f;
+        float const ty = canvasOrigin.y + rawAy - 9.0f;
         float const tw = a.text.length() * 7.0f + 28.0f;
         if (!Rectangle<float>(tx, ty, tw, 18.0f).contains(pt)) continue;
 
@@ -2337,8 +2427,8 @@ bool Canvas::handleNoteClick(Point<int> canvasPt)
         }
         mcpNoteEditIndex = i;
         mcpNoteOpenedAt = juce::Time::getMillisecondCounter();
-        mcpNoteEditor->setBounds(juce::roundToInt(canvasOrigin.x + a.x - 6.0f),
-                                 juce::roundToInt(canvasOrigin.y + a.y - 34.0f),
+        mcpNoteEditor->setBounds(juce::roundToInt(canvasOrigin.x + rawAx - 6.0f),
+                                 juce::roundToInt(canvasOrigin.y + rawAy - 34.0f),
                                  juce::jmax(140, juce::roundToInt(a.text.length() * 7.0f) + 40), 20);
         mcpNoteEditor->setText(a.text, false);
         mcpNoteEditor->setVisible(true);

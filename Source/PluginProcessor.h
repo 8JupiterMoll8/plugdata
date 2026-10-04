@@ -266,6 +266,7 @@ public:
         float x = 0, y = 0, w = 0, h = 0;
         juce::String title;
         juce::String kind; // e.g. source | fx | loop | output | group
+        juce::StringArray targetIds;
     };
     std::vector<McpRegion> mcpRegions;
     std::vector<McpRegion> getMcpRegions() const { juce::ScopedLock sl(mcpOverlayLock); return mcpRegions; }
