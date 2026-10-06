@@ -2005,6 +2005,17 @@ t_canvas* PluginProcessor::getCanvasBySymbolStrict(const String& canvas_symbol)
     if (!canvas && !canvas_symbol.startsWith("pd-")) {
         canvas = (t_canvas*)pd_findbyclass(gensym(String("pd-" + canvas_symbol).toRawUTF8()), canvas_class);
     }
+    if (!canvas && pd_this) {
+        for (t_canvas* c = pd_this->pd_canvaslist; c; c = c->gl_next) {
+            if (c->gl_name) {
+                juce::String glName(c->gl_name->s_name);
+                if (glName == canvas_symbol || ("pd-" + glName) == canvas_symbol || glName == ("pd-" + canvas_symbol)) {
+                    canvas = c;
+                    break;
+                }
+            }
+        }
+    }
     // NO fallback: unknown names return nullptr so the caller can name the
     // failure instead of mutating the focused/root canvas by accident.
     return canvas;
@@ -2041,6 +2052,54 @@ juce::String PluginProcessor::getStableId(t_gobj* g) const
     for (auto const& [canvasKey, canvasMap] : mcpStableObjectMap) {
         for (auto const& [id, ptr] : canvasMap) {
             if (ptr == g) return juce::String(id);
+        }
+    }
+    return {};
+}
+
+juce::String PluginProcessor::getOrAdoptStableId(t_canvas* canvas, t_gobj* g)
+{
+    if (!g) return {};
+    auto const existing = getStableId(g);
+    if (existing.isNotEmpty()) return existing;
+    if (!canvas) return {};
+
+    juce::String canonKey = MCPBridge::canonicalCanvasKey(canvas);
+    auto canonStr = canonKey.toStdString();
+
+    int objectIndex = 0;
+    for (t_gobj* y_obj = canvas->gl_list; y_obj; y_obj = y_obj->g_next, ++objectIndex) {
+        if (y_obj == g) {
+            t_class* cl = pd_class(&y_obj->g_pd);
+            const char* clName = class_getname(cl);
+            juce::String className = clName ? juce::String::fromUTF8(clName) : juce::String("unknown");
+            juce::String type = className;
+            juce::String abstractName;
+            if (cl == canvas_class) {
+                type = "pd";
+                pd::getAbstractionFileName(y_obj, abstractName);
+            } else if (cl == garray_class) {
+                type = "table";
+            }
+            juce::String classSrc = abstractName.isNotEmpty() ? abstractName : type;
+            juce::String canvasKeySymbol = canonKey;
+            if (canvasKeySymbol.startsWith("pd-"))
+                canvasKeySymbol = canvasKeySymbol.substring(3);
+            juce::String canvasKey;
+            for (auto ch : canvasKeySymbol)
+                canvasKey << (juce::CharacterFunctions::isLetterOrDigit(ch) || ch == '_'
+                                   ? juce::String::charToString(ch)
+                                   : juce::String("_"));
+            juce::String minted = pd::sanitizeClassNameForTempId(classSrc)
+                                      + "_" + canvasKey + "_" + juce::String(objectIndex);
+
+            auto& canvasIdMap = mcpStableObjectMap[canonStr];
+            canvasIdMap[minted.toStdString()] = y_obj;
+            if (mcpStableSerialMap.find(y_obj) == mcpStableSerialMap.end()) {
+                mcpStableSerialMap[y_obj] = mcpSerialCounter++;
+            }
+            mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+            return minted;
         }
     }
     return {};

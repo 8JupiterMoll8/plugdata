@@ -88,7 +88,9 @@ public:
     bool handleNoteClick(Point<int> canvasPt);
     bool isPointOverNote(Point<int> canvasPt) const;
     Object* findObjectByStableId(juce::String const& targetId) const;
+    bool getAnnotationLiveBounds(juce::String const& targetId, juce::StringArray const& targetIds, float fallbackX, float fallbackY, float fallbackLx, float fallbackLy, bool fallbackHasLeader, float& outAx, float& outAy, float& outLx, float& outLy, bool& outHasLeader, juce::Rectangle<int>* outGroupBounds = nullptr) const;
     bool getAnnotationLiveBounds(juce::String const& targetId, float fallbackX, float fallbackY, float fallbackLx, float fallbackLy, bool fallbackHasLeader, float& outAx, float& outAy, float& outLx, float& outLy, bool& outHasLeader) const;
+    juce::Rectangle<float> getAnnotationScreenBounds(size_t annIndex) const;
     void mouseDrag(MouseEvent const& e) override;
     void mouseUp(MouseEvent const& e) override;
     bool hitTest(int x, int y) override;
@@ -121,6 +123,10 @@ public:
     bool shouldShowAIAnnotations() const;
     bool shouldShowAIGhosts() const;
     bool shouldShowAIHud() const;
+    bool shouldShowAISketch() const;
+    void setSketchToolActive(bool active);
+    bool isSketchToolActive() const;
+    bool isSketchingActive() const;
     bool shouldShowConnectionDirection() const;
     bool shouldShowConnectionActivity() const;
     void setOverlayMask(int mask);
@@ -256,6 +262,7 @@ public:
     bool showAiAnnotations : 1 = true;
     bool showAiGhosts : 1 = true;
     bool showAiHud : 1 = true;
+    bool showAiSketch : 1 = true;
     bool showConnectionDirection : 1 = false;
     bool showConnectionActivity : 1 = false;
 
@@ -275,6 +282,9 @@ public:
     std::uint32_t mcpNoteOpenedAt = 0; // grace period so it can't self-close on open
     int mcpNoteHover = -1;             // hovered note index (-1 = none)
     bool mcpNoteHoverClose = false;    // hovering the dismiss "x"
+    int mcpNoteHoverChip = -1;         // hovered pivot chip index (-1 = none)
+    bool mcpNoteHoverSidebar = false;  // hovering the sidebar link icon "↗"
+    bool mcpNoteHoverReply = false;    // hovering the inline reply button "💬"
 
     // PRD Copilot: floating selection prompt pill (the "sculptor's chisel").
     // A glass prompt field that blooms under the selection; Enter sends it via
@@ -306,6 +316,26 @@ public:
         Canvas* canvas;
     };
     std::unique_ptr<SelectionPillAnimator> mcpPillAnimator;
+
+    struct SketchPoint {
+        float x = 0.0f;
+        float y = 0.0f;
+        double t = 0.0;
+    };
+    std::vector<SketchPoint> mcpCurrentStroke;
+    std::vector<std::vector<SketchPoint>> mcpCompletedStrokes;
+    bool isSketching = false;
+    bool mcpSketchToolActive = false;
+    float mcpSketchAlpha = 1.0f;
+
+    struct SketchFadeTimer : public juce::Timer {
+        explicit SketchFadeTimer(Canvas* c) : canvas(c) {}
+        void timerCallback() override;
+        Canvas* canvas;
+    };
+    std::unique_ptr<SketchFadeTimer> mcpSketchFadeTimer;
+    void startSketchFadeTimer();
+    void renderSketchOverlay(NVGcontext* nvg);
     // On-demand tool drawer (pressing "/" in the pill). Tools, not orders:
     // a native popup of neutral capabilities. Never shown unless asked.
     void showPillToolsMenu();

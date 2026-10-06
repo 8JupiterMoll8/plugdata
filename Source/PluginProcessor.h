@@ -62,6 +62,7 @@ public:
     // Reverse identity lookup (C++ truth): the stable tempId for a live pd object,
     // read straight from the bridge's own stable map — never from the TS mirror.
     juce::String getStableId(t_gobj* g) const;
+    juce::String getOrAdoptStableId(t_canvas* canvas, t_gobj* g);
     void sendMCPReply(const String& replyAddr, const SmallArray<pd::Atom>& atoms);
 
     bool hasMcpTransaction(t_canvas* cnv) const;
@@ -251,6 +252,7 @@ public:
         float x = 0, y = 0; // patch coords (placed in the margin beside the target)
         juce::String text;
         juce::String targetId; // tempId this note is attached to (may be empty)
+        juce::StringArray targetIds; // multi-selection targets
         juce::String kind;     // info | change | warn | artist  (drives the colour)
         double t = 0;          // creation time (s) — notes auto-fade after a TTL
         bool hasLeader = false;      // draw a thin line from the note to the object

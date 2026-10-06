@@ -11,6 +11,7 @@
 #include "Statusbar.h"
 #include "Canvas.h"
 #include "Object.h"
+#include "Sidebar/CopilotPanel.h"
 #include "Connection.h"
 #include "PluginProcessor.h"
 #include "Pd/MCPBridge.h" // artist-note forwarding from the inline note editor
@@ -605,6 +606,46 @@ void Canvas::updateFramebuffers(NVGcontext* nvg)
     }
 }
 
+namespace {
+struct AnnotationPivotChip {
+    juce::String label;
+    juce::String prompt;
+};
+
+static std::vector<AnnotationPivotChip> getAnnotationPivotChips(const juce::String& text, const juce::String& /*kind*/)
+{
+    juce::String lower = text.toLowerCase();
+    std::vector<AnnotationPivotChip> chips;
+
+    if (lower.contains("cutoff") || lower.contains("filter") || lower.contains("vcf") || lower.contains("lop~") || lower.contains("synth") || lower.contains("core")) {
+        chips.push_back({ "Dunkler", "Cutoff tiefer und sanfter filtern" });
+        chips.push_back({ "Bissiger", "Mehr Obertöne, Drive und Filter-Bite" });
+    } else if (lower.contains("decay") || lower.contains("envelope") || lower.contains("modulator") || lower.contains("vline~") || lower.contains("vca")) {
+        chips.push_back({ "Kürzer", "Kürzere und knackigere Hüllkurve" });
+        chips.push_back({ "Länger", "Längere Decay-Zeit für schwebenden Tail" });
+    } else if (lower.contains("control") || lower.contains("macro") || lower.contains("bay") || lower.contains("freq")) {
+        chips.push_back({ "Tief & Fett", "Tiefere Grundfrequenz und fetter Bass" });
+        chips.push_back({ "Höher", "Höhere Lage für Melodie und Lead" });
+    } else if (lower.contains("drive") || lower.contains("tanh~") || lower.contains("crunch") || lower.contains("grit")) {
+        chips.push_back({ "Cleaner", "Weniger Sättigung und Verzerrung" });
+        chips.push_back({ "Mehr Grit", "Mehr Drive und analoge Crunch-Sättigung" });
+    } else {
+        chips.push_back({ "Variieren", "Variiere die Klangfarbe und Parameter dieses Moduls" });
+        chips.push_back({ "Extremer", "Extremere Modulation und Charakter" });
+    }
+
+    chips.push_back({ "Reply", "__reply__" });
+    chips.push_back({ "Undo", "__undo__" });
+
+    return chips;
+}
+
+static float getChipWidth(const juce::String& label)
+{
+    return std::max(46.0f, label.length() * 6.6f + 16.0f);
+}
+} // namespace
+
 // Callback from canvasViewport to perform actual rendering
 void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
 {
@@ -669,11 +710,13 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
                     }
                 }
                 if (first) continue; // All member objects deleted -> auto-prune
-                constexpr int pad = 22;
-                rx = canvasOrigin.x + static_cast<float>(minX - pad);
-                ry = canvasOrigin.y + static_cast<float>(minY - pad - 16);
-                rw = static_cast<float>(maxX - minX + pad * 2);
-                rh = static_cast<float>(maxY - minY + pad * 2 + 16);
+                constexpr int padX = 18;
+                constexpr int padYTop = 48;
+                constexpr int padYBottom = 18;
+                rx = canvasOrigin.x + static_cast<float>(minX - padX);
+                ry = canvasOrigin.y + static_cast<float>(minY - padYTop);
+                rw = static_cast<float>(maxX - minX + padX * 2);
+                rh = static_cast<float>(maxY - minY + padYTop + padYBottom);
             } else {
                 rx = canvasOrigin.x + r.x;
                 ry = canvasOrigin.y + r.y;
@@ -684,26 +727,50 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
             NVGScopedState scopedRegion(nvg);
             juce::String const k = r.kind.isNotEmpty() ? r.kind : juce::String("group");
             int ar = 0x8a, ag = 0x93, ab = 0xa6;
-            if (k == "source") { ar = 0x3d; ag = 0xdd; ab = 0x8a; }
-            else if (k == "fx") { ar = 0x4a; ag = 0x9e; ab = 0xff; }
-            else if (k == "loop") { ar = 0xff; ag = 0xbe; ab = 0x50; }
-            else if (k == "output") { ar = 0xff; ag = 0x5a; ab = 0x5a; }
+            if (k == "source") { ar = 0x3d; ag = 0xdd; ab = 0x8a; }      // Emerald Green
+            else if (k == "fx") { ar = 0x4a; ag = 0x9e; ab = 0xff; }     // Electric Cyan
+            else if (k == "loop") { ar = 0xff; ag = 0xbe; ab = 0x50; }   // Warm Amber
+            else if (k == "output") { ar = 0xff; ag = 0x5a; ab = 0x5a; } // Coral Red
+
+            // 1. Module Chassis Backplate
             nvgBeginPath(nvg);
             nvgRoundedRect(nvg, rx, ry, rw, rh, 8.0f);
-            nvgFillColor(nvg, nvgRGBA(ar, ag, ab, 26));
+            nvgFillColor(nvg, nvgRGBA(ar, ag, ab, 22));
             nvgFill(nvg);
-            nvgStrokeColor(nvg, nvgRGBA(ar, ag, ab, 150));
-            nvgStrokeWidth(nvg, 1.5f);
+            nvgStrokeColor(nvg, nvgRGBA(ar, ag, ab, 140));
+            nvgStrokeWidth(nvg, 1.2f);
             nvgLineStyle(nvg, NVG_LINE_DASHED);
-            nvgDashLength(nvg, 8.0f);
+            nvgDashLength(nvg, 6.0f);
             nvgStroke(nvg);
             nvgLineStyle(nvg, NVG_LINE_SOLID);
+
+            // 2. Hardware Module Faceplate Title Badge
             if (r.title.isNotEmpty()) {
-                nvgFontSize(nvg, 12.0f);
+                nvgFontSize(nvg, 11.0f);
                 nvgFontFace(nvg, "Inter");
-                nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
-                nvgFillColor(nvg, nvgRGBA(ar, ag, ab, 235));
-                nvgText(nvg, rx + 8.0f, ry + 5.0f, r.title.toRawUTF8(), nullptr);
+                float bounds[4];
+                nvgTextBounds(nvg, rx + 10.0f, ry + 6.0f, r.title.toRawUTF8(), nullptr, bounds);
+                float const tw = bounds[2] - bounds[0];
+
+                // Dark chassis badge
+                nvgBeginPath(nvg);
+                nvgRoundedRect(nvg, rx + 8.0f, ry + 5.0f, tw + 22.0f, 18.0f, 4.0f);
+                nvgFillColor(nvg, nvgRGBA(16, 18, 22, 230));
+                nvgFill(nvg);
+                nvgStrokeColor(nvg, nvgRGBA(ar, ag, ab, 100));
+                nvgStrokeWidth(nvg, 1.0f);
+                nvgStroke(nvg);
+
+                // Status Jewel LED
+                nvgBeginPath(nvg);
+                nvgCircle(nvg, rx + 16.0f, ry + 14.0f, 2.5f);
+                nvgFillColor(nvg, nvgRGBA(ar, ag, ab, 255));
+                nvgFill(nvg);
+
+                // Title Text
+                nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+                nvgFillColor(nvg, nvgRGBA(ar, ag, ab, 245));
+                nvgText(nvg, rx + 23.0f, ry + 14.0f, r.title.toRawUTF8(), nullptr);
             }
         }
     }
@@ -848,67 +915,248 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
         connection->render(nvg);
     }
 
-    // PRD overlay: short in-place AI annotations — a translucent tag near the
-    // object it explains, so the reason lives on the patch, not in chat.
+    // PRD overlay: Console Tape (Eurorack Scribble Strip) annotations.
+    // Pinned directly above the module strip, bounded to column width (0% horizontal spill).
     if (pd && shouldShowAIAnnotations() && !pd->getMcpAnnotations().empty()) {
         int noteIdx = 0;
         for (auto const& a : pd->getMcpAnnotations()) {
             if (a.text.isEmpty()) continue;
             float rawAx = 0.0f, rawAy = 0.0f, rawLx = 0.0f, rawLy = 0.0f;
             bool hasLead = false;
-            if (!getAnnotationLiveBounds(a.targetId, a.x, a.y, a.leaderX, a.leaderY, a.hasLeader, rawAx, rawAy, rawLx, rawLy, hasLead))
+            juce::Rectangle<int> grpBounds;
+            if (!getAnnotationLiveBounds(a.targetId, a.targetIds, a.x, a.y, a.leaderX, a.leaderY, a.hasLeader, rawAx, rawAy, rawLx, rawLy, hasLead, &grpBounds))
                 continue;
 
+            auto const tapeBounds = getAnnotationScreenBounds(static_cast<size_t>(noteIdx));
+            if (tapeBounds.isEmpty()) continue;
+
             NVGScopedState scopedAnn(nvg);
-            float const ax = canvasOrigin.x + rawAx;
-            float const ay = canvasOrigin.y + rawAy;
+            float const ax = tapeBounds.getX();
+            float const ay = tapeBounds.getY();
+            float const tapeW = tapeBounds.getWidth();
+            float const tapeH = tapeBounds.getHeight();
+
             // Colour by kind so the artist can tell notes apart at a glance.
             juce::String const k = a.kind.isNotEmpty() ? a.kind : juce::String("info");
-            int ar = 0x4a, ag = 0x9e, ab = 0xff;
-            if (k == "change") { ar = 0x3d; ag = 0xdd; ab = 0x8a; }
-            else if (k == "warn") { ar = 0xff; ag = 0x5a; ab = 0x5a; }
-            else if (k == "artist") { ar = 0xff; ag = 0xbe; ab = 0x50; }
+            int ar = 0x4a, ag = 0x9e, ab = 0xff; // cyan
+            if (k == "change") { ar = 0x3d; ag = 0xdd; ab = 0x8a; }      // green
+            else if (k == "warn") { ar = 0xff; ag = 0x5a; ab = 0x5a; }   // red
+            else if (k == "artist") { ar = 0xff; ag = 0xbe; ab = 0x50; } // amber
             NVGcolor const accent = nvgRGBA(ar, ag, ab, 255);
-            // Leader line from the note (in the margin) to the object it explains.
-            if (hasLead) {
-                NVGScopedState scopedLeader(nvg);
+            bool const isHovered = (noteIdx == mcpNoteHover);
+            bool const isCloseHover = (isHovered && mcpNoteHoverClose);
+
+            // 1. Tactile Selection Region: illuminate with soft neon tint on hover
+            if (isHovered && !grpBounds.isEmpty()) {
+                constexpr int pad = 6;
+                float const rx = canvasOrigin.x + static_cast<float>(grpBounds.getX() - pad);
+                float const ry = canvasOrigin.y + static_cast<float>(grpBounds.getY() - pad);
+                float const rw = static_cast<float>(grpBounds.getWidth() + pad * 2);
+                float const rh = static_cast<float>(grpBounds.getHeight() + pad * 2);
+
                 nvgBeginPath(nvg);
-                nvgMoveTo(nvg, canvasOrigin.x + rawLx, canvasOrigin.y + rawLy);
-                nvgLineTo(nvg, ax - 6.0f, ay);
-                nvgStrokeColor(nvg, nvgRGBA(ar, ag, ab, 120));
-                nvgStrokeWidth(nvg, 1.0f);
+                nvgRoundedRect(nvg, rx, ry, rw, rh, 5.0f);
+                nvgFillColor(nvg, nvgRGBA(ar, ag, ab, 22));
+                nvgFill(nvg);
+                nvgStrokeColor(nvg, nvgRGBA(ar, ag, ab, 170));
+                nvgStrokeWidth(nvg, 1.2f);
                 nvgLineStyle(nvg, NVG_LINE_DASHED);
-                nvgDashLength(nvg, 4.0f);
+                nvgDashLength(nvg, 5.0f);
                 nvgStroke(nvg);
                 nvgLineStyle(nvg, NVG_LINE_SOLID);
             }
-            nvgFontSize(nvg, 12.0f);
-            nvgFontFace(nvg, "Inter");
-            nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
-            // Estimated width — deliberately the SAME formula the hit-test uses, so the
-            // drawn "x" lines up exactly with the dismiss zone.
-            float const tw = a.text.length() * 7.0f;
-            float const w = tw + 28.0f; // text + padding + dismiss "x" + accent bar
-            constexpr float h = 18.0f;
-            bool const hovered = (noteIdx == mcpNoteHover);
+
+            // 2. Hardware Console Tape Anchor: vertical tick connecting tape to module
+            if (hasLead && !grpBounds.isEmpty()) {
+                float const tickX = ax + 14.0f;
+                float const tickY1 = ay + tapeH;
+                float const tickY2 = canvasOrigin.y + static_cast<float>(grpBounds.getY());
+                nvgBeginPath(nvg);
+                nvgMoveTo(nvg, tickX, tickY1);
+                nvgLineTo(nvg, tickX, tickY2);
+                nvgStrokeColor(nvg, nvgRGBA(ar, ag, ab, isHovered ? 200 : 120));
+                nvgStrokeWidth(nvg, 1.0f);
+                nvgStroke(nvg);
+
+                // Small anchor rivet dot at module top edge
+                nvgBeginPath(nvg);
+                nvgCircle(nvg, tickX, tickY2, 2.0f);
+                nvgFillColor(nvg, nvgRGBA(ar, ag, ab, isHovered ? 240 : 160));
+                nvgFill(nvg);
+            }
+
+            // 3. Drop Shadow for depth
             nvgBeginPath(nvg);
-            nvgRoundedRect(nvg, ax - 6.0f, ay - h * 0.5f, w, h, 4.0f);
-            nvgFillColor(nvg, nvgRGBA(22, 22, 28, hovered ? 238 : 200));
+            nvgRoundedRect(nvg, ax, ay + 1.0f, tapeW, tapeH, 4.0f);
+            nvgFillColor(nvg, nvgRGBA(10, 10, 14, 180));
             nvgFill(nvg);
-            nvgStrokeColor(nvg, accent); // kind-coloured outline
+
+            // 4. Console Tape Chassis (Matte dark Eurorack scribble strip)
+            nvgBeginPath(nvg);
+            nvgRoundedRect(nvg, ax, ay, tapeW, tapeH, 3.5f);
+            nvgFillColor(nvg, nvgRGBA(20, 21, 26, isHovered ? 250 : 230));
+            nvgFill(nvg);
+            nvgStrokeColor(nvg, isHovered ? accent : nvgRGBA(ar, ag, ab, 140));
+            nvgStrokeWidth(nvg, isHovered ? 1.4f : 1.0f);
+            nvgStroke(nvg);
+
+            // 5. Top bevel reflection (milled brushed aluminum edge)
+            nvgBeginPath(nvg);
+            nvgMoveTo(nvg, ax + 3.0f, ay + 1.0f);
+            nvgLineTo(nvg, ax + tapeW - 3.0f, ay + 1.0f);
+            nvgStrokeColor(nvg, nvgRGBA(255, 255, 255, isHovered ? 50 : 25));
             nvgStrokeWidth(nvg, 1.0f);
             nvgStroke(nvg);
-            // left accent bar
+
+            // 6. Left accent bar
             nvgBeginPath(nvg);
-            nvgRoundedRect(nvg, ax - 6.0f, ay - h * 0.5f, 3.5f, h, 2.0f);
+            nvgRoundedRect(nvg, ax + 2.0f, ay + 2.5f, 2.5f, tapeH - 5.0f, 1.2f);
             nvgFillColor(nvg, accent);
             nvgFill(nvg);
-            nvgFillColor(nvg, nvgRGBA(232, 232, 244, 235));
-            nvgText(nvg, ax, ay, a.text.toRawUTF8(), nullptr);
-            // dismiss "x" (rightmost) — click it to remove the note
-            nvgFontSize(nvg, 11.0f);
-            nvgFillColor(nvg, hovered ? nvgRGBA(255, 255, 255, 240) : accent);
-            nvgText(nvg, ax + tw + 8.0f, ay, "x", nullptr);
+
+            // 7. Jewel LED Diode on tape
+            float const ledX = ax + 14.0f;
+            float const ledY = ay + tapeH * 0.5f;
+
+            // Soft glow
+            nvgBeginPath(nvg);
+            nvgCircle(nvg, ledX, ledY, 5.0f);
+            nvgFillColor(nvg, nvgRGBA(ar, ag, ab, isHovered ? 60 : 30));
+            nvgFill(nvg);
+
+            // Diode body
+            nvgBeginPath(nvg);
+            nvgCircle(nvg, ledX, ledY, 2.8f);
+            nvgFillColor(nvg, accent);
+            nvgFill(nvg);
+
+            // Specular glint
+            nvgBeginPath(nvg);
+            nvgCircle(nvg, ledX - 0.8f, ledY - 0.8f, 0.8f);
+            nvgFillColor(nvg, nvgRGBA(255, 255, 255, 220));
+            nvgFill(nvg);
+
+            // 8. Scribble text
+            nvgFontSize(nvg, 11.5f);
+            nvgFontFace(nvg, "Inter");
+            nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+
+            // Scissor so text NEVER overflows past right action buttons
+            float const textLeft = ax + 24.0f;
+            float const rightZoneW = 32.0f; // space for sidebar icon + close x
+            float const maxTextW = std::max(20.0f, tapeW - 24.0f - rightZoneW);
+            nvgScissor(nvg, textLeft, ay, maxTextW, tapeH);
+            nvgFillColor(nvg, isHovered ? nvgRGBA(255, 255, 255, 255) : nvgRGBA(225, 228, 238, 230));
+            nvgText(nvg, textLeft, ay + tapeH * 0.5f, a.text.toRawUTF8(), nullptr);
+            nvgResetScissor(nvg);
+
+            // 9. Right Icons: Notebook link ↗ & Dismiss ✕
+            // Sidebar Notebook link icon (subtle ↗ arrow)
+            float const iconX = ax + tapeW - 23.0f;
+            nvgBeginPath(nvg);
+            nvgMoveTo(nvg, iconX - 2.5f, ay + tapeH * 0.5f + 2.5f);
+            nvgLineTo(nvg, iconX + 2.5f, ay + tapeH * 0.5f - 2.5f);
+            nvgMoveTo(nvg, iconX - 0.5f, ay + tapeH * 0.5f - 2.5f);
+            nvgLineTo(nvg, iconX + 2.5f, ay + tapeH * 0.5f - 2.5f);
+            nvgLineTo(nvg, iconX + 2.5f, ay + tapeH * 0.5f + 0.5f);
+            nvgStrokeColor(nvg, (!isCloseHover && isHovered) ? accent : nvgRGBA(ar, ag, ab, 120));
+            nvgStrokeWidth(nvg, 1.1f);
+            nvgStroke(nvg);
+
+            // Dismiss 'x'
+            float const closeX = ax + tapeW - 9.0f;
+            nvgFontSize(nvg, 10.5f);
+            nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+            nvgFillColor(nvg, isCloseHover ? nvgRGBA(255, 90, 90, 255) : (isHovered ? nvgRGBA(255, 140, 140, 200) : nvgRGBA(ar, ag, ab, 130)));
+            nvgText(nvg, closeX, ay + tapeH * 0.5f, "x", nullptr);
+
+            // 10. Pivot Chips Drawer (blooms below hovered tape)
+            if (isHovered && mcpNoteEditIndex != noteIdx) {
+                auto const chips = getAnnotationPivotChips(a.text, a.kind);
+                float totalChipsW = 0.0f;
+                for (auto const& c : chips) totalChipsW += getChipWidth(c.label) + 4.0f;
+                float const drawerW = std::max(tapeW, totalChipsW + 4.0f);
+                float const drawerX = ax;
+                float const drawerY = ay + tapeH + 2.0f;
+                float const drawerH = 22.0f;
+
+                // Subtle drop shadow
+                nvgBeginPath(nvg);
+                nvgRoundedRect(nvg, drawerX, drawerY + 1.0f, drawerW, drawerH, 4.0f);
+                nvgFillColor(nvg, nvgRGBA(8, 9, 12, 160));
+                nvgFill(nvg);
+
+                // Smoked glass chassis with subtle accent stroke
+                nvgBeginPath(nvg);
+                nvgRoundedRect(nvg, drawerX, drawerY, drawerW, drawerH, 3.5f);
+                nvgFillColor(nvg, nvgRGBA(18, 19, 24, 245));
+                nvgFill(nvg);
+                nvgStrokeColor(nvg, nvgRGBA(ar, ag, ab, 90));
+                nvgStrokeWidth(nvg, 1.0f);
+                nvgStroke(nvg);
+
+                // Render each chip
+                float curChipX = drawerX + 4.0f;
+                float const chipY = drawerY + 2.5f;
+                float const chipH = drawerH - 5.0f;
+
+                for (size_t ci = 0; ci < chips.size(); ++ci) {
+                    auto const& chip = chips[ci];
+                    float const cw = getChipWidth(chip.label);
+                    bool const isThisChipHovered = (mcpNoteHoverChip == static_cast<int>(ci));
+
+                    NVGcolor bgCol, strkCol, txtCol;
+                    if (chip.prompt == "__undo__") {
+                        if (isThisChipHovered) {
+                            bgCol = nvgRGBA(170, 45, 45, 240);
+                            strkCol = nvgRGBA(255, 90, 90, 255);
+                            txtCol = nvgRGBA(255, 255, 255, 255);
+                        } else {
+                            bgCol = nvgRGBA(34, 22, 24, 210);
+                            strkCol = nvgRGBA(110, 40, 40, 160);
+                            txtCol = nvgRGBA(230, 140, 140, 220);
+                        }
+                    } else if (chip.prompt == "__reply__") {
+                        if (isThisChipHovered) {
+                            bgCol = nvgRGBA(45, 115, 215, 240);
+                            strkCol = nvgRGBA(90, 175, 255, 255);
+                            txtCol = nvgRGBA(255, 255, 255, 255);
+                        } else {
+                            bgCol = nvgRGBA(24, 32, 46, 210);
+                            strkCol = nvgRGBA(55, 95, 150, 160);
+                            txtCol = nvgRGBA(155, 200, 255, 220);
+                        }
+                    } else {
+                        // Sound pivot chip
+                        if (isThisChipHovered) {
+                            bgCol = nvgRGBA(ar, ag, ab, 220);
+                            strkCol = accent;
+                            txtCol = nvgRGBA(14, 16, 20, 255);
+                        } else {
+                            bgCol = nvgRGBA(28, 30, 38, 220);
+                            strkCol = nvgRGBA(65, 75, 95, 160);
+                            txtCol = nvgRGBA(215, 222, 235, 230);
+                        }
+                    }
+
+                    nvgBeginPath(nvg);
+                    nvgRoundedRect(nvg, curChipX, chipY, cw, chipH, 2.5f);
+                    nvgFillColor(nvg, bgCol);
+                    nvgFill(nvg);
+                    nvgStrokeColor(nvg, strkCol);
+                    nvgStrokeWidth(nvg, 1.0f);
+                    nvgStroke(nvg);
+
+                    nvgFontSize(nvg, 10.0f);
+                    nvgFontFace(nvg, "Inter");
+                    nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+                    nvgFillColor(nvg, txtCol);
+                    nvgText(nvg, curChipX + cw * 0.5f, chipY + chipH * 0.5f, chip.label.toRawUTF8(), nullptr);
+
+                    curChipX += cw + 4.0f;
+                }
+            }
+
             ++noteIdx;
         }
     }
@@ -981,6 +1229,36 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
             nvgLineTo(nvg, cx, cy + 4.5f);
             nvgStrokeColor(nvg, isPlusActive ? nvgRGBA(74, 180, 255, 255) : nvgRGBA(220, 230, 245, 230));
             nvgStrokeWidth(nvg, 1.6f);
+            nvgStroke(nvg);
+
+            // Right: ✏️ Pen / Sketch button
+            float const pw = 24.0f;
+            float const ph = 20.0f;
+            float const px = w - 58.0f;
+            float const py = (h - ph) * 0.5f;
+
+            if (mcpSketchToolActive) {
+                nvgDrawRoundedRect(nvg, px, py, pw, ph, nvgRGBA(0, 180, 220, 240), nvgRGBA(0, 245, 255, 255), 4.0f);
+            } else {
+                nvgDrawRoundedRect(nvg, px, py, pw, ph, nvgRGBA(38, 42, 50, 230), nvgRGBA(160, 175, 200, 80), 4.0f);
+            }
+
+            float const pcx = px + pw * 0.5f;
+            float const pcy = py + ph * 0.5f;
+            nvgBeginPath(nvg);
+            nvgMoveTo(nvg, pcx - 4.5f, pcy + 4.5f);
+            nvgLineTo(nvg, pcx + 2.5f, pcy - 4.5f);
+            nvgLineTo(nvg, pcx + 5.0f, pcy - 2.0f);
+            nvgLineTo(nvg, pcx - 2.0f, pcy + 5.0f);
+            nvgClosePath(nvg);
+            nvgStrokeColor(nvg, mcpSketchToolActive ? nvgRGBA(255, 255, 255, 255) : nvgRGBA(200, 215, 235, 220));
+            nvgStrokeWidth(nvg, 1.2f);
+            nvgStroke(nvg);
+            nvgBeginPath(nvg);
+            nvgMoveTo(nvg, pcx - 4.5f, pcy + 4.5f);
+            nvgLineTo(nvg, pcx - 6.0f, pcy + 6.0f);
+            nvgStrokeColor(nvg, mcpSketchToolActive ? nvgRGBA(255, 255, 255, 255) : nvgRGBA(0, 230, 255, 220));
+            nvgStrokeWidth(nvg, 1.4f);
             nvgStroke(nvg);
 
             // Right: 🎙️ Mic / Voice button
@@ -1270,6 +1548,9 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
         mcpApprovalYes = {};
         mcpApprovalNo = {};
     }
+    // Multimodal Pen / Sketch Ink Overlay (Rendered directly on GPU in canvas coords)
+    renderSketchOverlay(nvg);
+
     // PRD overlay: ghost/preview of PROPOSED (uncommitted) changes. Drawn above
     // the patch, never part of it — the artist sees the change before it's real.
     if (pd && shouldShowAIGhosts() && !pd->getMcpGhosts().empty()) {
@@ -1639,12 +1920,16 @@ bool Canvas::shouldShowAIState() const
 
 bool Canvas::shouldShowAIRegions() const
 {
-    return showAiRegions && !presentationMode.getValue();
+    if (presentationMode.getValue()) return false;
+    if (pd && !pd->getMcpRegions().empty()) return true;
+    return showAiRegions;
 }
 
 bool Canvas::shouldShowAIAnnotations() const
 {
-    return showAiAnnotations && !presentationMode.getValue();
+    if (presentationMode.getValue()) return false;
+    if (pd && !pd->getMcpAnnotations().empty()) return true;
+    return showAiAnnotations;
 }
 
 bool Canvas::shouldShowAIGhosts() const
@@ -1655,6 +1940,107 @@ bool Canvas::shouldShowAIGhosts() const
 bool Canvas::shouldShowAIHud() const
 {
     return showAiHud && !presentationMode.getValue();
+}
+
+bool Canvas::shouldShowAISketch() const
+{
+    if (presentationMode.getValue()) return false;
+    return showAiSketch;
+}
+
+void Canvas::setSketchToolActive(bool active)
+{
+    mcpSketchToolActive = active;
+    setMouseCursor(active ? MouseCursor::CrosshairCursor : MouseCursor::NormalCursor);
+    repaint();
+    if (editor) editor->nvgSurface.renderAll();
+}
+
+bool Canvas::isSketchToolActive() const
+{
+    return mcpSketchToolActive;
+}
+
+bool Canvas::isSketchingActive() const
+{
+    return isSketching;
+}
+
+void Canvas::SketchFadeTimer::timerCallback()
+{
+    if (!canvas) return;
+    canvas->mcpSketchAlpha -= 0.025f;
+    if (canvas->mcpSketchAlpha <= 0.0f) {
+        canvas->mcpSketchAlpha = 0.0f;
+        canvas->mcpCompletedStrokes.clear();
+        stopTimer();
+    }
+    canvas->repaint();
+    if (canvas->editor) canvas->editor->nvgSurface.renderAll();
+}
+
+void Canvas::startSketchFadeTimer()
+{
+    mcpSketchAlpha = 1.0f;
+    if (!mcpSketchFadeTimer) {
+        mcpSketchFadeTimer = std::make_unique<SketchFadeTimer>(this);
+    }
+    mcpSketchFadeTimer->startTimerHz(40);
+}
+
+void Canvas::renderSketchOverlay(NVGcontext* nvg)
+{
+    if (!shouldShowAISketch()) return;
+
+    auto drawStroke = [&](const std::vector<SketchPoint>& stroke, float alpha) {
+        if (stroke.size() < 2) return;
+
+        // 1. Outer Glow (Electric Cyan, soft wide stroke)
+        nvgBeginPath(nvg);
+        nvgMoveTo(nvg, stroke[0].x, stroke[0].y);
+        for (size_t i = 1; i < stroke.size(); ++i) {
+            nvgLineTo(nvg, stroke[i].x, stroke[i].y);
+        }
+        nvgLineCap(nvg, NVG_ROUND);
+        nvgLineJoin(nvg, NVG_ROUND);
+        nvgStrokeWidth(nvg, 7.0f);
+        nvgStrokeColor(nvg, nvgRGBA(0, 230, 255, static_cast<unsigned char>(alpha * 120.0f)));
+        nvgStroke(nvg);
+
+        // 2. Cyan Body
+        nvgBeginPath(nvg);
+        nvgMoveTo(nvg, stroke[0].x, stroke[0].y);
+        for (size_t i = 1; i < stroke.size(); ++i) {
+            nvgLineTo(nvg, stroke[i].x, stroke[i].y);
+        }
+        nvgLineCap(nvg, NVG_ROUND);
+        nvgLineJoin(nvg, NVG_ROUND);
+        nvgStrokeWidth(nvg, 3.5f);
+        nvgStrokeColor(nvg, nvgRGBA(0, 245, 255, static_cast<unsigned char>(alpha * 220.0f)));
+        nvgStroke(nvg);
+
+        // 3. Hot White Center Core
+        nvgBeginPath(nvg);
+        nvgMoveTo(nvg, stroke[0].x, stroke[0].y);
+        for (size_t i = 1; i < stroke.size(); ++i) {
+            nvgLineTo(nvg, stroke[i].x, stroke[i].y);
+        }
+        nvgLineCap(nvg, NVG_ROUND);
+        nvgLineJoin(nvg, NVG_ROUND);
+        nvgStrokeWidth(nvg, 1.5f);
+        nvgStrokeColor(nvg, nvgRGBA(255, 255, 255, static_cast<unsigned char>(alpha * 240.0f)));
+        nvgStroke(nvg);
+    };
+
+    if (mcpSketchAlpha > 0.001f) {
+        for (auto const& s : mcpCompletedStrokes) {
+            drawStroke(s, mcpSketchAlpha);
+        }
+    }
+
+    if (isSketching && !mcpCurrentStroke.empty()) {
+        drawStroke(mcpCurrentStroke, 1.0f);
+    }
 }
 
 // The server signals a pending destructive op via the HUD chapter ("APPROVE?").
@@ -1754,6 +2140,7 @@ void Canvas::updateOverlays()
     showAiAnnotations = overlayState & AIAnnotations;
     showAiGhosts = overlayState & AIGhosts;
     showAiHud = overlayState & AIHud;
+    showAiSketch = overlayState & AISketch;
     showConnectionDirection = overlayState & Direction;
     showConnectionActivity = overlayState & ConnectionActivity;
 
@@ -2162,25 +2549,71 @@ Object* Canvas::findObjectByStableId(juce::String const& targetId) const
     return nullptr;
 }
 
-bool Canvas::getAnnotationLiveBounds(juce::String const& targetId, float fallbackX, float fallbackY, float fallbackLx, float fallbackLy, bool fallbackHasLeader, float& outAx, float& outAy, float& outLx, float& outLy, bool& outHasLeader) const
+bool Canvas::getAnnotationLiveBounds(juce::String const& targetId, juce::StringArray const& targetIds, float fallbackX, float fallbackY, float fallbackLx, float fallbackLy, bool fallbackHasLeader, float& outAx, float& outAy, float& outLx, float& outLy, bool& outHasLeader, juce::Rectangle<int>* outGroupBounds) const
 {
-    if (targetId.isNotEmpty()) {
-        if (auto* obj = findObjectByStableId(targetId)) {
-            auto const b = obj->getObjectBounds();
-            float const ox = static_cast<float>(b.getX());
-            float const oy = static_cast<float>(b.getY());
-            float const ow = static_cast<float>(b.getWidth());
-            float const oh = static_cast<float>(b.getHeight());
-            outLx = ox + ow;
-            outLy = oy + oh * 0.5f;
-            outAx = outLx + 20.0f;
-            outAy = outLy;
+    auto const ids = targetIds.size() > 0 ? targetIds : (targetId.isNotEmpty() ? juce::StringArray(targetId) : juce::StringArray());
+    if (ids.size() > 0) {
+        bool first = true;
+        int minX = 0, minY = 0, maxX = 0, maxY = 0;
+        for (auto const& tid : ids) {
+            if (auto* obj = findObjectByStableId(tid)) {
+                auto const b = obj->getObjectBounds();
+                if (first) {
+                    minX = b.getX(); minY = b.getY();
+                    maxX = b.getRight(); maxY = b.getBottom();
+                    first = false;
+                } else {
+                    minX = std::min(minX, b.getX());
+                    minY = std::min(minY, b.getY());
+                    maxX = std::max(maxX, b.getRight());
+                    maxY = std::max(maxY, b.getBottom());
+                }
+            }
+        }
+        if (!first) {
+            if (outGroupBounds) {
+                *outGroupBounds = juce::Rectangle<int>(minX, minY, maxX - minX, maxY - minY);
+            }
+
+            // Console Tape: pinned directly above the top edge of the module strip
+            outLx = static_cast<float>(minX + 14);
+            outLy = static_cast<float>(minY);
+            outAx = static_cast<float>(minX);
+            outAy = static_cast<float>(minY - 24);
             outHasLeader = true;
+
+            // Stack multiple notes on the same group vertically upwards
+            if (pd) {
+                auto const allAnns = pd->getMcpAnnotations();
+                int noteOrder = 0;
+                for (auto const& prevA : allAnns) {
+                    bool isSelf = false;
+                    if (prevA.targetIds.size() > 0 && ids.size() > 0) {
+                        if (prevA.targetIds == ids) isSelf = true;
+                    } else if (prevA.targetId == targetId) {
+                        isSelf = true;
+                    }
+                    if (isSelf) break;
+                    // Check if targeting the same objects
+                    bool sameTarget = false;
+                    auto const prevIds = prevA.targetIds.size() > 0 ? prevA.targetIds : (prevA.targetId.isNotEmpty() ? juce::StringArray(prevA.targetId) : juce::StringArray());
+                    for (auto const& ptid : prevIds) {
+                        for (auto const& tid : ids) {
+                            if (ptid == tid) { sameTarget = true; break; }
+                        }
+                        if (sameTarget) break;
+                    }
+                    if (sameTarget) ++noteOrder;
+                }
+                outAy -= noteOrder * 24.0f;
+            }
+
             return true;
         }
-        // Attached to an object that was deleted -> auto-prune
-        return false;
+        return false; // All target objects deleted -> auto-prune
     }
+
+    if (outGroupBounds) *outGroupBounds = juce::Rectangle<int>();
     outAx = fallbackX;
     outAy = fallbackY;
     outLx = fallbackLx;
@@ -2189,36 +2622,97 @@ bool Canvas::getAnnotationLiveBounds(juce::String const& targetId, float fallbac
     return true;
 }
 
+bool Canvas::getAnnotationLiveBounds(juce::String const& targetId, float fallbackX, float fallbackY, float fallbackLx, float fallbackLy, bool fallbackHasLeader, float& outAx, float& outAy, float& outLx, float& outLy, bool& outHasLeader) const
+{
+    return getAnnotationLiveBounds(targetId, juce::StringArray(), fallbackX, fallbackY, fallbackLx, fallbackLy, fallbackHasLeader, outAx, outAy, outLx, outLy, outHasLeader, nullptr);
+}
+
+juce::Rectangle<float> Canvas::getAnnotationScreenBounds(size_t annIndex) const
+{
+    if (!pd) return {};
+    auto const anns = pd->getMcpAnnotations();
+    if (annIndex >= anns.size()) return {};
+    auto const& a = anns[annIndex];
+    float rawAx = 0.0f, rawAy = 0.0f, rawLx = 0.0f, rawLy = 0.0f;
+    bool hasLead = false;
+    juce::Rectangle<int> grpBounds;
+    if (!getAnnotationLiveBounds(a.targetId, a.targetIds, a.x, a.y, a.leaderX, a.leaderY, a.hasLeader, rawAx, rawAy, rawLx, rawLy, hasLead, &grpBounds))
+        return {};
+
+    float const ax = canvasOrigin.x + rawAx;
+    float const ay = canvasOrigin.y + rawAy;
+    constexpr float tapeH = 20.0f;
+    float const textW = a.text.length() * 6.8f + 40.0f;
+    float const groupW = grpBounds.isEmpty() ? 140.0f : static_cast<float>(grpBounds.getWidth());
+    float tapeW = 0.0f;
+    if (!grpBounds.isEmpty() && groupW >= 90.0f) {
+        tapeW = std::min(groupW, std::max(80.0f, textW));
+    } else {
+        tapeW = std::max(groupW, std::min(160.0f, textW));
+    }
+    return juce::Rectangle<float>(ax, ay, tapeW, tapeH);
+}
+
 void Canvas::mouseMove(MouseEvent const& e)
 {
-    // Hover feedback: brighten the note under the cursor.
+    // Hover feedback: brighten the note under the cursor & detect chip hovers.
     int hoverIdx = -1;
+    bool hoverClose = false;
+    int hoverChip = -1;
+
     if (pd && !pd->getMcpAnnotations().empty()) {
         auto const pt = e.getPosition().toFloat();
-        auto anns = pd->getMcpAnnotations();
+        auto const anns = pd->getMcpAnnotations();
         for (int i = static_cast<int>(anns.size()) - 1; i >= 0; --i) {
-            auto const& a = anns[static_cast<size_t>(i)];
-            float rawAx = 0.0f, rawAy = 0.0f, rawLx = 0.0f, rawLy = 0.0f;
-            bool hasLead = false;
-            if (!getAnnotationLiveBounds(a.targetId, a.x, a.y, a.leaderX, a.leaderY, a.hasLeader, rawAx, rawAy, rawLx, rawLy, hasLead))
-                continue;
-            float const tx = canvasOrigin.x + rawAx - 6.0f;
-            float const ty = canvasOrigin.y + rawAy - 9.0f;
-            float const tw = a.text.length() * 7.0f + 28.0f;
-            if (Rectangle<float>(tx, ty, tw, 18.0f).contains(pt)) { hoverIdx = i; break; }
+            auto const tb = getAnnotationScreenBounds(static_cast<size_t>(i));
+            if (tb.isEmpty()) continue;
+
+            auto const chips = getAnnotationPivotChips(anns[static_cast<size_t>(i)].text, anns[static_cast<size_t>(i)].kind);
+            float totalChipsW = 0.0f;
+            for (auto const& c : chips) totalChipsW += getChipWidth(c.label) + 4.0f;
+            float const drawerW = std::max(tb.getWidth(), totalChipsW + 4.0f);
+            constexpr float drawerH = 22.0f;
+            juce::Rectangle<float> const combinedBounds(tb.getX(), tb.getY(), drawerW, tb.getHeight() + drawerH + 3.0f);
+
+            if (combinedBounds.contains(pt)) {
+                hoverIdx = i;
+                hoverClose = (pt.y <= tb.getBottom() && pt.x >= tb.getRight() - 16.0f);
+
+                if (pt.y > tb.getBottom() + 1.0f) {
+                    float curChipX = tb.getX() + 4.0f;
+                    float const chipY = tb.getY() + tb.getHeight() + 2.5f;
+                    float const chipH = drawerH - 5.0f;
+                    for (size_t ci = 0; ci < chips.size(); ++ci) {
+                        float const cw = getChipWidth(chips[ci].label);
+                        juce::Rectangle<float> chipBox(curChipX, chipY, cw, chipH);
+                        if (chipBox.contains(pt)) {
+                            hoverChip = static_cast<int>(ci);
+                            break;
+                        }
+                        curChipX += cw + 4.0f;
+                    }
+                }
+                break;
+            }
         }
     }
-    if (hoverIdx != mcpNoteHover) {
+    if (hoverIdx != mcpNoteHover || hoverClose != mcpNoteHoverClose || hoverChip != mcpNoteHoverChip) {
         mcpNoteHover = hoverIdx;
+        mcpNoteHoverClose = hoverClose;
+        mcpNoteHoverChip = hoverChip;
         repaint();
+        if (editor) editor->nvgSurface.renderAll();
     }
 }
 
 void Canvas::mouseExit(MouseEvent const& e)
 {
-    if (mcpNoteHover != -1) {
+    if (mcpNoteHover != -1 || mcpNoteHoverClose || mcpNoteHoverChip != -1) {
         mcpNoteHover = -1;
+        mcpNoteHoverClose = false;
+        mcpNoteHoverChip = -1;
         repaint();
+        if (editor) editor->nvgSurface.renderAll();
     }
 }
 
@@ -2232,17 +2726,20 @@ bool Canvas::isPointOverNote(Point<int> canvasPt) const
     }
     if (!pd || pd->getMcpAnnotations().empty()) return false;
     auto const pt = canvasPt.toFloat();
-    auto anns = pd->getMcpAnnotations();
-    for (auto const& a : anns) {
-        float rawAx = 0.0f, rawAy = 0.0f, rawLx = 0.0f, rawLy = 0.0f;
-        bool hasLead = false;
-        if (!getAnnotationLiveBounds(a.targetId, a.x, a.y, a.leaderX, a.leaderY, a.hasLeader, rawAx, rawAy, rawLx, rawLy, hasLead))
-            continue;
-        float const tx = canvasOrigin.x + rawAx - 6.0f;
-        float const ty = canvasOrigin.y + rawAy - 9.0f;
-        float const tw = a.text.length() * 7.0f + 28.0f;
-        if (Rectangle<float>(tx, ty, tw, 18.0f).contains(pt))
+    auto const anns = pd->getMcpAnnotations();
+    for (size_t i = 0; i < anns.size(); ++i) {
+        auto const tb = getAnnotationScreenBounds(i);
+        if (tb.isEmpty()) continue;
+        if (static_cast<int>(i) == mcpNoteHover) {
+            auto const chips = getAnnotationPivotChips(anns[i].text, anns[i].kind);
+            float totalChipsW = 0.0f;
+            for (auto const& c : chips) totalChipsW += getChipWidth(c.label) + 4.0f;
+            float const drawerW = std::max(tb.getWidth(), totalChipsW + 4.0f);
+            juce::Rectangle<float> combined(tb.getX(), tb.getY(), drawerW, tb.getHeight() + 25.0f);
+            if (combined.contains(pt)) return true;
+        } else if (tb.contains(pt)) {
             return true;
+        }
     }
     if (mcpNoteEditor && mcpNoteEditor->isVisible() && mcpNoteEditor->getBounds().contains(canvasPt))
         return true;
@@ -2270,17 +2767,17 @@ bool Canvas::handleNoteClick(Point<int> canvasPt)
             }
         }
 
-        // 1. Drawer clicks (Lenses or Tools)
+        // 1. Drawer clicks (Lenses / Tools)
         if (mcpPillDrawerMode != 0 && mcpPillDrawerFrame.contains(canvasPt)) {
             int const relX = canvasPt.x - mcpPillDrawerFrame.getX();
             int const dw = mcpPillDrawerFrame.getWidth();
             if (mcpPillDrawerMode == 1) {
-                // Lenses: Doctor | Jam | Genesis | Modular | Free
-                const char* lensKeys[] = { "doctor", "jam", "genesis", "modular", "free" };
-                float const itemW = (static_cast<float>(dw) - 8.0f) / 5.0f;
+                // Lenses: Free | Signal | Logic | Order
+                float const itemW = (static_cast<float>(dw) - 8.0f) / 4.0f;
                 int idx = static_cast<int>((relX - 4) / itemW);
-                if (idx >= 0 && idx < 5) {
-                    juce::String const lens = (idx == 4) ? juce::String() : juce::String(lensKeys[idx]);
+                if (idx >= 0 && idx < 4) {
+                    const char* lenses[] = { "", "signal", "logic", "order" };
+                    juce::String lens(lenses[idx]);
                     mcpActiveLens = lens;
                     if (pd) {
                         if (auto* br = pd->getMCPBridge()) br->sendLens(lens.isEmpty() ? "free" : lens);
@@ -2323,9 +2820,15 @@ bool Canvas::handleNoteClick(Point<int> canvasPt)
                 showPillPalette();
                 return true;
             }
-            // Right ~36px: 🎙️ Mic / Voice button (the only right-side control;
-            // Enter sends, '+' opens the palette — so the old / and send buttons
-            // were redundant and are removed)
+            // Right ~60px..~34px: ✏️ Pen / Sketch tool button
+            if (relX >= panel.getWidth() - 60 && relX < panel.getWidth() - 32) {
+                setSketchToolActive(!isSketchToolActive());
+                repaint();
+                if (editor) editor->nvgSurface.renderAll();
+                return true;
+            }
+
+            // Right ~36px: 🎙️ Mic / Voice button
             if (relX >= panel.getWidth() - 36) {
                 if (pd) {
                     if (auto* br = pd->getMCPBridge()) {
@@ -2344,22 +2847,26 @@ bool Canvas::handleNoteClick(Point<int> canvasPt)
             return true;
         }
     }
+
     if (!pd || pd->getMcpAnnotations().empty()) return false;
     auto const pt = canvasPt.toFloat();
     auto anns = pd->getMcpAnnotations();
     for (int i = static_cast<int>(anns.size()) - 1; i >= 0; --i) {
         auto const& a = anns[static_cast<size_t>(i)];
-        float rawAx = 0.0f, rawAy = 0.0f, rawLx = 0.0f, rawLy = 0.0f;
-        bool hasLead = false;
-        if (!getAnnotationLiveBounds(a.targetId, a.x, a.y, a.leaderX, a.leaderY, a.hasLeader, rawAx, rawAy, rawLx, rawLy, hasLead))
-            continue;
-        float const tx = canvasOrigin.x + rawAx - 6.0f;
-        float const ty = canvasOrigin.y + rawAy - 9.0f;
-        float const tw = a.text.length() * 7.0f + 28.0f;
-        if (!Rectangle<float>(tx, ty, tw, 18.0f).contains(pt)) continue;
+        auto const tb = getAnnotationScreenBounds(static_cast<size_t>(i));
+        if (tb.isEmpty()) continue;
 
-        // Rightmost ~22px is the dismiss "x"; anywhere else opens the editor.
-        juce::Rectangle<float> closeZone(tx + tw - 22.0f, ty - 2.0f, 22.0f, 22.0f);
+        auto const chips = getAnnotationPivotChips(a.text, a.kind);
+        float totalChipsW = 0.0f;
+        for (auto const& c : chips) totalChipsW += getChipWidth(c.label) + 4.0f;
+        float const drawerW = std::max(tb.getWidth(), totalChipsW + 4.0f);
+        constexpr float drawerH = 22.0f;
+        juce::Rectangle<float> const combinedBounds(tb.getX(), tb.getY(), drawerW, tb.getHeight() + drawerH + 3.0f);
+
+        if (!combinedBounds.contains(pt)) continue;
+
+        // 1. Rightmost ~16px of the tape header is the dismiss "x"
+        juce::Rectangle<float> closeZone(tb.getRight() - 16.0f, tb.getY(), 16.0f, tb.getHeight());
         if (closeZone.contains(pt)) {
             if (mcpNoteEditor) mcpNoteEditor->setVisible(false);
             mcpNoteEditIndex = -1;
@@ -2367,77 +2874,152 @@ bool Canvas::handleNoteClick(Point<int> canvasPt)
             if (i < static_cast<int>(pd->mcpAnnotations.size()))
                 pd->mcpAnnotations.erase(pd->mcpAnnotations.begin() + i);
             repaint();
+            if (editor) editor->nvgSurface.renderAll();
             return true;
         }
 
-        if (!mcpNoteEditor) {
-            mcpNoteEditor = std::make_unique<juce::TextEditor>();
-            mcpNoteEditor->setMultiLine(false);
-            mcpNoteEditor->setReturnKeyStartsNewLine(false);
-            mcpNoteEditor->setWantsKeyboardFocus(true);
-            auto commit = [this](bool send) {
-                if (mcpNoteEditIndex < 0) return;
-                juce::String txt = mcpNoteEditor ? mcpNoteEditor->getText().trim() : juce::String();
-                juce::String targetId;
-                if (pd) {
-                    juce::ScopedLock sl(pd->mcpOverlayLock);
-                    if (mcpNoteEditIndex < static_cast<int>(pd->mcpAnnotations.size())) {
-                        if (txt.isEmpty()) {
-                            pd->mcpAnnotations.erase(pd->mcpAnnotations.begin() + mcpNoteEditIndex);
-                        } else {
-                            auto& ann = pd->mcpAnnotations[static_cast<size_t>(mcpNoteEditIndex)];
-                            ann.text = txt;
-                            ann.kind = "artist";
-                            targetId = ann.targetId;
+        // 2. Click inside the Pivot Chips drawer (pt.y > tb.getBottom())
+        if (pt.y > tb.getBottom() + 1.0f) {
+            float curChipX = tb.getX() + 4.0f;
+            float const chipY = tb.getY() + tb.getHeight() + 2.5f;
+            float const chipH = drawerH - 5.0f;
+            for (size_t ci = 0; ci < chips.size(); ++ci) {
+                float const cw = getChipWidth(chips[ci].label);
+                juce::Rectangle<float> chipBox(curChipX, chipY, cw, chipH);
+                if (chipBox.contains(pt)) {
+                    auto const& chip = chips[ci];
+                    if (chip.prompt == "__undo__") {
+                        undo();
+                        mcpNoteHover = -1;
+                        mcpNoteHoverChip = -1;
+                        repaint();
+                        if (editor) editor->nvgSurface.renderAll();
+                        return true;
+                    }
+                    if (chip.prompt == "__reply__") {
+                        // Open direct inline reply editor right below the tape!
+                        // Select target objects first so context is wired
+                        if (a.targetIds.size() > 0 || a.targetId.isNotEmpty()) {
+                            deselectAll();
+                            auto const ids = a.targetIds.size() > 0 ? a.targetIds : juce::StringArray(a.targetId);
+                            for (auto const& tid : ids) {
+                                if (auto* obj = findObjectByStableId(tid)) setSelected(obj, true);
+                            }
+                        }
+                        if (!mcpNoteEditor) {
+                            mcpNoteEditor = std::make_unique<juce::TextEditor>();
+                            mcpNoteEditor->setMultiLine(false);
+                            mcpNoteEditor->setReturnKeyStartsNewLine(false);
+                            mcpNoteEditor->setWantsKeyboardFocus(true);
+                            mcpNoteEditor->setColour(juce::TextEditor::backgroundColourId, juce::Colour(0xff16161c));
+                            mcpNoteEditor->setColour(juce::TextEditor::textColourId, juce::Colours::white);
+                            mcpNoteEditor->setColour(juce::TextEditor::outlineColourId, juce::Colour(0xff4a9eff));
+                            mcpNoteEditor->setColour(juce::TextEditor::focusedOutlineColourId, juce::Colour(0xff4a9eff));
+                            mcpNoteEditor->setColour(juce::TextEditor::highlightColourId, juce::Colour(0xff4a9eff));
+                            mcpNoteEditor->setColour(juce::CaretComponent::caretColourId, juce::Colours::white);
+                            addAndMakeVisible(*mcpNoteEditor);
+                        }
+                        mcpNoteEditIndex = i;
+                        mcpNoteOpenedAt = juce::Time::getMillisecondCounter();
+                        mcpNoteEditor->onReturnKey = [this, targetId = a.targetId, targetIds = a.targetIds] {
+                            if (mcpNoteEditor && pd) {
+                                juce::String const replyTxt = mcpNoteEditor->getText().trim();
+                                if (replyTxt.isNotEmpty()) {
+                                    if (targetIds.size() > 0 || targetId.isNotEmpty()) {
+                                        deselectAll();
+                                        auto const ids = targetIds.size() > 0 ? targetIds : juce::StringArray(targetId);
+                                        for (auto const& tid : ids) {
+                                            if (auto* obj = findObjectByStableId(tid)) setSelected(obj, true);
+                                        }
+                                    }
+                                    sendPillPrompt(replyTxt, false);
+                                    if (editor && editor->sidebar) {
+                                        if (auto* cp = editor->sidebar->getCopilotPanel())
+                                            cp->receiveMessage("user", replyTxt);
+                                    }
+                                    if (auto* br = pd->getMCPBridge())
+                                        br->sendArtistNote(targetId, replyTxt);
+                                }
+                            }
+                            mcpNoteEditIndex = -1;
+                            if (mcpNoteEditor) mcpNoteEditor->setVisible(false);
+                            repaint();
+                            if (editor) editor->nvgSurface.renderAll();
+                        };
+                        mcpNoteEditor->onEscapeKey = [this] {
+                            mcpNoteEditIndex = -1;
+                            if (mcpNoteEditor) mcpNoteEditor->setVisible(false);
+                            repaint();
+                            if (editor) editor->nvgSurface.renderAll();
+                        };
+                        mcpNoteEditor->onFocusLost = [this] {
+                            if (juce::Time::getMillisecondCounter() - mcpNoteOpenedAt < 500) return;
+                            mcpNoteEditIndex = -1;
+                            if (mcpNoteEditor) mcpNoteEditor->setVisible(false);
+                            repaint();
+                            if (editor) editor->nvgSurface.renderAll();
+                        };
+                        mcpNoteEditor->setBounds(juce::roundToInt(tb.getX()),
+                                                 juce::roundToInt(tb.getY() + tb.getHeight() + 2.0f),
+                                                 juce::roundToInt(std::max(tb.getWidth(), 240.0f)), 22);
+                        mcpNoteEditor->setText(juce::String(), false);
+                        mcpNoteEditor->setTextToShowWhenEmpty("Reply to Copilot on this module... (Enter sends)", juce::Colour(0xff7088a0));
+                        mcpNoteEditor->setVisible(true);
+                        mcpNoteEditor->toFront(true);
+                        {
+                            auto* ed = mcpNoteEditor.get();
+                            juce::MessageManager::callAsync([ed] { if (ed) ed->grabKeyboardFocus(); });
+                        }
+                        repaint();
+                        if (editor) editor->nvgSurface.renderAll();
+                        return true;
+                    }
+
+                    // Sound pivot chip clicked:
+                    // 1. Select the module objects
+                    if (a.targetIds.size() > 0 || a.targetId.isNotEmpty()) {
+                        deselectAll();
+                        auto const ids = a.targetIds.size() > 0 ? a.targetIds : juce::StringArray(a.targetId);
+                        for (auto const& tid : ids) {
+                            if (auto* obj = findObjectByStableId(tid)) setSelected(obj, true);
                         }
                     }
+                    // 2. Dispatch prompt
+                    sendPillPrompt(chip.prompt, false);
+                    // 3. Log to Sidebar chat
+                    if (editor && editor->sidebar) {
+                        if (auto* cp = editor->sidebar->getCopilotPanel())
+                            cp->receiveMessage("user", chip.prompt);
+                    }
+                    mcpNoteHover = -1;
+                    mcpNoteHoverChip = -1;
+                    repaint();
+                    if (editor) editor->nvgSurface.renderAll();
+                    return true;
                 }
-                mcpNoteEditIndex = -1;
-                if (mcpNoteEditor) mcpNoteEditor->setVisible(false);
-                if (send && txt.isNotEmpty() && pd) {
-                    if (auto* br = pd->getMCPBridge()) br->sendArtistNote(targetId, txt);
-                }
-                repaint();
-            };
-            mcpNoteEditor->onReturnKey = [commit] { commit(true); };
-            mcpNoteEditor->onFocusLost = [this, commit] {
-                if (juce::Time::getMillisecondCounter() - mcpNoteOpenedAt < 500) return;
-                commit(true);
-            };
-            mcpNoteEditor->onTextChange = [this] {
-                if (mcpNoteEditor && pd && mcpNoteEditIndex >= 0) {
-                    juce::ScopedLock sl(pd->mcpOverlayLock);
-                    if (mcpNoteEditIndex < static_cast<int>(pd->mcpAnnotations.size()))
-                        pd->mcpAnnotations[static_cast<size_t>(mcpNoteEditIndex)].text = mcpNoteEditor->getText();
-                }
-                repaint();
-                if (editor) editor->nvgSurface.renderAll();
-            };
-            mcpNoteEditor->onEscapeKey = [this] {
-                mcpNoteEditIndex = -1;
-                if (mcpNoteEditor) mcpNoteEditor->setVisible(false);
-            };
-            mcpNoteEditor->setColour(juce::TextEditor::backgroundColourId, juce::Colour(0xff16161c));
-            mcpNoteEditor->setColour(juce::TextEditor::textColourId, juce::Colours::white);
-            mcpNoteEditor->setColour(juce::TextEditor::outlineColourId, juce::Colour(0xff4a9eff));
-            mcpNoteEditor->setColour(juce::TextEditor::focusedOutlineColourId, juce::Colour(0xff4a9eff));
-            mcpNoteEditor->setColour(juce::TextEditor::highlightColourId, juce::Colour(0xff4a9eff));
-            mcpNoteEditor->setColour(juce::CaretComponent::caretColourId, juce::Colours::white);
-            addAndMakeVisible(*mcpNoteEditor);
+                curChipX += cw + 4.0f;
+            }
+            return true;
         }
-        mcpNoteEditIndex = i;
-        mcpNoteOpenedAt = juce::Time::getMillisecondCounter();
-        mcpNoteEditor->setBounds(juce::roundToInt(canvasOrigin.x + rawAx - 6.0f),
-                                 juce::roundToInt(canvasOrigin.y + rawAy - 34.0f),
-                                 juce::jmax(140, juce::roundToInt(a.text.length() * 7.0f) + 40), 20);
-        mcpNoteEditor->setText(a.text, false);
-        mcpNoteEditor->setVisible(true);
-        mcpNoteEditor->toFront(true);
-        {
-            auto* ed = mcpNoteEditor.get();
-            juce::MessageManager::callAsync([ed] { if (ed) { ed->grabKeyboardFocus(); ed->selectAll(); } });
+
+        // 3. Body click on tape header:
+        // Select module objects & open note in Sidebar Master Notebook
+        if (a.targetIds.size() > 0 || a.targetId.isNotEmpty()) {
+            deselectAll();
+            auto const ids = a.targetIds.size() > 0 ? a.targetIds : juce::StringArray(a.targetId);
+            for (auto const& tid : ids) {
+                if (auto* obj = findObjectByStableId(tid)) setSelected(obj, true);
+            }
+        }
+        if (editor && editor->sidebar) {
+            editor->sidebar->showSidebar(true);
+            editor->sidebar->showPanel(Sidebar::SidePanel::CopilotPan);
+            if (auto* cp = editor->sidebar->getCopilotPanel()) {
+                cp->showAnnotationNote(a.text, a.kind, a.targetIds);
+            }
         }
         repaint();
+        if (editor) editor->nvgSurface.renderAll();
         return true;
     }
     return false;
@@ -2461,6 +3043,19 @@ void Canvas::mouseDown(MouseEvent const& e)
 
     // Left-click
     if (!e.mods.isRightButtonDown()) {
+
+        // Multimodal Pen / Sketch overlay: Alt-drag or active sketch tool draws on canvas
+        if (shouldShowAISketch() && (e.mods.isAltDown() || mcpSketchToolActive)) {
+            isSketching = true;
+            mcpSketchAlpha = 1.0f;
+            if (mcpSketchFadeTimer) mcpSketchFadeTimer->stopTimer();
+            mcpCurrentStroke.clear();
+            auto const pt = e.getPosition();
+            mcpCurrentStroke.push_back({static_cast<float>(pt.x), static_cast<float>(pt.y), juce::Time::getMillisecondCounterHiRes()});
+            repaint();
+            if (editor) editor->nvgSurface.renderAll();
+            return;
+        }
 
         if (source == this) {
             // A click on an AI note is handled by the shared handler (x = dismiss, body =
@@ -2599,6 +3194,15 @@ void Canvas::mouseDown(MouseEvent const& e)
     }
     // Right click
     else {
+        if (shouldShowAISketch() && mcpSketchToolActive) {
+            isSketching = true;
+            mcpSketchAlpha = 1.0f;
+            if (mcpSketchFadeTimer) mcpSketchFadeTimer->stopTimer();
+            mcpCurrentStroke.clear();
+            repaint();
+            if (editor) editor->nvgSurface.renderAll();
+            return;
+        }
         Dialogs::showCanvasRightClickMenu(this, source, e.getScreenPosition());
     }
 }
@@ -2619,6 +3223,43 @@ bool Canvas::hitTest(int const x, int const y)
 
 void Canvas::mouseDrag(MouseEvent const& e)
 {
+    if (isSketching) {
+        auto const pt = e.getPosition();
+
+        // ERASER MODE: Ctrl-drag hit-tests strokes
+        if (e.mods.isCtrlDown() || e.mods.isRightButtonDown()) {
+            float eraseRadius = 25.0f;
+            bool erasedAny = false;
+            for (auto it = mcpCompletedStrokes.begin(); it != mcpCompletedStrokes.end(); ) {
+                bool hit = false;
+                for (auto const& p : *it) {
+                    float dx = p.x - pt.x;
+                    float dy = p.y - pt.y;
+                    if (dx*dx + dy*dy < eraseRadius*eraseRadius) {
+                        hit = true;
+                        break;
+                    }
+                }
+                if (hit) {
+                    it = mcpCompletedStrokes.erase(it);
+                    erasedAny = true;
+                } else {
+                    ++it;
+                }
+            }
+            if (erasedAny) {
+                repaint();
+                if (editor) editor->nvgSurface.renderAll();
+            }
+            return;
+        }
+
+        mcpCurrentStroke.push_back({static_cast<float>(pt.x), static_cast<float>(pt.y), juce::Time::getMillisecondCounterHiRes()});
+        repaint();
+        if (editor) editor->nvgSurface.renderAll();
+        return;
+    }
+
     if (canvasRateReducer.tooFast() || panningModifierDown())
         return;
 
@@ -2702,6 +3343,36 @@ bool Canvas::autoscroll(MouseEvent const& e)
 
 void Canvas::mouseUp(MouseEvent const& e)
 {
+    if (isSketching) {
+        isSketching = false;
+        if (mcpCurrentStroke.size() >= 2) {
+            mcpCompletedStrokes.push_back(mcpCurrentStroke);
+            juce::Array<juce::var> ptsVar;
+            for (auto const& p : mcpCurrentStroke) {
+                auto* obj = new juce::DynamicObject();
+                obj->setProperty("x", p.x - static_cast<float>(canvasOrigin.x));
+                obj->setProperty("y", p.y - static_cast<float>(canvasOrigin.y));
+                obj->setProperty("t", p.t);
+                ptsVar.add(juce::var(obj));
+            }
+            auto jsonStr = juce::JSON::toString(juce::var(ptsVar), true);
+            bool const isFastPath = e.mods.isShiftDown();
+            if (pd) {
+                if (auto* br = pd->getMCPBridge()) {
+                    auto const subpatch = patch.getPointer() ? juce::String(reinterpret_cast<uintptr_t>(patch.getPointer().get())) : juce::String("0");
+                    br->sendSketchStroke(subpatch, jsonStr, isFastPath);
+                }
+            }
+            mcpCurrentStroke.clear();
+            // startSketchFadeTimer(); // PERSISTENT INK
+        } else {
+            mcpCurrentStroke.clear();
+        }
+        repaint();
+        if (editor) editor->nvgSurface.renderAll();
+        return;
+    }
+
     setPanDragMode(false);
     setMouseCursor(MouseCursor::NormalCursor);
 
@@ -3030,7 +3701,7 @@ void Canvas::updateSelectionPill()
     // edH = 30 gives generous headroom and descender room so text is never clipped at the bottom.
     int const edH = 30;
     int const edY = pillY + (pillH - edH) / 2;
-    mcpSelectionPill->setBounds(pillX + 36, edY, pillW - 36 - 40, edH);
+    mcpSelectionPill->setBounds(pillX + 36, edY, pillW - 36 - 64, edH);
     mcpSelectionPill->setVisible(true);
     // toFront(false), NOT true: bringing it forward must never steal keyboard
     // focus, or typing 'o'/'m'/'c'/'b' on the canvas would land in the prompt
@@ -3077,11 +3748,52 @@ void Canvas::submitSelectionPill(bool queueForChat)
     mcpPillDrawerFrame = {};
     mcpPaletteFrame = {};
     if (!mcpSelectionPill) return;
-    // C++ truth: sendPillPrompt resolves the selection's stable tempIds from the
-    // bridge-owned map — the server never guesses from its identity mirror.
-    sendPillPrompt(mcpSelectionPill->getText().trim(), queueForChat);
-    mcpSelectionPill->setText(juce::String(), false);
+
+    auto const prompt = mcpSelectionPill->getText().trim();
+    if (prompt.isNotEmpty() && pd) {
+        // Find selection stable tempIds & compute group bounding box
+        juce::StringArray targetIds;
+        bool first = true;
+        int minX = 0, minY = 0, maxX = 0, maxY = 0;
+        auto patchPtr = patch.getPointer();
+        t_canvas* cnv = patchPtr ? patchPtr.get() : nullptr;
+        for (auto* obj : getSelectionOfType<Object>()) {
+            if (auto* ptr = obj->getPointer()) {
+                auto tid = pd->getStableId(ptr);
+                if (tid.isEmpty() && cnv) {
+                    tid = pd->getOrAdoptStableId(cnv, ptr);
+                }
+                if (tid.isNotEmpty()) targetIds.add(tid);
+            }
+            auto const b = obj->getObjectBounds();
+            if (first) {
+                minX = b.getX(); minY = b.getY();
+                maxX = b.getRight(); maxY = b.getBottom();
+                first = false;
+            } else {
+                minX = std::min(minX, b.getX());
+                minY = std::min(minY, b.getY());
+                maxX = std::max(maxX, b.getRight());
+                maxY = std::max(maxY, b.getBottom());
+            }
+        }
+
+        // Park the prompt in the Sidebar Copilot chat log (no clutter on canvas)
+        if (editor && editor->sidebar) {
+            if (auto* cp = editor->sidebar->getCopilotPanel()) {
+                cp->receiveMessage("user", prompt);
+            }
+        }
+
+        // C++ truth: sendPillPrompt resolves the selection's stable tempIds from the
+        // bridge-owned map — the server never guesses from its identity mirror.
+        sendPillPrompt(prompt, queueForChat);
+        mcpSelectionPill->setText(juce::String(), false);
+    }
+
     dismissSelectionPill();
+    repaint();
+    if (editor) editor->nvgSurface.renderAll();
 }
 
 bool Canvas::SelectionPillKeyListener::keyPressed(const juce::KeyPress& key, juce::Component*)
@@ -3259,9 +3971,14 @@ void Canvas::sendPillPrompt(const juce::String& prompt, bool queueForChat)
 {
     if (prompt.isEmpty() || !pd) return;
     juce::StringArray targetIds;
+    auto patchPtr = patch.getPointer();
+    t_canvas* cnv = patchPtr ? patchPtr.get() : nullptr;
     for (auto* obj : getSelectionOfType<Object>()) {
         if (auto* ptr = obj->getPointer()) {
-            auto const tid = pd->getStableId(ptr);
+            auto tid = pd->getStableId(ptr);
+            if (tid.isEmpty() && cnv) {
+                tid = pd->getOrAdoptStableId(cnv, ptr);
+            }
             if (tid.isNotEmpty()) targetIds.add(tid);
         }
     }

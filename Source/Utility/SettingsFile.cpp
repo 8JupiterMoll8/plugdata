@@ -507,7 +507,7 @@ void SettingsFile::initialiseThemesTree()
 
 void SettingsFile::initialiseOverlayTree()
 {
-    int const aiDefaultFlags = AIState | AIRegions | AIAnnotations | AIGhosts | AIHud;
+    int const aiDefaultFlags = AIState | AIRegions | AIAnnotations | AIGhosts | AIHud | AISketch;
     UnorderedMap<String, int> defaults = {
         { "edit", Origin | ActivationState | aiDefaultFlags },
         { "lock", Behind | aiDefaultFlags },

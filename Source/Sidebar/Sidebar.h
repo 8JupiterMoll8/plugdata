@@ -281,6 +281,7 @@ public:
         InspectorPan };
 
     void showPanel(SidePanel panelToShow);
+    CopilotPanel* getCopilotPanel() const;
 
     void showSidebar(bool show);
 

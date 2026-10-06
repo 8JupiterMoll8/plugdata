@@ -148,6 +148,7 @@ public:
         aiGroup.add(new OverlaySelector(overlayTree, AIAnnotations, "ai_annotations", "Notes", "In-canvas explanation tags"));
         aiGroup.add(new OverlaySelector(overlayTree, AIGhosts, "ai_ghosts", "Ghosts", "Proposed uncommitted changes"));
         aiGroup.add(new OverlaySelector(overlayTree, AIHud, "ai_hud", "Cinema HUD", "Cinema subtitle & status bar"));
+        aiGroup.add(new OverlaySelector(overlayTree, AISketch, "ai_sketch", "Sketch", "Live stylus and mouse sketch ink layer"));
 
         debugModeValue.referTo(SettingsFile::getInstance()->getPropertyAsValue("debug_connections"));
         debugModeValue.addListener(this);

@@ -303,6 +303,11 @@ void Sidebar::mouseExit(MouseEvent const& e)
     e.originalComponent->setMouseCursor(MouseCursor::NormalCursor);
 }
 
+CopilotPanel* Sidebar::getCopilotPanel() const
+{
+    return copilotPanel.get();
+}
+
 void Sidebar::showPanel(SidePanel const panelToShow)
 {
     if (panelToShow == currentPanel && !sidebarHidden) {

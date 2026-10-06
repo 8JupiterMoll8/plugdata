@@ -234,6 +234,7 @@ public:
     // objects' stable tempIds (resolved in C++ — the identity source of truth) so
     // the MCP server never has to guess the selection from a stale mirror.
     void sendSelectionPrompt(const juce::String& promptText, const juce::StringArray& targetTempIds, bool queue = false);
+    void sendSketchStroke(const juce::String& subpatch, const juce::String& jsonPoints, bool isFastPath = false);
     // PRD Copilot: the active creative Lens (Doctor / Jam Partner / Genesis /
     // Modular Tech). Sent to the MCP server, which prepends the lens brief to
     // subsequent agent turns. "free" clears it.

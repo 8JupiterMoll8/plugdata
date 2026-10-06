@@ -749,6 +749,12 @@ void Object::mouseDown(MouseEvent const& e)
     if (!e.mods.isRightButtonDown() && cnv && cnv->handleNoteClick(e.getEventRelativeTo(cnv).getPosition()))
         return;
 
+    // Multimodal Pen / Sketch overlay: Alt-drag or active sketch tool draws on canvas
+    if (!e.mods.isRightButtonDown() && cnv && cnv->shouldShowAISketch() && (e.mods.isAltDown() || cnv->isSketchToolActive())) {
+        cnv->mouseDown(e.getEventRelativeTo(cnv));
+        return;
+    }
+
     // Only show right-click menu in locked mode if the object can be opened
     // We don't allow alt+click for popupmenus here, as that will conflict with some object behaviour, like for [range.hsl]
     if (e.mods.isRightButtonDown() && !cnv->isGraph && !(gui && gui->isEditorShown())) {
@@ -824,6 +830,11 @@ void Object::mouseDown(MouseEvent const& e)
 
 void Object::mouseUp(MouseEvent const& e)
 {
+    if (cnv && cnv->shouldShowAISketch() && (cnv->isSketchingActive() || (cnv->isSketchToolActive() && !wasLockedOnMouseDown))) {
+        cnv->mouseUp(e.getEventRelativeTo(cnv));
+        return;
+    }
+
     if (wasLockedOnMouseDown || (gui && gui->isEditorShown()))
         return;
 
@@ -925,6 +936,11 @@ void Object::mouseUp(MouseEvent const& e)
 
 void Object::mouseDrag(MouseEvent const& e)
 {
+    if (cnv && cnv->shouldShowAISketch() && (e.mods.isAltDown() || cnv->isSketchToolActive() || cnv->isSketchingActive())) {
+        cnv->mouseDrag(e.getEventRelativeTo(cnv));
+        return;
+    }
+
     if (wasLockedOnMouseDown || (gui && gui->isEditorShown()))
         return;
 
