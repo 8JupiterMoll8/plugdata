@@ -1,6 +1,7 @@
 #pragma once
 
 #include <juce_core/juce_core.h>
+#include <cmath>
 
 // -----------------------------------------------------------------------------
 // IEM GUI creation-argument guard (shared by every MCP create path).
@@ -65,8 +66,13 @@ inline juce::StringArray expandIemGuiShortForm(const juce::StringArray& tokens)
 
     const int given = tokens.size() - 1; // args after the class name
 
-    // ── Slider / numbox family: init lives at the END (arg 16), not position 5,
-    //    so a positional pad would mis-map it. Use an explicit mapping.
+    // ── Slider / numbox family: init lives at the END (arg 16), not position 5.
+    //    Short-form convention (matches every AI-facing example):
+    //        hsl <w> <h> <min> <max> [value] [log]
+    //    The 5th arg IS the initial value (e.g. `hsl 128 15 0 1 0.35`), the
+    //    6th is the log flag. The old mapping treated the 5th as `log`, so the
+    //    documented example created a log slider with value 0 → a gain slider
+    //    at zero → silent patch (the "range calibration muted it" trap).
     if (cls == "hsl" || cls == "vsl" || cls == "nbx" || cls == "numbox")
     {
         if (given < 4 || given > 6) return tokens; // 0 or full/other form
@@ -74,11 +80,42 @@ inline juce::StringArray expandIemGuiShortForm(const juce::StringArray& tokens)
         const juce::String h    = tokens[2];
         const juce::String mn   = tokens[3];
         const juce::String mx   = tokens[4];
-        const juce::String log  = given >= 5 ? tokens[5] : "0";
-        const bool hasInit      = given >= 6;
-        const juce::String init = hasInit ? tokens[6] : "0";
+        const juce::String init = given >= 5 ? tokens[5] : "0";
+        const juce::String log  = given >= 6 ? tokens[6] : "0";
         const juce::String ldx  = (cls == "vsl") ? "0"  : "-2";
         const juce::String ldy  = (cls == "vsl") ? "-9" : "-8";
+        // hsl/vsl store arg 16 as x_val = PIXEL POSITION ×100, not the real
+        // value (slider_getfval: fval = x_val*0.01*k + min). Handing it the raw
+        // requested value (e.g. 1200) produced fval 937 — a slider that starts
+        // nowhere near its documented value. Convert real value → position here.
+        // nbx stores real values directly and is left untouched.
+        juce::String initArg = init;
+        if (cls == "hsl" || cls == "vsl") {
+            const double len = (cls == "vsl") ? h.getDoubleValue() : w.getDoubleValue();
+            double dmin = mn.getDoubleValue();
+            double dmax = mx.getDoubleValue();
+            const bool isLog = log.getDoubleValue() != 0.0;
+            double val = init.getDoubleValue();
+            // Replicate slider_check_minmax() normalization for log sliders.
+            if (isLog) {
+                if (dmin == 0.0 && dmax == 0.0) dmax = 1.0;
+                if (dmax > 0.0) { if (dmin <= 0.0) dmin = 0.01 * dmax; }
+                else { if (dmin > 0.0) dmax = 0.01 * dmin; }
+            }
+            const double span = (len > 1.0) ? (len - 1.0) : 1.0;
+            if (val < dmin) val = dmin;
+            if (val > dmax) val = dmax;
+            double g = 0.0;
+            if (isLog && dmin > 0.0 && val > 0.0 && dmax > dmin)
+                g = std::log(val / dmin) / (std::log(dmax / dmin) / span);
+            else if (dmax != dmin)
+                g = (val - dmin) / ((dmax - dmin) / span);
+            int xval = (int) std::lround(100.0 * g);
+            const int maxPos = (int) std::lround(100.0 * span);
+            if (xval < 0) xval = 0;
+            if (xval > maxPos) xval = maxPos;
+            initArg = juce::String(xval);
+        }
         juce::StringArray full;
         full.add(tokens[0]);            // class
         full.add(w);                    // 0  width
@@ -104,7 +141,7 @@ inline juce::StringArray expandIemGuiShortForm(const juce::StringArray& tokens)
         full.add("#fcfcfc");            // 13 bg colour
         full.add("#000000");            // 14 fg colour (handle / thumb)
         full.add("#000000");            // 15 label colour
-        full.add(init);                 // 16 init value
+        full.add(initArg);              // 16 init (position×100 for hsl/vsl)
         return full;
     }
 

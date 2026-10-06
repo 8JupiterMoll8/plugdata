@@ -23,6 +23,8 @@
 #include "Utility/SettingsFile.h" // compiledMode (hvcc_mode) in /pd/perf
 #include "Utility/Config.h"
 #include "../../Libraries/fftw3/api/fftw3.h"
+#include "Dialogs/Dialogs.h"
+#include "Pd/Library.h"
 
 #include <set>
 #include <unordered_map>
@@ -1045,7 +1047,12 @@ juce::String MCPBridge::computeDiagnoseFacts(PluginProcessor* processor, t_canva
         anyOutletWired.insert({ si, lt.tr_outno });
         bool srcIsSig = (lt.tr_outlet->o_sym == gensym("signal"));
         bool destIsSig = obj_issignalinlet(lt.tr_ob2, lt.tr_inno);
-        if (srcIsSig != destIsSig)
+        // Control float → signal PARAMETER inlet (inlet >= 1) is the documented
+        // Pd pattern for setting DSP params (e.g. hsl → [lop~] inlet 1 cutoff):
+        // Pd stores the scalar in the signal inlet. Only flag ctl→sig on
+        // inlet 0 (usually a mistaken audio input) and all sig→ctl wires.
+        bool controlToParamInlet = !srcIsSig && destIsSig && lt.tr_inno >= 1;
+        if (srcIsSig != destIsSig && !controlToParamInlet)
             mismatchedWires.push_back({ si, lt.tr_outno, di, lt.tr_inno, srcIsSig });
         if (srcIsSig)
             sigEdges.push_back({ si, di });
@@ -2906,6 +2913,158 @@ static bool mcpGobjIsLive(t_canvas* cnv, t_gobj* g)
     return false;
 }
 
+/** Build the full C++ ValueTree doc JSON for one object. Single source of
+ *  truth shared by /pd/doc_get and the paginated /pd/doc_dump. */
+static juce::String buildObjectDocJson(pd::Library* library, const juce::String& objectNameIn, const juce::String& creationArgs)
+{
+        auto objectName = objectNameIn;
+
+
+            if (library == nullptr) return "{}";
+
+            auto tree = library->getObjectInfo(objectName);
+            if (!tree.isValid()) {
+                if (objectName.contains("/")) {
+                    tree = library->getObjectInfo(objectName.fromLastOccurrenceOf("/", false, false));
+                } else {
+                    tree = library->getObjectInfo("ELSE/" + objectName);
+                }
+            }
+
+            if (!tree.isValid()) {
+                return "{}";
+            }
+
+            auto* root = new juce::DynamicObject();
+            auto name = tree.getProperty("name").toString();
+            auto desc = tree.getProperty("description").toString();
+            root->setProperty("name", name.isNotEmpty() ? name : objectName);
+            root->setProperty("description", desc);
+
+            // Categories & origin
+            auto categoriesTree = tree.getChildWithName("categories");
+            juce::Array<juce::var> cats;
+            juce::String origin = "";
+            for (auto cat : categoriesTree) {
+                auto c = cat.getProperty("name").toString();
+                cats.add(c);
+                if (pd::Library::objectOrigins.contains(c)) {
+                    origin = c;
+                }
+            }
+            root->setProperty("categories", cats);
+            root->setProperty("origin", origin);
+
+            // Inlets & Outlets
+            auto iolets = tree.getChildWithName("iolets");
+            int numIn = 0;
+            int numOut = 0;
+            for (auto iolet : iolets) {
+                if (iolet.getType() == juce::Identifier("inlet")) numIn++;
+                else if (iolet.getType() == juce::Identifier("outlet")) numOut++;
+            }
+
+            // Dynamic arity resolution if creation args were passed
+            StackArray<juce::StringArray, 2> parsedTooltips;
+            bool hasParsedTooltips = false;
+            if (creationArgs.isNotEmpty() || numIn > 0 || numOut > 0) {
+                auto fullObjText = objectName + (creationArgs.isNotEmpty() ? " " + creationArgs : "");
+                parsedTooltips = pd::Library::parseIoletTooltips(iolets, fullObjText, numIn, numOut);
+                hasParsedTooltips = true;
+            }
+
+            juce::Array<juce::var> inletsArr;
+            juce::Array<juce::var> outletsArr;
+            int inIdx = 0;
+            int outIdx = 0;
+
+            if (hasParsedTooltips && (parsedTooltips[0].size() > 0 || parsedTooltips[1].size() > 0)) {
+                for (int i = 0; i < parsedTooltips[0].size(); ++i) {
+                    auto* inObj = new juce::DynamicObject();
+                    inObj->setProperty("index", i);
+                    auto ttip = parsedTooltips[0][i];
+                    inObj->setProperty("description", ttip);
+                    bool isSig = ttip.containsIgnoreCase("signal") || objectName.endsWith("~");
+                    inObj->setProperty("signalRate", isSig);
+                    inletsArr.add(juce::var(inObj));
+                }
+                for (int i = 0; i < parsedTooltips[1].size(); ++i) {
+                    auto* outObj = new juce::DynamicObject();
+                    outObj->setProperty("index", i);
+                    auto ttip = parsedTooltips[1][i];
+                    outObj->setProperty("description", ttip);
+                    bool isSig = ttip.containsIgnoreCase("signal") || objectName.endsWith("~");
+                    outObj->setProperty("signalRate", isSig);
+                    outletsArr.add(juce::var(outObj));
+                }
+            } else {
+                for (auto iolet : iolets) {
+                    auto* ioObj = new juce::DynamicObject();
+                    auto ttip = iolet.getProperty("tooltip").toString();
+                    auto isVar = iolet.getProperty("variable").toString() == "1";
+                    bool isSig = ttip.containsIgnoreCase("signal") || objectName.endsWith("~");
+                    ioObj->setProperty("description", ttip);
+                    ioObj->setProperty("signalRate", isSig);
+                    ioObj->setProperty("variable", isVar);
+
+                    if (iolet.getType() == juce::Identifier("inlet")) {
+                        ioObj->setProperty("index", inIdx++);
+                        inletsArr.add(juce::var(ioObj));
+                    } else {
+                        ioObj->setProperty("index", outIdx++);
+                        outletsArr.add(juce::var(ioObj));
+                    }
+                }
+            }
+
+            root->setProperty("numInlets", inletsArr.size());
+            root->setProperty("numOutlets", outletsArr.size());
+            root->setProperty("inlets", inletsArr);
+            root->setProperty("outlets", outletsArr);
+
+            // Arguments
+            auto argsTree = tree.getChildWithName("arguments");
+            juce::Array<juce::var> argsArr;
+            int argIdx = 0;
+            for (auto arg : argsTree) {
+                auto* argObj = new juce::DynamicObject();
+                argObj->setProperty("index", argIdx++);
+                argObj->setProperty("type", arg.getProperty("type").toString());
+                argObj->setProperty("description", arg.getProperty("description").toString());
+                if (arg.hasProperty("default")) argObj->setProperty("default", arg.getProperty("default").toString());
+                argsArr.add(juce::var(argObj));
+            }
+            root->setProperty("arguments", argsArr);
+
+            // Methods
+            auto methodsTree = tree.getChildWithName("methods");
+            juce::Array<juce::var> methodsArr;
+            for (auto method : methodsTree) {
+                auto* mObj = new juce::DynamicObject();
+                mObj->setProperty("signature", method.getProperty("type").toString());
+                mObj->setProperty("description", method.getProperty("description").toString());
+                methodsArr.add(juce::var(mObj));
+            }
+            root->setProperty("methods", methodsArr);
+
+            // Flags
+            auto flagsTree = tree.getChildWithName("flags");
+            juce::Array<juce::var> flagsArr;
+            for (auto flag : flagsTree) {
+                auto* fObj = new juce::DynamicObject();
+                auto fName = flag.getProperty("name").toString().trim();
+                if (!fName.startsWith("-")) fName = "-" + fName;
+                fObj->setProperty("name", fName);
+                fObj->setProperty("description", flag.getProperty("description").toString());
+                if (flag.hasProperty("default")) fObj->setProperty("default", flag.getProperty("default").toString());
+                flagsArr.add(juce::var(fObj));
+            }
+            root->setProperty("flags", flagsArr);
+
+                        return juce::JSON::toString(juce::var(root));
+
+}
+
 void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessage& msg)
 {
     if (action == "ping") {
@@ -3135,6 +3294,191 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             root->setProperty("atoms", arr);
             sendReply("/pd/param_get/reply/" + correlationId, juce::JSON::toString(juce::var(root)));
         }
+        return;
+    }
+
+    if (action == "doc_get" || action == "doc") {
+        // /pd/doc_get <objectName> <corrId> [creationArgs]
+        // Reply: JSON on /pd/doc_get/reply/<corrId>
+        if (msg.size() >= 1 && processor) {
+            auto objectName = getArgString(msg[0]);
+            auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : juce::String("0");
+            auto creationArgs = msg.size() > 2 ? getArgString(msg[2]) : juce::String();
+            if (!processor->objectLibrary) {
+                sendReply("/pd/doc_get/reply/" + correlationId, "{}");
+                return;
+            }
+            processor->objectLibrary->waitForInitialisationToFinish();
+            sendReply("/pd/doc_get/reply/" + correlationId,
+                      buildObjectDocJson(processor->objectLibrary.get(), objectName, creationArgs));
+        }
+        return;
+    }
+
+    if (action == "doc_search") {
+        // /pd/doc_search <query> <corrId> [limit]
+        // Live name oracle: the same fuzzy engine behind the Documentation
+        // Browser. Reply JSON { results: ["name", ...] }.
+        if (msg.size() >= 1 && processor) {
+            auto query = getArgString(msg[0]);
+            auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : juce::String("0");
+            int limit = msg.size() > 2 ? static_cast<int>(getArgFloat(msg[2])) : 10;
+            if (limit < 1) limit = 10;
+            if (limit > 50) limit = 50;
+            juce::Array<juce::var> results;
+            if (processor->objectLibrary) {
+                processor->objectLibrary->waitForInitialisationToFinish();
+                auto names = processor->objectLibrary->searchObjectDocumentation(query);
+                for (int i = 0; i < names.size() && i < limit; ++i) results.add(names[i]);
+            }
+            auto* root = new juce::DynamicObject();
+            root->setProperty("results", results);
+            sendReply("/pd/doc_search/reply/" + correlationId, juce::JSON::toString(juce::var(root)));
+        }
+        return;
+    }
+
+    if (action == "doc_dump") {
+        // /pd/doc_dump <corrId> <offset> <limit>
+        // Paginated full-library doc dump. Reply JSON { total, offset, items }.
+        if (msg.size() >= 1 && processor) {
+            auto correlationId = getArgString(msg[0]);
+            int offset = msg.size() > 1 ? static_cast<int>(getArgFloat(msg[1])) : 0;
+            int limit = msg.size() > 2 ? static_cast<int>(getArgFloat(msg[2])) : 20;
+            if (offset < 0) offset = 0;
+            if (limit < 1) limit = 1;
+            if (limit > 25) limit = 25;
+            juce::Array<juce::var> items;
+            int total = 0;
+            if (processor->objectLibrary) {
+                processor->objectLibrary->waitForInitialisationToFinish();
+                auto names = processor->objectLibrary->getAllObjects();
+                total = names.size();
+                for (int i = offset; i < names.size() && i < offset + limit; ++i) {
+                    auto json = buildObjectDocJson(processor->objectLibrary.get(), names[i], "");
+                    if (json == "{}") continue;
+                    items.add(juce::JSON::parse(json));
+                }
+            }
+            auto* root = new juce::DynamicObject();
+            root->setProperty("total", total);
+            root->setProperty("offset", offset);
+            root->setProperty("items", items);
+            sendReply("/pd/doc_dump/reply/" + correlationId, juce::JSON::toString(juce::var(root)));
+        }
+        return;
+    }
+
+    if (action == "library_info") {
+        // /pd/library_info <corrId>
+        // Live inventory count for pd-docs staleness checks.
+        if (msg.size() >= 1 && processor) {
+            auto correlationId = getArgString(msg[0]);
+            int count = 0;
+            if (processor->objectLibrary) {
+                processor->objectLibrary->waitForInitialisationToFinish();
+                count = processor->objectLibrary->getAllObjects().size();
+            }
+            auto* root = new juce::DynamicObject();
+            root->setProperty("objects", count);
+            sendReply("/pd/library_info/reply/" + correlationId, juce::JSON::toString(juce::var(root)));
+        }
+        return;
+    }
+
+    if (action == "ui_open_reference") {
+        // /pd/ui_open_reference <objectName> <corrId>
+        if (msg.size() >= 1 && processor) {
+            auto objectName = getArgString(msg[0]);
+            auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : juce::String("0");
+
+            juce::MessageManager::callAsync([proc = processor, objectName, correlationId, this] {
+                PluginEditor* editor = nullptr;
+                for (auto* ed : proc->getEditors()) {
+                    if (ed) { editor = ed; break; }
+                }
+                if (!editor) editor = dynamic_cast<PluginEditor*>(proc->getActiveEditor());
+                if (editor) {
+                    Dialogs::showObjectReferenceDialog(&editor->openedDialog, editor, objectName);
+                    sendReply("/pd/ui_open_reference/reply/" + correlationId, 1.0f);
+                } else {
+                    sendReply("/pd/ui_open_reference/reply/" + correlationId, 0.0f);
+                }
+            });
+        }
+        return;
+    }
+
+    if (action == "ui_open_help") {
+        // /pd/ui_open_help <objectName> <corrId>
+        if (msg.size() >= 1 && processor) {
+            auto objectName = getArgString(msg[0]);
+            auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : juce::String("0");
+
+            juce::MessageManager::callAsync([proc = processor, objectName, correlationId, this] {
+                auto helpFile = pd::Library::findHelpfile(objectName);
+                if (helpFile.existsAsFile()) {
+                    PluginEditor* editor = nullptr;
+                    for (auto* ed : proc->getEditors()) {
+                        if (ed) { editor = ed; break; }
+                    }
+                    if (!editor) editor = dynamic_cast<PluginEditor*>(proc->getActiveEditor());
+                    if (editor) {
+                        editor->getTabComponent().openHelpPatch(juce::URL(helpFile));
+                        sendReply("/pd/ui_open_help/reply/" + correlationId, 1.0f);
+                        return;
+                    }
+                }
+                sendReply("/pd/ui_open_help/reply/" + correlationId, 0.0f);
+            });
+        }
+        return;
+    }
+
+    if (action == "viewport") {
+        // /pd/viewport <canvas> <corrId>
+        auto canvasName = msg.size() > 0 ? getArgString(msg[0]) : juce::String("main");
+        auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : juce::String("0");
+
+        juce::MessageManager::callAsync([proc = processor, canvasName, correlationId, this] {
+            PluginEditor* editor = nullptr;
+            for (auto* ed : proc->getEditors()) {
+                if (ed) { editor = ed; break; }
+            }
+            if (!editor) editor = dynamic_cast<PluginEditor*>(proc->getActiveEditor());
+            if (editor) {
+                auto* canvas = editor->getCurrentCanvas();
+                if (canvas) {
+                    auto* vp = canvas->viewport.get();
+                    float zoom = getValue<float>(canvas->zoomScale);
+                    float viewX = vp ? static_cast<float>(vp->getViewPositionX()) : 0.0f;
+                    float viewY = vp ? static_cast<float>(vp->getViewPositionY()) : 0.0f;
+                    float panX = (viewX / zoom) - static_cast<float>(canvas->canvasOrigin.x);
+                    float panY = (viewY / zoom) - static_cast<float>(canvas->canvasOrigin.y);
+                    float vpW = vp ? static_cast<float>(vp->getViewArea().getWidth()) : static_cast<float>(canvas->getWidth());
+                    float vpH = vp ? static_cast<float>(vp->getViewArea().getHeight()) : static_cast<float>(canvas->getHeight());
+                    float scaleFactor = editor->getRenderScale();
+
+                    juce::OSCMessage reply(juce::OSCAddressPattern("/pd/viewport/reply/" + correlationId));
+                    reply.addArgument(zoom);
+                    reply.addArgument(panX);
+                    reply.addArgument(panY);
+                    reply.addArgument(vpW);
+                    reply.addArgument(vpH);
+                    reply.addArgument(scaleFactor);
+                    sender.send(reply);
+                    return;
+                }
+            }
+            juce::OSCMessage reply(juce::OSCAddressPattern("/pd/viewport/reply/" + correlationId));
+            reply.addArgument(1.0f);
+            reply.addArgument(0.0f);
+            reply.addArgument(0.0f);
+            reply.addArgument(1920.0f);
+            reply.addArgument(1080.0f);
+            reply.addArgument(1.0f);
+            sender.send(reply);
+        });
         return;
     }
 
@@ -4632,29 +4976,51 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             }
 
             // Auto-frame newly-created objects: if a CREATED object landed outside
-            // the current viewport, frame the canvas so the artist SEES it (the
-            // "I don't see any object" trap when the AI places far from the view).
-            // Only counts objects created in THIS batch, so panning around never
-            // triggers it; a creation inside the view never yanks the camera.
+            // the current viewport, PAN it into view — never change the zoom.
+            // (The old zoomToFitAll() fit the whole canvas and yanked the artist's
+            // zoom from 100% to 66% on every offscreen build.) Only counts objects
+            // created in THIS batch, so panning around never triggers it; a
+            // creation inside the view never moves the camera.
             if (cnv && created > 0 && !canvasNotFound) {
                 auto frameIfCreateOffscreen = [p = processor, cnv, ptrs = createdPtrs]() {
                     auto* cc = mcpFindGuiCanvasFor(p, cnv);
                     if (!cc || !cc->viewport) return;
                     float z = std::sqrt(std::abs(cc->getTransform().getDeterminant()));
                     if (z <= 0.0f) z = 1.0f;
-                    auto view = cc->viewport->getViewArea().toFloat() / z;
+                    auto const origin = cc->canvasOrigin;
+                    auto area = cc->viewport->getViewArea().toFloat();
+                    juce::Rectangle<float> viewPatch(
+                        area.getX() / z - (float) origin.x,
+                        area.getY() / z - (float) origin.y,
+                        area.getWidth() / z,
+                        area.getHeight() / z);
+
                     bool offscreen = false;
+                    bool any = false;
+                    juce::Rectangle<float> bbox;
                     sys_lock();
                     for (auto* g : ptrs) {
                         if (!g) continue;
                         int x = 0, y = 0, w = 0, h = 0;
                         pd::Interface::getObjectBounds(cnv, g, &x, &y, &w, &h);
-                        if (!view.contains(juce::Rectangle<float>((float)x, (float)y, (float)w, (float)h).getCentre())) {
-                            offscreen = true; break;
+                        juce::Rectangle<float> r((float) x, (float) y, (float) w, (float) h);
+                        bbox = any ? bbox.getUnion(r) : r;
+                        any = true;
+                        if (!viewPatch.contains(r.getCentre())) {
+                            offscreen = true;
+                            break;
                         }
                     }
                     sys_unlock();
-                    if (offscreen) cc->zoomToFitAll();
+                    if (!offscreen || !any) return;
+
+                    // Keep zoom, center the new objects.
+                    auto centre = bbox.getCentre();
+                    float targetX = centre.x - viewPatch.getWidth() * 0.5f;
+                    float targetY = centre.y - viewPatch.getHeight() * 0.5f;
+                    cc->viewport->setViewPosition(
+                        (int) std::round(((float) origin.x + targetX) * z),
+                        (int) std::round(((float) origin.y + targetY) * z));
                 };
                 if (juce::MessageManager::getInstance()->isThisTheMessageThread()) {
                     frameIfCreateOffscreen();
@@ -9603,6 +9969,14 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
         // PRD 1.5: programmatic GUI selection by tempId (highlight)
         reply.addArgument(juce::String("select"));
         // PRD overlay: per-object AI state markers drawn on the canvas
+        // C++ Ground Truth Documentation & Native Dialogs
+        reply.addArgument(juce::String("doc_get"));
+        reply.addArgument(juce::String("doc_search"));
+        reply.addArgument(juce::String("doc_dump"));
+        reply.addArgument(juce::String("library_info"));
+        reply.addArgument(juce::String("ui_open_reference"));
+        reply.addArgument(juce::String("ui_open_help"));
+        reply.addArgument(juce::String("viewport"));
         reply.addArgument(juce::String("ai_overlay"));
         // PRD overlay: ghost/preview of proposed (uncommitted) changes
         reply.addArgument(juce::String("ai_ghost"));
@@ -11217,6 +11591,16 @@ void MCPBridge::sendSelectionPrompt(const juce::String& promptText, const juce::
     for (auto const& id : targetTempIds) {
         msg.addArgument(id);
     }
+    sender.send(msg);
+}
+
+void MCPBridge::sendSketchStroke(const juce::String& subpatch, const juce::String& jsonPoints, bool isFastPath)
+{
+    if (!active.load()) return;
+    juce::OSCMessage msg { juce::OSCAddressPattern("/pd/sketch/stroke") };
+    msg.addArgument(subpatch);
+    msg.addArgument(isFastPath ? 1 : 0);
+    msg.addArgument(jsonPoints);
     sender.send(msg);
 }
 
