@@ -149,6 +149,7 @@ public:
         aiGroup.add(new OverlaySelector(overlayTree, AIGhosts, "ai_ghosts", "Ghosts", "Proposed uncommitted changes"));
         aiGroup.add(new OverlaySelector(overlayTree, AIHud, "ai_hud", "Cinema HUD", "Cinema subtitle & status bar"));
         aiGroup.add(new OverlaySelector(overlayTree, AISketch, "ai_sketch", "Sketch", "Live stylus and mouse sketch ink layer"));
+        aiGroup.add(new OverlaySelector(overlayTree, AIReferences, "ai_references", "References", "Pasted schematics & reference images layer"));
 
         debugModeValue.referTo(SettingsFile::getInstance()->getPropertyAsValue("debug_connections"));
         debugModeValue.addListener(this);
@@ -166,7 +167,7 @@ public:
                 addAndMakeVisible(item);
             }
         }
-        setSize(500, 220);
+        setSize(500, 260);
     }
 
     void valueChanged(Value& v) override

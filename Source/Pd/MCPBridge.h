@@ -10,6 +10,8 @@
 #include <juce_osc/juce_osc.h>
 #include <juce_core/juce_core.h>
 #include <juce_events/juce_events.h>
+#include <juce_audio_formats/juce_audio_formats.h>
+#include <juce_audio_devices/juce_audio_devices.h>
 #include <readerwriterqueue.h>
 #include <array>
 #include <memory>
@@ -235,6 +237,13 @@ public:
     // the MCP server never has to guess the selection from a stale mirror.
     void sendSelectionPrompt(const juce::String& promptText, const juce::StringArray& targetTempIds, bool queue = false);
     void sendSketchStroke(const juce::String& subpatch, const juce::String& jsonPoints, bool isFastPath = false);
+    // Phase 1B/Moodboard Chisel: the artist hit [⚡ Build] on the sketch pill —
+    // ships the full multi-stroke bundle + bbox (PD patch coords) + optional
+    // prompt as /pd/sketch/build so the MCP server becomes the visual compiler.
+    void sendSketchBuild(const juce::String& subpatch, const juce::String& jsonStrokes, const juce::String& jsonBBox, const juce::String& prompt);
+    // PRD Phase 2: a reference image was pinned to the canvas glass —
+    // /pd/reference/image <path> <x> <y> <w> <h> in PD patch coords.
+    void sendReferenceImage(const juce::String& path, float x, float y, float w, float h);
     // PRD Copilot: the active creative Lens (Doctor / Jam Partner / Genesis /
     // Modular Tech). Sent to the MCP server, which prepends the lens brief to
     // subsequent agent turns. "free" clears it.
@@ -242,13 +251,23 @@ public:
     // AI Copilot Chat callback: role ("user", "ai", "thought", "error"), text
     void setChatCallback(std::function<void(const juce::String& role, const juce::String& text)> cb);
     void postChatMessage(const juce::String& role, const juce::String& text);
-    // Voice & Beatbox Capture Engine
-    void startVoiceCapture(int maxSeconds = 5);
+    // Voice & Beatbox Capture Engine. mode: 0 = auto-classify, 1 = melody
+    // (artist declared "sing"), 2 = beat (artist declared "beatbox").
+    // maxSeconds = safety ceiling only — the artist decides the real length by
+    // tapping stop; a full buffer now stages the take instead of discarding it.
+    void startVoiceCapture(int maxSeconds = 60, int mode = 0);
     void stopVoiceCaptureAndAnalyze();
+    void analyzeCapturedVoice();
+    // Voice take preview — out-of-patch audition through the main audio output.
+    // Tapping a playing take's ▶ again stops it.
+    void playVoiceTake(const juce::String& takeId, const juce::String& wavPath);
+    void stopVoiceTake();
+    juce::String getPlayingVoiceTakeId();
     bool isVoiceCapturing() const { return voiceCapturing.load(std::memory_order_relaxed); }
     float getVoiceLiveLevel() const { return voiceLiveLevel.load(std::memory_order_relaxed); }
+    int getVoiceCaptureMode() const { return voiceCaptureMode.load(std::memory_order_relaxed); }
     void voiceInputTick(float const* inputSamples, int numSamples);
-    void parseVoiceBufferToJson(float const* buffer, int totalSamples, double sampleRate);
+    void parseVoiceBufferToJson(float const* buffer, int totalSamples, double sampleRate, int forcedMode);
 
     void sendReply(const juce::String& addressPattern, const juce::Array<juce::var>& args);
     void sendReply(const juce::String& addressPattern, float val);
@@ -413,6 +432,13 @@ private:
     std::atomic<bool> voiceCapturing { false };
     std::atomic<int> voiceCaptureWritePos { 0 };
     std::atomic<float> voiceLiveLevel { 0.0f };
+    std::atomic<int> voiceCaptureMode { 0 }; // 0 = auto, 1 = melody, 2 = beat
+    // Preview transport state (message thread; audio callback is the player)
+    std::unique_ptr<juce::AudioFormatManager> previewFormatManager;
+    std::unique_ptr<juce::AudioTransportSource> previewTransport;
+    std::unique_ptr<juce::AudioSourcePlayer> previewPlayer;
+    juce::CriticalSection previewLock;
+    juce::String previewTakeId;
 
     std::function<void(const juce::String&, const juce::String&)> chatCallback;
     juce::CriticalSection chatLock;

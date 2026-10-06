@@ -3482,6 +3482,92 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         return;
     }
 
+    if (action == "moodboard") {
+        // /pd/moodboard <corrId> -> /pd/moodboard/reply/<corrId> <json>
+        // The multimodal brief rail: every visible moodboard artifact with paths,
+        // coordinates, bindings and the structured voice takes.
+        auto correlationId = msg.size() > 0 ? getArgString(msg[0]) : juce::String("0");
+        juce::MessageManager::callAsync([proc = processor, correlationId, this] {
+            juce::Array<juce::var> imagesArr, notesArr, takesArr, selArr;
+            juce::String strokesJson = "[]";
+            juce::String bboxJson = "{}";
+
+            if (proc) {
+                for (auto const& img : proc->getMcpReferenceImages()) {
+                    auto* o = new juce::DynamicObject();
+                    o->setProperty("id", img.id);
+                    o->setProperty("path", img.filePath);
+                    o->setProperty("title", img.title);
+                    o->setProperty("x", img.x);
+                    o->setProperty("y", img.y);
+                    o->setProperty("w", img.width);
+                    o->setProperty("h", img.height);
+                    o->setProperty("targetId", img.targetId);
+                    o->setProperty("locked", img.isLocked);
+                    o->setProperty("visible", img.visible);
+                    imagesArr.add(juce::var(o));
+                }
+                for (auto const& a : proc->getMcpAnnotations()) {
+                    if (a.text.isEmpty()) continue;
+                    auto* o = new juce::DynamicObject();
+                    o->setProperty("text", a.text);
+                    o->setProperty("kind", a.kind);
+                    o->setProperty("targetId", a.targetId);
+                    notesArr.add(juce::var(o));
+                }
+                for (auto const& t : proc->getMcpVoiceTakes()) {
+                    auto* o = new juce::DynamicObject();
+                    o->setProperty("id", t.id);
+                    o->setProperty("wav", t.wavPath);
+                    o->setProperty("mode", t.mode);
+                    o->setProperty("bpm", t.bpm);
+                    o->setProperty("hits", t.hitCount);
+                    o->setProperty("notes", t.noteCount);
+                    o->setProperty("duration", t.durationSec);
+                    o->setProperty("visible", t.visible);
+                    takesArr.add(juce::var(o));
+                }
+
+                PluginEditor* editor = nullptr;
+                for (auto* ed : proc->getEditors()) {
+                    if (ed) {
+                        editor = ed;
+                        break;
+                    }
+                }
+                if (!editor) editor = dynamic_cast<PluginEditor*>(proc->getActiveEditor());
+                if (editor) {
+                    if (auto* canvas = editor->getCurrentCanvas()) {
+                        strokesJson = canvas->buildSketchJson();
+                        auto const sb = canvas->getSketchBoundsInCanvas();
+                        if (!sb.isEmpty()) {
+                            auto* b = new juce::DynamicObject();
+                            b->setProperty("x", sb.getX() - static_cast<float>(canvas->canvasOrigin.x));
+                            b->setProperty("y", sb.getY() - static_cast<float>(canvas->canvasOrigin.y));
+                            b->setProperty("w", sb.getWidth());
+                            b->setProperty("h", sb.getHeight());
+                            bboxJson = juce::JSON::toString(juce::var(b), true);
+                        }
+                        for (auto const& tid : canvas->getSelectionStableIds()) {
+                            selArr.add(tid);
+                        }
+                    }
+                }
+            }
+
+            juce::String json = "{"
+                "\"images\":" + juce::JSON::toString(juce::var(imagesArr), false)
+                + ",\"notes\":" + juce::JSON::toString(juce::var(notesArr), false)
+                + ",\"voiceTakes\":" + juce::JSON::toString(juce::var(takesArr), false)
+                + ",\"strokes\":" + strokesJson
+                + ",\"bbox\":" + bboxJson
+                + ",\"selection\":" + juce::JSON::toString(juce::var(selArr), false)
+                + "}";
+            sendReply("/pd/moodboard/reply/" + correlationId, json);
+        });
+        return;
+    }
+
     if (action == "params") {
         // /pd/params <canvas> <corrId>
         // List knob-bound named parameters: [{ tempId, name, value, min, max }]
@@ -9952,6 +10038,9 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
         reply.addArgument(juce::String("layout_guard"));
         reply.addArgument(juce::String("compose"));
         reply.addArgument(juce::String("flow"));
+        // PRD Multimodal Studio: the moodboard rail — one query returns the whole
+        // multimodal brief (images + ink + notes + voice takes + selection).
+        reply.addArgument(juce::String("moodboard"));
         reply.addArgument(juce::String("pillars"));
         reply.addArgument(juce::String("connections"));
         reply.addArgument(juce::String("zoom_to_fit"));
@@ -10331,6 +10420,62 @@ static float estimateFrequency(const float* buf, int n, float sampleRate)
     return 0.0f;
 }
 
+// ── Precision pitch: YIN (de Cheveigné & Kawahara, 2002) ─────────────────────
+// Difference function → cumulative-mean normalized difference → absolute
+// threshold → parabolic interpolation. Returns Hz (0 = unvoiced) and a
+// per-frame confidence. Far fewer octave errors than FFT-peak picking.
+static float estimatePitchYIN(const float* buf, int n, float sampleRate, float& outConfidence)
+{
+    outConfidence = 0.0f;
+    if (!buf || n < 256 || sampleRate <= 0.0f) return 0.0f;
+
+    int const maxTau = std::min(n / 2, static_cast<int>(sampleRate / 55.0f)); // down to ~55 Hz
+    if (maxTau < 8) return 0.0f;
+    int const halfN = n / 2;
+
+    std::vector<float> dp(maxTau, 1.0f);
+    float running = 0.0f;
+    for (int tau = 1; tau < maxTau; ++tau) {
+        float sum = 0.0f;
+        for (int i = 0; i < halfN; ++i) {
+            float const diff = buf[i] - buf[i + tau];
+            sum += diff * diff;
+        }
+        running += sum;
+        dp[tau] = running > 0.0f ? (sum * static_cast<float>(tau)) / running : 1.0f;
+    }
+
+    constexpr float threshold = 0.15f;
+    int tauEstimate = -1;
+    for (int tau = 2; tau < maxTau; ++tau) {
+        if (dp[tau] < threshold) {
+            while (tau + 1 < maxTau && dp[tau + 1] < dp[tau]) ++tau;
+            tauEstimate = tau;
+            break;
+        }
+    }
+    if (tauEstimate < 0) {
+        int best = 1;
+        for (int tau = 2; tau < maxTau; ++tau) {
+            if (dp[tau] < dp[best]) best = tau;
+        }
+        if (dp[best] > 0.35f) return 0.0f; // too aperiodic → unvoiced
+        tauEstimate = best;
+    }
+
+    outConfidence = juce::jlimit(0.0f, 1.0f, 1.0f - dp[tauEstimate] * 1.6f);
+
+    float betterTau = static_cast<float>(tauEstimate);
+    if (tauEstimate > 1 && tauEstimate < maxTau - 1) {
+        float const s0 = dp[tauEstimate - 1];
+        float const s1 = dp[tauEstimate];
+        float const s2 = dp[tauEstimate + 1];
+        float const denom = 2.0f * (2.0f * s1 - s2 - s0);
+        if (std::abs(denom) > 1e-9f) betterTau = static_cast<float>(tauEstimate) + (s2 - s0) / denom;
+    }
+    return betterTau > 0.0f ? sampleRate / betterTau : 0.0f;
+}
+
 void MCPBridge::voiceInputTick(float const* inputSamples, int numSamples)
 {
     if (!inputSamples || numSamples <= 0) return;
@@ -10351,10 +10496,13 @@ void MCPBridge::voiceInputTick(float const* inputSamples, int numSamples)
     int const writePos = voiceCaptureWritePos.load(std::memory_order_relaxed);
     int const maxSamples = static_cast<int>(voiceCaptureBuffer.size());
     if (writePos + numSamples > maxSamples) {
-        voiceCapturing.store(false, std::memory_order_release);
-        juce::MessageManager::callAsync([this] {
-            stopVoiceCaptureAndAnalyze();
-        });
+        // Buffer full = auto-stop. Hand staging to the SAME terminal path as a
+        // manual stop. Do NOT pre-clear voiceCapturing here: the old code
+        // cleared it first, so stopVoiceCaptureAndAnalyze()'s own
+        // exchange(false) early-returned and the take vanished unstaged.
+        if (voiceCapturing.exchange(false, std::memory_order_acq_rel)) {
+            juce::MessageManager::callAsync([this] { analyzeCapturedVoice(); });
+        }
         return;
     }
 
@@ -10362,7 +10510,7 @@ void MCPBridge::voiceInputTick(float const* inputSamples, int numSamples)
     voiceCaptureWritePos.store(writePos + numSamples, std::memory_order_release);
 }
 
-void MCPBridge::startVoiceCapture(int maxSeconds)
+void MCPBridge::startVoiceCapture(int maxSeconds, int mode)
 {
     // NEVER re-open the audio device here. setAudioDeviceSetup() can BLOCK the
     // message thread on flaky hardware (e.g. the ALC298 mic-jack bug) and freeze
@@ -10375,14 +10523,20 @@ void MCPBridge::startVoiceCapture(int maxSeconds)
     }
 
     int const sr = processor ? static_cast<int>(processor->getSampleRate()) : 48000;
-    int const neededSamples = juce::jlimit(48000, 48000 * 8, sr * maxSeconds);
+    int const neededSamples = juce::jlimit(48000, 48000 * 70, sr * maxSeconds);
     if (static_cast<int>(voiceCaptureBuffer.size()) < neededSamples)
         voiceCaptureBuffer.resize(neededSamples, 0.0f);
 
     voiceCaptureWritePos.store(0, std::memory_order_release);
     voiceLiveLevel.store(0.0f, std::memory_order_release);
+    voiceCaptureMode.store(mode, std::memory_order_release);
     voiceCapturing.store(true, std::memory_order_release);
-    sendConsoleLog("MCP: Voice recording started (hum melody or beatbox)", false);
+    if (mode == 1)
+        sendConsoleLog("MCP: Recording MELODY - sing! (tap the mic again to stop)", false);
+    else if (mode == 2)
+        sendConsoleLog("MCP: Recording BEAT - beatbox! (tap the drum again to stop)", false);
+    else
+        sendConsoleLog("MCP: Voice recording started (hum melody or beatbox)", false);
 
     // Watchdog: the buffer auto-stops+analyzes once filled, but if NO input
     // samples ever arrive (mic muted / input device not running) it would hang
@@ -10399,11 +10553,75 @@ void MCPBridge::startVoiceCapture(int maxSeconds)
     });
 }
 
+juce::String MCPBridge::getPlayingVoiceTakeId()
+{
+    juce::ScopedLock sl(previewLock);
+    return previewTakeId;
+}
+
+void MCPBridge::stopVoiceTake()
+{
+    juce::ScopedLock sl(previewLock);
+    if (previewTransport) previewTransport->stop();
+    if (previewPlayer) {
+        previewPlayer->setSource(nullptr);
+        if (auto* dm = ProjectInfo::getDeviceManager()) dm->removeAudioCallback(previewPlayer.get());
+    }
+    previewTransport.reset();
+    previewPlayer.reset();
+    previewTakeId.clear();
+}
+
+void MCPBridge::playVoiceTake(const juce::String& takeId, const juce::String& wavPath)
+{
+    // Toggle: tapping the playing chip's ▶ stops it.
+    if (getPlayingVoiceTakeId() == takeId) {
+        stopVoiceTake();
+        return;
+    }
+
+    auto* dm = ProjectInfo::getDeviceManager();
+    if (!dm) return;
+    juce::File const wav(wavPath);
+    if (!wav.existsAsFile()) return;
+
+    if (!previewFormatManager) {
+        previewFormatManager = std::make_unique<juce::AudioFormatManager>();
+        previewFormatManager->registerBasicFormats();
+    }
+    std::unique_ptr<juce::AudioFormatReader> reader(previewFormatManager->createReaderFor(wav));
+    if (!reader) return;
+
+    stopVoiceTake();
+
+    juce::ScopedLock sl(previewLock);
+    previewTransport = std::make_unique<juce::AudioTransportSource>();
+    previewTransport->setSource(new juce::AudioFormatReaderSource(reader.release(), true));
+    previewPlayer = std::make_unique<juce::AudioSourcePlayer>();
+    previewPlayer->setSource(previewTransport.get());
+
+    double const sr = dm->getCurrentAudioDevice() ? dm->getCurrentAudioDevice()->getCurrentSampleRate() : 48000.0;
+    int const bs = dm->getCurrentAudioDevice() ? dm->getCurrentAudioDevice()->getCurrentBufferSizeSamples() : 512;
+    previewTransport->prepareToPlay(bs, sr);
+    dm->addAudioCallback(previewPlayer.get());
+    previewTransport->start();
+    previewTakeId = takeId;
+
+    double const lengthSec = previewTransport->getLengthInSeconds();
+    juce::Timer::callAfterDelay(static_cast<int>((lengthSec + 0.15) * 1000.0), [this, takeId] {
+        if (getPlayingVoiceTakeId() == takeId) stopVoiceTake();
+    });
+}
+
 void MCPBridge::stopVoiceCaptureAndAnalyze()
 {
     if (!voiceCapturing.exchange(false))
         return;
+    analyzeCapturedVoice();
+}
 
+void MCPBridge::analyzeCapturedVoice()
+{
     int const totalSamples = voiceCaptureWritePos.load(std::memory_order_acquire);
     if (totalSamples < 2048) {
         sendConsoleLog("MCP: Voice recording too short (<50ms)", false);
@@ -10411,14 +10629,15 @@ void MCPBridge::stopVoiceCaptureAndAnalyze()
     }
 
     double const sampleRate = processor ? processor->getSampleRate() : 48000.0;
+    int const declaredMode = voiceCaptureMode.exchange(0, std::memory_order_acq_rel);
     sendConsoleLog("MCP: Analyzing voice take (" + juce::String(totalSamples) + " samples)...", false);
 
-    std::thread([this, totalSamples, sampleRate] {
-        parseVoiceBufferToJson(voiceCaptureBuffer.data(), totalSamples, sampleRate);
+    std::thread([this, totalSamples, sampleRate, declaredMode] {
+        parseVoiceBufferToJson(voiceCaptureBuffer.data(), totalSamples, sampleRate, declaredMode);
     }).detach();
 }
 
-void MCPBridge::parseVoiceBufferToJson(float const* buffer, int totalSamples, double sampleRate)
+void MCPBridge::parseVoiceBufferToJson(float const* buffer, int totalSamples, double sampleRate, int forcedMode)
 {
     if (!buffer || totalSamples < 1024 || sampleRate <= 0.0) return;
 
@@ -10453,6 +10672,7 @@ void MCPBridge::parseVoiceBufferToJson(float const* buffer, int totalSamples, do
     std::vector<float> framePitch(numFrames, 0.0f);
     std::vector<float> frameCentroid(numFrames, 0.0f);
     std::vector<float> frameFlatness(numFrames, 0.0f);
+    std::vector<float> frameConf(numFrames, 0.0f);
 
     for (int f = 0; f < numFrames; ++f) {
         float const* framePtr = buffer + f * HOP;
@@ -10467,7 +10687,12 @@ void MCPBridge::parseVoiceBufferToJson(float const* buffer, int totalSamples, do
             frameCentroid[f] = static_cast<float>(specObj->getProperty("spectralCentroid"));
             frameFlatness[f] = static_cast<float>(specObj->getProperty("spectralFlatness"));
         }
-        framePitch[f] = estimateFrequency(framePtr, N, static_cast<float>(sampleRate));
+        if (forcedMode == 1) {
+            // Declared melody → precision lane: YIN + per-frame confidence.
+            framePitch[f] = estimatePitchYIN(framePtr, N, static_cast<float>(sampleRate), frameConf[f]);
+        } else {
+            framePitch[f] = estimateFrequency(framePtr, N, static_cast<float>(sampleRate));
+        }
     }
 
     // Adaptive noise/onset thresholds relative to recording
@@ -10510,58 +10735,237 @@ void MCPBridge::parseVoiceBufferToJson(float const* buffer, int totalSamples, do
         double startSec;
         double durationSec;
         float velocity;
+        float conf = 0.0f;
+        bool onsetAttack = false;
     };
     std::vector<MelodicNote> notes;
 
-    int noteStartFrame = -1;
-    float noteAccumPitch = 0.0f;
-    int noteFrameCount = 0;
-    float noteMaxRms = 0.0f;
+    if (forcedMode == 1) {
+        // ── Precision melody pipeline (declared melody) ──────────────────────
+        // 1) OCTAVE-FOLD + continuity: 3-state DP over {f/2, f, 2f} picks the
+        //    octave nearest the running reference (greedy Viterbi). Kills the
+        //    classic octave errors.
+        // 2) 5-tap median filter on the folded track (single-frame spikes).
+        // 3) Segmentation: same note while within 90 cents; 3 dead frames end it.
+        // 4) Merge same-pitch notes across <70ms breath gaps.
+        std::vector<float> track(numFrames, 0.0f);
+        std::vector<float> trackConf(numFrames, 0.0f);
 
-    for (int f = 0; f < numFrames; ++f) {
-        float const pitch = framePitch[f];
-        bool const isVoiced = (pitch >= 50.0f && pitch <= 1400.0f && frameRms[f] > rmsFloor);
+        std::vector<float> voiced;
+        voiced.reserve(static_cast<size_t>(numFrames));
+        for (int f = 0; f < numFrames; ++f) {
+            if (framePitch[f] > 55.0f && framePitch[f] < 1600.0f && frameConf[f] > 0.4f && frameRms[f] > rmsFloor) {
+                voiced.push_back(framePitch[f]);
+            }
+        }
+        float reference = 0.0f;
+        if (!voiced.empty()) {
+            std::sort(voiced.begin(), voiced.end());
+            reference = voiced[voiced.size() / 2]; // median → robust to octave jumps
+        }
 
-        if (isVoiced) {
-            if (noteStartFrame < 0) {
-                noteStartFrame = f;
-                noteAccumPitch = pitch;
-                noteFrameCount = 1;
-                noteMaxRms = frameRms[f];
+        for (int f = 0; f < numFrames; ++f) {
+            float const hz0 = framePitch[f];
+            if (!(hz0 > 55.0f && hz0 < 1600.0f && frameConf[f] > 0.35f && frameRms[f] > rmsFloor)) continue;
+            float const candidates[3] = { hz0 * 0.5f, hz0, hz0 * 2.0f };
+            float const ref = reference > 0.0f ? reference : hz0;
+            float best = hz0;
+            float bestCents = 1e9f;
+            for (float c : candidates) {
+                if (c < 55.0f || c > 1600.0f) continue;
+                float const cents = std::abs(120.0f * std::log2(c / ref));
+                if (cents < bestCents) {
+                    bestCents = cents;
+                    best = c;
+                }
+            }
+            track[f] = best;
+            trackConf[f] = frameConf[f];
+            reference = 0.85f * reference + 0.15f * best;
+        }
+
+        std::vector<float> smoothed = track;
+        for (int f = 0; f < numFrames; ++f) {
+            if (track[f] <= 0.0f) continue;
+            float window[5];
+            int count = 0;
+            for (int k = -2; k <= 2; ++k) {
+                int const idx = f + k;
+                if (idx >= 0 && idx < numFrames && track[idx] > 0.0f) window[count++] = track[idx];
+            }
+            for (int a = 1; a < count; ++a) {
+                for (int b = a; b > 0 && window[b] < window[b - 1]; --b) std::swap(window[b], window[b - 1]);
+            }
+            smoothed[f] = window[count / 2];
+        }
+
+        // Onset flags (attack frames) for onset-gated splitting.
+        std::vector<char> onsetFlag(numFrames, 0);
+        for (auto const& h : hits) {
+            int const hf = static_cast<int>(std::round(h.timeSec * sampleRate / HOP));
+            for (int d = -1; d <= 1; ++d) {
+                int const idx = hf + d;
+                if (idx >= 0 && idx < numFrames) onsetFlag[idx] = 1;
+            }
+        }
+
+        int segStart = -1;
+        int unvoicedRun = 0;
+        float segAnchor = 0.0f;   // pitch at note onset: FIXED stability reference
+        float segPitch = 0.0f;    // running estimate (for reporting)
+        float segConfSum = 0.0f;
+        int segFrames = 0;
+        float segPeakRms = 0.0f;
+        int overRun = 0;          // consecutive frames past the sustained-move gate
+        bool segFromOnset = false;
+
+        auto flushNote = [&](int endFrame) {
+            if (segStart < 0) return;
+            double const dur = (endFrame - segStart) * static_cast<double>(HOP) / sampleRate;
+            if (dur >= 0.045 && segFrames > 0) {
+                MelodicNote n;
+                n.freqHz = segPitch;
+                n.midiNote = juce::jlimit(24, 96, static_cast<int>(std::round(69.0 + 12.0 * std::log2(segPitch / 440.0))));
+                n.startSec = segStart * static_cast<double>(HOP) / sampleRate;
+                n.durationSec = dur;
+                n.velocity = juce::jlimit(0.2f, 1.0f, (segPeakRms / std::max(0.01f, globalPeak)) * 1.2f);
+                n.conf = segConfSum / static_cast<float>(segFrames);
+                n.onsetAttack = segFromOnset;
+                notes.push_back(n);
+            }
+            segStart = -1;
+            segFrames = 0;
+            segConfSum = 0.0f;
+            segPeakRms = 0.0f;
+            overRun = 0;
+            segFromOnset = false;
+        };
+
+        auto startNote = [&](int f, float hz, bool fromOnset) {
+            segStart = f;
+            segAnchor = hz;
+            segPitch = hz;
+            segConfSum = trackConf[f];
+            segFrames = 1;
+            segPeakRms = frameRms[f];
+            overRun = 0;
+            segFromOnset = fromOnset;
+        };
+
+        for (int f = 0; f < numFrames; ++f) {
+            float const hz = smoothed[f];
+            bool const voicedFrame = hz > 0.0f && trackConf[f] > 0.35f;
+            if (!voicedFrame) {
+                if (segStart >= 0 && ++unvoicedRun >= 3) flushNote(f - unvoicedRun + 1);
+                continue;
+            }
+            unvoicedRun = 0;
+            if (segStart < 0) { startNote(f, hz, onsetFlag[f] != 0); continue; }
+
+            // Compare against the note's START pitch (fixed anchor). The old EMA
+            // reference drifted with the voice, so glides never split a phrase.
+            float const centsAnchor = std::abs(120.0f * std::log2(hz / segAnchor));
+            bool const onsetHere = onsetFlag[f] != 0;
+            int const ageFrames = f - segStart;
+
+            // Split rules:
+            //  a) clear leap (>= 180 cents) — immediate;
+            //  b) sustained move (>= 100 cents held 3 frames, ~35ms);
+            //  c) fresh onset after the first frames (re-articulation / new syllable).
+            bool const leap = centsAnchor >= 180.0f;
+            bool const onsetSplit = onsetHere && ageFrames >= 2;
+            overRun = (centsAnchor >= 100.0f) ? overRun + 1 : 0;
+            bool const sustainedMove = overRun >= 3;
+
+            if (leap || sustainedMove || onsetSplit) {
+                flushNote(f);
+                startNote(f, hz, onsetHere);
             } else {
-                float const avgPitch = noteAccumPitch / noteFrameCount;
-                float const semitoneDiff = std::abs(12.0f * std::log2(pitch / avgPitch));
-                if (semitoneDiff < 1.5f) {
-                    noteAccumPitch += pitch;
-                    noteFrameCount++;
-                    if (frameRms[f] > noteMaxRms) noteMaxRms = frameRms[f];
+                segPitch = 0.85f * segPitch + 0.15f * hz;
+                segConfSum += trackConf[f];
+                segFrames++;
+                segPeakRms = std::max(segPeakRms, frameRms[f]);
+            }
+        }
+        flushNote(numFrames);
+
+        // Merge same-midi neighbors across a short breath gap — but never merge
+        // a re-articulated note (onset attack): that separation IS the rhythm.
+        // EXCEPTION (jitter-split merge, 2026-10-06): when BOTH segments are
+        // micro-short (<200ms) with a near-touching gap (<60ms) and the pitch
+        // is within 30 cents, the split is tracker jitter (an onset-attacked
+        // micro pair inside one sung gesture) — merge it; keep real repeats.
+        if (notes.size() >= 2) {
+            std::vector<MelodicNote> merged;
+            for (auto const& n : notes) {
+                if (!merged.empty()) {
+                    auto& prev = merged.back();
+                    double const gap = n.startSec - (prev.startSec + prev.durationSec);
+                    bool const closePitch = std::abs(120.0f * std::log2(n.freqHz / prev.freqHz)) < 30.0f;
+                    bool const microPair = (n.durationSec < 0.20 && prev.durationSec < 0.20 && gap < 0.06);
+                    if ((!n.onsetAttack || microPair) && (n.midiNote == prev.midiNote || closePitch) && gap < 0.07) {
+                        prev.freqHz = static_cast<float>((prev.freqHz * prev.durationSec + n.freqHz * n.durationSec) / std::max(1e-6, prev.durationSec + n.durationSec));
+                        prev.durationSec = prev.durationSec + n.durationSec + std::max(0.0, gap);
+                        prev.conf = 0.5f * (prev.conf + n.conf);
+                        continue;
+                    }
+                }
+                merged.push_back(n);
+            }
+            notes = std::move(merged);
+        }
+    } else {
+        // Legacy path (auto / beat): keep the original naive segmentation.
+        int noteStartFrame = -1;
+        float noteAccumPitch = 0.0f;
+        int noteFrameCount = 0;
+        float noteMaxRms = 0.0f;
+
+        for (int f = 0; f < numFrames; ++f) {
+            float const pitch = framePitch[f];
+            bool const isVoiced = (pitch >= 50.0f && pitch <= 1400.0f && frameRms[f] > rmsFloor);
+
+            if (isVoiced) {
+                if (noteStartFrame < 0) {
+                    noteStartFrame = f;
+                    noteAccumPitch = pitch;
+                    noteFrameCount = 1;
+                    noteMaxRms = frameRms[f];
                 } else {
+                    float const avgPitch = noteAccumPitch / noteFrameCount;
+                    float const semitoneDiff = std::abs(12.0f * std::log2(pitch / avgPitch));
+                    if (semitoneDiff < 1.5f) {
+                        noteAccumPitch += pitch;
+                        noteFrameCount++;
+                        if (frameRms[f] > noteMaxRms) noteMaxRms = frameRms[f];
+                    } else {
+                        if (noteFrameCount >= 3) {
+                            float const finalHz = noteAccumPitch / noteFrameCount;
+                            int const midi = juce::jlimit(24, 96, static_cast<int>(std::round(69.0 + 12.0 * std::log2(finalHz / 440.0))));
+                            notes.push_back({ midi, finalHz, (noteStartFrame * HOP) / sampleRate, (noteFrameCount * HOP) / sampleRate, juce::jlimit(0.2f, 1.0f, (noteMaxRms / std::max(0.01f, globalPeak)) * 1.2f) });
+                        }
+                        noteStartFrame = f;
+                        noteAccumPitch = pitch;
+                        noteFrameCount = 1;
+                        noteMaxRms = frameRms[f];
+                    }
+                }
+            } else {
+                if (noteStartFrame >= 0) {
                     if (noteFrameCount >= 3) {
                         float const finalHz = noteAccumPitch / noteFrameCount;
                         int const midi = juce::jlimit(24, 96, static_cast<int>(std::round(69.0 + 12.0 * std::log2(finalHz / 440.0))));
                         notes.push_back({ midi, finalHz, (noteStartFrame * HOP) / sampleRate, (noteFrameCount * HOP) / sampleRate, juce::jlimit(0.2f, 1.0f, (noteMaxRms / std::max(0.01f, globalPeak)) * 1.2f) });
                     }
-                    noteStartFrame = f;
-                    noteAccumPitch = pitch;
-                    noteFrameCount = 1;
-                    noteMaxRms = frameRms[f];
+                    noteStartFrame = -1;
                 }
-            }
-        } else {
-            if (noteStartFrame >= 0) {
-                if (noteFrameCount >= 3) {
-                    float const finalHz = noteAccumPitch / noteFrameCount;
-                    int const midi = juce::jlimit(24, 96, static_cast<int>(std::round(69.0 + 12.0 * std::log2(finalHz / 440.0))));
-                    notes.push_back({ midi, finalHz, (noteStartFrame * HOP) / sampleRate, (noteFrameCount * HOP) / sampleRate, juce::jlimit(0.2f, 1.0f, (noteMaxRms / std::max(0.01f, globalPeak)) * 1.2f) });
-                }
-                noteStartFrame = -1;
             }
         }
-    }
-    if (noteStartFrame >= 0 && noteFrameCount >= 3) {
-        float const finalHz = noteAccumPitch / noteFrameCount;
-        int const midi = juce::jlimit(24, 96, static_cast<int>(std::round(69.0 + 12.0 * std::log2(finalHz / 440.0))));
-        notes.push_back({ midi, finalHz, (noteStartFrame * HOP) / sampleRate, (noteFrameCount * HOP) / sampleRate, juce::jlimit(0.2f, 1.0f, (noteMaxRms / std::max(0.01f, globalPeak)) * 1.2f) });
+        if (noteStartFrame >= 0 && noteFrameCount >= 3) {
+            float const finalHz = noteAccumPitch / noteFrameCount;
+            int const midi = juce::jlimit(24, 96, static_cast<int>(std::round(69.0 + 12.0 * std::log2(finalHz / 440.0))));
+            notes.push_back({ midi, finalHz, (noteStartFrame * HOP) / sampleRate, (noteFrameCount * HOP) / sampleRate, juce::jlimit(0.2f, 1.0f, (noteMaxRms / std::max(0.01f, globalPeak)) * 1.2f) });
+        }
     }
 
     juce::String mode = "beatbox";
@@ -10591,6 +10995,12 @@ void MCPBridge::parseVoiceBufferToJson(float const* buffer, int totalSamples, do
         }
     }
 
+    // Declared intent beats inference: if the artist chose Melody or Beat before
+    // recording, that mode is truth — no guessing (an FX take never dresses as
+    // "6 hats" again). Auto mode (0) keeps the heuristic for legacy paths.
+    if (forcedMode == 1) mode = "melody";
+    else if (forcedMode == 2) mode = "beatbox";
+
     auto* root = new juce::DynamicObject();
     root->setProperty("mode", mode);
     root->setProperty("bpm", estimatedBpm);
@@ -10609,6 +11019,50 @@ void MCPBridge::parseVoiceBufferToJson(float const* buffer, int totalSamples, do
     }
     root->setProperty("hits", hitsArray);
 
+    // ── Spectral octave referee ──────────────────────────────────────────
+    // The YIN+fold pipeline can land a whole note an octave HIGH when the
+    // fundamental is weak (quiet hums): sub-octave energy at f/2 is the
+    // giveaway — natural voices do not energize below their fundamental.
+    // For each note, compare windowed DFT magnitude at f/2 vs f across its
+    // frames; ratio > 0.5 → halve (loop twice to catch double-octave slips).
+    // FFT referee validated 2026-10-06: held D3 147Hz (480k) vs D4 294Hz
+    // (137k) while the fold claimed D4.
+    {
+        auto toneMag = [&](float const* frame, float freq) {
+            double re = 0.0, im = 0.0;
+            for (int i = 0; i < N; ++i) {
+                double const w = 0.5 - 0.5 * std::cos(2.0 * juce::MathConstants<double>::pi * i / (N - 1));
+                double const ph = 2.0 * juce::MathConstants<double>::pi * freq * i / sampleRate;
+                re += frame[i] * w * std::cos(ph);
+                im += frame[i] * w * std::sin(ph);
+            }
+            return std::sqrt(re * re + im * im);
+        };
+
+        for (auto& n : notes) {
+            for (int pass = 0; pass < 2; ++pass) {
+                int const f0 = juce::jlimit(0, numFrames - 1, static_cast<int>(n.startSec * sampleRate / HOP));
+                int const f1 = juce::jlimit(f0 + 1, numFrames, static_cast<int>((n.startSec + n.durationSec) * sampleRate / HOP));
+                double sumFull = 0.0, sumHalf = 0.0;
+                int cnt = 0;
+                for (int f = f0; f < f1; ++f) {
+                    float const* fp = buffer + f * HOP;
+                    sumFull += toneMag(fp, n.freqHz);
+                    sumHalf += toneMag(fp, n.freqHz * 0.5f);
+                    ++cnt;
+                }
+                if (cnt <= 0) break;
+                double const ratio = sumHalf / std::max(1.0, sumFull);
+                if (ratio > 0.5 && n.freqHz * 0.5f >= 40.0f) {
+                    n.freqHz *= 0.5f;
+                    n.midiNote = juce::jlimit(24, 96, static_cast<int>(std::round(69.0 + 12.0 * std::log2(n.freqHz / 440.0))));
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
     juce::Array<juce::var> notesArray;
     for (auto const& n : notes) {
         auto* noteObj = new juce::DynamicObject();
@@ -10617,6 +11071,15 @@ void MCPBridge::parseVoiceBufferToJson(float const* buffer, int totalSamples, do
         noteObj->setProperty("start", static_cast<float>(n.startSec));
         noteObj->setProperty("duration", static_cast<float>(n.durationSec));
         noteObj->setProperty("vel", n.velocity);
+        noteObj->setProperty("conf", n.conf);
+        // 12-TET snap companion: raw freqHz stays untouched as the honest
+        // measurement; freqSnap is the in-tune playback pitch (midiNote is
+        // already the rounded semitone); centsOff shows the performance drift.
+        {
+            float const snapHz = 440.0f * std::pow(2.0f, static_cast<float>(n.midiNote - 69) / 12.0f);
+            noteObj->setProperty("freqSnap", snapHz);
+            noteObj->setProperty("centsOff", 1200.0f * std::log2(n.freqHz / snapHz));
+        }
         notesArray.add(juce::var(noteObj));
     }
     root->setProperty("notes", notesArray);
@@ -10626,13 +11089,64 @@ void MCPBridge::parseVoiceBufferToJson(float const* buffer, int totalSamples, do
     // Save directly to disk
     juce::File("/home/alphi/Desktop/plugdata/mcp-server/voice-take.json").replaceWithText(jsonStr);
 
+    // Phase 3 (slice): persist the take as a real WAV and register it as a
+    // first-class moodboard artifact, so any agent can audition/analyse/route it.
+    juce::String wavPath;
+    {
+        auto const takeDir = ProjectInfo::appDataDir.getChildFile("recordings");
+        takeDir.createDirectory();
+        auto const takeFile = takeDir.getChildFile("take_" + juce::String(juce::Time::getCurrentTime().toMilliseconds()) + ".wav");
+        juce::WavAudioFormat wavFormat;
+        std::unique_ptr<juce::FileOutputStream> stream(takeFile.createOutputStream());
+        if (stream) {
+            std::unique_ptr<juce::AudioFormatWriter> writer(wavFormat.createWriterFor(stream.get(), sampleRate, 1, 16, {}, 0));
+            if (writer) {
+                stream.release(); // writer owns the stream on success
+                juce::AudioBuffer<float> takeBuffer(1, totalSamples);
+                takeBuffer.copyFrom(0, 0, buffer, totalSamples);
+                if (writer->writeFromAudioSampleBuffer(takeBuffer, 0, totalSamples)) {
+                    wavPath = takeFile.getFullPathName();
+                }
+            }
+        }
+    }
+    if (processor) {
+        PluginProcessor::McpVoiceTake take;
+        take.id = wavPath.isNotEmpty() ? juce::File(wavPath).getFileNameWithoutExtension()
+                                       : "take_" + juce::String(juce::Time::getCurrentTime().toMilliseconds());
+        take.wavPath = wavPath;
+        take.json = jsonStr;
+        take.mode = mode.toLowerCase();
+        take.bpm = estimatedBpm;
+        take.hitCount = static_cast<int>(hits.size());
+        take.noteCount = static_cast<int>(notes.size());
+        take.durationSec = static_cast<double>(totalSamples) / sampleRate;
+
+        // 64-bucket peak envelope for the on-canvas chip waveform.
+        {
+            constexpr int numBuckets = 64;
+            take.peaks.assign(numBuckets, 0.0f);
+            int const per = juce::jmax(1, totalSamples / numBuckets);
+            for (int bk = 0; bk < numBuckets; ++bk) {
+                int const start = bk * per;
+                int const end = juce::jmin(totalSamples, start + per);
+                float peak = 0.0f;
+                for (int i = start; i < end; ++i) {
+                    peak = juce::jmax(peak, std::abs(buffer[i]));
+                }
+                take.peaks[bk] = peak;
+            }
+        }
+
+        processor->addMcpVoiceTake(std::move(take));
+    }
+
     sendReply("/pd/voice/event", jsonStr);
     sendConsoleLog("MCP: Voice take analyzed -> mode: " + mode + " (" + juce::String(hits.size()) + " hits, " + juce::String(notes.size()) + " notes, " + juce::String(estimatedBpm) + " BPM)", false);
 
-    // Also dispatch as prompt so AI Copilot mutates the patch automatically!
-    juce::StringArray targets;
-    juce::String const promptText = "[VOICE:" + mode.toUpperCase() + "] " + jsonStr;
-    sendSelectionPrompt(promptText, targets, false);
+    // STAGING LAW: the take parks (WAV on disk + Staging Bay row + moodboard rail).
+    // Nothing is sent to the AI here — recording must never auto-build a patch.
+    // The artist commits explicitly (Enter / ⚡), and the rail carries the take.
 }
 
 ProbeManager::ProbeManager(MCPBridge* owner)
@@ -11601,6 +12115,29 @@ void MCPBridge::sendSketchStroke(const juce::String& subpatch, const juce::Strin
     msg.addArgument(subpatch);
     msg.addArgument(isFastPath ? 1 : 0);
     msg.addArgument(jsonPoints);
+    sender.send(msg);
+}
+
+void MCPBridge::sendSketchBuild(const juce::String& subpatch, const juce::String& jsonStrokes, const juce::String& jsonBBox, const juce::String& prompt)
+{
+    if (!active.load()) return;
+    juce::OSCMessage msg { juce::OSCAddressPattern("/pd/sketch/build") };
+    msg.addArgument(subpatch);
+    msg.addArgument(jsonStrokes);
+    msg.addArgument(jsonBBox);
+    msg.addArgument(prompt);
+    sender.send(msg);
+}
+
+void MCPBridge::sendReferenceImage(const juce::String& path, float x, float y, float w, float h)
+{
+    if (!active.load()) return;
+    juce::OSCMessage msg { juce::OSCAddressPattern("/pd/reference/image") };
+    msg.addArgument(path);
+    msg.addArgument(x);
+    msg.addArgument(y);
+    msg.addArgument(w);
+    msg.addArgument(h);
     sender.send(msg);
 }
 

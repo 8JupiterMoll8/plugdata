@@ -449,7 +449,8 @@ enum Overlay {
     AIAnnotations = 1 << 11,
     AIGhosts = 1 << 12,
     AIHud = 1 << 13,
-    AISketch = 1 << 14
+    AISketch = 1 << 14,
+    AIReferences = 1 << 15
 };
 
 enum Align {

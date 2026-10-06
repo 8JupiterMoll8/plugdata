@@ -22,6 +22,7 @@ class VolumeSlider;
 class LatencyDisplayButton;
 class CommandButton;
 class StatusbarTextButton;
+class StudioDock;
 
 class StatusbarSource final : public Timer {
 
@@ -206,6 +207,9 @@ private:
     std::unique_ptr<LatencyDisplayButton> latencyDisplayButton;
 
     std::unique_ptr<ZoomLabel> zoomLabel;
+
+    // PRD Lane 1 — Studio moodboard dock, docked into the status bar's center gap.
+    std::unique_ptr<StudioDock> studioDock;
 
     float currentZoomLevel = 100.f;
 

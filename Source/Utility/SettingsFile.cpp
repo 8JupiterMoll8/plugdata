@@ -507,7 +507,7 @@ void SettingsFile::initialiseThemesTree()
 
 void SettingsFile::initialiseOverlayTree()
 {
-    int const aiDefaultFlags = AIState | AIRegions | AIAnnotations | AIGhosts | AIHud | AISketch;
+    int const aiDefaultFlags = AIState | AIRegions | AIAnnotations | AIGhosts | AIHud | AISketch | AIReferences;
     UnorderedMap<String, int> defaults = {
         { "edit", Origin | ActivationState | aiDefaultFlags },
         { "lock", Behind | aiDefaultFlags },
@@ -531,6 +531,16 @@ void SettingsFile::initialiseOverlayTree()
             overlayTree.setProperty(mode, static_cast<int>(overlayTree.getProperty(mode)) | aiDefaultFlags, nullptr);
         }
         overlayTree.setProperty("ai_granular_seeded", 1, nullptr);
+    }
+
+    // Migration: the References layer bit (1<<15) was added AFTER the first
+    // granular seeding. Without this, persisted masks keep pasted schematics
+    // invisible forever. Seed it ON once, with its own marker.
+    if (!overlayTree.hasProperty("ai_references_seeded")) {
+        for (auto const& mode : { String("edit"), String("lock"), String("alt") }) {
+            overlayTree.setProperty(mode, static_cast<int>(overlayTree.getProperty(mode)) | AIReferences, nullptr);
+        }
+        overlayTree.setProperty("ai_references_seeded", 1, nullptr);
     }
 }
 

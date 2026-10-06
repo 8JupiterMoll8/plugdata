@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <unordered_map>
 #include <nanovg.h>
 #ifdef NANOVG_GL_IMPLEMENTATION
 #    include <juce_opengl/juce_opengl.h>
@@ -124,9 +125,15 @@ public:
     bool shouldShowAIGhosts() const;
     bool shouldShowAIHud() const;
     bool shouldShowAISketch() const;
+    bool shouldShowAIReferences() const;
     void setSketchToolActive(bool active);
     bool isSketchToolActive() const;
     bool isSketchingActive() const;
+    // Phase 1B: combined bounding box of all persistent ink strokes, in Canvas
+    // component coordinates (empty rect when no strokes exist).
+    juce::Rectangle<float> getSketchBoundsInCanvas() const;
+    // All completed strokes serialized as [[{x,y,t},...],...] in PD patch coords.
+    juce::String buildSketchJson() const;
     bool shouldShowConnectionDirection() const;
     bool shouldShowConnectionActivity() const;
     void setOverlayMask(int mask);
@@ -263,6 +270,7 @@ public:
     bool showAiGhosts : 1 = true;
     bool showAiHud : 1 = true;
     bool showAiSketch : 1 = true;
+    bool showAiReferences : 1 = true;
     bool showConnectionDirection : 1 = false;
     bool showConnectionActivity : 1 = false;
 
@@ -310,6 +318,14 @@ public:
         Canvas* canvas;
     };
     std::unique_ptr<SelectionPillKeyListener> mcpSelectionPillKeys;
+    // Ctrl+V catcher: fires before TextEditors can swallow the key, so the paste
+    // slot works even while a tape-note editor has the caret.
+    struct SlotPasteKeyListener : public juce::KeyListener {
+        explicit SlotPasteKeyListener(Canvas* c) : canvas(c) {}
+        bool keyPressed(const juce::KeyPress& key, juce::Component* origin) override;
+        Canvas* canvas;
+    };
+    std::unique_ptr<SlotPasteKeyListener> mcpSlotPasteKeys;
     struct SelectionPillAnimator : public juce::Timer {
         explicit SelectionPillAnimator(Canvas* c) : canvas(c) {}
         void timerCallback() override;
@@ -336,6 +352,78 @@ public:
     std::unique_ptr<SketchFadeTimer> mcpSketchFadeTimer;
     void startSketchFadeTimer();
     void renderSketchOverlay(NVGcontext* nvg);
+
+    // Phase 1B — Moodboard Chisel: when no PD object is selected but ink exists,
+    // the pill anchors 14px below the sketch bounding box as a tactile action
+    // bar: [⚡ Build] | prompt | [↩ Undo] [🗑 Clear].
+    bool mcpPillSketchMode = false;
+    juce::Rectangle<float> mcpLastSketchBounds; // last ink bbox — keeps the chisel parked after Clear
+    bool mcpEraseGesture = false;              // current drag is an eraser pass (toolstrip eraser)
+    // Mood lane: clicking empty glass opens the pill as a "New Mood" palette
+    // (tools + prompt) before any ink exists.
+    bool mcpMoodPillActive = false;
+    juce::Point<int> mcpMoodPillPos;
+    // Paste slot: tapping 🖼 opens an empty dashed frame; Ctrl+V fills it.
+    // Nothing is auto-read from the clipboard — paste is an explicit act.
+    bool mcpImageSlotActive = false;
+    juce::Point<int> mcpImageSlotPos;
+    // Transient hint chip (e.g. "Clipboard has no image") under the mood strip.
+    juce::String mcpMoodHint;
+    std::uint32_t mcpMoodHintUntil = 0;
+    // Shift+Enter: park the typed intent + artifacts without waking the AI.
+    void parkSelectionPill();
+    void sendSketchBuild(const juce::String& prompt); // dispatch /pd/sketch/build
+    void undoLastStroke();
+    void clearAllInk();
+
+    // Studio brainstorm mode: the sidebar Studio drawer owns commit/undo/clear,
+    // the pen is up, and the selection pill is suppressed — nothing to select
+    // while collecting ideas. Edit mode (pill) returns when Studio mode is off.
+    bool mcpStudioMode = false;
+    void setStudioMode(bool active);
+    bool isStudioMode() const { return mcpStudioMode; }
+    // Commit the visible moodboard from the canvas itself (toolstrip / Ctrl+Enter):
+    // pulls the drawer's typed draft, dispatches, clears the draft.
+    void commitStudioFromCanvas();
+    // Dedicated eraser tool (statusbar dock): left-drag deletes strokes,
+    // exactly like Ctrl-drag. Mutually exclusive with the pen.
+    bool mcpEraserToolActive = false;
+    void setEraserToolActive(bool active);
+    bool isEraserToolActive() const { return mcpEraserToolActive; }
+    // Type tool (T): click the glass to pin a crisp console-tape text note on the
+    // Moodboard layer — never a [comment] DSP box. Reuses the inline note editor.
+    bool mcpTextToolActive = false;
+    void setTextToolActive(bool active);
+    bool isTextToolActive() const { return mcpTextToolActive; }
+    void createTextNoteAt(Point<int> canvasPos);
+    void openNoteEditorForIndex(int index);
+    // Stable tempIds of the current object selection — the surgical lane's anchor.
+    juce::StringArray getSelectionStableIds();
+    // Visible-Only Ingestion: hidden ink is neither rendered nor sent to the AI.
+    bool mcpStudioInkVisible = true;
+    void setStudioInkVisible(bool visible);
+    bool isStudioInkVisible() const { return mcpStudioInkVisible; }
+
+    // Phase 2 — Reference Images: pasted schematics/photos live on the canvas
+    // glass behind cords/objects. Textures cache the decoded image in a
+    // context-safe NVGImage (auto-invalidated when the NanoVG context restarts).
+    struct RefImageTexture {
+        int handle = 0;            // nvg texture via nvgCreateImage (stb_image path)
+        NVGcontext* ctx = nullptr; // context it was made on — recreated if it changes
+    };
+    std::unordered_map<std::string, RefImageTexture> mcpRefImageCache;
+    juce::String mcpDraggingRefImageId;
+    juce::Point<int> mcpRefImageDragOffset;
+    void renderReferenceImages(NVGcontext* nvg, Rectangle<int> invalidRegion);
+    bool pasteImageFromClipboard();
+    bool handleReferenceImageClick(MouseEvent const& e, Point<int> mousePos, bool isRightClick);
+
+    // Phase 3 — Voice take chips on the glass: ▶ audition + mini-waveform + ✕.
+    void renderVoiceTakes(NVGcontext* nvg, Rectangle<int> invalidRegion);
+    bool handleVoiceTakeClick(MouseEvent const& e, Point<int> mousePos);
+    juce::String mcpDraggingTakeId;
+    juce::Point<int> mcpTakeDragOffset;
+    juce::Point<int> mcpTakeSpawnPos; // where the next recorded take lands (canvas coords)
     // On-demand tool drawer (pressing "/" in the pill). Tools, not orders:
     // a native popup of neutral capabilities. Never shown unless asked.
     void showPillToolsMenu();

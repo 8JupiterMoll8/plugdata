@@ -1209,6 +1209,170 @@ private:
     Statusbar* statusbar;
 };
 
+// Studio moodboard dock — the PRD's Lane 1 toolstrip, docked into the empty center
+// gap of the native status bar (zero occlusion, zero floating chrome).
+class StudioDock final : public Component, private Timer {
+public:
+    explicit StudioDock(PluginEditor* e)
+        : editor(e)
+    {
+        setInterceptsMouseClicks(true, false);
+        startTimerHz(12); // keep active states in sync with keyboard tool flips
+    }
+
+    static constexpr int numChips = 6;
+
+    // Plain UTF-8-safe labels + PlugData's own icon font glyphs (never emoji:
+    // the app fonts have no emoji coverage — this is how the PlugData team
+    // renders every native toolbar icon).
+    static char const* chipLabel(int i)
+    {
+        static char const* labels[numChips] = { "Pen", "Text", "Eraser", "Image", "Audio", "Commit" };
+        return labels[i];
+    }
+
+    static juce::String chipIcon(int i)
+    {
+        switch (i) {
+        case 0: return Icons::Pencil;
+        case 1: return Icons::GlyphComment; // console-tape note
+        case 2: return Icons::Clear;
+        case 3: return Icons::File;
+        case 4: return Icons::Sine;
+        default: return Icons::Sparkle; // AI commit
+        }
+    }
+
+    static juce::Colour chipAccent(int i)
+    {
+        switch (i) {
+        case 0: return juce::Colour(0xff00e6ff); // electric cyan
+        case 1: return juce::Colour(0xff4a9eff); // laser blue
+        case 2: return juce::Colour(0xffffaa00); // warm amber
+        case 3: return juce::Colour(0xff7c4dff); // violet
+        case 4: return juce::Colour(0xff00e676); // green
+        default: return juce::Colour(0xff00f0ff); // commit
+        }
+    }
+
+    juce::Rectangle<int> chipBounds(int i) const
+    {
+        auto b = getLocalBounds().reduced(3, 2);
+        int const w = b.getWidth() / numChips;
+        int const x = b.getX() + i * w;
+        if (i == numChips - 1) return { x, b.getY(), b.getRight() - x, b.getHeight() };
+        return { x, b.getY(), w - 2, b.getHeight() };
+    }
+
+    int chipAt(juce::Point<int> p) const
+    {
+        for (int i = 0; i < numChips; ++i) {
+            if (chipBounds(i).contains(p)) return i;
+        }
+        return -1;
+    }
+
+    Canvas* activeCanvas() const
+    {
+        return editor ? editor->getCurrentCanvas() : nullptr;
+    }
+
+    bool isChipActive(int i) const
+    {
+        auto* cnv = activeCanvas();
+        if (!cnv) return false;
+        switch (i) {
+        case 0: return cnv->isSketchToolActive();
+        case 1: return cnv->isTextToolActive();
+        case 2: return cnv->isEraserToolActive();
+        default: return false;
+        }
+    }
+
+    void mouseMove(MouseEvent const& e) override
+    {
+        int const idx = chipAt(e.getPosition());
+        if (idx != hoverIndex) {
+            hoverIndex = idx;
+            repaint();
+        }
+    }
+
+    void mouseExit(MouseEvent const&) override
+    {
+        hoverIndex = -1;
+        repaint();
+    }
+
+    void mouseUp(MouseEvent const& e) override
+    {
+        if (!e.mods.isLeftButtonDown()) return;
+        auto* cnv = activeCanvas();
+        if (!cnv) return;
+        switch (chipAt(e.getPosition())) {
+        case 0: cnv->setSketchToolActive(!cnv->isSketchToolActive()); break;
+        case 1: cnv->setTextToolActive(!cnv->isTextToolActive()); break;
+        case 2: cnv->setEraserToolActive(!cnv->isEraserToolActive()); break;
+        case 3: cnv->pasteImageFromClipboard(); break;
+        case 4: break; // Phase 3 — audio snippet chips
+        case 5: cnv->commitStudioFromCanvas(); break;
+        default: break;
+        }
+        repaint();
+    }
+
+    void paint(Graphics& g) override
+    {
+        auto b = getLocalBounds().toFloat();
+        g.setColour(juce::Colour(22, 24, 29).withAlpha(0.88f));
+        g.fillRoundedRectangle(b, 6.0f);
+        g.setColour(juce::Colours::white.withAlpha(0.12f));
+        g.drawRoundedRectangle(b.reduced(0.25f), 6.0f, 0.5f);
+
+        for (int i = 0; i < numChips; ++i) {
+            auto const cb = chipBounds(i).toFloat();
+            bool const active = isChipActive(i);
+            bool const hovered = (i == hoverIndex);
+            auto const accent = chipAccent(i);
+
+            if (active) {
+                g.setColour(accent.withAlpha(0.85f));
+                g.fillRoundedRectangle(cb, 4.0f);
+            } else if (hovered) {
+                g.setColour(juce::Colours::white.withAlpha(0.10f));
+                g.fillRoundedRectangle(cb, 4.0f);
+            }
+
+            auto const contentCol = active ? juce::Colours::black.withAlpha(0.85f)
+                                           : juce::Colours::white.withAlpha(hovered ? 0.95f : 0.72f);
+
+            // Icon-font glyph + plain label (emoji-free, pixel-crisp).
+            auto content = chipBounds(i).reduced(6, 0);
+            auto iconArea = content.removeFromLeft(15);
+            Fonts::drawIcon(g, chipIcon(i), iconArea, contentCol, 12);
+            content.removeFromLeft(3);
+            g.setColour(contentCol);
+            g.setFont(juce::Font(11.0f, juce::Font::bold));
+            g.drawFittedText(chipLabel(i), content, juce::Justification::centredLeft, 1);
+        }
+    }
+
+    void timerCallback() override
+    {
+        auto* cnv = activeCanvas();
+        int const state = cnv ? ((cnv->isSketchToolActive() ? 1 : 0) | (cnv->isTextToolActive() ? 2 : 0) | (cnv->isEraserToolActive() ? 4 : 0)) : 0;
+        if (state != lastState) {
+            lastState = state;
+            repaint();
+        }
+    }
+
+private:
+    PluginEditor* editor;
+    int hoverIndex = -1;
+    int lastState = -1;
+};
+
 Statusbar::Statusbar(PluginProcessor* processor, PluginEditor* e)
     : pd(processor)
     , editor(e)
@@ -1410,6 +1574,10 @@ Statusbar::Statusbar(PluginProcessor* processor, PluginEditor* e)
 
     setSize(getWidth(), statusbarHeight);
 
+    // PRD Lane 1 — Studio moodboard dock (Pen / Text / Eraser / Image / Audio / Commit)
+    studioDock = std::make_unique<StudioDock>(editor);
+    addAndMakeVisible(*studioDock);
+
     lookAndFeelChanged();
 }
 
@@ -1550,6 +1718,20 @@ void Statusbar::resized()
     }
 
     commandInputButton->setTopRightPosition(position(10, true), getHeight() * 0.5f - commandInputButton->getHeight() * 0.5f);
+
+    // Studio dock — centered in the empty gap between the left cluster and the
+    // right meters. Zero occlusion: it lives in the status bar, never on the glass.
+    if (studioDock) {
+        int const leftLimit = overlaySettingsButton.getRight() + 12;
+        int const rightLimit = commandInputButton ? (commandInputButton->getX() - 12) : (levelMeter->getX() - 12);
+        int const available = rightLimit - leftLimit;
+        int const dockW = juce::jlimit(0, 470, available);
+        bool const show = !welcomePanelIsShown && dockW >= 320;
+        studioDock->setVisible(show);
+        if (show) {
+            studioDock->setBounds(leftLimit + (available - dockW) / 2, 3, dockW, getHeight() - 6);
+        }
+    }
 }
 
 void Statusbar::setLatencyDisplay(int const value)

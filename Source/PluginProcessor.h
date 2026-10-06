@@ -273,6 +273,136 @@ public:
     std::vector<McpRegion> mcpRegions;
     std::vector<McpRegion> getMcpRegions() const { juce::ScopedLock sl(mcpOverlayLock); return mcpRegions; }
 
+    // PRD Phase 2: pasted reference images (hardware photos, schematics) living on
+    // the canvas glass behind the DSP layer. x/y/w/h are PD patch coords so they map
+    // 1:1 to OSC /pd/reference/image and construct_patch_v4 placement.
+    struct McpReferenceImage {
+        juce::String id;       // content hash
+        juce::String filePath; // cached PNG under <appData>/references/
+        juce::String title;    // display tag (file name)
+        juce::String targetId; // surgical lane: stable tempId this image is attached to ("" = loose moodboard)
+        float x = 0.0f;        // top-left corner, PD patch coords
+        float y = 0.0f;
+        float width = 300.0f;
+        float height = 200.0f;
+        float alpha = 0.88f;
+        bool isLocked = false;
+        bool visible = true; // Visible-Only Ingestion: hidden images are not rendered nor sent to the AI
+    };
+    std::vector<McpReferenceImage> mcpReferenceImages;
+    std::vector<McpReferenceImage> getMcpReferenceImages() const { juce::ScopedLock sl(mcpOverlayLock); return mcpReferenceImages; }
+    void addMcpReferenceImage(McpReferenceImage img)
+    {
+        juce::ScopedLock sl(mcpOverlayLock);
+        for (auto& existing : mcpReferenceImages) {
+            if (existing.id == img.id) {
+                existing.x = img.x;
+                existing.y = img.y;
+                return; // re-pasting the same image just re-centers it
+            }
+        }
+        mcpReferenceImages.push_back(std::move(img));
+    }
+    void moveMcpReferenceImage(const juce::String& id, float x, float y)
+    {
+        juce::ScopedLock sl(mcpOverlayLock);
+        for (auto& img : mcpReferenceImages) {
+            if (img.id == id) {
+                img.x = x;
+                img.y = y;
+                return;
+            }
+        }
+    }
+    void setMcpReferenceLock(const juce::String& id, bool locked)
+    {
+        juce::ScopedLock sl(mcpOverlayLock);
+        for (auto& img : mcpReferenceImages) {
+            if (img.id == id) {
+                img.isLocked = locked;
+                return;
+            }
+        }
+    }
+    void setMcpReferenceVisible(const juce::String& id, bool visible)
+    {
+        juce::ScopedLock sl(mcpOverlayLock);
+        for (auto& img : mcpReferenceImages) {
+            if (img.id == id) {
+                img.visible = visible;
+                return;
+            }
+        }
+    }
+    void setMcpReferenceTarget(const juce::String& id, const juce::String& targetId)
+    {
+        juce::ScopedLock sl(mcpOverlayLock);
+        for (auto& img : mcpReferenceImages) {
+            if (img.id == id) {
+                img.targetId = targetId;
+                return;
+            }
+        }
+    }
+
+    // Phase 3 (slice): persisted voice takes — the beatbox/melody recordings become
+    // first-class moodboard artifacts (WAV on disk + structured transcript).
+    struct McpVoiceTake {
+        juce::String id;      // take_<timestamp>
+        juce::String wavPath; // ~/Documents/plugdata/recordings/take_….wav
+        juce::String json;    // structured analysis (mode, bpm, hits, notes)
+        juce::String mode;    // "beatbox" | "melody"
+        int bpm = 0;
+        int hitCount = 0;
+        int noteCount = 0;
+        double durationSec = 0.0;
+        bool visible = true;
+        // On-glass presence (PD patch coords) + mini-waveform envelope.
+        float x = 0.0f;
+        float y = 0.0f;
+        bool positioned = false;
+        std::vector<float> peaks; // 64 peak buckets for the chip
+    };
+    std::vector<McpVoiceTake> mcpVoiceTakes;
+    std::vector<McpVoiceTake> getMcpVoiceTakes() const { juce::ScopedLock sl(mcpOverlayLock); return mcpVoiceTakes; }
+    void addMcpVoiceTake(McpVoiceTake take)
+    {
+        juce::ScopedLock sl(mcpOverlayLock);
+        mcpVoiceTakes.push_back(std::move(take));
+    }
+    void removeMcpVoiceTake(const juce::String& id)
+    {
+        juce::ScopedLock sl(mcpOverlayLock);
+        std::erase_if(mcpVoiceTakes, [&id](McpVoiceTake const& t) { return t.id == id; });
+    }
+    void setMcpVoiceTakeVisible(const juce::String& id, bool visible)
+    {
+        juce::ScopedLock sl(mcpOverlayLock);
+        for (auto& t : mcpVoiceTakes) {
+            if (t.id == id) {
+                t.visible = visible;
+                return;
+            }
+        }
+    }
+    void setMcpVoiceTakePos(const juce::String& id, float x, float y)
+    {
+        juce::ScopedLock sl(mcpOverlayLock);
+        for (auto& t : mcpVoiceTakes) {
+            if (t.id == id) {
+                t.x = x;
+                t.y = y;
+                t.positioned = true;
+                return;
+            }
+        }
+    }
+    void removeMcpReferenceImage(const juce::String& id)
+    {
+        juce::ScopedLock sl(mcpOverlayLock);
+        std::erase_if(mcpReferenceImages, [&id](McpReferenceImage const& img) { return img.id == id; });
+    }
+
     // Cinematic Viewport HUD & Subtitle overlay for video capture & tutorials.
     // Rendered in screen space (unscaled/unpanned) — zero cord collisions.
     struct McpHud {
@@ -342,6 +472,8 @@ public:
         mcpGhosts.clear();
         mcpAnnotations.clear();
         mcpRegions.clear();
+        mcpReferenceImages.clear();
+        mcpVoiceTakes.clear();
         mcpAiOverlay.clear();
         mcpOverlayTargets.clear();
         mcpOverlayStrictCables = false;

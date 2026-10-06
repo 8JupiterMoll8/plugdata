@@ -4,6 +4,7 @@
  // WARRANTIES, see the file, "LICENSE.txt," in this distribution.
  */
 #include <juce_gui_basics/juce_gui_basics.h>
+#include <juce_cryptography/juce_cryptography.h>
 #include "Utility/Config.h"
 #include "Utility/Fonts.h"
 
@@ -775,6 +776,10 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
         }
     }
 
+    // PRD Phase 2: pasted reference images render as glass backdrops behind cords/objects.
+    renderReferenceImages(nvg, invalidRegion);
+    renderVoiceTakes(nvg, invalidRegion);
+
     auto drawBorder = [this, nvg, zoom](bool const bg, bool const fg) {
         if (viewport && (showOrigin || showBorder) && !::getValue<bool>(presentationMode)) {
             NVGScopedState scopedState(nvg);
@@ -1211,6 +1216,310 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
             nvgStrokeWidth(nvg, 1.0f);
             nvgStroke(nvg);
 
+            if (mcpPillSketchMode && mcpCompletedStrokes.empty()) {
+                // Mood strip: icons first, surfaces second. [✏] [T] [🖼] [🎙 Melody] [🥁 Beat]
+                float const btn = 30.0f;
+                float const gap = 4.0f;
+                float const pad = 6.0f;
+                float const by = (h - btn) * 0.5f;
+                bool const capturing = pd && pd->getMCPBridge() && pd->getMCPBridge()->isVoiceCapturing();
+                int const captureMode = capturing ? pd->getMCPBridge()->getVoiceCaptureMode() : 0;
+                bool const melodyRec = capturing && captureMode == 1;
+                bool const beatRec = capturing && captureMode == 2;
+
+                for (int i = 0; i < 5; ++i) {
+                    float const bx = pad + i * (btn + gap);
+                    bool const active = (i == 0 && mcpSketchToolActive) || (i == 1 && mcpTextToolActive) || (i == 3 && melodyRec) || (i == 4 && beatRec);
+
+                    NVGcolor bg = nvgRGBA(38, 42, 50, 230);
+                    NVGcolor border = nvgRGBA(160, 175, 200, 100);
+                    if (active) {
+                        bg = nvgRGBA(0, 190, 230, 245);
+                        border = nvgRGBA(0, 245, 255, 255);
+                    }
+                    nvgDrawRoundedRect(nvg, bx, by, btn, btn, bg, border, 6.0f);
+
+                    float const cx = bx + btn * 0.5f;
+                    float const cy = by + btn * 0.5f;
+                    NVGcolor const fg = active ? nvgRGBA(12, 14, 18, 255) : nvgRGBA(212, 224, 240, 235);
+
+                    if (i == 0) { // pen
+                        nvgBeginPath(nvg);
+                        nvgMoveTo(nvg, cx - 5.0f, cy + 5.0f);
+                        nvgLineTo(nvg, cx + 3.0f, cy - 5.0f);
+                        nvgLineTo(nvg, cx + 5.5f, cy - 2.5f);
+                        nvgLineTo(nvg, cx - 2.5f, cy + 5.5f);
+                        nvgClosePath(nvg);
+                        nvgStrokeColor(nvg, fg);
+                        nvgStrokeWidth(nvg, 1.3f);
+                        nvgStroke(nvg);
+                        nvgBeginPath(nvg);
+                        nvgMoveTo(nvg, cx - 5.0f, cy + 5.0f);
+                        nvgLineTo(nvg, cx - 6.5f, cy + 6.5f);
+                        nvgStroke(nvg);
+                    } else if (i == 1) { // text
+                        nvgFontFace(nvg, "Inter");
+                        nvgFontSize(nvg, 13.0f);
+                        nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+                        nvgFillColor(nvg, fg);
+                        nvgText(nvg, cx, cy, "T", nullptr);
+                    } else if (i == 2) { // image
+                        nvgBeginPath(nvg);
+                        nvgRoundedRect(nvg, cx - 6.0f, cy - 5.0f, 12.0f, 10.0f, 1.8f);
+                        nvgStrokeColor(nvg, fg);
+                        nvgStrokeWidth(nvg, 1.2f);
+                        nvgStroke(nvg);
+                        nvgBeginPath(nvg);
+                        nvgMoveTo(nvg, cx - 5.0f, cy + 3.0f);
+                        nvgLineTo(nvg, cx - 1.0f, cy - 1.0f);
+                        nvgLineTo(nvg, cx + 2.0f, cy + 1.5f);
+                        nvgLineTo(nvg, cx + 5.0f, cy - 2.0f);
+                        nvgStrokeColor(nvg, fg);
+                        nvgStrokeWidth(nvg, 1.1f);
+                        nvgStroke(nvg);
+                    } else if (i == 3) { // melody (beamed notes)
+                        nvgBeginPath(nvg);
+                        nvgEllipse(nvg, cx - 3.5f, cy + 4.5f, 2.8f, 2.0f);
+                        nvgFillColor(nvg, fg);
+                        nvgFill(nvg);
+                        nvgBeginPath(nvg);
+                        nvgEllipse(nvg, cx + 4.0f, cy + 3.0f, 2.8f, 2.0f);
+                        nvgFillColor(nvg, fg);
+                        nvgFill(nvg);
+                        nvgBeginPath(nvg);
+                        nvgMoveTo(nvg, cx - 0.9f, cy + 4.4f);
+                        nvgLineTo(nvg, cx - 0.9f, cy - 5.5f);
+                        nvgLineTo(nvg, cx + 6.6f, cy - 6.8f);
+                        nvgLineTo(nvg, cx + 6.6f, cy + 2.9f);
+                        nvgStrokeColor(nvg, fg);
+                        nvgStrokeWidth(nvg, 1.4f);
+                        nvgStroke(nvg);
+
+                        if (melodyRec) { // live level aura
+                            float const lvl = pd->getMCPBridge()->getVoiceLiveLevel();
+                            nvgBeginPath(nvg);
+                            nvgRoundedRect(nvg, bx - 2.0f - lvl * 4.0f, by - 2.0f - lvl * 4.0f,
+                                           btn + 4.0f + lvl * 8.0f, btn + 4.0f + lvl * 8.0f, 8.0f);
+                            nvgStrokeColor(nvg, nvgRGBA(255, 60, 45, static_cast<unsigned char>(120 + juce::jlimit(0.0f, 130.0f, lvl * 350.0f))));
+                            nvgStrokeWidth(nvg, 1.5f);
+                            nvgStroke(nvg);
+                        }
+                    } else { // beat (drum glyph)
+                        nvgBeginPath(nvg);
+                        nvgRoundedRect(nvg, cx - 6.0f, cy - 0.5f, 12.0f, 6.5f, 2.0f);
+                        nvgStrokeColor(nvg, fg);
+                        nvgStrokeWidth(nvg, 1.2f);
+                        nvgStroke(nvg);
+                        nvgBeginPath(nvg);
+                        nvgEllipse(nvg, cx, cy - 0.5f, 6.0f, 2.0f);
+                        nvgStrokeColor(nvg, fg);
+                        nvgStrokeWidth(nvg, 1.2f);
+                        nvgStroke(nvg);
+                        // crossed beaters
+                        nvgBeginPath(nvg);
+                        nvgMoveTo(nvg, cx - 4.5f, cy - 7.0f);
+                        nvgLineTo(nvg, cx + 1.0f, cy - 1.5f);
+                        nvgMoveTo(nvg, cx + 4.5f, cy - 7.0f);
+                        nvgLineTo(nvg, cx - 1.0f, cy - 1.5f);
+                        nvgStrokeColor(nvg, fg);
+                        nvgStrokeWidth(nvg, 1.1f);
+                        nvgStroke(nvg);
+
+                        if (beatRec) { // live level aura
+                            float const lvl = pd->getMCPBridge()->getVoiceLiveLevel();
+                            nvgBeginPath(nvg);
+                            nvgRoundedRect(nvg, bx - 2.0f - lvl * 4.0f, by - 2.0f - lvl * 4.0f,
+                                           btn + 4.0f + lvl * 8.0f, btn + 4.0f + lvl * 8.0f, 8.0f);
+                            nvgStrokeColor(nvg, nvgRGBA(255, 60, 45, static_cast<unsigned char>(120 + juce::jlimit(0.0f, 130.0f, lvl * 350.0f))));
+                            nvgStrokeWidth(nvg, 1.5f);
+                            nvgStroke(nvg);
+                        }
+                    }
+                }
+
+                // Record slot: declared intent + live level while capturing.
+                if (melodyRec || beatRec) {
+                    juce::String const recText = melodyRec
+                        ? "Sing a melody - tap the note to stop"
+                        : "Beatbox - tap the drum to stop";
+                    float const boxW = 330.0f;
+                    float const boxX = (w - boxW) * 0.5f;
+                    float const boxY = -44.0f;
+                    nvgDrawRoundedRect(nvg, boxX, boxY, boxW, 32.0f, nvgRGBA(26, 18, 20, 242), nvgRGBA(255, 70, 58, 220), 7.0f);
+
+                    // pulsing red REC dot
+                    float const pulse = 0.65f + 0.35f * std::sin(static_cast<float>(juce::Time::getMillisecondCounter()) * 0.008f);
+                    float const lvl = juce::jlimit(0.0f, 1.0f, pd->getMCPBridge()->getVoiceLiveLevel() * 3.5f);
+                    nvgBeginPath(nvg);
+                    nvgCircle(nvg, boxX + 15.0f, boxY + 16.0f, 4.0f);
+                    nvgFillColor(nvg, nvgRGBA(255, 60, 45, static_cast<unsigned char>(160 + 95 * pulse)));
+                    nvgFill(nvg);
+
+                    // live level meter
+                    nvgDrawRoundedRect(nvg, boxX + 26.0f, boxY + 13.0f, 70.0f, 6.0f, nvgRGBA(50, 30, 32, 230), nvgRGBA(90, 50, 52, 120), 3.0f);
+                    nvgDrawRoundedRect(nvg, boxX + 26.0f, boxY + 13.0f, 4.0f + lvl * 66.0f, 6.0f, nvgRGBA(255, 70, 55, 235), nvgRGBA(255, 120, 100, 120), 3.0f);
+
+                    nvgFontFace(nvg, "Inter");
+                    nvgFontSize(nvg, 10.5f);
+                    nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+                    nvgFillColor(nvg, nvgRGBA(255, 214, 208, 240));
+                    nvgText(nvg, boxX + 104.0f, boxY + 16.0f, recText.toRawUTF8(), nullptr);
+                }
+
+                // Hint chip under the strip
+                if (mcpMoodHint.isNotEmpty() && juce::Time::getMillisecondCounter() < mcpMoodHintUntil) {
+                    nvgFontFace(nvg, "Inter");
+                    nvgFontSize(nvg, 11.0f);
+                    nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+                    float tb[4];
+                    nvgTextBounds(nvg, 0.0f, 0.0f, mcpMoodHint.toRawUTF8(), nullptr, tb);
+                    float const hw = (tb[2] - tb[0]) + 16.0f;
+                    nvgDrawRoundedRect(nvg, 0.0f, h + 6.0f, hw, 20.0f, nvgRGBA(16, 18, 22, 232), nvgRGBA(255, 190, 80, 150), 5.0f);
+                    nvgFillColor(nvg, nvgRGBA(255, 214, 150, 240));
+                    nvgText(nvg, 8.0f, h + 16.0f, mcpMoodHint.toRawUTF8(), nullptr);
+                }
+            } else if (mcpPillSketchMode) {
+                // Moodboard Chisel: [⚡ Build] | prompt | [T] [🖼] [↩ Undo] [🗑 Clear] [✏️ pen]
+                float const chipH = 22.0f;
+                float const chipY = (h - chipH) * 0.5f;
+
+                // ⚡ Build chip — the commit action (accent blue)
+                {
+                    float const bx = 6.0f;
+                    float const bw = 80.0f;
+                    nvgDrawRoundedRect(nvg, bx, chipY, bw, chipH, nvgRGBA(32, 108, 214, 245), nvgRGBA(96, 178, 255, 255), 5.0f);
+                    // vector lightning bolt
+                    nvgBeginPath(nvg);
+                    nvgMoveTo(nvg, bx + 15.0f, chipY + 3.5f);
+                    nvgLineTo(nvg, bx + 10.0f, chipY + 11.5f);
+                    nvgLineTo(nvg, bx + 14.0f, chipY + 11.5f);
+                    nvgLineTo(nvg, bx + 12.0f, chipY + 18.5f);
+                    nvgLineTo(nvg, bx + 19.0f, chipY + 9.5f);
+                    nvgLineTo(nvg, bx + 14.5f, chipY + 9.5f);
+                    nvgLineTo(nvg, bx + 17.0f, chipY + 3.5f);
+                    nvgClosePath(nvg);
+                    nvgFillColor(nvg, nvgRGBA(255, 235, 130, 255));
+                    nvgFill(nvg);
+                    nvgFontFace(nvg, "Inter");
+                    nvgFontSize(nvg, 11.5f);
+                    nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+                    nvgFillColor(nvg, nvgRGBA(255, 255, 255, 255));
+                    nvgText(nvg, bx + 25.0f, chipY + chipH * 0.5f, "Build", nullptr);
+                }
+
+                // T attach-text chip (same tools as the surgical lane)
+                {
+                    float const tx = w - 234.0f;
+                    float const tw2 = 24.0f;
+                    nvgDrawRoundedRect(nvg, tx, chipY, tw2, chipH,
+                                       mcpTextToolActive ? nvgRGBA(74, 158, 255, 240) : nvgRGBA(38, 42, 50, 230),
+                                       mcpTextToolActive ? nvgRGBA(140, 195, 255, 255) : nvgRGBA(160, 175, 200, 110), 4.0f);
+                    nvgFontFace(nvg, "Inter");
+                    nvgFontSize(nvg, 12.0f);
+                    nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+                    nvgFillColor(nvg, mcpTextToolActive ? nvgRGBA(255, 255, 255, 255) : nvgRGBA(215, 225, 240, 235));
+                    nvgText(nvg, tx + tw2 * 0.5f, chipY + chipH * 0.5f, "T", nullptr);
+                }
+
+                // 🖼 attach-image chip (pastes the clipboard onto the mood/sketch)
+                {
+                    float const ix = w - 206.0f;
+                    float const iw = 24.0f;
+                    float const icx = ix + iw * 0.5f;
+                    float const icy = chipY + chipH * 0.5f;
+                    nvgDrawRoundedRect(nvg, ix, chipY, iw, chipH, nvgRGBA(38, 42, 50, 230), nvgRGBA(160, 175, 200, 110), 4.0f);
+                    nvgBeginPath(nvg);
+                    nvgRoundedRect(nvg, icx - 5.0f, icy - 4.0f, 10.0f, 8.5f, 1.5f);
+                    nvgStrokeColor(nvg, nvgRGBA(200, 215, 235, 220));
+                    nvgStrokeWidth(nvg, 1.1f);
+                    nvgStroke(nvg);
+                    nvgBeginPath(nvg);
+                    nvgMoveTo(nvg, icx - 4.0f, icy + 2.5f);
+                    nvgLineTo(nvg, icx - 1.0f, icy - 0.5f);
+                    nvgLineTo(nvg, icx + 1.5f, icy + 1.5f);
+                    nvgLineTo(nvg, icx + 4.0f, icy + 0.5f);
+                    nvgStrokeColor(nvg, nvgRGBA(160, 230, 200, 200));
+                    nvgStrokeWidth(nvg, 1.0f);
+                    nvgStroke(nvg);
+                }
+
+                // ↩ Undo chip
+                {
+                    float const ux = w - 178.0f;
+                    float const uw = 70.0f;
+                    float const ucy = chipY + chipH * 0.5f;
+                    nvgDrawRoundedRect(nvg, ux, chipY, uw, chipH, nvgRGBA(38, 42, 50, 235), nvgRGBA(160, 175, 200, 110), 4.0f);
+                    // back-arrow glyph
+                    nvgBeginPath(nvg);
+                    nvgMoveTo(nvg, ux + 18.0f, ucy);
+                    nvgLineTo(nvg, ux + 10.0f, ucy);
+                    nvgMoveTo(nvg, ux + 13.5f, ucy - 3.0f);
+                    nvgLineTo(nvg, ux + 10.0f, ucy);
+                    nvgLineTo(nvg, ux + 13.5f, ucy + 3.0f);
+                    nvgStrokeColor(nvg, nvgRGBA(150, 200, 255, 235));
+                    nvgStrokeWidth(nvg, 1.4f);
+                    nvgStroke(nvg);
+                    nvgFontFace(nvg, "Inter");
+                    nvgFontSize(nvg, 10.5f);
+                    nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+                    nvgFillColor(nvg, nvgRGBA(215, 225, 240, 235));
+                    nvgText(nvg, ux + 23.0f, ucy, "Undo", nullptr);
+                }
+
+                // 🗑 Clear chip
+                {
+                    float const cxX = w - 104.0f;
+                    float const cxW = 70.0f;
+                    float const ccy = chipY + chipH * 0.5f;
+                    nvgDrawRoundedRect(nvg, cxX, chipY, cxW, chipH, nvgRGBA(58, 30, 34, 235), nvgRGBA(220, 110, 110, 140), 4.0f);
+                    // trash glyph
+                    float const tcx = cxX + 14.0f;
+                    nvgBeginPath(nvg);
+                    nvgRoundedRect(nvg, tcx - 3.5f, ccy - 3.0f, 7.0f, 8.5f, 1.5f);
+                    nvgStrokeColor(nvg, nvgRGBA(255, 175, 175, 240));
+                    nvgStrokeWidth(nvg, 1.3f);
+                    nvgStroke(nvg);
+                    nvgBeginPath(nvg);
+                    nvgMoveTo(nvg, tcx - 5.0f, ccy - 4.5f);
+                    nvgLineTo(nvg, tcx + 5.0f, ccy - 4.5f);
+                    nvgStrokeColor(nvg, nvgRGBA(255, 175, 175, 240));
+                    nvgStrokeWidth(nvg, 1.3f);
+                    nvgStroke(nvg);
+                    nvgFontFace(nvg, "Inter");
+                    nvgFontSize(nvg, 10.5f);
+                    nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+                    nvgFillColor(nvg, nvgRGBA(255, 200, 200, 240));
+                    nvgText(nvg, cxX + 24.0f, ccy, "Clear", nullptr);
+                }
+
+                // ✏️ Pen toggle — put the pen down / pick it back up without knowing Esc
+                {
+                    float const px = w - 30.0f;
+                    float const pw = 24.0f;
+                    float const pcy = chipY + chipH * 0.5f;
+                    if (mcpSketchToolActive) {
+                        nvgDrawRoundedRect(nvg, px, chipY, pw, chipH, nvgRGBA(0, 180, 220, 240), nvgRGBA(0, 245, 255, 255), 4.0f);
+                    } else {
+                        nvgDrawRoundedRect(nvg, px, chipY, pw, chipH, nvgRGBA(38, 42, 50, 230), nvgRGBA(160, 175, 200, 80), 4.0f);
+                    }
+                    float const pcx = px + pw * 0.5f;
+                    nvgBeginPath(nvg);
+                    nvgMoveTo(nvg, pcx - 4.5f, pcy + 4.5f);
+                    nvgLineTo(nvg, pcx + 2.5f, pcy - 4.5f);
+                    nvgLineTo(nvg, pcx + 5.0f, pcy - 2.0f);
+                    nvgLineTo(nvg, pcx - 2.0f, pcy + 5.0f);
+                    nvgClosePath(nvg);
+                    nvgStrokeColor(nvg, mcpSketchToolActive ? nvgRGBA(255, 255, 255, 255) : nvgRGBA(200, 215, 235, 220));
+                    nvgStrokeWidth(nvg, 1.2f);
+                    nvgStroke(nvg);
+                    nvgBeginPath(nvg);
+                    nvgMoveTo(nvg, pcx - 4.5f, pcy + 4.5f);
+                    nvgLineTo(nvg, pcx - 6.0f, pcy + 6.0f);
+                    nvgStrokeColor(nvg, mcpSketchToolActive ? nvgRGBA(255, 255, 255, 255) : nvgRGBA(0, 230, 255, 220));
+                    nvgStrokeWidth(nvg, 1.4f);
+                    nvgStroke(nvg);
+                }
+            } else {
             // Left: + Add Context & Actions button (Antigravity vector plus!)
             float const lw = 24.0f;
             float const lh = 20.0f;
@@ -1230,6 +1539,69 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
             nvgStrokeColor(nvg, isPlusActive ? nvgRGBA(74, 180, 255, 255) : nvgRGBA(220, 230, 245, 230));
             nvgStrokeWidth(nvg, 1.6f);
             nvgStroke(nvg);
+
+            // Surgical attachment chips: [✏ attach-sketch] [T attach-text] [🖼 attach-image]
+            // Same tools as the Studio lane, but bound to the selected object.
+            {
+                float const chipW = 24.0f;
+                float const chipH = 20.0f;
+                float const chipY = (h - chipH) * 0.5f;
+                struct AttachChip { float x; };
+                float const sketchX = w - 144.0f;
+                float const textX = w - 116.0f;
+                float const imageX = w - 88.0f;
+
+                bool const sketchArmed = mcpSketchToolActive;
+                bool const textArmed = mcpTextToolActive;
+
+                // ✏ attach-sketch
+                nvgDrawRoundedRect(nvg, sketchX, chipY, chipW, chipH,
+                                   sketchArmed ? nvgRGBA(0, 180, 220, 240) : nvgRGBA(38, 42, 50, 230),
+                                   sketchArmed ? nvgRGBA(0, 245, 255, 255) : nvgRGBA(160, 175, 200, 80), 4.0f);
+                {
+                    float const pcx = sketchX + chipW * 0.5f;
+                    float const pcy = chipY + chipH * 0.5f;
+                    nvgBeginPath(nvg);
+                    nvgMoveTo(nvg, pcx - 4.0f, pcy + 4.0f);
+                    nvgLineTo(nvg, pcx + 2.5f, pcy - 4.5f);
+                    nvgLineTo(nvg, pcx + 4.5f, pcy - 2.0f);
+                    nvgLineTo(nvg, pcx - 2.0f, pcy + 5.0f);
+                    nvgClosePath(nvg);
+                    nvgStrokeColor(nvg, sketchArmed ? nvgRGBA(255, 255, 255, 255) : nvgRGBA(200, 215, 235, 220));
+                    nvgStrokeWidth(nvg, 1.2f);
+                    nvgStroke(nvg);
+                }
+
+                // T attach-text
+                nvgDrawRoundedRect(nvg, textX, chipY, chipW, chipH,
+                                   textArmed ? nvgRGBA(74, 158, 255, 240) : nvgRGBA(38, 42, 50, 230),
+                                   textArmed ? nvgRGBA(140, 195, 255, 255) : nvgRGBA(160, 175, 200, 80), 4.0f);
+                nvgFontFace(nvg, "Inter");
+                nvgFontSize(nvg, 12.0f);
+                nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+                nvgFillColor(nvg, textArmed ? nvgRGBA(255, 255, 255, 255) : nvgRGBA(200, 215, 235, 220));
+                nvgText(nvg, textX + chipW * 0.5f, chipY + chipH * 0.5f, "T", nullptr);
+
+                // 🖼 attach-image (picture frame glyph)
+                nvgDrawRoundedRect(nvg, imageX, chipY, chipW, chipH, nvgRGBA(38, 42, 50, 230), nvgRGBA(160, 175, 200, 80), 4.0f);
+                {
+                    float const icx = imageX + chipW * 0.5f;
+                    float const icy = chipY + chipH * 0.5f;
+                    nvgBeginPath(nvg);
+                    nvgRoundedRect(nvg, icx - 5.0f, icy - 4.0f, 10.0f, 8.5f, 1.5f);
+                    nvgStrokeColor(nvg, nvgRGBA(200, 215, 235, 220));
+                    nvgStrokeWidth(nvg, 1.1f);
+                    nvgStroke(nvg);
+                    nvgBeginPath(nvg);
+                    nvgMoveTo(nvg, icx - 4.0f, icy + 2.5f);
+                    nvgLineTo(nvg, icx - 1.0f, icy - 0.5f);
+                    nvgLineTo(nvg, icx + 1.5f, icy + 1.5f);
+                    nvgLineTo(nvg, icx + 4.0f, icy + 0.5f);
+                    nvgStrokeColor(nvg, nvgRGBA(160, 230, 200, 200));
+                    nvgStrokeWidth(nvg, 1.0f);
+                    nvgStroke(nvg);
+                }
+            }
 
             // Right: ✏️ Pen / Sketch button
             float const pw = 24.0f;
@@ -1300,14 +1672,16 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
             nvgStrokeColor(nvg, isVoiceRec ? nvgRGBA(255, 255, 255, 255) : nvgRGBA(200, 215, 235, 220));
             nvgStrokeWidth(nvg, 1.2f);
             nvgStroke(nvg);
+            } // else: object-pill controls (+ / pen / mic)
         }
 
         // Ambient blinking caret when unfocused & empty to clearly signal interactive input affordance
-        if (mcpSelectionPill && !mcpSelectionPill->hasKeyboardFocus(true) && mcpSelectionPill->getText().isEmpty()) {
+        if (mcpSelectionPill && !mcpSelectionPill->hasKeyboardFocus(true) && mcpSelectionPill->getText().isEmpty()
+            && !(mcpPillSketchMode && mcpCompletedStrokes.empty())) {
             bool const caretBlink = ((juce::Time::getMillisecondCounter() / 530) % 2) == 0;
             if (caretBlink) {
                 NVGScopedState scopedCaret(nvg);
-                float const caretX = panel.getX() + 38.0f;
+                float const caretX = panel.getX() + (mcpPillSketchMode ? 96.0f : 38.0f);
                 float const caretY = panel.getY() + panel.getHeight() * 0.5f;
                 nvgBeginPath(nvg);
                 nvgMoveTo(nvg, caretX, caretY - 7.0f);
@@ -1319,13 +1693,19 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
         }
 
         // Crisp on-canvas placeholder when empty (subtle dim when focused)
-        if (mcpSelectionPill && mcpSelectionPill->getText().isEmpty()) {
+        if (mcpSelectionPill && mcpSelectionPill->getText().isEmpty()
+            && !(mcpPillSketchMode && mcpCompletedStrokes.empty())) {
             NVGScopedState scopedHint(nvg);
             nvgFontFace(nvg, "Inter");
             nvgFontSize(nvg, 12.0f);
             nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
             juce::String hint;
-            if (isVoiceRec) {
+            if (mcpPillSketchMode) {
+                hint = mcpCompletedStrokes.empty()
+                    ? "New Mood — paint, paste, type... then Build"
+                    : "Describe the build, or hit Build...";
+                nvgFillColor(nvg, nvgRGBA(140, 155, 175, mcpSelectionPill->hasKeyboardFocus(true) ? 90 : 170));
+            } else if (isVoiceRec) {
                 hint = "Listening... (speak prompt or beatbox groove)";
                 nvgFillColor(nvg, nvgRGBA(255, 110, 95, 240));
             } else if (mcpActiveLens.isNotEmpty()) {
@@ -1335,7 +1715,7 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
                 hint = "Ask AI on selection...  (/ skills & actions)";
                 nvgFillColor(nvg, nvgRGBA(140, 155, 175, mcpSelectionPill->hasKeyboardFocus(true) ? 90 : 170));
             }
-            nvgText(nvg, panel.getX() + 38.0f, panel.getY() + panel.getHeight() * 0.5f, hint.toRawUTF8(), nullptr);
+            nvgText(nvg, panel.getX() + (mcpPillSketchMode ? 96.0f : 38.0f), panel.getY() + panel.getHeight() * 0.5f, hint.toRawUTF8(), nullptr);
         }
 
         {
@@ -1551,6 +1931,36 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
     // Multimodal Pen / Sketch Ink Overlay (Rendered directly on GPU in canvas coords)
     renderSketchOverlay(nvg);
 
+    // Paste slot ghost: an empty dashed frame waiting for Ctrl+V. Explicit,
+    // local, never auto-read from the clipboard.
+    if (mcpImageSlotActive) {
+        float const scx = static_cast<float>(mcpImageSlotPos.x);
+        float const scy = static_cast<float>(mcpImageSlotPos.y);
+        float const sx = scx - 160.0f;
+        float const sy = scy - 110.0f;
+
+        NVGScopedState scopedSlot(nvg);
+        nvgBeginPath(nvg);
+        nvgRoundedRect(nvg, sx, sy, 320.0f, 220.0f, 8.0f);
+        nvgFillColor(nvg, nvgRGBA(20, 24, 30, 150));
+        nvgFill(nvg);
+        nvgStrokeColor(nvg, nvgRGBA(124, 77, 255, 200));
+        nvgStrokeWidth(nvg, 1.5f);
+        nvgLineStyle(nvg, NVG_LINE_DASHED);
+        nvgDashLength(nvg, 7.0f);
+        nvgStroke(nvg);
+        nvgLineStyle(nvg, NVG_LINE_SOLID);
+
+        nvgFontFace(nvg, "Inter");
+        nvgFontSize(nvg, 13.0f);
+        nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+        nvgFillColor(nvg, nvgRGBA(198, 208, 226, 225));
+        nvgText(nvg, scx, scy - 8.0f, "Ctrl+V to paste image", nullptr);
+        nvgFontSize(nvg, 11.0f);
+        nvgFillColor(nvg, nvgRGBA(150, 160, 180, 170));
+        nvgText(nvg, scx, scy + 12.0f, "(Esc cancels)", nullptr);
+    }
+
     // PRD overlay: ghost/preview of PROPOSED (uncommitted) changes. Drawn above
     // the patch, never part of it — the artist sees the change before it's real.
     if (pd && shouldShowAIGhosts() && !pd->getMcpGhosts().empty()) {
@@ -1625,6 +2035,30 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
 
     if (objectsDistributeResizer)
         objectsDistributeResizer->render(nvg);
+
+    // Studio ink mode: a subtle neon frame around the visible viewport so the
+    // armed pen is unmistakable — even after you look away. (Crosshair alone is
+    // easy to miss.) Screen-constant width via /zoom.
+    if ((mcpSketchToolActive || mcpEraserToolActive) && viewport && !::getValue<bool>(presentationMode) && zoom > 0.0f) {
+        float const vx = static_cast<float>(viewport->getViewPositionX()) / zoom;
+        float const vy = static_cast<float>(viewport->getViewPositionY()) / zoom;
+        float const vw = static_cast<float>(viewport->getWidth()) / zoom;
+        float const vh = static_cast<float>(viewport->getHeight()) / zoom;
+        float const inset = 2.0f / zoom;
+
+        NVGScopedState scopedArmed(nvg);
+        nvgBeginPath(nvg);
+        nvgRect(nvg, vx + inset, vy + inset, vw - inset * 2.0f, vh - inset * 2.0f);
+        nvgStrokeColor(nvg, nvgRGBA(0, 230, 255, 22));
+        nvgStrokeWidth(nvg, 9.0f / zoom);
+        nvgStroke(nvg);
+
+        nvgBeginPath(nvg);
+        nvgRect(nvg, vx + inset, vy + inset, vw - inset * 2.0f, vh - inset * 2.0f);
+        nvgStrokeColor(nvg, nvgRGBA(0, 230, 255, 115));
+        nvgStrokeWidth(nvg, 1.5f / zoom);
+        nvgStroke(nvg);
+    }
 
     nvgRestore(nvg);
 
@@ -1948,10 +2382,51 @@ bool Canvas::shouldShowAISketch() const
     return showAiSketch;
 }
 
+bool Canvas::shouldShowAIReferences() const
+{
+    if (presentationMode.getValue() || isGraph) return false;
+    return showAiReferences;
+}
+
 void Canvas::setSketchToolActive(bool active)
 {
     mcpSketchToolActive = active;
-    setMouseCursor(active ? MouseCursor::CrosshairCursor : MouseCursor::NormalCursor);
+    if (active) {
+        mcpEraserToolActive = false; // one tool at a time
+        mcpTextToolActive = false;
+    }
+    setMouseCursor((active || mcpEraserToolActive || mcpTextToolActive) ? MouseCursor::CrosshairCursor : MouseCursor::NormalCursor);
+    // The chisel's presence follows the pen: arming shows it, dropping it hides
+    // it (when the board is empty). Keeps the mode state always visible.
+    updateSelectionPill();
+    repaint();
+    if (editor) editor->nvgSurface.renderAll();
+}
+
+void Canvas::setEraserToolActive(bool active)
+{
+    mcpEraserToolActive = active;
+    if (active) {
+        mcpSketchToolActive = false; // one tool at a time
+        mcpTextToolActive = false;
+    }
+    setMouseCursor((active || mcpSketchToolActive) ? MouseCursor::CrosshairCursor : MouseCursor::NormalCursor);
+    updateSelectionPill();
+    repaint();
+    if (editor) editor->nvgSurface.renderAll();
+}
+
+void Canvas::setTextToolActive(bool active)
+{
+    mcpTextToolActive = active;
+    if (active) {
+        mcpSketchToolActive = false; // one tool at a time
+        mcpEraserToolActive = false;
+        setMouseCursor(MouseCursor::IBeamCursor);
+    } else if (!mcpSketchToolActive && !mcpEraserToolActive) {
+        setMouseCursor(MouseCursor::NormalCursor);
+    }
+    updateSelectionPill();
     repaint();
     if (editor) editor->nvgSurface.renderAll();
 }
@@ -1964,6 +2439,166 @@ bool Canvas::isSketchToolActive() const
 bool Canvas::isSketchingActive() const
 {
     return isSketching;
+}
+
+void Canvas::setStudioMode(bool active)
+{
+    mcpStudioMode = active;
+    // Brainstorm mode = pen up; edit mode = pen down, pill back in charge.
+    setSketchToolActive(active);
+    updateSelectionPill();
+    repaint();
+    if (editor) editor->nvgSurface.renderAll();
+}
+
+void Canvas::setStudioInkVisible(bool visible)
+{
+    mcpStudioInkVisible = visible;
+    repaint();
+    if (editor) editor->nvgSurface.renderAll();
+}
+
+void Canvas::commitStudioFromCanvas()
+{
+    juce::String draft;
+    if (editor && editor->sidebar) {
+        if (auto* cp = editor->sidebar->getCopilotPanel()) draft = cp->getStudioDraft();
+    }
+    sendSketchBuild(draft);
+    if (editor && editor->sidebar) {
+        if (auto* cp = editor->sidebar->getCopilotPanel()) cp->clearStudioDraft();
+    }
+}
+
+juce::StringArray Canvas::getSelectionStableIds()
+{
+    juce::StringArray ids;
+    if (!pd) return ids;
+    auto patchPtr = patch.getPointer();
+    t_canvas* cnv = patchPtr ? patchPtr.get() : nullptr;
+    for (auto* obj : getSelectionOfType<Object>()) {
+        if (auto* ptr = obj->getPointer()) {
+            auto tid = pd->getStableId(ptr);
+            if (tid.isEmpty() && cnv) {
+                tid = pd->getOrAdoptStableId(cnv, ptr);
+            }
+            if (tid.isNotEmpty()) ids.add(tid);
+        }
+    }
+    return ids;
+}
+
+void Canvas::createTextNoteAt(Point<int> canvasPos)
+{
+    if (!pd) return;
+
+    // Drop any abandoned empty artist note first so note indices never drift.
+    {
+        juce::ScopedLock sl(pd->mcpOverlayLock);
+        std::erase_if(pd->mcpAnnotations, [](PluginProcessor::McpAnnotation const& a) {
+            return a.text.isEmpty() && a.kind == "artist";
+        });
+
+        PluginProcessor::McpAnnotation ann;
+        ann.x = static_cast<float>(canvasPos.x - canvasOrigin.x);
+        ann.y = static_cast<float>(canvasPos.y - canvasOrigin.y);
+        ann.kind = "artist";
+        ann.t = juce::Time::getMillisecondCounterHiRes() / 1000.0;
+        // Surgical lane: a selection turns the note into an attachment bound to it
+        // (renders anchored beside the object with a leader tick).
+        auto const selIds = getSelectionStableIds();
+        if (selIds.size() > 0) {
+            ann.targetId = selIds[0];
+            ann.targetIds = selIds;
+        }
+        pd->mcpAnnotations.push_back(ann);
+    }
+
+    openNoteEditorForIndex(static_cast<int>(pd->getMcpAnnotations().size()) - 1);
+}
+
+void Canvas::openNoteEditorForIndex(int index)
+{
+    if (!pd) return;
+    auto const anns = pd->getMcpAnnotations();
+    if (index < 0 || index >= static_cast<int>(anns.size())) return;
+    auto const ann = anns[static_cast<size_t>(index)];
+
+    if (!mcpNoteEditor) {
+        mcpNoteEditor = std::make_unique<juce::TextEditor>();
+        mcpNoteEditor->setMultiLine(false);
+        mcpNoteEditor->setReturnKeyStartsNewLine(false);
+        mcpNoteEditor->setWantsKeyboardFocus(true);
+
+        // Commit: pin the typed note. Empty text = discard it entirely.
+        auto commit = [this] {
+            if (mcpNoteEditIndex < 0) return;
+            auto const txt = mcpNoteEditor ? mcpNoteEditor->getText().trim() : juce::String();
+            if (pd) {
+                juce::ScopedLock sl(pd->mcpOverlayLock);
+                if (mcpNoteEditIndex < static_cast<int>(pd->mcpAnnotations.size())) {
+                    if (txt.isEmpty()) {
+                        pd->mcpAnnotations.erase(pd->mcpAnnotations.begin() + mcpNoteEditIndex);
+                    } else {
+                        auto& a = pd->mcpAnnotations[static_cast<size_t>(mcpNoteEditIndex)];
+                        a.text = txt;
+                        a.kind = "artist";
+                    }
+                }
+            }
+            mcpNoteEditIndex = -1;
+            if (mcpNoteEditor) mcpNoteEditor->setVisible(false);
+            repaint();
+            if (editor) editor->nvgSurface.renderAll();
+        };
+
+        mcpNoteEditor->onReturnKey = [commit] { commit(); };
+        mcpNoteEditor->onFocusLost = [this, commit] {
+            if (juce::Time::getMillisecondCounter() - mcpNoteOpenedAt < 500) return;
+            commit();
+        };
+        // Live feedback: write the field's text onto the note as you type.
+        mcpNoteEditor->onTextChange = [this] {
+            if (mcpNoteEditor && pd && mcpNoteEditIndex >= 0) {
+                juce::ScopedLock sl(pd->mcpOverlayLock);
+                if (mcpNoteEditIndex < static_cast<int>(pd->mcpAnnotations.size()))
+                    pd->mcpAnnotations[static_cast<size_t>(mcpNoteEditIndex)].text = mcpNoteEditor->getText();
+            }
+            repaint();
+            if (editor) editor->nvgSurface.renderAll();
+        };
+        mcpNoteEditor->onEscapeKey = [commit] { commit(); }; // Esc = finish editing
+
+        mcpNoteEditor->setColour(juce::TextEditor::backgroundColourId, juce::Colour(0xff16161c));
+        mcpNoteEditor->setColour(juce::TextEditor::textColourId, juce::Colours::white);
+        mcpNoteEditor->setColour(juce::TextEditor::outlineColourId, juce::Colour(0xffffbe50));
+        mcpNoteEditor->setColour(juce::TextEditor::focusedOutlineColourId, juce::Colour(0xffffbe50));
+        mcpNoteEditor->setColour(juce::TextEditor::highlightColourId, juce::Colour(0xffffbe50));
+        mcpNoteEditor->setColour(juce::CaretComponent::caretColourId, juce::Colours::white);
+        addAndMakeVisible(*mcpNoteEditor);
+        if (!mcpSlotPasteKeys) mcpSlotPasteKeys = std::make_unique<SlotPasteKeyListener>(this);
+        mcpNoteEditor->addKeyListener(mcpSlotPasteKeys.get());
+    }
+
+    mcpNoteEditIndex = index;
+    mcpNoteOpenedAt = juce::Time::getMillisecondCounter();
+    mcpNoteEditor->setBounds(juce::roundToInt(canvasOrigin.x + ann.x - 6.0f),
+                             juce::roundToInt(canvasOrigin.y + ann.y - 26.0f),
+                             220, 20);
+    mcpNoteEditor->setText(ann.text, false);
+    mcpNoteEditor->setVisible(true);
+    mcpNoteEditor->toFront(true);
+
+    auto* ed = mcpNoteEditor.get();
+    juce::MessageManager::callAsync([ed] {
+        if (ed) {
+            ed->grabKeyboardFocus();
+            ed->selectAll();
+        }
+    });
+
+    repaint();
+    if (editor) editor->nvgSurface.renderAll();
 }
 
 void Canvas::SketchFadeTimer::timerCallback()
@@ -2032,7 +2667,7 @@ void Canvas::renderSketchOverlay(NVGcontext* nvg)
         nvgStroke(nvg);
     };
 
-    if (mcpSketchAlpha > 0.001f) {
+    if (mcpSketchAlpha > 0.001f && mcpStudioInkVisible) {
         for (auto const& s : mcpCompletedStrokes) {
             drawStroke(s, mcpSketchAlpha);
         }
@@ -2041,6 +2676,574 @@ void Canvas::renderSketchOverlay(NVGcontext* nvg)
     if (isSketching && !mcpCurrentStroke.empty()) {
         drawStroke(mcpCurrentStroke, 1.0f);
     }
+}
+
+juce::Rectangle<float> Canvas::getSketchBoundsInCanvas() const
+{
+    float minX = 1e9f, minY = 1e9f, maxX = -1e9f, maxY = -1e9f;
+    bool any = false;
+    for (auto const& stroke : mcpCompletedStrokes) {
+        for (auto const& p : stroke) {
+            minX = std::min(minX, p.x);
+            minY = std::min(minY, p.y);
+            maxX = std::max(maxX, p.x);
+            maxY = std::max(maxY, p.y);
+            any = true;
+        }
+    }
+    if (!any) return {};
+    return { minX, minY, maxX - minX, maxY - minY };
+}
+
+juce::String Canvas::buildSketchJson() const
+{
+    juce::Array<juce::var> strokesVar;
+    for (auto const& stroke : mcpCompletedStrokes) {
+        juce::Array<juce::var> ptsVar;
+        for (auto const& p : stroke) {
+            auto* obj = new juce::DynamicObject();
+            obj->setProperty("x", p.x - static_cast<float>(canvasOrigin.x));
+            obj->setProperty("y", p.y - static_cast<float>(canvasOrigin.y));
+            obj->setProperty("t", p.t);
+            ptsVar.add(juce::var(obj));
+        }
+        strokesVar.add(juce::var(ptsVar));
+    }
+    return juce::JSON::toString(juce::var(strokesVar), true);
+}
+
+void Canvas::sendSketchBuild(const juce::String& prompt)
+{
+    if (!pd) return;
+    // Visible-Only Ingestion: hidden ink is excluded from the brief (sent as []).
+    if (mcpCompletedStrokes.empty() && pd->getMcpReferenceImages().empty()) return;
+
+    // Committing = done drawing: disarm the pen so the artist can immediately
+    // drag/tweak the freshly built patch without leaving ink everywhere.
+    // (In Studio mode the drawer owns the pen — keep it up for the next idea.)
+    if (!mcpStudioMode) setSketchToolActive(false);
+
+    // Bounding box in PD patch coords — construct_patch_v4 speaks this space.
+    juce::String bboxJson = "{}";
+    if (mcpStudioInkVisible && !mcpCompletedStrokes.empty()) {
+        auto const sb = getSketchBoundsInCanvas();
+        auto* bboxObj = new juce::DynamicObject();
+        bboxObj->setProperty("x", sb.getX() - static_cast<float>(canvasOrigin.x));
+        bboxObj->setProperty("y", sb.getY() - static_cast<float>(canvasOrigin.y));
+        bboxObj->setProperty("w", sb.getWidth());
+        bboxObj->setProperty("h", sb.getHeight());
+        bboxJson = juce::JSON::toString(juce::var(bboxObj), true);
+    }
+
+    // Park the artist's words in the sidebar log (canvas stays calm).
+    if (editor && editor->sidebar) {
+        if (auto* cp = editor->sidebar->getCopilotPanel()) {
+            cp->receiveMessage("user", prompt.isNotEmpty() ? prompt : juce::String("Build from moodboard"));
+        }
+    }
+
+    auto const subpatch = patch.getPointer() ? juce::String(reinterpret_cast<uintptr_t>(patch.getPointer().get())) : juce::String("0");
+    if (auto* br = pd->getMCPBridge()) {
+        br->sendSketchBuild(subpatch, mcpStudioInkVisible ? buildSketchJson() : juce::String("[]"), bboxJson, prompt);
+    }
+
+    // ── Commit: the ink did its job and clears; the mood STAYS. ───────────────
+    // Artist-first default (learned in the field): pictures, notes and takes are
+    // moodboard furniture — they survive the build so you can A/B the new patch
+    // against the reference it came from. Remove them explicitly with 🗑/🔒.
+    mcpCompletedStrokes.clear();
+    mcpCurrentStroke.clear();
+    mcpLastSketchBounds = {};
+
+    updateSelectionPill();
+    repaint();
+    if (editor) editor->nvgSurface.renderAll();
+}
+
+void Canvas::undoLastStroke()
+{
+    if (mcpCompletedStrokes.empty()) return;
+    mcpCompletedStrokes.pop_back();
+    updateSelectionPill();
+    repaint();
+    if (editor) editor->nvgSurface.renderAll();
+}
+
+void Canvas::clearAllInk()
+{
+    mcpCompletedStrokes.clear();
+    mcpCurrentStroke.clear();
+    mcpSketchAlpha = 1.0f;
+    if (mcpSketchFadeTimer) mcpSketchFadeTimer->stopTimer();
+    updateSelectionPill();
+    repaint();
+    if (editor) editor->nvgSurface.renderAll();
+}
+
+//===----------------------------------------------------------------------===//
+// Phase 2 — Reference Images (pasted schematics on the canvas glass)
+//===----------------------------------------------------------------------===//
+
+namespace {
+// JUCE 7.0's SystemClipboard only speaks text. Image paste therefore tries, in order:
+//  1. Linux/X11 + Wayland clipboard tools (xclip / wl-paste), bounded by `timeout`;
+//  2. a text-path heuristic — many apps copy "file:///path/img.png" as clipboard text.
+juce::Image loadImageFromClipboard()
+{
+    auto const clipboardText = juce::SystemClipboard::getTextFromClipboard().trim();
+    if (clipboardText.isNotEmpty() && clipboardText.length() < 4096) {
+        juce::File file;
+        if (clipboardText.startsWithIgnoreCase("file://"))
+            file = juce::URL(clipboardText).getLocalFile();
+        else if (juce::File::isAbsolutePath(clipboardText))
+            file = juce::File(clipboardText);
+
+        if (file.existsAsFile()) {
+            if (auto image = juce::ImageFileFormat::loadFrom(file); image.isValid()) {
+                return image;
+            }
+        }
+    }
+
+#if JUCE_LINUX
+    auto const tmp = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                         .getChildFile("plugdata_paste_" + juce::String(juce::Random::getSystemRandom().nextInt64()) + ".img");
+    auto const quotedPath = "'" + tmp.getFullPathName().replace("'", "'\\''") + "'";
+    juce::StringArray attempts;
+    attempts.add("timeout 3 xclip -selection clipboard -t image/png -o > " + quotedPath);
+    attempts.add("timeout 3 wl-paste --type image/png > " + quotedPath);
+    attempts.add("timeout 3 wl-paste > " + quotedPath);
+    for (auto const& command : attempts) {
+        tmp.deleteFile();
+        juce::ChildProcess proc;
+        if (!proc.start(juce::StringArray { "/bin/sh", "-c", command })) {
+            continue;
+        }
+        proc.waitForProcessToFinish(3500);
+        if (proc.isRunning()) proc.kill();
+        if (tmp.existsAsFile() && tmp.getSize() > 0) {
+            if (auto image = juce::ImageFileFormat::loadFrom(tmp); image.isValid()) {
+                tmp.deleteFile();
+                return image;
+            }
+        }
+    }
+    tmp.deleteFile();
+#endif
+
+    return {};
+}
+} // namespace
+
+void Canvas::renderReferenceImages(NVGcontext* nvg, Rectangle<int> invalidRegion)
+{
+    if (!pd || !shouldShowAIReferences()) return; // 👁 layer toggle + performance mode
+    auto const images = pd->getMcpReferenceImages();
+    if (images.empty()) return;
+
+    for (auto const& img : images) {
+        if (!img.visible) continue; // Visible-Only Ingestion Law
+
+        // Native nvg texture from the cached PNG (stb_image path). The JUCE-ARGB
+        // upload path proved unreliable for file-loaded colour images, so this
+        // bypasses NVGImage entirely.
+        auto& entry = mcpRefImageCache.try_emplace(img.id.toStdString()).first->second;
+        if (entry.handle == 0 || entry.ctx != nvg) {
+            entry.handle = nvgCreateImage(nvg, img.filePath.toRawUTF8(), 0);
+            entry.ctx = nvg;
+        }
+        if (entry.handle == 0) continue;
+
+        Rectangle<float> const b(static_cast<float>(canvasOrigin.x) + img.x,
+                                 static_cast<float>(canvasOrigin.y) + img.y,
+                                 img.width, img.height);
+        if (!invalidRegion.intersects(b.getSmallestIntegerContainer())) continue;
+
+        NVGScopedState scopedImage(nvg);
+
+        // Light paper matte behind the image — dark screenshots on a dark canvas
+        // would otherwise blend into the background and look "missing".
+        nvgBeginPath(nvg);
+        nvgRoundedRect(nvg, b.getX() - 6.0f, b.getY() - 6.0f, b.getWidth() + 12.0f, b.getHeight() + 12.0f, 9.0f);
+        nvgFillColor(nvg, nvgRGBA(228, 230, 236, 240));
+        nvgFill(nvg);
+
+        // The image itself — straight through nvgImagePattern.
+        {
+            nvgBeginPath(nvg);
+            nvgRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), 4.0f);
+            nvgFillPaint(nvg, nvgImagePattern(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), 0.0f, entry.handle, img.alpha));
+            nvgFill(nvg);
+        }
+
+        // Hardware frame: cool slate normally, warm amber when locked
+        nvgBeginPath(nvg);
+        nvgRoundedRect(nvg, b.getX() - 1.0f, b.getY() - 1.0f, b.getWidth() + 2.0f, b.getHeight() + 2.0f, 5.0f);
+        nvgStrokeColor(nvg, img.isLocked ? nvgRGBA(255, 190, 80, 210) : nvgRGBA(150, 165, 190, 140));
+        nvgStrokeWidth(nvg, img.isLocked ? 1.6f : 1.2f);
+        nvgStroke(nvg);
+
+        // Title tag above the image (+ lock glyph)
+        juce::String const tag = img.title.isNotEmpty() ? img.title : juce::File(img.filePath).getFileName();
+        nvgFontFace(nvg, "Inter");
+        nvgFontSize(nvg, 10.0f);
+        nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+        float textBounds[4];
+        nvgTextBounds(nvg, 0.0f, 0.0f, tag.toRawUTF8(), nullptr, textBounds);
+        float const tagW = (textBounds[2] - textBounds[0]) + (img.isLocked ? 34.0f : 18.0f);
+        nvgBeginPath(nvg);
+        nvgRoundedRect(nvg, b.getX(), b.getY() - 20.0f, tagW, 16.0f, 3.5f);
+        nvgFillColor(nvg, nvgRGBA(16, 18, 22, 225));
+        nvgFill(nvg);
+        nvgStrokeColor(nvg, nvgRGBA(120, 135, 160, 120));
+        nvgStrokeWidth(nvg, 1.0f);
+        nvgStroke(nvg);
+        nvgFillColor(nvg, nvgRGBA(205, 216, 232, 235));
+        nvgText(nvg, b.getX() + 8.0f, b.getY() - 12.0f, tag.toRawUTF8(), nullptr);
+
+        if (img.isLocked) {
+            float const lx = b.getX() + tagW - 12.0f;
+            float const ly = b.getY() - 11.5f;
+            nvgBeginPath(nvg);
+            nvgRoundedRect(nvg, lx - 3.5f, ly - 0.5f, 7.0f, 5.5f, 1.0f);
+            nvgFillColor(nvg, nvgRGBA(255, 190, 80, 235));
+            nvgFill(nvg);
+            nvgBeginPath(nvg);
+            nvgArc(nvg, lx, ly - 2.0f, 2.6f, juce::MathConstants<float>::pi, 0.0f, NVG_HOLE);
+            nvgStrokeColor(nvg, nvgRGBA(255, 190, 80, 235));
+            nvgStrokeWidth(nvg, 1.2f);
+            nvgStroke(nvg);
+        }
+    }
+}
+
+bool Canvas::pasteImageFromClipboard()
+{
+    auto const clipboardImage = loadImageFromClipboard();
+    if (!clipboardImage.isValid()) {
+        // Slot is open but the clipboard has no image yet — coach, keep the slot.
+        if (mcpImageSlotActive) {
+            mcpMoodHint = "Clipboard has no image — copy one, then Ctrl+V here";
+            mcpMoodHintUntil = juce::Time::getMillisecondCounter() + 2600;
+            repaint();
+            if (editor) editor->nvgSurface.renderAll();
+        }
+        return false;
+    }
+    if (!pd) return true; // consume the paste; there is nowhere to put it
+
+    // Encode once: hash names the cache file, bytes are reused for the disk write.
+    juce::MemoryOutputStream pngData;
+    juce::PNGImageFormat pngFormat;
+    if (!pngFormat.writeImageToStream(clipboardImage, pngData)) return true;
+    auto const hash = juce::MD5(pngData.getData(), pngData.getDataSize()).toHexString();
+
+    auto const refsDir = ProjectInfo::appDataDir.getChildFile("references");
+    refsDir.createDirectory();
+    auto const pngFile = refsDir.getChildFile(hash + ".png");
+    if (!pngFile.existsAsFile()) {
+        if (auto stream = std::unique_ptr<juce::FileOutputStream>(pngFile.createOutputStream())) {
+            stream->write(pngData.getData(), pngData.getDataSize());
+            stream->flush();
+        }
+    }
+
+    // Fit the image to the paste slot when one is open, else to a sane default.
+    float const maxW = mcpImageSlotActive ? 320.0f : 520.0f;
+    float const maxH = mcpImageSlotActive ? 220.0f : 420.0f;
+    float const fit = juce::jmin(1.0f, juce::jmin(maxW / static_cast<float>(clipboardImage.getWidth()), maxH / static_cast<float>(clipboardImage.getHeight())));
+    float const w = static_cast<float>(clipboardImage.getWidth()) * fit;
+    float const h = static_cast<float>(clipboardImage.getHeight()) * fit;
+
+    auto const mousePosition = getMouseXYRelative() - canvasOrigin;
+
+    PluginProcessor::McpReferenceImage ref;
+    ref.id = hash;
+    ref.filePath = pngFile.getFullPathName();
+    ref.title = "Pasted_" + hash.substring(0, 6) + ".png";
+    // Surgical lane: pasting over a selection attaches the image to it.
+    auto const selIds = getSelectionStableIds();
+    if (selIds.size() > 0) ref.targetId = selIds[0];
+    if (mcpImageSlotActive) {
+        // Drop into the waiting slot, centered.
+        ref.x = static_cast<float>(mcpImageSlotPos.x - canvasOrigin.x) - w * 0.5f;
+        ref.y = static_cast<float>(mcpImageSlotPos.y - canvasOrigin.y) - h * 0.5f;
+        mcpImageSlotActive = false; // slot consumed
+    } else {
+        ref.x = static_cast<float>(mousePosition.x) - w * 0.5f;
+        ref.y = static_cast<float>(mousePosition.y) - h * 0.5f;
+    }
+    ref.width = w;
+    ref.height = h;
+    pd->addMcpReferenceImage(ref);
+
+    // Bridge dispatch: /pd/reference/image <path> <x> <y> <w> <h> (PD patch coords)
+    if (auto* br = pd->getMCPBridge()) {
+        br->sendReferenceImage(ref.filePath, ref.x, ref.y, ref.width, ref.height);
+    }
+
+    // Pasting a reference = composing mode: put the pen down so the fresh image
+    // is immediately draggable / lockable (re-arm with the ✏️ chip when done).
+    // In Studio brainstorm mode the drawer owns the pen — keep drawing.
+    if (!mcpStudioMode) setSketchToolActive(false);
+
+    repaint();
+    if (editor) editor->nvgSurface.renderAll();
+    return true;
+}
+
+// Phase 3 — Voice take chips: ▶ audition, mini-waveform, duration, ✕ remove.
+void Canvas::renderVoiceTakes(NVGcontext* nvg, Rectangle<int> invalidRegion)
+{
+    if (!pd || presentationMode.getValue()) return;
+    auto takes = pd->getMcpVoiceTakes();
+    if (takes.empty()) return;
+
+    auto* br = pd->getMCPBridge();
+    juce::String const playingId = br ? br->getPlayingVoiceTakeId() : juce::String();
+
+    constexpr float chipW = 240.0f;
+    constexpr float chipH = 38.0f;
+    int slot = 0;
+
+    for (auto& take : takes) {
+        if (!take.visible) continue;
+
+        if (!take.positioned) {
+            // First sight: park near where the record strip was (or canvas centre).
+            float const px = mcpTakeSpawnPos.x != 0 ? static_cast<float>(mcpTakeSpawnPos.x)
+                                                    : static_cast<float>(canvasOrigin.x + 40);
+            float const py = mcpTakeSpawnPos.y != 0 ? static_cast<float>(mcpTakeSpawnPos.y)
+                                                    : static_cast<float>(canvasOrigin.y + 40);
+            pd->setMcpVoiceTakePos(take.id, px - static_cast<float>(canvasOrigin.x),
+                                   py - static_cast<float>(canvasOrigin.y) + 46.0f * static_cast<float>(slot));
+            take.x = px - static_cast<float>(canvasOrigin.x);
+            take.y = py - static_cast<float>(canvasOrigin.y) + 46.0f * static_cast<float>(slot);
+            take.positioned = true;
+        }
+        ++slot;
+
+        Rectangle<float> const b(static_cast<float>(canvasOrigin.x) + take.x,
+                                 static_cast<float>(canvasOrigin.y) + take.y,
+                                 chipW, chipH);
+        if (!invalidRegion.intersects(b.getSmallestIntegerContainer())) continue;
+
+        bool const playing = playingId == take.id;
+        bool const melody = take.mode.startsWithIgnoreCase("melody");
+        NVGcolor const accent = melody ? nvgRGBA(255, 190, 60, playing ? 255 : 210)
+                                       : nvgRGBA(80, 220, 140, playing ? 255 : 210);
+
+        NVGScopedState scopedChip(nvg);
+
+        // Cassette body: deep slate + per-type accent border (amber = melody, green = beat)
+        nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(),
+                           nvgRGBA(18, 22, 28, 242), accent, 6.0f);
+
+        // Type glyph: beamed notes (melody) or drum (beat) — the strip's language
+        {
+            float const gx = b.getX() + 18.0f;
+            float const gy = b.getCentreY();
+            nvgStrokeColor(nvg, accent);
+            nvgFillColor(nvg, accent);
+            if (melody) {
+                nvgBeginPath(nvg);
+                nvgEllipse(nvg, gx - 3.0f, gy + 3.5f, 2.4f, 1.7f);
+                nvgFill(nvg);
+                nvgBeginPath(nvg);
+                nvgEllipse(nvg, gx + 3.2f, gy + 2.2f, 2.4f, 1.7f);
+                nvgFill(nvg);
+                nvgBeginPath(nvg);
+                nvgMoveTo(nvg, gx - 0.7f, gy + 3.4f);
+                nvgLineTo(nvg, gx - 0.7f, gy - 4.5f);
+                nvgLineTo(nvg, gx + 5.6f, gy - 5.7f);
+                nvgLineTo(nvg, gx + 5.6f, gy + 2.1f);
+                nvgStrokeWidth(nvg, 1.3f);
+                nvgStroke(nvg);
+            } else {
+                nvgBeginPath(nvg);
+                nvgRoundedRect(nvg, gx - 5.0f, gy - 0.5f, 10.0f, 5.5f, 1.7f);
+                nvgStrokeWidth(nvg, 1.1f);
+                nvgStroke(nvg);
+                nvgBeginPath(nvg);
+                nvgEllipse(nvg, gx, gy - 0.5f, 5.0f, 1.7f);
+                nvgStrokeWidth(nvg, 1.1f);
+                nvgStroke(nvg);
+                nvgBeginPath(nvg);
+                nvgMoveTo(nvg, gx - 3.8f, gy - 6.0f);
+                nvgLineTo(nvg, gx + 0.8f, gy - 1.2f);
+                nvgMoveTo(nvg, gx + 3.8f, gy - 6.0f);
+                nvgLineTo(nvg, gx - 0.8f, gy - 1.2f);
+                nvgStrokeWidth(nvg, 1.0f);
+                nvgStroke(nvg);
+            }
+        }
+
+        // ▶ / ⏸ (playing) — pause bars while the take is auditioning
+        float const pcx = b.getX() + 46.0f;
+        float const pcy = b.getCentreY();
+        if (playing) {
+            nvgBeginPath(nvg);
+            nvgRoundedRect(nvg, pcx - 4.5f, pcy - 5.0f, 3.4f, 10.0f, 1.2f);
+            nvgFillColor(nvg, accent);
+            nvgFill(nvg);
+            nvgBeginPath(nvg);
+            nvgRoundedRect(nvg, pcx + 1.1f, pcy - 5.0f, 3.4f, 10.0f, 1.2f);
+            nvgFillColor(nvg, accent);
+            nvgFill(nvg);
+        } else {
+            nvgBeginPath(nvg);
+            nvgMoveTo(nvg, pcx - 4.5f, pcy - 6.5f);
+            nvgLineTo(nvg, pcx + 6.5f, pcy);
+            nvgLineTo(nvg, pcx - 4.5f, pcy + 6.5f);
+            nvgClosePath(nvg);
+            nvgFillColor(nvg, accent);
+            nvgFill(nvg);
+        }
+
+        // Mini-waveform (64 peak buckets)
+        float const wfX = b.getX() + 62.0f;
+        float const wfW = b.getWidth() - 62.0f - 72.0f;
+        float const wfCy = pcy;
+        constexpr float wfMaxH = 22.0f;
+        if (take.peaks.size() >= 2) {
+            float const barW = wfW / static_cast<float>(take.peaks.size());
+            nvgBeginPath(nvg);
+            for (size_t k = 0; k < take.peaks.size(); ++k) {
+                float const h = juce::jmax(1.5f, juce::jlimit(0.0f, 1.0f, take.peaks[k]) * wfMaxH);
+                nvgRect(nvg, wfX + static_cast<float>(k) * barW, wfCy - h * 0.5f, juce::jmax(0.8f, barW - 0.4f), h);
+            }
+            nvgFillColor(nvg, accent);
+            nvgFill(nvg);
+        } else {
+            nvgBeginPath(nvg);
+            nvgMoveTo(nvg, wfX, wfCy);
+            nvgLineTo(nvg, wfX + wfW, wfCy);
+            nvgStrokeColor(nvg, accent);
+            nvgStrokeWidth(nvg, 1.0f);
+            nvgStroke(nvg);
+        }
+
+        // Duration m:ss
+        int const totalSec = juce::roundToInt(take.durationSec);
+        juce::String const dur = juce::String(totalSec / 60) + ":" + juce::String(totalSec % 60).paddedLeft('0', 2);
+        nvgFontFace(nvg, "Inter");
+        nvgFontSize(nvg, 10.0f);
+        nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+        nvgFillColor(nvg, nvgRGBA(230, 220, 200, 220));
+        nvgText(nvg, b.getX() + b.getWidth() - 66.0f, pcy, dur.toRawUTF8(), nullptr);
+
+        // ✕ remove
+        float const xx = b.getRight() - 14.0f;
+        nvgBeginPath(nvg);
+        nvgMoveTo(nvg, xx - 4.0f, pcy - 4.0f);
+        nvgLineTo(nvg, xx + 4.0f, pcy + 4.0f);
+        nvgMoveTo(nvg, xx + 4.0f, pcy - 4.0f);
+        nvgLineTo(nvg, xx - 4.0f, pcy + 4.0f);
+        nvgStrokeColor(nvg, nvgRGBA(220, 150, 150, 230));
+        nvgStrokeWidth(nvg, 1.4f);
+        nvgStroke(nvg);
+    }
+}
+
+bool Canvas::handleVoiceTakeClick(MouseEvent const& e, Point<int> mousePos)
+{
+    if (!pd) return false;
+    auto const takes = pd->getMcpVoiceTakes();
+    for (auto it = takes.rbegin(); it != takes.rend(); ++it) {
+        auto const& take = *it;
+        if (!take.visible) continue;
+        Rectangle<int> const b(static_cast<int>(canvasOrigin.x + take.x), static_cast<int>(canvasOrigin.y + take.y), 240, 38);
+        if (!b.contains(mousePos)) continue;
+
+        int const relX = mousePos.x - b.getX();
+        auto* br = pd->getMCPBridge();
+
+        if (relX >= 30 && relX <= 60) {
+            // ▶ / ■ audition toggle
+            if (br) br->playVoiceTake(take.id, take.wavPath);
+            repaint();
+            if (editor) editor->nvgSurface.renderAll();
+            return true;
+        }
+        if (relX >= b.getWidth() - 30) {
+            // ✕ remove (stop audition first if it's this one)
+            if (br && br->getPlayingVoiceTakeId() == take.id) br->stopVoiceTake();
+            pd->removeMcpVoiceTake(take.id);
+            repaint();
+            if (editor) editor->nvgSurface.renderAll();
+            return true;
+        }
+
+        // Body: drag the chip
+        mcpDraggingTakeId = take.id;
+        mcpTakeDragOffset = mousePos - b.getPosition();
+        setMouseCursor(juce::MouseCursor::DraggingHandCursor);
+        return true;
+    }
+    return false;
+}
+
+bool Canvas::handleReferenceImageClick(MouseEvent const& e, Point<int> mousePos, bool isRightClick)
+{
+    if (!pd) return false;
+    auto const images = pd->getMcpReferenceImages();
+    for (auto it = images.rbegin(); it != images.rend(); ++it) {
+        auto const& img = *it;
+        // Include the title header in the hit zone so the tag doubles as a grab handle
+        Rectangle<float> const b(static_cast<float>(canvasOrigin.x) + img.x - 4.0f,
+                                 static_cast<float>(canvasOrigin.y) + img.y - 22.0f,
+                                 img.width + 8.0f, img.height + 26.0f);
+        if (!b.contains(mousePos.toFloat())) continue;
+
+        if (!isRightClick) {
+            if (img.isLocked) return true; // locked: swallow the click, don't lasso through it
+            mcpDraggingRefImageId = img.id;
+            mcpRefImageDragOffset = mousePos - Point<int>(juce::roundToInt(static_cast<float>(canvasOrigin.x) + img.x),
+                                                          juce::roundToInt(static_cast<float>(canvasOrigin.y) + img.y));
+            setMouseCursor(juce::MouseCursor::DraggingHandCursor);
+            return true;
+        }
+
+        auto const imageId = img.id;
+        auto const title = img.title.isNotEmpty() ? img.title : juce::File(img.filePath).getFileName();
+        auto const locked = img.isLocked;
+
+        juce::PopupMenu menu;
+        menu.addSectionHeader("Reference Image");
+        menu.addItem(1, "Analyze Circuit with AI");
+        menu.addItem(2, locked ? "Unlock Position" : "Lock Position");
+        menu.addSeparator();
+        menu.addItem(3, "Delete Reference Image");
+        menu.showMenuAsync(juce::PopupMenu::Options().withTargetScreenArea(Rectangle<int>(e.getScreenPosition(), e.getScreenPosition().translated(1, 1))),
+            [safeThis = juce::Component::SafePointer<Canvas>(this), imageId, title](int result) {
+                auto* canvas = safeThis.getComponent();
+                if (!canvas || !canvas->pd) return;
+
+                if (result == 1) {
+                    auto const prompt = "[REFERENCE IMAGE] Analyze the pasted schematic \"" + title + "\" on the canvas and build a live patch that matches its circuit or panel.";
+                    if (canvas->editor && canvas->editor->sidebar) {
+                        if (auto* cp = canvas->editor->sidebar->getCopilotPanel()) cp->receiveMessage("user", prompt);
+                    }
+                    canvas->sendPillPrompt(prompt, false);
+                } else if (result == 2) {
+                    for (auto const& im : canvas->pd->getMcpReferenceImages()) {
+                        if (im.id == imageId) {
+                            canvas->pd->setMcpReferenceLock(imageId, !im.isLocked);
+                            break;
+                        }
+                    }
+                    canvas->repaint();
+                    if (canvas->editor) canvas->editor->nvgSurface.renderAll();
+                } else if (result == 3) {
+                    canvas->pd->removeMcpReferenceImage(imageId);
+                    canvas->mcpRefImageCache.erase(imageId.toStdString());
+                    canvas->repaint();
+                    if (canvas->editor) canvas->editor->nvgSurface.renderAll();
+                }
+            });
+        return true;
+    }
+    return false;
 }
 
 // The server signals a pending destructive op via the HUD chapter ("APPROVE?").
@@ -2141,6 +3344,7 @@ void Canvas::updateOverlays()
     showAiGhosts = overlayState & AIGhosts;
     showAiHud = overlayState & AIHud;
     showAiSketch = overlayState & AISketch;
+    showAiReferences = overlayState & AIReferences;
     showConnectionDirection = overlayState & Direction;
     showConnectionActivity = overlayState & ConnectionActivity;
 
@@ -2815,11 +4019,132 @@ bool Canvas::handleNoteClick(Point<int> canvasPt)
         auto const panel = mcpSelectionPillFrame.isEmpty() ? mcpSelectionPill->getBounds() : mcpSelectionPillFrame;
         if (panel.contains(canvasPt)) {
             int const relX = canvasPt.x - panel.getX();
+
+            // Mood strip: [✏] [T] [🖼] [🎙] [🔊] — icons first, surfaces second.
+            if (mcpPillSketchMode && mcpCompletedStrokes.empty()) {
+                if (relX >= 6 && relX < 176) {
+                    int const idx = (relX - 6) / 34;
+                    switch (idx) {
+                    case 0:
+                        setSketchToolActive(!isSketchToolActive());
+                        repaint();
+                        if (editor) editor->nvgSurface.renderAll();
+                        return true;
+                    case 1:
+                        createTextNoteAt(mcpMoodPillActive ? mcpMoodPillPos : juce::Point<int>(panel.getCentreX(), panel.getBottom()));
+                        return true;
+                    case 2:
+                        // Open (or cancel) a paste slot — Ctrl+V fills it. Nothing
+                        // is read from the clipboard automatically.
+                        mcpImageSlotActive = !mcpImageSlotActive;
+                        mcpImageSlotPos = mcpMoodPillActive
+                            ? mcpMoodPillPos
+                            : juce::Point<int>(panel.getCentreX(), panel.getBottom() + 130);
+                        // Pull keyboard focus to the canvas so Ctrl+V can never be
+                        // swallowed by a lingering tape-note editor.
+                        grabKeyboardFocus();
+                        repaint();
+                        if (editor) editor->nvgSurface.renderAll();
+                        return true;
+                    case 3:
+                        // Melody record: declared intent — sing (no guessing).
+                        if (pd) {
+                            if (auto* br = pd->getMCPBridge()) {
+                                if (br->isVoiceCapturing()) {
+                                    br->stopVoiceCaptureAndAnalyze();
+                                } else {
+                                    setSketchToolActive(false);
+                                    setEraserToolActive(false);
+                                    setTextToolActive(false);
+                                    mcpTakeSpawnPos = mcpMoodPillActive ? mcpMoodPillPos : juce::Point<int>(panel.getCentreX(), panel.getBottom() + 170);
+                                    br->startVoiceCapture(60, 1);
+                                }
+                                repaint();
+                                if (editor) editor->nvgSurface.renderAll();
+                            }
+                        }
+                        return true;
+                    default:
+                        // Beat record: declared intent — beatbox (no guessing).
+                        if (pd) {
+                            if (auto* br = pd->getMCPBridge()) {
+                                if (br->isVoiceCapturing()) {
+                                    br->stopVoiceCaptureAndAnalyze();
+                                } else {
+                                    setSketchToolActive(false);
+                                    setEraserToolActive(false);
+                                    setTextToolActive(false);
+                                    mcpTakeSpawnPos = mcpMoodPillActive ? mcpMoodPillPos : juce::Point<int>(panel.getCentreX(), panel.getBottom() + 170);
+                                    br->startVoiceCapture(60, 2);
+                                }
+                                repaint();
+                                if (editor) editor->nvgSurface.renderAll();
+                            }
+                        }
+                        return true;
+                    }
+                }
+                return true; // the strip frame swallows clicks
+            }
+
+            // Sketch / Moodboard Chisel: [⚡ Build] | prompt | [T] [🖼] [↩ Undo] [🗑 Clear] [✏️ pen]
+            if (mcpPillSketchMode) {
+                if (relX <= 88) {
+                    sendSketchBuild(mcpSelectionPill ? mcpSelectionPill->getText().trim() : juce::String());
+                    return true;
+                }
+                if (relX >= panel.getWidth() - 238 && relX < panel.getWidth() - 210) {
+                    setTextToolActive(!isTextToolActive());
+                    repaint();
+                    if (editor) editor->nvgSurface.renderAll();
+                    return true;
+                }
+                if (relX >= panel.getWidth() - 210 && relX < panel.getWidth() - 182) {
+                    pasteImageFromClipboard();
+                    return true;
+                }
+                if (relX >= panel.getWidth() - 182 && relX < panel.getWidth() - 106) {
+                    undoLastStroke();
+                    return true;
+                }
+                if (relX >= panel.getWidth() - 106 && relX < panel.getWidth() - 32) {
+                    clearAllInk();
+                    return true;
+                }
+                if (relX >= panel.getWidth() - 32) {
+                    // Pen toggle: put it down / pick it back up mid-sketch.
+                    setSketchToolActive(!isSketchToolActive());
+                    return true;
+                }
+                mcpSelectionPill->grabKeyboardFocus();
+                return true;
+            }
+
             // Left ~34px: + button (toggles Antigravity Actions/Skills popover!)
             if (relX <= 34) {
                 showPillPalette();
                 return true;
             }
+
+            // Surgical attachment chips — same tools as Studio, bound to the selection:
+            // [✏ attach-sketch] [T attach-text] [🖼 attach-image]
+            if (relX >= panel.getWidth() - 148 && relX < panel.getWidth() - 118) {
+                setSketchToolActive(!isSketchToolActive());
+                repaint();
+                if (editor) editor->nvgSurface.renderAll();
+                return true;
+            }
+            if (relX >= panel.getWidth() - 118 && relX < panel.getWidth() - 90) {
+                setTextToolActive(!isTextToolActive());
+                repaint();
+                if (editor) editor->nvgSurface.renderAll();
+                return true;
+            }
+            if (relX >= panel.getWidth() - 90 && relX < panel.getWidth() - 62) {
+                pasteImageFromClipboard();
+                return true;
+            }
+
             // Right ~60px..~34px: ✏️ Pen / Sketch tool button
             if (relX >= panel.getWidth() - 60 && relX < panel.getWidth() - 32) {
                 setSketchToolActive(!isSketchToolActive());
@@ -2835,7 +4160,7 @@ bool Canvas::handleNoteClick(Point<int> canvasPt)
                         if (br->isVoiceCapturing())
                             br->stopVoiceCaptureAndAnalyze();
                         else
-                            br->startVoiceCapture(5);
+                            br->startVoiceCapture(60);
                         repaint();
                         if (editor) editor->nvgSurface.renderAll();
                     }
@@ -3041,27 +4366,75 @@ void Canvas::mouseDown(MouseEvent const& e)
 
     auto* source = e.originalComponent;
 
+    // Paste slot: click inside the frame = paste now; click outside = cancel it.
+    if (mcpImageSlotActive && source == this) {
+        auto const pos = e.getEventRelativeTo(this).getPosition();
+        juce::Rectangle<int> const slot(mcpImageSlotPos.x - 160, mcpImageSlotPos.y - 110, 320, 220);
+        if (slot.contains(pos)) {
+            pasteImageFromClipboard();
+        } else {
+            mcpImageSlotActive = false;
+            repaint();
+            if (editor) editor->nvgSurface.renderAll();
+        }
+        return;
+    }
+
+    // The pill/chisel and its chips float ABOVE everything: their clicks must beat
+    // the pen, the reference images and the lasso. Without this, an armed pen
+    // swallows [↩ Undo] / [🗑 Clear] clicks as new strokes.
+    if (source == this && !e.mods.isRightButtonDown() && handleNoteClick(e.getPosition())) return;
+
+    // Voice take chips float above the glass: ▶ audition / ✕ / drag.
+    if (source == this && !e.mods.isRightButtonDown() && handleVoiceTakeClick(e, e.getEventRelativeTo(this).getPosition())) return;
+
+    // PRD Phase 2: reference images on the canvas glass — drag to move, right-click
+    // for the menu. In edit mode an armed pen draws over them; in Studio mode they
+    // stay grabbable (Alt forces drawing, even there).
+    bool const forceDraw = e.mods.isAltDown();
+    bool const penBlocksImages = !mcpStudioMode && (forceDraw || mcpSketchToolActive || mcpEraserToolActive);
+    if (source == this && !penBlocksImages) {
+        if (handleReferenceImageClick(e, e.getEventRelativeTo(this).getPosition(), e.mods.isRightButtonDown())) return;
+    }
+
     // Left-click
     if (!e.mods.isRightButtonDown()) {
 
-        // Multimodal Pen / Sketch overlay: Alt-drag or active sketch tool draws on canvas
-        if (shouldShowAISketch() && (e.mods.isAltDown() || mcpSketchToolActive)) {
+        // Type tool (T): click the glass to drop a console-tape note at the cursor.
+        if (mcpTextToolActive && source == this) {
+            createTextNoteAt(e.getEventRelativeTo(this).getPosition());
+            return;
+        }
+
+        // Multimodal Pen / Sketch overlay: Alt-drag, active pen, or eraser tool
+        if (shouldShowAISketch() && (e.mods.isAltDown() || mcpSketchToolActive || mcpEraserToolActive)) {
+            // Two lanes: with no selection, the ink is moodboard material (the
+            // chisel takes over the glass). With a selection, the ink is a
+            // surgical annotation — the selection IS kept and the pill stays.
             isSketching = true;
+            mcpEraseGesture = mcpEraserToolActive && !e.mods.isAltDown();
             mcpSketchAlpha = 1.0f;
             if (mcpSketchFadeTimer) mcpSketchFadeTimer->stopTimer();
             mcpCurrentStroke.clear();
-            auto const pt = e.getPosition();
-            mcpCurrentStroke.push_back({static_cast<float>(pt.x), static_cast<float>(pt.y), juce::Time::getMillisecondCounterHiRes()});
+            if (!mcpEraseGesture) {
+                auto const pt = e.getPosition();
+                mcpCurrentStroke.push_back({static_cast<float>(pt.x), static_cast<float>(pt.y), juce::Time::getMillisecondCounterHiRes()});
+            }
             repaint();
             if (editor) editor->nvgSurface.renderAll();
             return;
         }
 
         if (source == this) {
-            // A click on an AI note is handled by the shared handler (x = dismiss, body =
-            // edit). Objects forward their clicks here too, so notes overlaying objects
-            // stay clickable.
-            if (handleNoteClick(e.getPosition())) return;
+            // Mood lane: a click on empty glass opens the pill as a "New Mood"
+            // palette (same tools + prompt) when there is no selection and no ink.
+            if (getSelectionOfType<Object>().empty() && mcpCompletedStrokes.empty()) {
+                mcpMoodPillActive = true;
+                mcpMoodPillPos = e.getPosition();
+                updateSelectionPill();
+            }
+
+            // Pill / note clicks were already handled above (before the pen branch).
             if (false && pd && !pd->getMcpAnnotations().empty()) {
                 auto const pt = e.getPosition().toFloat();
                 auto anns = pd->getMcpAnnotations();
@@ -3194,8 +4567,10 @@ void Canvas::mouseDown(MouseEvent const& e)
     }
     // Right click
     else {
-        if (shouldShowAISketch() && mcpSketchToolActive) {
+        if (shouldShowAISketch() && (mcpSketchToolActive || mcpEraserToolActive)) {
+            // Right-drag eraser — selection stays (surgical lane).
             isSketching = true;
+            mcpEraseGesture = true; // right-drag always erases
             mcpSketchAlpha = 1.0f;
             if (mcpSketchFadeTimer) mcpSketchFadeTimer->stopTimer();
             mcpCurrentStroke.clear();
@@ -3223,11 +4598,31 @@ bool Canvas::hitTest(int const x, int const y)
 
 void Canvas::mouseDrag(MouseEvent const& e)
 {
+    // Voice take chip drag.
+    if (mcpDraggingTakeId.isNotEmpty()) {
+        auto const pt = e.getEventRelativeTo(this).getPosition();
+        auto const pdPos = pt - mcpTakeDragOffset - canvasOrigin;
+        if (pd) pd->setMcpVoiceTakePos(mcpDraggingTakeId, static_cast<float>(pdPos.x), static_cast<float>(pdPos.y));
+        repaint();
+        if (editor) editor->nvgSurface.renderAll();
+        return;
+    }
+
+    // PRD Phase 2: dragging a reference image across the canvas glass.
+    if (mcpDraggingRefImageId.isNotEmpty()) {
+        auto const pt = e.getEventRelativeTo(this).getPosition();
+        auto const pdPos = pt - mcpRefImageDragOffset - canvasOrigin;
+        if (pd) pd->moveMcpReferenceImage(mcpDraggingRefImageId, static_cast<float>(pdPos.x), static_cast<float>(pdPos.y));
+        repaint();
+        if (editor) editor->nvgSurface.renderAll();
+        return;
+    }
+
     if (isSketching) {
         auto const pt = e.getPosition();
 
-        // ERASER MODE: Ctrl-drag hit-tests strokes
-        if (e.mods.isCtrlDown() || e.mods.isRightButtonDown()) {
+        // ERASER MODE: dedicated eraser tool, Ctrl-drag, or Right-drag hit-tests strokes
+        if (mcpEraseGesture || e.mods.isCtrlDown() || e.mods.isRightButtonDown()) {
             float eraseRadius = 25.0f;
             bool erasedAny = false;
             for (auto it = mcpCompletedStrokes.begin(); it != mcpCompletedStrokes.end(); ) {
@@ -3248,6 +4643,7 @@ void Canvas::mouseDrag(MouseEvent const& e)
                 }
             }
             if (erasedAny) {
+                updateSelectionPill();
                 repaint();
                 if (editor) editor->nvgSurface.renderAll();
             }
@@ -3343,8 +4739,28 @@ bool Canvas::autoscroll(MouseEvent const& e)
 
 void Canvas::mouseUp(MouseEvent const& e)
 {
+    // Finish a voice take chip drag.
+    if (mcpDraggingTakeId.isNotEmpty()) {
+        mcpDraggingTakeId.clear();
+        setMouseCursor(juce::MouseCursor::NormalCursor);
+        repaint();
+        if (editor) editor->nvgSurface.renderAll();
+        return;
+    }
+
+    // PRD Phase 2: finish a reference-image drag.
+    if (mcpDraggingRefImageId.isNotEmpty()) {
+        mcpDraggingRefImageId.clear();
+        setMouseCursor(juce::MouseCursor::NormalCursor);
+        repaint();
+        if (editor) editor->nvgSurface.renderAll();
+        return;
+    }
+
     if (isSketching) {
         isSketching = false;
+        bool const wasEraseGesture = mcpEraseGesture;
+        mcpEraseGesture = false;
         if (mcpCurrentStroke.size() >= 2) {
             mcpCompletedStrokes.push_back(mcpCurrentStroke);
             juce::Array<juce::var> ptsVar;
@@ -3367,7 +4783,15 @@ void Canvas::mouseUp(MouseEvent const& e)
             // startSketchFadeTimer(); // PERSISTENT INK
         } else {
             mcpCurrentStroke.clear();
+            // A TAP (not a drag) opens the mood palette — even with the pen armed.
+            // Studio entry auto-arms the pen, so this is how you call up the pill.
+            if (!wasEraseGesture && mcpCompletedStrokes.empty() && getSelectionOfType<Object>().empty()) {
+                mcpMoodPillActive = true;
+                mcpMoodPillPos = e.getPosition();
+            }
         }
+        // Ink persists -> anchor the Moodboard Chisel under the fresh bbox.
+        updateSelectionPill();
         repaint();
         if (editor) editor->nvgSurface.renderAll();
         return;
@@ -3446,6 +4870,18 @@ void Canvas::updateSidebarSelection()
 
 bool Canvas::keyPressed(KeyPress const& key)
 {
+    // Paste-slot fast path: Ctrl/Cmd+V pastes the clipboard image directly,
+    // independent of the global Paste command and its focus rules.
+    if (mcpImageSlotActive) {
+        auto const kc = key.getKeyCode();
+        bool const ctrlV = (key.getModifiers().isCtrlDown() || key.getModifiers().isCommandDown())
+            && (kc == 'v' || kc == 'V' || kc == 22 /* Ctrl+V control code */ || key.getTextCharacter() == 'v');
+        if (ctrlV) {
+            pasteImageFromClipboard();
+            return true;
+        }
+    }
+
     if (mcpSelectionPill && mcpSelectionPill->hasKeyboardFocus(true))
         return false;
 
@@ -3464,6 +4900,57 @@ bool Canvas::keyPressed(KeyPress const& key)
     if (editor->getCurrentCanvas() != this || isGraph)
         return false;
 
+    // Paste slot: Esc cancels the waiting frame.
+    if (mcpImageSlotActive && key.getKeyCode() == juce::KeyPress::escapeKey) {
+        mcpImageSlotActive = false;
+        repaint();
+        if (editor) editor->nvgSurface.renderAll();
+        return true;
+    }
+
+    // Moodboard tools escape hatch: Esc always disarms the tool first, so the
+    // artist is never trapped drawing/typing when the chisel replaced the pill.
+    if ((mcpSketchToolActive || mcpEraserToolActive || mcpTextToolActive) && key.getKeyCode() == juce::KeyPress::escapeKey) {
+        setSketchToolActive(false);
+        setEraserToolActive(false);
+        setTextToolActive(false);
+        return true;
+    }
+
+    // Moodboard hotkeys (Lane 1): T arms the type tool, Tab flips Pen <-> Eraser,
+    // Z / Ctrl+Z pops the last ink stroke. Esc exits (handled above).
+    bool const moodboardArmed = mcpSketchToolActive || mcpEraserToolActive || mcpTextToolActive || mcpStudioMode || mcpMoodPillActive;
+    if (moodboardArmed) {
+        if (key.getKeyCode() == 't' || key.getKeyCode() == 'T') {
+            setTextToolActive(!mcpTextToolActive);
+            return true;
+        }
+        if (key.getKeyCode() == juce::KeyPress::tabKey) {
+            if (mcpSketchToolActive) setEraserToolActive(true);
+            else setSketchToolActive(true);
+            return true;
+        }
+        if (key.getKeyCode() == 'z' || key.getKeyCode() == 'Z') {
+            if (!mcpCompletedStrokes.empty()) {
+                undoLastStroke();
+                return true;
+            }
+        }
+    }
+
+    // Studio brainstorm: Enter commits from the keyboard — no mouse travel to the
+    // sidebar. Shift+Enter PARKS the intent in the bay without waking the AI.
+    if (mcpStudioMode && key.getKeyCode() == juce::KeyPress::returnKey
+        && (key.getModifiers().isCtrlDown() || key.getModifiers().isShiftDown() || key.getModifiers().isCommandDown())) {
+        bool const cmdCombo = key.getModifiers().isCtrlDown() || key.getModifiers().isCommandDown();
+        if (key.getModifiers().isShiftDown() && !cmdCombo) {
+            parkSelectionPill(); // Shift = park (no AI)
+        } else {
+            commitStudioFromCanvas(); // Ctrl/Cmd+Enter = send
+        }
+        return true;
+    }
+
     // Fast-focus / hotkey handling when the selection pill is visible but unfocused:
     // - '/' opens the smart command palette or tools menu
     // - Tab or Enter focuses the prompt text field immediately
@@ -3475,6 +4962,8 @@ bool Canvas::keyPressed(KeyPress const& key)
             return true;
         }
         if (key.getKeyCode() == juce::KeyPress::tabKey || key.getKeyCode() == juce::KeyPress::returnKey) {
+            // Mood strip has no prompt field — focus keys do nothing there.
+            if (mcpPillSketchMode && mcpCompletedStrokes.empty()) return true;
             mcpSelectionPill->grabKeyboardFocus();
             return true;
         }
@@ -3575,7 +5064,8 @@ void Canvas::deselectAll(bool const broadcastChange)
 
     selectedComponents.deselectAll();
     editor->sidebar->hideParameters();
-    hideSelectionPill();
+    // Fall back to the sketch pill when ink exists; otherwise this hides it.
+    updateSelectionPill();
 
     if (!broadcastChange) {
         // Add back the listener, but make sure it's added back 'after' the last event on the message queue
@@ -3594,12 +5084,20 @@ void Canvas::hideAllActiveEditors()
 void Canvas::updateSelectionPill()
 {
     if (isGraph || getValue<bool>(locked) || presentationMode.getValue()) {
+        mcpPillSketchMode = false;
         hideSelectionPill();
         return;
     }
 
+    // NOTE: Studio mode deliberately does NOT suppress the pill anymore — the
+    // drawer is the cart/commit surface, while the pill is the workbench:
+    // empty glass → mood palette, selection → surgical palette, ink → chisel.
+
     auto selectedObjects = getSelectionOfType<Object>();
-    if (selectedObjects.empty()) {
+    // The chisel owns the canvas while ink exists, the pen/eraser is up, or a
+    // fresh mood palette was opened; otherwise hide.
+    if (selectedObjects.empty() && mcpCompletedStrokes.empty() && !mcpSketchToolActive && !mcpEraserToolActive && !mcpMoodPillActive) {
+        mcpPillSketchMode = false;
         hideSelectionPill();
         return;
     }
@@ -3609,33 +5107,77 @@ void Canvas::updateSelectionPill()
     // re-selecting the SAME object later always brings it back.
     if (juce::Time::getMillisecondCounter() < mcpSelectionPillHideUntil) return;
 
-    // Object::getBounds() is already in Canvas component coordinates, so the pill
-    // scrolls/zooms with the patch for free (canvasOrigin is constant).
-    Rectangle<int> bounds;
-    bool first = true;
-    for (auto const* obj : selectedObjects) {
-        if (!obj) continue;
-        auto const ob = obj->getBounds();
-        bounds = first ? ob : bounds.getUnion(ob);
-        first = false;
-    }
-    if (first) {
-        hideSelectionPill();
-        return;
+    // Phase 1B: no PD object selected but ink exists -> the pill becomes the
+    // Moodboard Chisel, anchored 14px beneath the combined stroke bounding box.
+    bool const sketchMode = selectedObjects.empty();
+    mcpPillSketchMode = sketchMode;
+
+    constexpr int pillH = 34;
+    int pillW = 0;
+    int pillX = 0;
+    int pillY = 0;
+    int editorX = 0;
+    int editorW = 0;
+
+    bool sketchStrip = false;
+    if (sketchMode) {
+        // Prefer the live ink bbox; fall back to the last one so the chisel stays
+        // parked after [🗑 Clear]; fall back again to the fresh mood-palette click.
+        auto const liveBounds = getSketchBoundsInCanvas();
+        if (!liveBounds.isEmpty()) mcpLastSketchBounds = liveBounds;
+        juce::Rectangle<float> sb = !liveBounds.isEmpty() ? liveBounds : mcpLastSketchBounds;
+        if (sb.isEmpty() && mcpMoodPillActive) {
+            sb = juce::Rectangle<float>(static_cast<float>(mcpMoodPillPos.x), static_cast<float>(mcpMoodPillPos.y), 1.0f, 1.0f);
+        }
+        if (sb.isEmpty()) {
+            mcpPillSketchMode = false;
+            hideSelectionPill();
+            return;
+        }
+        // No ink yet -> compact icon strip (tool palette first, surfaces second).
+        // Ink exists -> the full chisel (Build / prompt / Undo / Clear).
+        sketchStrip = mcpCompletedStrokes.empty();
+        pillW = sketchStrip ? 182 : 520;
+        pillX = juce::roundToInt(sb.getCentreX()) - pillW / 2;
+        pillY = juce::roundToInt(sb.getBottom()) + 14;
+        editorX = 92; // [⚡ Build] chip
+        editorW = pillW - 92 - 238; // ...prompt... [T] [🖼] [↩ Undo] [🗑 Clear] [✏️ pen]
+        mcpPillDrawerMode = 0;
+        mcpPillDrawerFrame = {};
+        mcpPaletteFrame = {};
+    } else {
+        // Object::getBounds() is already in Canvas component coordinates, so the pill
+        // scrolls/zooms with the patch for free (canvasOrigin is constant).
+        Rectangle<int> bounds;
+        bool first = true;
+        for (auto const* obj : selectedObjects) {
+            if (!obj) continue;
+            auto const ob = obj->getBounds();
+            bounds = first ? ob : bounds.getUnion(ob);
+            first = false;
+        }
+        if (first) {
+            hideSelectionPill();
+            return;
+        }
+
+        pillW = 480;
+        // Position purely in CANVAS content coords (same space as obj->getBounds()).
+        // Do NOT clamp against viewport->getViewArea(): that returns zoomed/screen
+        // coords, so at any zoom != 100% it threw the pill off-screen.
+        pillX = bounds.getCentreX() - pillW / 2;
+        pillY = bounds.getBottom() + 12;
+        editorX = 36;
+        editorW = pillW - 36 - 148; // ...prompt field... [attach ✏ T 🖼] [pen] [mic]
     }
 
-    constexpr int pillW = 380;
-    constexpr int pillH = 34;
-    // Position purely in CANVAS content coords (same space as obj->getBounds()).
-    // Do NOT clamp against viewport->getViewArea(): that returns zoomed/screen
-    // coords, so at any zoom != 100% it threw the pill off-screen.
-    int pillX = bounds.getCentreX() - pillW / 2;
-    int pillY = bounds.getBottom() + 12;
     mcpSelectionPillFrame = juce::Rectangle<int>(pillX, pillY, pillW, pillH);
-    if (mcpPillDrawerMode != 0) {
-        mcpPillDrawerFrame = juce::Rectangle<int>(pillX, pillY + pillH + 5, pillW, 30);
-    } else {
-        mcpPillDrawerFrame = {};
+    if (!sketchMode) {
+        if (mcpPillDrawerMode != 0) {
+            mcpPillDrawerFrame = juce::Rectangle<int>(pillX, pillY + pillH + 5, pillW, 30);
+        } else {
+            mcpPillDrawerFrame = {};
+        }
     }
 
     if (!mcpSelectionPill) {
@@ -3660,6 +5202,8 @@ void Canvas::updateSelectionPill()
         mcpSelectionPill->onReturnKey = [this] { submitSelectionPill(false); };
         mcpSelectionPillKeys = std::make_unique<SelectionPillKeyListener>(this);
         mcpSelectionPill->addKeyListener(mcpSelectionPillKeys.get());
+        if (!mcpSlotPasteKeys) mcpSlotPasteKeys = std::make_unique<SlotPasteKeyListener>(this);
+        mcpSelectionPill->addKeyListener(mcpSlotPasteKeys.get());
         mcpSelectionPill->onEscapeKey = [this] {
             if (mcpPillDrawerMode != 0) {
                 mcpPillDrawerMode = 0;
@@ -3697,11 +5241,18 @@ void Canvas::updateSelectionPill()
         addAndMakeVisible(*mcpSelectionPill);
     }
 
-    // Leave room on the left for the + button and on the right for 🎙️ Mic.
+    // Object mode: room on the left for + and on the right for 🎙️ Mic.
+    // Sketch mode: room for the [⚡ Build] chip and the [↩ Undo] [🗑 Clear] pair.
     // edH = 30 gives generous headroom and descender room so text is never clipped at the bottom.
     int const edH = 30;
     int const edY = pillY + (pillH - edH) / 2;
-    mcpSelectionPill->setBounds(pillX + 36, edY, pillW - 36 - 64, edH);
+    if (sketchStrip) {
+        // Mood strip: no prompt field. Park the editor off-cells (still "visible"
+        // so hiding it can't trigger a focus-loss dismiss).
+        mcpSelectionPill->setBounds(pillX - 60, pillY, 1, 1);
+    } else {
+        mcpSelectionPill->setBounds(pillX + editorX, edY, editorW, edH);
+    }
     mcpSelectionPill->setVisible(true);
     // toFront(false), NOT true: bringing it forward must never steal keyboard
     // focus, or typing 'o'/'m'/'c'/'b' on the canvas would land in the prompt
@@ -3735,11 +5286,53 @@ void Canvas::dismissSelectionPill()
     mcpPillDrawerMode = 0;
     mcpPillDrawerFrame = {};
     mcpPaletteFrame = {};
+    mcpMoodPillActive = false;
     // Artist dismissed (send / Esc / empty focus-out): suppress re-show for a
     // short window so the immediate refresh can't re-pop it. Time-based, so
     // re-selecting the same object later always brings it back.
     mcpSelectionPillHideUntil = juce::Time::getMillisecondCounter() + 700;
     hideSelectionPill();
+}
+
+// Shift+Enter: park, don't wake the AI. The typed intent becomes a tape note
+// (bound to the selection when there is one); ink and images stay staged.
+void Canvas::parkSelectionPill()
+{
+    if (!pd) {
+        dismissSelectionPill();
+        return;
+    }
+
+    auto const prompt = mcpSelectionPill ? mcpSelectionPill->getText().trim() : juce::String();
+    if (prompt.isNotEmpty()) {
+        PluginProcessor::McpAnnotation ann;
+        ann.kind = "artist";
+        ann.text = prompt;
+        ann.t = juce::Time::getMillisecondCounterHiRes() / 1000.0;
+
+        auto const selIds = getSelectionStableIds();
+        if (selIds.size() > 0) {
+            ann.targetId = selIds[0];
+            ann.targetIds = selIds;
+        } else {
+            auto sb = getSketchBoundsInCanvas();
+            if (sb.isEmpty() && mcpMoodPillActive) {
+                ann.x = static_cast<float>(mcpMoodPillPos.x - canvasOrigin.x);
+                ann.y = static_cast<float>(mcpMoodPillPos.y - canvasOrigin.y);
+            } else {
+                ann.x = sb.getCentreX() - static_cast<float>(canvasOrigin.x);
+                ann.y = sb.getCentreY() - static_cast<float>(canvasOrigin.y);
+            }
+        }
+
+        juce::ScopedLock sl(pd->mcpOverlayLock);
+        pd->mcpAnnotations.push_back(ann);
+    }
+
+    if (mcpSelectionPill) mcpSelectionPill->setText(juce::String(), false);
+    dismissSelectionPill();
+    repaint();
+    if (editor) editor->nvgSurface.renderAll();
 }
 
 void Canvas::submitSelectionPill(bool queueForChat)
@@ -3750,6 +5343,18 @@ void Canvas::submitSelectionPill(bool queueForChat)
     if (!mcpSelectionPill) return;
 
     auto const prompt = mcpSelectionPill->getText().trim();
+
+    // Sketch mode: Enter / Shift+Enter = Commit & Build the staged ink.
+    if (mcpPillSketchMode) {
+        sendSketchBuild(prompt);
+        mcpSelectionPill->setText(juce::String(), false);
+        // Keep the chisel parked so [↩ Undo] / [🗑 Clear] stay one tap away.
+        updateSelectionPill();
+        repaint();
+        if (editor) editor->nvgSurface.renderAll();
+        return;
+    }
+
     if (prompt.isNotEmpty() && pd) {
         // Find selection stable tempIds & compute group bounding box
         juce::StringArray targetIds;
@@ -3796,9 +5401,21 @@ void Canvas::submitSelectionPill(bool queueForChat)
     if (editor) editor->nvgSurface.renderAll();
 }
 
-bool Canvas::SelectionPillKeyListener::keyPressed(const juce::KeyPress& key, juce::Component*)
+bool Canvas::SlotPasteKeyListener::keyPressed(const juce::KeyPress& key, juce::Component*)
 {
-    if (canvas && canvas->mcpPillDrawerMode == 3) {
+    if (!canvas || !canvas->mcpImageSlotActive) return false;
+    auto const kc = key.getKeyCode();
+    bool const ctrlV = (key.getModifiers().isCtrlDown() || key.getModifiers().isCommandDown())
+        && (kc == 'v' || kc == 'V' || kc == 22 /* Ctrl+V control code */);
+    if (ctrlV) {
+        canvas->pasteImageFromClipboard();
+        return true;
+    }
+    return false;
+}
+
+bool Canvas::SelectionPillKeyListener::keyPressed(const juce::KeyPress& key, juce::Component*)
+{    if (canvas && canvas->mcpPillDrawerMode == 3) {
         auto const count = static_cast<int>(canvas->mcpFilteredPaletteIndices.size());
         if (key.getKeyCode() == juce::KeyPress::upKey && count > 0) {
             canvas->mcpPaletteSelectedIndex = (canvas->mcpPaletteSelectedIndex - 1 + count) % count;
@@ -3824,10 +5441,10 @@ bool Canvas::SelectionPillKeyListener::keyPressed(const juce::KeyPress& key, juc
             return true;
         }
     }
-    // Shift+Enter = queue for the interactive chat. TextEditor only fires
-    // onReturnKey for a plain Return, so consume the Shift variant here.
+    // Shift+Enter = Park: keep the artifacts + typed intent in the bay without
+    // waking the AI. (Plain Enter is the send — TextEditor fires onReturnKey.)
     if (key.getKeyCode() == juce::KeyPress::returnKey && key.getModifiers().isShiftDown()) {
-        if (canvas) canvas->submitSelectionPill(true);
+        if (canvas) canvas->parkSelectionPill();
         return true;
     }
     // "/" opens the on-demand smart command palette if input is empty
@@ -4091,6 +5708,10 @@ void Canvas::dragAndDropPaste(String const& patchString, Point<int> const mouseP
 
 void Canvas::pasteSelection()
 {
+    // PRD Phase 2: an image on the system clipboard becomes a canvas reference
+    // image; otherwise fall through to the classic PD object paste.
+    if (pasteImageFromClipboard()) return;
+
     patch.startUndoSequence("Paste object/s");
 
     // Paste at mousePos, adds padding if pasted the same place
