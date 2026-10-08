@@ -12,6 +12,7 @@
 #include <juce_events/juce_events.h>
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <juce_audio_devices/juce_audio_devices.h>
+#include <juce_audio_basics/juce_audio_basics.h>
 #include <readerwriterqueue.h>
 #include <array>
 #include <memory>
@@ -274,7 +275,9 @@ public:
     // maxSeconds = safety ceiling; the artist decides the real length by stopping.
     void startMidiCapture(int maxSeconds = 120, const juce::String& voiceBinding = "canvas");
     void stopMidiCaptureAndStage();
-    void midiInputTick(const juce::MidiBuffer& midi, int numSamples);
+    void midiInputTick(const juce::MidiBuffer& midi, int numSamples, juce::AudioBuffer<float>* audioBuffer = nullptr, double sampleRate = 48000.0);
+    void setMidiMonitorThrough(bool enabled) { monitorThroughEnabled.store(enabled); }
+    bool isMidiMonitorThrough() const { return monitorThroughEnabled.load(); }
     bool isMidiCapturing() const { return midiCapturing.load(std::memory_order_relaxed); }
     int getMidiCaptureNoteCount() const;
     juce::String getMidiCaptureVoice() const { return midiCaptureVoice; }
@@ -453,6 +456,20 @@ private:
         double durationSec = 0.0;   // filled on note-off
         bool closed = false;
     };
+    // Option B: Auto-Monitor-Through synth voice bank (warm EPiano tone for blank canvas)
+    struct MonitorVoice {
+        int pitch = -1;
+        float velocity = 0.0f;
+        float phase = 0.0f;
+        float phaseInc = 0.0f;
+        float env = 0.0f;
+        bool active = false;
+        bool released = false;
+    };
+    static constexpr int kMaxMonitorVoices = 16;
+    MonitorVoice monitorVoices[kMaxMonitorVoices];
+    std::atomic<bool> monitorThroughEnabled { true };
+
     std::vector<MidiNoteEvent> midiCaptureEvents;
     juce::CriticalSection midiCaptureLock;
     std::atomic<bool> midiCapturing { false };

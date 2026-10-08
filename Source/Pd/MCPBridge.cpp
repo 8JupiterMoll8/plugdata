@@ -10666,25 +10666,34 @@ void MCPBridge::startMidiCapture(int maxSeconds, const juce::String& voiceBindin
     midiCaptureMaxSamples.store(sr * juce::jlimit(1, 300, maxSeconds), std::memory_order_release);
     midiCaptureVoice = voiceBinding.isEmpty() ? juce::String("canvas") : voiceBinding;
     midiCaptureStartBpm = transport.running.load() ? static_cast<int>(transport.bpm.load()) : 0;
+
+    // Reset Option B monitor voices
+    for (auto& v : monitorVoices) {
+        v.active = false;
+        v.pitch = -1;
+        v.env = 0.0f;
+    }
+
     midiCapturing.store(true, std::memory_order_release);
 
     sendConsoleLog("MCP: Recording MIDI - play! (tap again to stop)", false);
     sendReply("/pd/midi/event", "{\"status\":\"armed\",\"voice\":\"" + midiCaptureVoice + "\"}");
 }
 
-void MCPBridge::midiInputTick(const juce::MidiBuffer& midi, int numSamples)
+void MCPBridge::midiInputTick(const juce::MidiBuffer& midi, int numSamples, juce::AudioBuffer<float>* audioBuffer, double sampleRate)
 {
     if (!midiCapturing.load(std::memory_order_acquire)) return;
 
     juce::int64 const blockStart = midiCaptureSamples.fetch_add(numSamples, std::memory_order_acq_rel);
     int const maxSamples = midiCaptureMaxSamples.load(std::memory_order_relaxed);
     bool autoStop = false;
+    double const effectiveSr = (sampleRate > 1000.0) ? sampleRate : 48000.0;
 
     {
         juce::ScopedLock sl(midiCaptureLock);
         for (auto const meta : midi) {
             auto const msg = meta.getMessage();
-            double const tSec = (blockStart + meta.samplePosition) / 48000.0;
+            double const tSec = (blockStart + meta.samplePosition) / effectiveSr;
 
             if (msg.isNoteOn()) {
                 MidiNoteEvent e;
@@ -10693,19 +10702,97 @@ void MCPBridge::midiInputTick(const juce::MidiBuffer& midi, int numSamples)
                 e.channel = msg.getChannel();
                 e.sampleTime = blockStart + meta.samplePosition;
                 midiCaptureEvents.push_back(e);
+
+                // Option B: Auto-Monitor-Through voice allocation for immediate auditory feedback
+                if (monitorThroughEnabled.load(std::memory_order_relaxed)) {
+                    int voiceIdx = -1;
+                    float lowestEnv = 100.0f;
+                    for (int i = 0; i < kMaxMonitorVoices; ++i) {
+                        if (!monitorVoices[i].active) {
+                            voiceIdx = i;
+                            break;
+                        }
+                        if (monitorVoices[i].env < lowestEnv) {
+                            lowestEnv = monitorVoices[i].env;
+                            voiceIdx = i;
+                        }
+                    }
+                    if (voiceIdx >= 0) {
+                        auto& v = monitorVoices[voiceIdx];
+                        v.pitch = msg.getNoteNumber();
+                        v.velocity = static_cast<float>(msg.getVelocity()) / 127.0f;
+                        float const freq = 440.0f * std::pow(2.0f, static_cast<float>(v.pitch - 69) / 12.0f);
+                        v.phaseInc = static_cast<float>(2.0 * juce::MathConstants<double>::pi * freq / effectiveSr);
+                        v.phase = 0.0f;
+                        v.env = v.velocity;
+                        v.active = true;
+                        v.released = false;
+                    }
+                }
             } else if (msg.isNoteOff()) {
                 // close the most recent open note with this pitch
                 for (auto it = midiCaptureEvents.rbegin(); it != midiCaptureEvents.rend(); ++it) {
                     if (!it->closed && it->pitch == msg.getNoteNumber()) {
                         it->closed = true;
-                        it->durationSec = tSec - (it->sampleTime / 48000.0);
+                        it->durationSec = tSec - (it->sampleTime / effectiveSr);
                         break;
+                    }
+                }
+
+                if (monitorThroughEnabled.load(std::memory_order_relaxed)) {
+                    for (int i = 0; i < kMaxMonitorVoices; ++i) {
+                        if (monitorVoices[i].active && monitorVoices[i].pitch == msg.getNoteNumber()) {
+                            monitorVoices[i].released = true;
+                        }
                     }
                 }
             }
         }
         if (blockStart >= maxSamples) {
             autoStop = true; // reached the safety ceiling
+        }
+    }
+
+    // Option B: Auto-Monitor-Through synth audio generation (warm EPiano on blank canvas)
+    if (audioBuffer != nullptr && monitorThroughEnabled.load(std::memory_order_relaxed)) {
+        float patchRms = 0.0f;
+        if (audioBuffer->getNumChannels() > 0 && numSamples > 0) {
+            patchRms = audioBuffer->getRMSLevel(0, 0, numSamples);
+        }
+        // If the patch is already sounding (> 0.02, ~ -34dB), duck monitor tone to avoid clashing
+        float const monitorGain = (patchRms > 0.02f) ? 0.0f : 0.16f;
+
+        if (monitorGain > 0.0f) {
+            int const numChannels = audioBuffer->getNumChannels();
+            for (int s = 0; s < numSamples; ++s) {
+                float sampleSum = 0.0f;
+                for (int i = 0; i < kMaxMonitorVoices; ++i) {
+                    auto& v = monitorVoices[i];
+                    if (!v.active) continue;
+
+                    v.phase += v.phaseInc;
+                    if (v.phase >= juce::MathConstants<float>::twoPi)
+                        v.phase -= juce::MathConstants<float>::twoPi;
+
+                    // Warm electric piano tone: fundamental + 22% 2nd harmonic + 6% 3rd harmonic
+                    float const wave = std::sin(v.phase) + 0.22f * std::sin(2.0f * v.phase) + 0.06f * std::sin(3.0f * v.phase);
+                    sampleSum += wave * v.env;
+
+                    if (v.released) {
+                        v.env *= 0.9993f; // ~300ms release tail
+                        if (v.env < 0.0005f) {
+                            v.active = false;
+                        }
+                    } else {
+                        v.env *= 0.99996f; // natural acoustic decay
+                    }
+                }
+
+                float const out = sampleSum * monitorGain;
+                for (int ch = 0; ch < numChannels; ++ch) {
+                    audioBuffer->addSample(ch, s, out);
+                }
+            }
         }
     }
 
@@ -10723,6 +10810,13 @@ int MCPBridge::getMidiCaptureNoteCount() const
 void MCPBridge::stopMidiCaptureAndStage()
 {
     if (!midiCapturing.exchange(false)) return;
+
+    // Silence all Option B monitor voices
+    for (auto& v : monitorVoices) {
+        v.active = false;
+        v.pitch = -1;
+        v.env = 0.0f;
+    }
 
     // Grab a snapshot of the events (audio thread may still be logging; it stops
     // because midiCapturing is now false).
