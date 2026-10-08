@@ -397,6 +397,55 @@ public:
             }
         }
     }
+
+    // MIDI melodic intent — captured from a MIDI keyboard: EXACT notes (no transcription).
+    // A MIDI take is pure data, so it carries a `voice` binding (canvas | voice_bank:<name> | agent).
+    struct McpMidiTake {
+        juce::String id;    // midi_<timestamp>
+        juce::String json;  // structured (mode, bpm, notes[{pitch,start,duration,vel}], voice)
+        juce::String voice; // "canvas" | "voice_bank:name" | "agent"
+        int bpm = 0;
+        int noteCount = 0;
+        double durationSec = 0.0;
+        bool visible = true;
+        float x = 0.0f;
+        float y = 0.0f;
+        bool positioned = false;
+    };
+    std::vector<McpMidiTake> mcpMidiTakes;
+    std::vector<McpMidiTake> getMcpMidiTakes() const { juce::ScopedLock sl(mcpOverlayLock); return mcpMidiTakes; }
+    void addMcpMidiTake(McpMidiTake take)
+    {
+        juce::ScopedLock sl(mcpOverlayLock);
+        mcpMidiTakes.push_back(std::move(take));
+    }
+    void removeMcpMidiTake(const juce::String& id)
+    {
+        juce::ScopedLock sl(mcpOverlayLock);
+        std::erase_if(mcpMidiTakes, [&id](McpMidiTake const& t) { return t.id == id; });
+    }
+    void setMcpMidiTakeVisible(const juce::String& id, bool visible)
+    {
+        juce::ScopedLock sl(mcpOverlayLock);
+        for (auto& t : mcpMidiTakes) {
+            if (t.id == id) {
+                t.visible = visible;
+                return;
+            }
+        }
+    }
+    void setMcpMidiTakePos(const juce::String& id, float x, float y)
+    {
+        juce::ScopedLock sl(mcpOverlayLock);
+        for (auto& t : mcpMidiTakes) {
+            if (t.id == id) {
+                t.x = x;
+                t.y = y;
+                t.positioned = true;
+                return;
+            }
+        }
+    }
     void removeMcpReferenceImage(const juce::String& id)
     {
         juce::ScopedLock sl(mcpOverlayLock);

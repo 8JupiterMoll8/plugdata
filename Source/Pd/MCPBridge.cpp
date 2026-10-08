@@ -3488,7 +3488,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         // coordinates, bindings and the structured voice takes.
         auto correlationId = msg.size() > 0 ? getArgString(msg[0]) : juce::String("0");
         juce::MessageManager::callAsync([proc = processor, correlationId, this] {
-            juce::Array<juce::var> imagesArr, notesArr, takesArr, selArr;
+            juce::Array<juce::var> imagesArr, notesArr, takesArr, midiTakesArr, selArr;
             juce::String strokesJson = "[]";
             juce::String bboxJson = "{}";
 
@@ -3527,6 +3527,17 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     o->setProperty("visible", t.visible);
                     takesArr.add(juce::var(o));
                 }
+                for (auto const& t : proc->getMcpMidiTakes()) {
+                    auto* o = new juce::DynamicObject();
+                    o->setProperty("id", t.id);
+                    o->setProperty("voice", t.voice);
+                    o->setProperty("bpm", t.bpm);
+                    o->setProperty("notes", t.noteCount);
+                    o->setProperty("duration", t.durationSec);
+                    o->setProperty("visible", t.visible);
+                    o->setProperty("json", t.json);
+                    midiTakesArr.add(juce::var(o));
+                }
 
                 PluginEditor* editor = nullptr;
                 for (auto* ed : proc->getEditors()) {
@@ -3559,6 +3570,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 "\"images\":" + juce::JSON::toString(juce::var(imagesArr), false)
                 + ",\"notes\":" + juce::JSON::toString(juce::var(notesArr), false)
                 + ",\"voiceTakes\":" + juce::JSON::toString(juce::var(takesArr), false)
+                + ",\"midiTakes\":" + juce::JSON::toString(juce::var(midiTakesArr), false)
                 + ",\"strokes\":" + strokesJson
                 + ",\"bbox\":" + bboxJson
                 + ",\"selection\":" + juce::JSON::toString(juce::var(selArr), false)
@@ -10635,6 +10647,151 @@ void MCPBridge::analyzeCapturedVoice()
     std::thread([this, totalSamples, sampleRate, declaredMode] {
         parseVoiceBufferToJson(voiceCaptureBuffer.data(), totalSamples, sampleRate, declaredMode);
     }).detach();
+}
+
+// ── MIDI Melodic-Intent Capture ──────────────────────────────────────────────
+// The artist plays a MIDI keyboard; we log EXACT note events (no transcription:
+// no YIN, no octave referee, no tuning guesswork). Monitor-through is handled by
+// the app's normal MIDI path (Pd [notein]); this only records + stages.
+void MCPBridge::startMidiCapture(int maxSeconds, const juce::String& voiceBinding)
+{
+    if (midiCapturing.load(std::memory_order_relaxed)) return;
+
+    juce::ScopedLock sl(midiCaptureLock);
+    midiCaptureEvents.clear();
+    midiCapturing.store(false, std::memory_order_relaxed);
+
+    int const sr = processor ? static_cast<int>(processor->getSampleRate()) : 48000;
+    midiCaptureSamples.store(0, std::memory_order_release);
+    midiCaptureMaxSamples.store(sr * juce::jlimit(1, 300, maxSeconds), std::memory_order_release);
+    midiCaptureVoice = voiceBinding.isEmpty() ? juce::String("canvas") : voiceBinding;
+    midiCaptureStartBpm = transport.running.load() ? static_cast<int>(transport.bpm.load()) : 0;
+    midiCapturing.store(true, std::memory_order_release);
+
+    sendConsoleLog("MCP: Recording MIDI - play! (tap again to stop)", false);
+    sendReply("/pd/midi/event", "{\"status\":\"armed\",\"voice\":\"" + midiCaptureVoice + "\"}");
+}
+
+void MCPBridge::midiInputTick(const juce::MidiBuffer& midi, int numSamples)
+{
+    if (!midiCapturing.load(std::memory_order_acquire)) return;
+
+    juce::int64 const blockStart = midiCaptureSamples.fetch_add(numSamples, std::memory_order_acq_rel);
+    int const maxSamples = midiCaptureMaxSamples.load(std::memory_order_relaxed);
+    bool autoStop = false;
+
+    {
+        juce::ScopedLock sl(midiCaptureLock);
+        for (auto const meta : midi) {
+            auto const msg = meta.getMessage();
+            double const tSec = (blockStart + meta.samplePosition) / 48000.0;
+
+            if (msg.isNoteOn()) {
+                MidiNoteEvent e;
+                e.pitch = msg.getNoteNumber();
+                e.velocity = msg.getVelocity();
+                e.channel = msg.getChannel();
+                e.sampleTime = blockStart + meta.samplePosition;
+                midiCaptureEvents.push_back(e);
+            } else if (msg.isNoteOff()) {
+                // close the most recent open note with this pitch
+                for (auto it = midiCaptureEvents.rbegin(); it != midiCaptureEvents.rend(); ++it) {
+                    if (!it->closed && it->pitch == msg.getNoteNumber()) {
+                        it->closed = true;
+                        it->durationSec = tSec - (it->sampleTime / 48000.0);
+                        break;
+                    }
+                }
+            }
+        }
+        if (blockStart >= maxSamples) {
+            autoStop = true; // reached the safety ceiling
+        }
+    }
+
+    if (autoStop) {
+        juce::MessageManager::callAsync([this] { stopMidiCaptureAndStage(); });
+    }
+}
+
+int MCPBridge::getMidiCaptureNoteCount() const
+{
+    juce::ScopedLock sl(const_cast<juce::CriticalSection&>(midiCaptureLock));
+    return static_cast<int>(midiCaptureEvents.size());
+}
+
+void MCPBridge::stopMidiCaptureAndStage()
+{
+    if (!midiCapturing.exchange(false)) return;
+
+    // Grab a snapshot of the events (audio thread may still be logging; it stops
+    // because midiCapturing is now false).
+    std::vector<MidiNoteEvent> events;
+    {
+        juce::ScopedLock sl(midiCaptureLock);
+        events = midiCaptureEvents;
+        midiCaptureEvents.clear();
+    }
+
+    if (events.size() < 1) {
+        sendConsoleLog("MCP: MIDI recording empty", false);
+        sendReply("/pd/midi/event", "{\"status\":\"empty\"}");
+        return;
+    }
+
+    // Close any still-open notes at "now".
+    double const sr = processor ? processor->getSampleRate() : 48000.0;
+    for (auto& e : events) {
+        if (!e.closed) {
+            e.durationSec = juce::jmax(0.05, (midiCaptureSamples.load() - e.sampleTime) / sr);
+        }
+    }
+
+    double const captureStartSample = static_cast<double>(events.front().sampleTime);
+    double const captureEndSample = [&] {
+        double mx = 0.0;
+        for (auto const& e : events) mx = juce::jmax(mx, static_cast<double>(e.sampleTime) + e.durationSec * sr);
+        return mx;
+    }();
+    double const durationSec = juce::jmax(0.1, (captureEndSample - captureStartSample) / sr);
+
+    juce::Array<juce::var> notesArray;
+    for (auto const& e : events) {
+        auto* noteObj = new juce::DynamicObject();
+        noteObj->setProperty("pitch", e.pitch);
+        noteObj->setProperty("start", (e.sampleTime - captureStartSample) / sr);
+        noteObj->setProperty("duration", e.durationSec);
+        noteObj->setProperty("vel", e.velocity);
+        notesArray.add(juce::var(noteObj));
+    }
+
+    auto* root = new juce::DynamicObject();
+    juce::String const takeId = "midi_" + juce::String(juce::Time::getCurrentTime().toMilliseconds());
+    root->setProperty("id", takeId);
+    root->setProperty("mode", "midi");
+    root->setProperty("bpm", midiCaptureStartBpm);
+    root->setProperty("durationSec", durationSec);
+    root->setProperty("voice", midiCaptureVoice);
+    root->setProperty("noteCount", static_cast<int>(events.size()));
+    root->setProperty("notes", notesArray);
+    juce::String const jsonStr = juce::JSON::toString(juce::var(root));
+
+    juce::File("/home/alphi/Desktop/plugdata/mcp-server/midi-take.json").replaceWithText(jsonStr);
+
+    // Register as a first-class moodboard artifact.
+    PluginProcessor::McpMidiTake take;
+    take.id = takeId;
+    take.json = jsonStr;
+    take.voice = midiCaptureVoice;
+    take.bpm = midiCaptureStartBpm;
+    take.noteCount = static_cast<int>(events.size());
+    take.durationSec = durationSec;
+    take.visible = true;
+    if (processor) processor->addMcpMidiTake(std::move(take));
+
+    sendReply("/pd/midi/event", jsonStr);
+    sendConsoleLog("MCP: MIDI take staged -> " + takeId + " (" + juce::String(events.size())
+                   + " notes, voice: " + midiCaptureVoice + ")", false);
 }
 
 void MCPBridge::parseVoiceBufferToJson(float const* buffer, int totalSamples, double sampleRate, int forcedMode)

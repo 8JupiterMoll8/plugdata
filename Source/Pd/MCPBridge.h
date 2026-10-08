@@ -269,6 +269,16 @@ public:
     void voiceInputTick(float const* inputSamples, int numSamples);
     void parseVoiceBufferToJson(float const* buffer, int totalSamples, double sampleRate, int forcedMode);
 
+    // MIDI Melodic-Intent Capture. The artist plays a MIDI keyboard; we log exact
+    // note-on/off events (no transcription) and stage a take with a voice binding.
+    // maxSeconds = safety ceiling; the artist decides the real length by stopping.
+    void startMidiCapture(int maxSeconds = 120, const juce::String& voiceBinding = "canvas");
+    void stopMidiCaptureAndStage();
+    void midiInputTick(const juce::MidiBuffer& midi, int numSamples);
+    bool isMidiCapturing() const { return midiCapturing.load(std::memory_order_relaxed); }
+    int getMidiCaptureNoteCount() const;
+    juce::String getMidiCaptureVoice() const { return midiCaptureVoice; }
+
     void sendReply(const juce::String& addressPattern, const juce::Array<juce::var>& args);
     void sendReply(const juce::String& addressPattern, float val);
     void sendReply(const juce::String& addressPattern, const juce::String& str);
@@ -433,6 +443,23 @@ private:
     std::atomic<int> voiceCaptureWritePos { 0 };
     std::atomic<float> voiceLiveLevel { 0.0f };
     std::atomic<int> voiceCaptureMode { 0 }; // 0 = auto, 1 = melody, 2 = beat
+
+    // MIDI capture state (audio thread logs; message thread stages)
+    struct MidiNoteEvent {
+        int pitch = 0;
+        int velocity = 0;
+        int channel = 1;
+        juce::int64 sampleTime = 0; // absolute samples since capture start
+        double durationSec = 0.0;   // filled on note-off
+        bool closed = false;
+    };
+    std::vector<MidiNoteEvent> midiCaptureEvents;
+    juce::CriticalSection midiCaptureLock;
+    std::atomic<bool> midiCapturing { false };
+    std::atomic<juce::int64> midiCaptureSamples { 0 }; // running sample clock
+    std::atomic<int> midiCaptureMaxSamples { 0 };
+    juce::String midiCaptureVoice { "canvas" };
+    int midiCaptureStartBpm = 0;
     // Preview transport state (message thread; audio callback is the player)
     std::unique_ptr<juce::AudioFormatManager> previewFormatManager;
     std::unique_ptr<juce::AudioTransportSource> previewTransport;

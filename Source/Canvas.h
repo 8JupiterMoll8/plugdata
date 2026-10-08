@@ -421,6 +421,10 @@ public:
     // Phase 3 — Voice take chips on the glass: ▶ audition + mini-waveform + ✕.
     void renderVoiceTakes(NVGcontext* nvg, Rectangle<int> invalidRegion);
     bool handleVoiceTakeClick(MouseEvent const& e, Point<int> mousePos);
+    void renderMidiTakes(NVGcontext* nvg, Rectangle<int> invalidRegion);
+    bool handleMidiTakeClick(MouseEvent const& e, Point<int> mousePos);
+    juce::String mcpDraggingMidiTakeId;
+    juce::Point<int> mcpMidiTakeDragOffset;
     juce::String mcpDraggingTakeId;
     juce::Point<int> mcpTakeDragOffset;
     juce::Point<int> mcpTakeSpawnPos; // where the next recorded take lands (canvas coords)

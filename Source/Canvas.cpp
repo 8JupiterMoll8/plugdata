@@ -779,6 +779,7 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
     // PRD Phase 2: pasted reference images render as glass backdrops behind cords/objects.
     renderReferenceImages(nvg, invalidRegion);
     renderVoiceTakes(nvg, invalidRegion);
+    renderMidiTakes(nvg, invalidRegion);
 
     auto drawBorder = [this, nvg, zoom](bool const bg, bool const fg) {
         if (viewport && (showOrigin || showBorder) && !::getValue<bool>(presentationMode)) {
@@ -1226,16 +1227,22 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
                 int const captureMode = capturing ? pd->getMCPBridge()->getVoiceCaptureMode() : 0;
                 bool const melodyRec = capturing && captureMode == 1;
                 bool const beatRec = capturing && captureMode == 2;
+                bool const midiRec = pd && pd->getMCPBridge() && pd->getMCPBridge()->isMidiCapturing();
 
-                for (int i = 0; i < 5; ++i) {
+                for (int i = 0; i < 6; ++i) {
                     float const bx = pad + i * (btn + gap);
-                    bool const active = (i == 0 && mcpSketchToolActive) || (i == 1 && mcpTextToolActive) || (i == 3 && melodyRec) || (i == 4 && beatRec);
+                    bool const active = (i == 0 && mcpSketchToolActive) || (i == 1 && mcpTextToolActive) || (i == 3 && melodyRec) || (i == 4 && beatRec) || (i == 5 && midiRec);
 
                     NVGcolor bg = nvgRGBA(38, 42, 50, 230);
                     NVGcolor border = nvgRGBA(160, 175, 200, 100);
                     if (active) {
-                        bg = nvgRGBA(0, 190, 230, 245);
-                        border = nvgRGBA(0, 245, 255, 255);
+                        if (i == 5) {
+                            bg = nvgRGBA(140, 60, 230, 245);
+                            border = nvgRGBA(180, 100, 255, 255);
+                        } else {
+                            bg = nvgRGBA(0, 190, 230, 245);
+                            border = nvgRGBA(0, 245, 255, 255);
+                        }
                     }
                     nvgDrawRoundedRect(nvg, bx, by, btn, btn, bg, border, 6.0f);
 
@@ -1304,7 +1311,7 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
                             nvgStrokeWidth(nvg, 1.5f);
                             nvgStroke(nvg);
                         }
-                    } else { // beat (drum glyph)
+                    } else if (i == 4) { // beat (drum glyph)
                         nvgBeginPath(nvg);
                         nvgRoundedRect(nvg, cx - 6.0f, cy - 0.5f, 12.0f, 6.5f, 2.0f);
                         nvgStrokeColor(nvg, fg);
@@ -1334,36 +1341,71 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
                             nvgStrokeWidth(nvg, 1.5f);
                             nvgStroke(nvg);
                         }
+                    } else { // i == 5: MIDI (piano keyboard glyph)
+                        nvgBeginPath(nvg);
+                        nvgRoundedRect(nvg, cx - 7.0f, cy - 6.0f, 14.0f, 12.0f, 1.5f);
+                        nvgStrokeColor(nvg, fg);
+                        nvgStrokeWidth(nvg, 1.2f);
+                        nvgStroke(nvg);
+                        nvgBeginPath(nvg);
+                        nvgMoveTo(nvg, cx - 2.5f, cy - 6.0f);
+                        nvgLineTo(nvg, cx - 2.5f, cy + 6.0f);
+                        nvgMoveTo(nvg, cx + 2.0f, cy - 6.0f);
+                        nvgLineTo(nvg, cx + 2.0f, cy + 6.0f);
+                        nvgStrokeColor(nvg, fg);
+                        nvgStrokeWidth(nvg, 1.0f);
+                        nvgStroke(nvg);
+                        nvgBeginPath(nvg);
+                        nvgRect(nvg, cx - 4.5f, cy - 6.0f, 1.8f, 6.5f);
+                        nvgRect(nvg, cx + 0.2f, cy - 6.0f, 1.8f, 6.5f);
+                        nvgFillColor(nvg, fg);
+                        nvgFill(nvg);
+
+                        if (midiRec) {
+                            float const pulse = 0.65f + 0.35f * std::sin(static_cast<float>(juce::Time::getMillisecondCounter()) * 0.008f);
+                            nvgBeginPath(nvg);
+                            nvgRoundedRect(nvg, bx - 2.0f, by - 2.0f, btn + 4.0f, btn + 4.0f, 8.0f);
+                            nvgStrokeColor(nvg, nvgRGBA(180, 70, 255, static_cast<unsigned char>(140 + 100 * pulse)));
+                            nvgStrokeWidth(nvg, 1.6f);
+                            nvgStroke(nvg);
+                        }
                     }
                 }
 
                 // Record slot: declared intent + live level while capturing.
-                if (melodyRec || beatRec) {
-                    juce::String const recText = melodyRec
-                        ? "Sing a melody - tap the note to stop"
-                        : "Beatbox - tap the drum to stop";
-                    float const boxW = 330.0f;
+                if (melodyRec || beatRec || midiRec) {
+                    int const nNotes = (pd && pd->getMCPBridge()) ? pd->getMCPBridge()->getMidiCaptureNoteCount() : 0;
+                    juce::String const recText = midiRec
+                        ? ("Play MIDI keyboard - tap keys to stop (" + juce::String(nNotes) + " notes)")
+                        : (melodyRec ? "Sing a melody - tap the note to stop" : "Beatbox - tap the drum to stop");
+                    float const boxW = midiRec ? 340.0f : 330.0f;
                     float const boxX = (w - boxW) * 0.5f;
                     float const boxY = -44.0f;
-                    nvgDrawRoundedRect(nvg, boxX, boxY, boxW, 32.0f, nvgRGBA(26, 18, 20, 242), nvgRGBA(255, 70, 58, 220), 7.0f);
+                    NVGcolor const recBorder = midiRec ? nvgRGBA(180, 80, 255, 220) : nvgRGBA(255, 70, 58, 220);
+                    nvgDrawRoundedRect(nvg, boxX, boxY, boxW, 32.0f, nvgRGBA(26, 18, 20, 242), recBorder, 7.0f);
 
-                    // pulsing red REC dot
                     float const pulse = 0.65f + 0.35f * std::sin(static_cast<float>(juce::Time::getMillisecondCounter()) * 0.008f);
                     float const lvl = juce::jlimit(0.0f, 1.0f, pd->getMCPBridge()->getVoiceLiveLevel() * 3.5f);
                     nvgBeginPath(nvg);
                     nvgCircle(nvg, boxX + 15.0f, boxY + 16.0f, 4.0f);
-                    nvgFillColor(nvg, nvgRGBA(255, 60, 45, static_cast<unsigned char>(160 + 95 * pulse)));
+                    NVGcolor const dotColor = midiRec
+                        ? nvgRGBA(190, 80, 255, static_cast<unsigned char>(160 + 95 * pulse))
+                        : nvgRGBA(255, 60, 45, static_cast<unsigned char>(160 + 95 * pulse));
+                    nvgFillColor(nvg, dotColor);
                     nvgFill(nvg);
 
-                    // live level meter
-                    nvgDrawRoundedRect(nvg, boxX + 26.0f, boxY + 13.0f, 70.0f, 6.0f, nvgRGBA(50, 30, 32, 230), nvgRGBA(90, 50, 52, 120), 3.0f);
-                    nvgDrawRoundedRect(nvg, boxX + 26.0f, boxY + 13.0f, 4.0f + lvl * 66.0f, 6.0f, nvgRGBA(255, 70, 55, 235), nvgRGBA(255, 120, 100, 120), 3.0f);
+                    if (!midiRec) {
+                        // live level meter
+                        nvgDrawRoundedRect(nvg, boxX + 26.0f, boxY + 13.0f, 70.0f, 6.0f, nvgRGBA(50, 30, 32, 230), nvgRGBA(90, 50, 52, 120), 3.0f);
+                        nvgDrawRoundedRect(nvg, boxX + 26.0f, boxY + 13.0f, 4.0f + lvl * 66.0f, 6.0f, nvgRGBA(255, 70, 55, 235), nvgRGBA(255, 120, 100, 120), 3.0f);
+                    }
 
                     nvgFontFace(nvg, "Inter");
                     nvgFontSize(nvg, 10.5f);
                     nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
-                    nvgFillColor(nvg, nvgRGBA(255, 214, 208, 240));
-                    nvgText(nvg, boxX + 104.0f, boxY + 16.0f, recText.toRawUTF8(), nullptr);
+                    nvgFillColor(nvg, midiRec ? nvgRGBA(235, 220, 255, 240) : nvgRGBA(255, 214, 208, 240));
+                    float const tx = midiRec ? (boxX + 28.0f) : (boxX + 104.0f);
+                    nvgText(nvg, tx, boxY + 16.0f, recText.toRawUTF8(), nullptr);
                 }
 
                 // Hint chip under the strip
@@ -3183,6 +3225,130 @@ bool Canvas::handleVoiceTakeClick(MouseEvent const& e, Point<int> mousePos)
     return false;
 }
 
+void Canvas::renderMidiTakes(NVGcontext* nvg, Rectangle<int> invalidRegion)
+{
+    if (!pd || presentationMode.getValue()) return;
+    auto takes = pd->getMcpMidiTakes();
+    if (takes.empty()) return;
+
+    constexpr float chipW = 240.0f;
+    constexpr float chipH = 38.0f;
+    int slot = 0;
+
+    for (auto& take : takes) {
+        if (!take.visible) continue;
+
+        if (!take.positioned) {
+            float const px = mcpTakeSpawnPos.x != 0 ? static_cast<float>(mcpTakeSpawnPos.x)
+                                                    : static_cast<float>(canvasOrigin.x + 40);
+            float const py = mcpTakeSpawnPos.y != 0 ? static_cast<float>(mcpTakeSpawnPos.y)
+                                                    : static_cast<float>(canvasOrigin.y + 40);
+            pd->setMcpMidiTakePos(take.id, px - static_cast<float>(canvasOrigin.x),
+                                  py - static_cast<float>(canvasOrigin.y) + 46.0f * static_cast<float>(slot));
+            take.x = px - static_cast<float>(canvasOrigin.x);
+            take.y = py - static_cast<float>(canvasOrigin.y) + 46.0f * static_cast<float>(slot);
+            take.positioned = true;
+        }
+        ++slot;
+
+        Rectangle<float> const b(static_cast<float>(canvasOrigin.x) + take.x,
+                                 static_cast<float>(canvasOrigin.y) + take.y,
+                                 chipW, chipH);
+        if (!invalidRegion.intersects(b.getSmallestIntegerContainer())) continue;
+
+        NVGcolor const accent = nvgRGBA(180, 90, 255, 220); // synth royal purple
+
+        NVGScopedState scopedChip(nvg);
+
+        // Cassette body: deep slate + royal purple border
+        nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(),
+                           nvgRGBA(20, 18, 28, 245), accent, 6.0f);
+
+        // 🎹 Piano keyboard glyph
+        {
+            float const gx = b.getX() + 18.0f;
+            float const gy = b.getCentreY();
+            nvgBeginPath(nvg);
+            nvgRoundedRect(nvg, gx - 7.0f, gy - 6.0f, 14.0f, 12.0f, 1.5f);
+            nvgStrokeColor(nvg, accent);
+            nvgStrokeWidth(nvg, 1.2f);
+            nvgStroke(nvg);
+            nvgBeginPath(nvg);
+            nvgMoveTo(nvg, gx - 2.5f, gy - 6.0f);
+            nvgLineTo(nvg, gx - 2.5f, gy + 6.0f);
+            nvgMoveTo(nvg, gx + 2.0f, gy - 6.0f);
+            nvgLineTo(nvg, gx + 2.0f, gy + 6.0f);
+            nvgStrokeColor(nvg, accent);
+            nvgStrokeWidth(nvg, 1.0f);
+            nvgStroke(nvg);
+            nvgBeginPath(nvg);
+            nvgRect(nvg, gx - 4.5f, gy - 6.0f, 1.8f, 6.5f);
+            nvgRect(nvg, gx + 0.2f, gy - 6.0f, 1.8f, 6.5f);
+            nvgFillColor(nvg, accent);
+            nvgFill(nvg);
+        }
+
+        // Title and notes
+        float const tx = b.getX() + 34.0f;
+        float const ty = b.getY() + 14.0f;
+        nvgFontFace(nvg, "Inter-Medium");
+        nvgFontSize(nvg, 11.5f);
+        nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+        nvgFillColor(nvg, nvgRGBA(235, 225, 250, 240));
+        juce::String const title = take.id + " · " + juce::String(take.noteCount) + " notes";
+        nvgText(nvg, tx, ty, title.toRawUTF8(), nullptr);
+
+        // Subtitle: voice binding + duration
+        float const subY = b.getY() + 27.0f;
+        nvgFontFace(nvg, "Inter");
+        nvgFontSize(nvg, 9.5f);
+        nvgFillColor(nvg, nvgRGBA(180, 165, 205, 200));
+        juce::String const sub = "voice: " + take.voice + " · " + juce::String(take.durationSec, 1) + "s";
+        nvgText(nvg, tx, subY, sub.toRawUTF8(), nullptr);
+
+        // ✕ Remove button on the far right
+        float const xx = b.getRight() - 14.0f;
+        float const pcy = b.getCentreY();
+        nvgBeginPath(nvg);
+        nvgMoveTo(nvg, xx - 4.0f, pcy - 4.0f);
+        nvgLineTo(nvg, xx + 4.0f, pcy + 4.0f);
+        nvgMoveTo(nvg, xx + 4.0f, pcy - 4.0f);
+        nvgLineTo(nvg, xx - 4.0f, pcy + 4.0f);
+        nvgStrokeColor(nvg, nvgRGBA(200, 160, 220, 210));
+        nvgStrokeWidth(nvg, 1.3f);
+        nvgStroke(nvg);
+    }
+}
+
+bool Canvas::handleMidiTakeClick(MouseEvent const& e, Point<int> mousePos)
+{
+    if (!pd) return false;
+    auto const takes = pd->getMcpMidiTakes();
+    for (auto it = takes.rbegin(); it != takes.rend(); ++it) {
+        auto const& take = *it;
+        if (!take.visible) continue;
+        Rectangle<int> const b(static_cast<int>(canvasOrigin.x + take.x), static_cast<int>(canvasOrigin.y + take.y), 240, 38);
+        if (!b.contains(mousePos)) continue;
+
+        int const relX = mousePos.x - b.getX();
+
+        if (relX >= b.getWidth() - 30) {
+            // ✕ remove
+            pd->removeMcpMidiTake(take.id);
+            repaint();
+            if (editor) editor->nvgSurface.renderAll();
+            return true;
+        }
+
+        // Body: drag the chip
+        mcpDraggingMidiTakeId = take.id;
+        mcpMidiTakeDragOffset = mousePos - b.getPosition();
+        setMouseCursor(juce::MouseCursor::DraggingHandCursor);
+        return true;
+    }
+    return false;
+}
+
 bool Canvas::handleReferenceImageClick(MouseEvent const& e, Point<int> mousePos, bool isRightClick)
 {
     if (!pd) return false;
@@ -4020,9 +4186,9 @@ bool Canvas::handleNoteClick(Point<int> canvasPt)
         if (panel.contains(canvasPt)) {
             int const relX = canvasPt.x - panel.getX();
 
-            // Mood strip: [✏] [T] [🖼] [🎙] [🔊] — icons first, surfaces second.
+            // Mood strip: [✏] [T] [🖼] [🎙 Melody] [🥁 Beat] [🎹 MIDI] — icons first, surfaces second.
             if (mcpPillSketchMode && mcpCompletedStrokes.empty()) {
-                if (relX >= 6 && relX < 176) {
+                if (relX >= 6 && relX < 210) {
                     int const idx = (relX - 6) / 34;
                     switch (idx) {
                     case 0:
@@ -4064,7 +4230,7 @@ bool Canvas::handleNoteClick(Point<int> canvasPt)
                             }
                         }
                         return true;
-                    default:
+                    case 4:
                         // Beat record: declared intent — beatbox (no guessing).
                         if (pd) {
                             if (auto* br = pd->getMCPBridge()) {
@@ -4076,6 +4242,24 @@ bool Canvas::handleNoteClick(Point<int> canvasPt)
                                     setTextToolActive(false);
                                     mcpTakeSpawnPos = mcpMoodPillActive ? mcpMoodPillPos : juce::Point<int>(panel.getCentreX(), panel.getBottom() + 170);
                                     br->startVoiceCapture(60, 2);
+                                }
+                                repaint();
+                                if (editor) editor->nvgSurface.renderAll();
+                            }
+                        }
+                        return true;
+                    case 5:
+                        // MIDI record: declared intent — MIDI keyboard (exact notes).
+                        if (pd) {
+                            if (auto* br = pd->getMCPBridge()) {
+                                if (br->isMidiCapturing()) {
+                                    br->stopMidiCaptureAndStage();
+                                } else {
+                                    setSketchToolActive(false);
+                                    setEraserToolActive(false);
+                                    setTextToolActive(false);
+                                    mcpTakeSpawnPos = mcpMoodPillActive ? mcpMoodPillPos : juce::Point<int>(panel.getCentreX(), panel.getBottom() + 170);
+                                    br->startMidiCapture(120, "canvas");
                                 }
                                 repaint();
                                 if (editor) editor->nvgSurface.renderAll();
@@ -4387,6 +4571,7 @@ void Canvas::mouseDown(MouseEvent const& e)
 
     // Voice take chips float above the glass: ▶ audition / ✕ / drag.
     if (source == this && !e.mods.isRightButtonDown() && handleVoiceTakeClick(e, e.getEventRelativeTo(this).getPosition())) return;
+    if (source == this && !e.mods.isRightButtonDown() && handleMidiTakeClick(e, e.getEventRelativeTo(this).getPosition())) return;
 
     // PRD Phase 2: reference images on the canvas glass — drag to move, right-click
     // for the menu. In edit mode an armed pen draws over them; in Studio mode they
@@ -4608,6 +4793,16 @@ void Canvas::mouseDrag(MouseEvent const& e)
         return;
     }
 
+    // MIDI take chip drag.
+    if (mcpDraggingMidiTakeId.isNotEmpty()) {
+        auto const pt = e.getEventRelativeTo(this).getPosition();
+        auto const pdPos = pt - mcpMidiTakeDragOffset - canvasOrigin;
+        if (pd) pd->setMcpMidiTakePos(mcpDraggingMidiTakeId, static_cast<float>(pdPos.x), static_cast<float>(pdPos.y));
+        repaint();
+        if (editor) editor->nvgSurface.renderAll();
+        return;
+    }
+
     // PRD Phase 2: dragging a reference image across the canvas glass.
     if (mcpDraggingRefImageId.isNotEmpty()) {
         auto const pt = e.getEventRelativeTo(this).getPosition();
@@ -4742,6 +4937,15 @@ void Canvas::mouseUp(MouseEvent const& e)
     // Finish a voice take chip drag.
     if (mcpDraggingTakeId.isNotEmpty()) {
         mcpDraggingTakeId.clear();
+        setMouseCursor(juce::MouseCursor::NormalCursor);
+        repaint();
+        if (editor) editor->nvgSurface.renderAll();
+        return;
+    }
+
+    // Finish a MIDI take chip drag.
+    if (mcpDraggingMidiTakeId.isNotEmpty()) {
+        mcpDraggingMidiTakeId.clear();
         setMouseCursor(juce::MouseCursor::NormalCursor);
         repaint();
         if (editor) editor->nvgSurface.renderAll();
@@ -5137,7 +5341,7 @@ void Canvas::updateSelectionPill()
         // No ink yet -> compact icon strip (tool palette first, surfaces second).
         // Ink exists -> the full chisel (Build / prompt / Undo / Clear).
         sketchStrip = mcpCompletedStrokes.empty();
-        pillW = sketchStrip ? 182 : 520;
+        pillW = sketchStrip ? 216 : 520;
         pillX = juce::roundToInt(sb.getCentreX()) - pillW / 2;
         pillY = juce::roundToInt(sb.getBottom()) + 14;
         editorX = 92; // [⚡ Build] chip
