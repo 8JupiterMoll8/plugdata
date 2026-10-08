@@ -3231,6 +3231,9 @@ void Canvas::renderMidiTakes(NVGcontext* nvg, Rectangle<int> invalidRegion)
     auto takes = pd->getMcpMidiTakes();
     if (takes.empty()) return;
 
+    auto* br = pd->getMCPBridge();
+    juce::String const playingId = br ? br->getPlayingMidiTakeId() : juce::String();
+
     constexpr float chipW = 240.0f;
     constexpr float chipH = 38.0f;
     int slot = 0;
@@ -3256,7 +3259,8 @@ void Canvas::renderMidiTakes(NVGcontext* nvg, Rectangle<int> invalidRegion)
                                  chipW, chipH);
         if (!invalidRegion.intersects(b.getSmallestIntegerContainer())) continue;
 
-        NVGcolor const accent = nvgRGBA(180, 90, 255, 220); // synth royal purple
+        bool const playing = (playingId == take.id);
+        NVGcolor const accent = nvgRGBA(180, 90, 255, playing ? 255 : 220); // synth royal purple (bright glow while playing)
 
         NVGScopedState scopedChip(nvg);
 
@@ -3264,9 +3268,9 @@ void Canvas::renderMidiTakes(NVGcontext* nvg, Rectangle<int> invalidRegion)
         nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(),
                            nvgRGBA(20, 18, 28, 245), accent, 6.0f);
 
-        // 🎹 Piano keyboard glyph
+        // 🎹 Piano keyboard glyph (at x = 16)
         {
-            float const gx = b.getX() + 18.0f;
+            float const gx = b.getX() + 16.0f;
             float const gy = b.getCentreY();
             nvgBeginPath(nvg);
             nvgRoundedRect(nvg, gx - 7.0f, gy - 6.0f, 14.0f, 12.0f, 1.5f);
@@ -3288,8 +3292,30 @@ void Canvas::renderMidiTakes(NVGcontext* nvg, Rectangle<int> invalidRegion)
             nvgFill(nvg);
         }
 
-        // Title and notes
-        float const tx = b.getX() + 34.0f;
+        // ▶ / ⏸ Audition toggle button (at x = 38)
+        float const pcx = b.getX() + 38.0f;
+        float const pcy = b.getCentreY();
+        if (playing) {
+            nvgBeginPath(nvg);
+            nvgRoundedRect(nvg, pcx - 4.5f, pcy - 5.0f, 3.4f, 10.0f, 1.2f);
+            nvgFillColor(nvg, accent);
+            nvgFill(nvg);
+            nvgBeginPath(nvg);
+            nvgRoundedRect(nvg, pcx + 1.1f, pcy - 5.0f, 3.4f, 10.0f, 1.2f);
+            nvgFillColor(nvg, accent);
+            nvgFill(nvg);
+        } else {
+            nvgBeginPath(nvg);
+            nvgMoveTo(nvg, pcx - 4.5f, pcy - 6.0f);
+            nvgLineTo(nvg, pcx + 6.0f, pcy);
+            nvgLineTo(nvg, pcx - 4.5f, pcy + 6.0f);
+            nvgClosePath(nvg);
+            nvgFillColor(nvg, accent);
+            nvgFill(nvg);
+        }
+
+        // Title and notes (at x = 54)
+        float const tx = b.getX() + 54.0f;
         float const ty = b.getY() + 14.0f;
         nvgFontFace(nvg, "Inter-Medium");
         nvgFontSize(nvg, 11.5f);
@@ -3298,7 +3324,7 @@ void Canvas::renderMidiTakes(NVGcontext* nvg, Rectangle<int> invalidRegion)
         juce::String const title = take.id + " · " + juce::String(take.noteCount) + " notes";
         nvgText(nvg, tx, ty, title.toRawUTF8(), nullptr);
 
-        // Subtitle: voice binding + duration
+        // Subtitle: voice binding + duration (at x = 54)
         float const subY = b.getY() + 27.0f;
         nvgFontFace(nvg, "Inter");
         nvgFontSize(nvg, 9.5f);
@@ -3308,7 +3334,6 @@ void Canvas::renderMidiTakes(NVGcontext* nvg, Rectangle<int> invalidRegion)
 
         // ✕ Remove button on the far right
         float const xx = b.getRight() - 14.0f;
-        float const pcy = b.getCentreY();
         nvgBeginPath(nvg);
         nvgMoveTo(nvg, xx - 4.0f, pcy - 4.0f);
         nvgLineTo(nvg, xx + 4.0f, pcy + 4.0f);
@@ -3331,9 +3356,19 @@ bool Canvas::handleMidiTakeClick(MouseEvent const& e, Point<int> mousePos)
         if (!b.contains(mousePos)) continue;
 
         int const relX = mousePos.x - b.getX();
+        auto* br = pd->getMCPBridge();
+
+        if (relX >= 26 && relX <= 50) {
+            // ▶ / ⏸ audition toggle
+            if (br) br->playMidiTake(take.id, take.json);
+            repaint();
+            if (editor) editor->nvgSurface.renderAll();
+            return true;
+        }
 
         if (relX >= b.getWidth() - 30) {
-            // ✕ remove
+            // ✕ remove (stop playback first if it's currently playing)
+            if (br && br->getPlayingMidiTakeId() == take.id) br->stopMidiTake();
             pd->removeMcpMidiTake(take.id);
             repaint();
             if (editor) editor->nvgSurface.renderAll();

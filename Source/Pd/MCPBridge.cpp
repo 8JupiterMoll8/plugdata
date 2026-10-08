@@ -10591,6 +10591,7 @@ void MCPBridge::playVoiceTake(const juce::String& takeId, const juce::String& wa
         stopVoiceTake();
         return;
     }
+    stopMidiTake();
 
     auto* dm = ProjectInfo::getDeviceManager();
     if (!dm) return;
@@ -10682,29 +10683,97 @@ void MCPBridge::startMidiCapture(int maxSeconds, const juce::String& voiceBindin
 
 void MCPBridge::midiInputTick(const juce::MidiBuffer& midi, int numSamples, juce::AudioBuffer<float>* audioBuffer, double sampleRate)
 {
-    if (!midiCapturing.load(std::memory_order_acquire)) return;
+    bool const capturing = midiCapturing.load(std::memory_order_acquire);
+    bool const playing = midiPlaying.load(std::memory_order_acquire);
+    if (!capturing && !playing) return;
 
-    juce::int64 const blockStart = midiCaptureSamples.fetch_add(numSamples, std::memory_order_acq_rel);
-    int const maxSamples = midiCaptureMaxSamples.load(std::memory_order_relaxed);
-    bool autoStop = false;
     double const effectiveSr = (sampleRate > 1000.0) ? sampleRate : 48000.0;
 
-    {
-        juce::ScopedLock sl(midiCaptureLock);
-        for (auto const meta : midi) {
-            auto const msg = meta.getMessage();
-            double const tSec = (blockStart + meta.samplePosition) / effectiveSr;
+    // ── 1. Recording Live Input ──────────────────────────────
+    if (capturing) {
+        juce::int64 const blockStart = midiCaptureSamples.fetch_add(numSamples, std::memory_order_acq_rel);
+        int const maxSamples = midiCaptureMaxSamples.load(std::memory_order_relaxed);
+        bool autoStop = false;
 
-            if (msg.isNoteOn()) {
-                MidiNoteEvent e;
-                e.pitch = msg.getNoteNumber();
-                e.velocity = msg.getVelocity();
-                e.channel = msg.getChannel();
-                e.sampleTime = blockStart + meta.samplePosition;
-                midiCaptureEvents.push_back(e);
+        {
+            juce::ScopedLock sl(midiCaptureLock);
+            for (auto const meta : midi) {
+                auto const msg = meta.getMessage();
+                double const tSec = (blockStart + meta.samplePosition) / effectiveSr;
 
-                // Option B: Auto-Monitor-Through voice allocation for immediate auditory feedback
-                if (monitorThroughEnabled.load(std::memory_order_relaxed)) {
+                if (msg.isNoteOn()) {
+                    MidiNoteEvent e;
+                    e.pitch = msg.getNoteNumber();
+                    e.velocity = msg.getVelocity();
+                    e.channel = msg.getChannel();
+                    e.sampleTime = blockStart + meta.samplePosition;
+                    midiCaptureEvents.push_back(e);
+
+                    // Option B: Auto-Monitor-Through voice allocation for immediate auditory feedback
+                    if (monitorThroughEnabled.load(std::memory_order_relaxed)) {
+                        int voiceIdx = -1;
+                        float lowestEnv = 100.0f;
+                        for (int i = 0; i < kMaxMonitorVoices; ++i) {
+                            if (!monitorVoices[i].active) {
+                                voiceIdx = i;
+                                break;
+                            }
+                            if (monitorVoices[i].env < lowestEnv) {
+                                lowestEnv = monitorVoices[i].env;
+                                voiceIdx = i;
+                            }
+                        }
+                        if (voiceIdx >= 0) {
+                            auto& v = monitorVoices[voiceIdx];
+                            v.pitch = msg.getNoteNumber();
+                            v.velocity = static_cast<float>(msg.getVelocity()) / 127.0f;
+                            float const freq = 440.0f * std::pow(2.0f, static_cast<float>(v.pitch - 69) / 12.0f);
+                            v.phaseInc = static_cast<float>(2.0 * juce::MathConstants<double>::pi * freq / effectiveSr);
+                            v.phase = 0.0f;
+                            v.env = v.velocity;
+                            v.active = true;
+                            v.released = false;
+                        }
+                    }
+                } else if (msg.isNoteOff()) {
+                    for (auto it = midiCaptureEvents.rbegin(); it != midiCaptureEvents.rend(); ++it) {
+                        if (!it->closed && it->pitch == msg.getNoteNumber()) {
+                            it->closed = true;
+                            it->durationSec = tSec - (it->sampleTime / effectiveSr);
+                            break;
+                        }
+                    }
+
+                    if (monitorThroughEnabled.load(std::memory_order_relaxed)) {
+                        for (int i = 0; i < kMaxMonitorVoices; ++i) {
+                            if (monitorVoices[i].active && monitorVoices[i].pitch == msg.getNoteNumber()) {
+                                monitorVoices[i].released = true;
+                            }
+                        }
+                    }
+                }
+            }
+            if (blockStart >= maxSamples) {
+                autoStop = true;
+            }
+        }
+
+        if (autoStop) {
+            juce::MessageManager::callAsync([this] { stopMidiCaptureAndStage(); });
+        }
+    }
+
+    // ── 2. Playback of Staged Take ───────────────────────────
+    if (playing) {
+        juce::int64 const pStart = midiPlaybackPos.fetch_add(numSamples, std::memory_order_acq_rel);
+        juce::int64 const pEnd = pStart + numSamples;
+        juce::int64 const totalEnd = midiPlaybackEndSample.load(std::memory_order_relaxed);
+
+        {
+            juce::ScopedLock sl(midiPlaybackLock);
+            for (auto const& pn : midiPlaybackNotes) {
+                // Note-on within this block
+                if (pn.startSample >= pStart && pn.startSample < pEnd) {
                     int voiceIdx = -1;
                     float lowestEnv = 100.0f;
                     for (int i = 0; i < kMaxMonitorVoices; ++i) {
@@ -10719,8 +10788,8 @@ void MCPBridge::midiInputTick(const juce::MidiBuffer& midi, int numSamples, juce
                     }
                     if (voiceIdx >= 0) {
                         auto& v = monitorVoices[voiceIdx];
-                        v.pitch = msg.getNoteNumber();
-                        v.velocity = static_cast<float>(msg.getVelocity()) / 127.0f;
+                        v.pitch = pn.pitch;
+                        v.velocity = pn.velocity;
                         float const freq = 440.0f * std::pow(2.0f, static_cast<float>(v.pitch - 69) / 12.0f);
                         v.phaseInc = static_cast<float>(2.0 * juce::MathConstants<double>::pi * freq / effectiveSr);
                         v.phase = 0.0f;
@@ -10729,31 +10798,23 @@ void MCPBridge::midiInputTick(const juce::MidiBuffer& midi, int numSamples, juce
                         v.released = false;
                     }
                 }
-            } else if (msg.isNoteOff()) {
-                // close the most recent open note with this pitch
-                for (auto it = midiCaptureEvents.rbegin(); it != midiCaptureEvents.rend(); ++it) {
-                    if (!it->closed && it->pitch == msg.getNoteNumber()) {
-                        it->closed = true;
-                        it->durationSec = tSec - (it->sampleTime / effectiveSr);
-                        break;
-                    }
-                }
-
-                if (monitorThroughEnabled.load(std::memory_order_relaxed)) {
+                // Note-off within this block
+                if (pn.endSample >= pStart && pn.endSample < pEnd) {
                     for (int i = 0; i < kMaxMonitorVoices; ++i) {
-                        if (monitorVoices[i].active && monitorVoices[i].pitch == msg.getNoteNumber()) {
+                        if (monitorVoices[i].active && monitorVoices[i].pitch == pn.pitch) {
                             monitorVoices[i].released = true;
                         }
                     }
                 }
             }
         }
-        if (blockStart >= maxSamples) {
-            autoStop = true; // reached the safety ceiling
+
+        if (pEnd >= totalEnd) {
+            juce::MessageManager::callAsync([this] { stopMidiTake(); });
         }
     }
 
-    // Option B: Auto-Monitor-Through synth audio generation (warm EPiano on blank canvas)
+    // ── 3. Synth Audio Generation (Warm EPiano on Blank Canvas) ──
     if (audioBuffer != nullptr && monitorThroughEnabled.load(std::memory_order_relaxed)) {
         float patchRms = 0.0f;
         if (audioBuffer->getNumChannels() > 0 && numSamples > 0) {
@@ -10794,10 +10855,6 @@ void MCPBridge::midiInputTick(const juce::MidiBuffer& midi, int numSamples, juce
                 }
             }
         }
-    }
-
-    if (autoStop) {
-        juce::MessageManager::callAsync([this] { stopMidiCaptureAndStage(); });
     }
 }
 
@@ -10886,6 +10943,103 @@ void MCPBridge::stopMidiCaptureAndStage()
     sendReply("/pd/midi/event", jsonStr);
     sendConsoleLog("MCP: MIDI take staged -> " + takeId + " (" + juce::String(events.size())
                    + " notes, voice: " + midiCaptureVoice + ")", false);
+}
+
+
+void MCPBridge::playMidiTake(const juce::String& takeId, const juce::String& jsonStr)
+{
+    if (getPlayingMidiTakeId() == takeId) {
+        stopMidiTake();
+        return;
+    }
+
+    stopMidiTake();
+    stopVoiceTake();
+
+    auto parsed = juce::JSON::parse(jsonStr);
+    if (!parsed.isObject()) return;
+
+    auto* root = parsed.getDynamicObject();
+    if (!root) return;
+
+    auto notesVar = root->getProperty("notes");
+    if (!notesVar.isArray()) return;
+
+    auto* notesArr = notesVar.getArray();
+    if (!notesArr || notesArr->isEmpty()) return;
+
+    double const sr = processor ? processor->getSampleRate() : 48000.0;
+    double const durationSec = static_cast<double>(root->getProperty("durationSec"));
+
+    std::vector<MidiPlaybackNote> notes;
+    for (auto const& n : *notesArr) {
+        if (!n.isObject()) continue;
+        auto* no = n.getDynamicObject();
+        if (!no) continue;
+
+        MidiPlaybackNote pn;
+        pn.pitch = static_cast<int>(no->getProperty("pitch"));
+        double const startSec = static_cast<double>(no->getProperty("start"));
+        double const durSec = static_cast<double>(no->getProperty("duration"));
+        int const vel = static_cast<int>(no->getProperty("vel"));
+
+        pn.velocity = (vel > 0) ? (static_cast<float>(vel) / 127.0f) : 0.8f;
+        pn.startSample = static_cast<juce::int64>(startSec * sr);
+        pn.endSample = pn.startSample + static_cast<juce::int64>(juce::jmax(0.05, durSec) * sr);
+        notes.push_back(pn);
+    }
+
+    if (notes.empty()) return;
+
+    // Reset monitor voices
+    for (auto& v : monitorVoices) {
+        v.active = false;
+        v.pitch = -1;
+        v.env = 0.0f;
+    }
+
+    {
+        juce::ScopedLock sl(midiPlaybackLock);
+        midiPlaybackNotes = std::move(notes);
+        midiPlaybackPos.store(0, std::memory_order_release);
+        midiPlaybackEndSample.store(static_cast<juce::int64>((durationSec + 0.3) * sr), std::memory_order_release);
+        playingMidiTakeId = takeId;
+        midiPlaying.store(true, std::memory_order_release);
+    }
+
+    juce::Timer::callAfterDelay(static_cast<int>((durationSec + 0.4) * 1000.0), [this, takeId] {
+        if (getPlayingMidiTakeId() == takeId) {
+            stopMidiTake();
+        }
+    });
+
+    sendConsoleLog("MCP: Auditioning MIDI take -> " + takeId, false);
+}
+
+void MCPBridge::stopMidiTake()
+{
+    if (!midiPlaying.exchange(false)) {
+        playingMidiTakeId.clear();
+        return;
+    }
+    playingMidiTakeId.clear();
+
+    for (auto& v : monitorVoices) {
+        v.active = false;
+        v.pitch = -1;
+        v.env = 0.0f;
+    }
+
+    if (processor) {
+        for (auto* ed : processor->getEditors()) {
+            if (auto* pe = dynamic_cast<PluginEditor*>(ed)) {
+                for (auto* c : pe->getCanvases()) {
+                    if (c) c->repaint();
+                }
+                pe->nvgSurface.renderAll();
+            }
+        }
+    }
 }
 
 void MCPBridge::parseVoiceBufferToJson(float const* buffer, int totalSamples, double sampleRate, int forcedMode)

@@ -281,6 +281,10 @@ public:
     bool isMidiCapturing() const { return midiCapturing.load(std::memory_order_relaxed); }
     int getMidiCaptureNoteCount() const;
     juce::String getMidiCaptureVoice() const { return midiCaptureVoice; }
+    void playMidiTake(const juce::String& takeId, const juce::String& jsonStr);
+    void stopMidiTake();
+    bool isMidiPlaying() const { return midiPlaying.load(std::memory_order_relaxed); }
+    juce::String getPlayingMidiTakeId() const { return playingMidiTakeId; }
 
     void sendReply(const juce::String& addressPattern, const juce::Array<juce::var>& args);
     void sendReply(const juce::String& addressPattern, float val);
@@ -477,6 +481,20 @@ private:
     std::atomic<int> midiCaptureMaxSamples { 0 };
     juce::String midiCaptureVoice { "canvas" };
     int midiCaptureStartBpm = 0;
+
+    // MIDI playback state (auditioning staged takes on canvas)
+    struct MidiPlaybackNote {
+        int pitch = 0;
+        float velocity = 0.8f;
+        juce::int64 startSample = 0;
+        juce::int64 endSample = 0;
+    };
+    std::vector<MidiPlaybackNote> midiPlaybackNotes;
+    std::atomic<bool> midiPlaying { false };
+    std::atomic<juce::int64> midiPlaybackPos { 0 };
+    std::atomic<juce::int64> midiPlaybackEndSample { 0 };
+    juce::String playingMidiTakeId;
+    juce::CriticalSection midiPlaybackLock;
     // Preview transport state (message thread; audio callback is the player)
     std::unique_ptr<juce::AudioFormatManager> previewFormatManager;
     std::unique_ptr<juce::AudioTransportSource> previewTransport;

@@ -978,7 +978,8 @@ void PluginProcessor::processBlock(AudioBuffer<float>& buffer, MidiBuffer& midiB
 
     midiInputHistory.addEvents(midiDeviceManager.getInputHistory(), 0, buffer.getNumSamples(), 0);
     // MIDI melodic-intent capture tap: log exact note events while armed (no DSP).
-    if (mcpBridge && mcpBridge->isMidiCapturing())
+    // MIDI melodic-intent capture & playback tap
+    if (mcpBridge && (mcpBridge->isMidiCapturing() || mcpBridge->isMidiPlaying()))
         mcpBridge->midiInputTick(midiInputHistory, buffer.getNumSamples(), &buffer, getSampleRate());
     statusbarSource->process(midiInputHistory, midiDeviceManager.getOutputHistory());
     midiDeviceManager.clearMidiOutputBuffers(blockOut.getNumSamples());
