@@ -1099,11 +1099,15 @@ public:
 
     void setTab(PanelTab newTab)
     {
-        // Studio mode follows its drawer tab: the pen arms on entry, rests on exit.
+        // The pen does NOT auto-arm on tab entry. It used to ("Studio mode follows
+        // its drawer tab"), but that hijacked the canvas tool: opening the drawer
+        // just to browse the Staging Bay armed the pen, so the next click drew ink
+        // instead of selecting. The Brainstorm bar is the explicit control.
+        // Leaving the Studio tab still rests the pen.
         if (editor && newTab != currentTab) {
             if (auto* cnv = editor->getCurrentCanvas()) {
-                if (newTab == PanelTab::Studio) cnv->setStudioMode(true);
-                else if (currentTab == PanelTab::Studio) cnv->setStudioMode(false);
+                if (currentTab == PanelTab::Studio && newTab != PanelTab::Studio)
+                    cnv->setStudioMode(false);
             }
         }
 
