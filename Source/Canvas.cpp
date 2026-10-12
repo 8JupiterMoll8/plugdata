@@ -5030,8 +5030,8 @@ bool Canvas::keyPressed(KeyPress const& key)
         return true;
     }
 
-    // Summon the AI on selected object(s) when "/" is pressed:
-    if (key.getTextCharacter() == '/' || key.getKeyCode() == '/') {
+    // Summon the AI pill prompt on selected object(s) when Spacebar (Leertaste) or "/" is pressed:
+    if (key.getKeyCode() == juce::KeyPress::spaceKey || key.getTextCharacter() == '/' || key.getKeyCode() == '/') {
         if (!getSelectionOfType<Object>().empty() && !ObjectBase::isBeingEdited()) {
             mcpPillRequested = true;
             mcpPillDrawerMode = 0;
@@ -5040,6 +5040,10 @@ bool Canvas::keyPressed(KeyPress const& key)
             if (mcpSelectionPill) {
                 mcpSelectionPill->setText(juce::String(), false);
                 mcpSelectionPill->grabKeyboardFocus();
+                // If triggered by slash, open the command/skills palette directly
+                if (key.getTextCharacter() == '/' || key.getKeyCode() == '/') {
+                    showPillToolsMenu();
+                }
             }
             return true;
         }
