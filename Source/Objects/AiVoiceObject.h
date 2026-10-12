@@ -56,6 +56,7 @@ class AiVoiceObject final : public ObjectBase
     float meterPeak = 0.0f;    // decaying peak-hold
     float pulsePhase = 0.0f;
     double recStartMs = 0.0;
+    int lastRecState = 0;      // state observer: drives the bridge on ANY 0->1/1->0
 
 public:
     AiVoiceObject(pd::WeakReference ptr, Object* object)
@@ -137,6 +138,24 @@ public:
 
         bool const rec = (voice->x_recording != 0);
 
+        // ── State observer: ONE path drives the bridge ───────────────────────
+        // The Pd external cannot call the bridge, and the REC button only sets
+        // the Pd state. So watch the state here: any 0->1 (button OR a patch
+        // message `record 1`) arms the capture; any 1->0 analyzes + stages the
+        // take. This is what makes the object properly patchable.
+        if (voice->x_recording != lastRecState) {
+            if (auto* b = bridge()) {
+                if (voice->x_recording) {
+                    b->startVoiceCapture(60, voice->x_mode);
+                } else {
+                    b->stopVoiceCaptureAndAnalyze();
+                    outlet_symbol(voice->x_out_id, gensym(voice->x_take_id));
+                    outlet_bang(voice->x_out_bang);
+                }
+            }
+            lastRecState = voice->x_recording;
+        }
+
         // VU ballistics: fast attack, slow release, decaying peak-hold.
         if (auto* b = bridge()) {
             float const live = b->getVoiceLiveLevel();
@@ -176,17 +195,14 @@ public:
 
         auto voice = ptr.get<t_fake_aivoice>();
         if (!voice) return;
-        auto* b = bridge();
 
         if (recRect.contains(pos)) {
+            // Only flip the Pd state — the timer's state observer arms the
+            // capture and stages the take, so the REC button and a patch
+            // message `record 1` behave identically (one path, no double-arm).
             if (voice->x_recording) {
-                // Stop → the bridge analyzes the buffer and stages the take
-                // (WAV on disk + Staging Bay row + moodboard rail).
                 voice->x_recording = 0;
                 voice->x_rec_start_time = 0.0;
-                if (b) b->stopVoiceCaptureAndAnalyze();
-                outlet_symbol(voice->x_out_id, gensym(voice->x_take_id));
-                outlet_bang(voice->x_out_bang);
             } else {
                 voice->x_playing = 0;
                 voice->x_recording = 1;
@@ -195,7 +211,6 @@ public:
                 voice->x_wav[0] = '\0';
                 voice->x_rec_start_time = clock_getlogicaltime();
                 recStartMs = juce::Time::getMillisecondCounterHiRes();
-                if (b) b->startVoiceCapture(60, voice->x_mode);
             }
             repaint();
         } else if (playRect.contains(pos)) {
