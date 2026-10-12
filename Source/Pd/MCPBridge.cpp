@@ -1510,7 +1510,9 @@ juce::String MCPBridge::computeSignalTrace(PluginProcessor* processor, t_canvas*
             frontier = next;
         }
         if (selIdx >= 0 && gateIdx >= 0) {
-            return " — cause: [" + objTextOf(selIdx).trim() + "] ('" + names[selIdx] + "') filters the gate; the harness sends the note VELOCITY (1..127, e.g. 100), so only an exact match passes ([sel 1] never fires). Trigger on any non-zero ([t b] / [> 0]).";
+            // ASCII only: non-ASCII in a reply string is mangled to mojibake on
+            // the C++ -> OSC -> TS path (an em-dash arrives as 'â').
+            return " - cause: [" + objTextOf(selIdx).trim() + "] ('" + names[selIdx] + "') filters the gate; the harness sends the note VELOCITY (1..127, e.g. 100), so only an exact match passes ([sel 1] never fires). Trigger on any non-zero ([t b] / [> 0]).";
         }
         return {};
     };

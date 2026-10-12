@@ -1574,9 +1574,8 @@ Statusbar::Statusbar(PluginProcessor* processor, PluginEditor* e)
 
     setSize(getWidth(), statusbarHeight);
 
-    // PRD Lane 1 — Studio moodboard dock (Pen / Text / Eraser / Image / Audio / Commit)
-    studioDock = std::make_unique<StudioDock>(editor);
-    addAndMakeVisible(*studioDock);
+    // PRD Lane 1 — Studio moodboard dock moved to Studio Panel in Sidebar
+    // studioDock disabled to keep canvas statusbar 100% clean
 
     lookAndFeelChanged();
 }
@@ -1719,18 +1718,8 @@ void Statusbar::resized()
 
     commandInputButton->setTopRightPosition(position(10, true), getHeight() * 0.5f - commandInputButton->getHeight() * 0.5f);
 
-    // Studio dock — centered in the empty gap between the left cluster and the
-    // right meters. Zero occlusion: it lives in the status bar, never on the glass.
     if (studioDock) {
-        int const leftLimit = overlaySettingsButton.getRight() + 12;
-        int const rightLimit = commandInputButton ? (commandInputButton->getX() - 12) : (levelMeter->getX() - 12);
-        int const available = rightLimit - leftLimit;
-        int const dockW = juce::jlimit(0, 470, available);
-        bool const show = !welcomePanelIsShown && dockW >= 320;
-        studioDock->setVisible(show);
-        if (show) {
-            studioDock->setBounds(leftLimit + (available - dockW) / 2, 3, dockW, getHeight() - 6);
-        }
+        studioDock->setVisible(false);
     }
 }
 
