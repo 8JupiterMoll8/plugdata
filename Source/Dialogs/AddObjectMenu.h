@@ -221,6 +221,7 @@ public:
         { "AI",
             {
                 { Icons::GlyphKeyboard, "#X obj 0 0 ai.midi 240 64", "AI MIDI Cassette - record & audition takes", "AI MIDI", OtherObject },
+                { Icons::GlyphAdc, "#X obj 0 0 ai.voice 240 72", "AI Voice Capsule - mic takes (melody/beat) staged to the rail", "AI Voice", OtherObject },
                 { Icons::GlyphFunction, "#X obj 0 0 particlepad 200 200 24", "2D Particle Pad - kinetic touch pad", "Particle Pad", OtherObject },
             } },
         { "General",
