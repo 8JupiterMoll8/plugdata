@@ -34,8 +34,8 @@ public:
 
     class DraggableWidgetCard final : public ObjectDragAndDrop {
     public:
-        DraggableWidgetCard(PluginEditor* e, const juce::String& name, const juce::String& iconStr, const juce::String& patchText)
-            : ObjectDragAndDrop(e), widgetName(name), icon(iconStr), patchString(patchText)
+        DraggableWidgetCard(PluginEditor* e, const juce::String& name, const juce::String& sub, juce::Colour dotCol, const juce::String& patchText)
+            : ObjectDragAndDrop(e), widgetName(name), subText(sub), accentDot(dotCol), patchString(patchText)
         {}
 
         juce::String getObjectString() override { return patchString; }
@@ -46,17 +46,33 @@ public:
             auto b = getLocalBounds().toFloat().reduced(1.0f);
             auto const bgCol = findColour(PlugDataColour::sidebarBackgroundColourId);
             auto const activeCol = findColour(PlugDataColour::toolbarActiveColourId);
-            auto const textCol = findColour(PlugDataColour::sidebarTextColourId);
-
+            bool const dark = (bgCol.getPerceivedBrightness() < 0.5f);
             bool const over = isMouseOver();
-            g.setColour(over ? activeCol.withAlpha(0.22f) : bgCol.contrasting(0.06f));
-            g.fillRoundedRectangle(b, 5.0f);
-            g.setColour(over ? activeCol.withAlpha(0.8f) : bgCol.contrasting(0.15f));
-            g.drawRoundedRectangle(b, 5.0f, 1.0f);
 
-            g.setFont(Font(11.5f, Font::bold));
-            g.setColour(over ? activeCol.contrasting(0.1f) : textCol.withAlpha(0.92f));
-            g.drawFittedText(icon + " " + widgetName, getLocalBounds().reduced(4, 2), Justification::centred, 1);
+            juce::Colour cardBg = dark
+                ? (over ? juce::Colour(0xff262a34) : juce::Colour(0xff1a1d24))
+                : (over ? juce::Colour(0xfff0f2f6) : juce::Colour(0xffffffff));
+
+            juce::Colour borderCol = over ? activeCol.withAlpha(0.85f) : (dark ? juce::Colour(0xff353a47) : juce::Colour(0xffd2d6df));
+
+            g.setColour(cardBg);
+            g.fillRoundedRectangle(b, 6.0f);
+            g.setColour(borderCol);
+            g.drawRoundedRectangle(b, 6.0f, over ? 1.4f : 1.0f);
+
+            // Glowing accent indicator dot
+            g.setColour(accentDot.withAlpha(over ? 1.0f : 0.85f));
+            g.fillEllipse(b.getX() + 9.0f, b.getY() + 9.0f, 6.0f, 6.0f);
+
+            // Title
+            g.setFont(Fonts::getBoldFont().withHeight(12.5f));
+            g.setColour(dark ? juce::Colour(0xfff0f2f5) : juce::Colour(0xff181a1f));
+            g.drawText(widgetName, b.getX() + 20.0f, b.getY() + 4.0f, b.getWidth() - 24.0f, 15.0f, Justification::left, true);
+
+            // Subtitle
+            g.setFont(Fonts::getDefaultFont().withHeight(10.0f));
+            g.setColour(dark ? juce::Colour(0xff9aa0a6) : juce::Colour(0xff606670));
+            g.drawText(subText, b.getX() + 20.0f, b.getY() + 18.0f, b.getWidth() - 24.0f, 13.0f, Justification::left, true);
         }
 
         void mouseEnter(const MouseEvent&) override { repaint(); }
@@ -64,7 +80,8 @@ public:
 
     private:
         juce::String widgetName;
-        juce::String icon;
+        juce::String subText;
+        juce::Colour accentDot;
         juce::String patchString;
     };
 
@@ -80,23 +97,24 @@ public:
             auto b = getLocalBounds().toFloat().reduced(1.0f);
             auto const bgCol = findColour(PlugDataColour::sidebarBackgroundColourId);
             auto const activeCol = findColour(PlugDataColour::toolbarActiveColourId);
-            auto const textCol = findColour(PlugDataColour::sidebarTextColourId);
+            bool const dark = (bgCol.getPerceivedBrightness() < 0.5f);
 
-            g.setColour(bgCol.contrasting(isMouseOver() ? 0.08f : 0.04f));
-            g.fillRoundedRectangle(b, 4.0f);
-            g.setColour(bgCol.contrasting(0.12f));
-            g.drawRoundedRectangle(b, 4.0f, 1.0f);
+            g.setColour(dark ? (isMouseOver() ? juce::Colour(0xff252932) : juce::Colour(0xff1c1f26))
+                             : (isMouseOver() ? juce::Colour(0xffe8ebf0) : juce::Colour(0xfff3f5f8)));
+            g.fillRoundedRectangle(b, 5.0f);
+            g.setColour(dark ? juce::Colour(0xff323742) : juce::Colour(0xffd5d8e0));
+            g.drawRoundedRectangle(b, 5.0f, 1.0f);
 
-            g.setFont(Font(10.5f, Font::bold));
-            g.setColour(textCol.withAlpha(0.7f));
-            juce::String label = (open ? "v " : "> ") + juce::String("SHELF (") +
+            g.setFont(Fonts::getSemiBoldFont().withHeight(11.0f));
+            g.setColour(dark ? juce::Colour(0xffcfd3dc) : juce::Colour(0xff2d3138));
+            juce::String label = (open ? "v  " : ">  ") + juce::String("TAPE SHELF  (") +
                                  juce::String(takeCount) + " takes, " +
                                  juce::String(imageCount) + " images)";
-            g.drawText(label, 8, 0, getWidth() - 55, getHeight(), Justification::centredLeft, true);
+            g.drawText(label, 10, 0, getWidth() - 65, getHeight(), Justification::centredLeft, true);
 
-            g.setFont(Font(10.0f, Font::plain));
-            g.setColour(activeCol.withAlpha(0.9f));
-            g.drawText(open ? "close" : "browse", getWidth() - 50, 0, 44, getHeight(), Justification::centredRight, true);
+            g.setFont(Fonts::getBoldFont().withHeight(10.5f));
+            g.setColour(activeCol);
+            g.drawText(open ? "HIDE" : "BROWSE", getWidth() - 58, 0, 50, getHeight(), Justification::centredRight, true);
         }
 
         void mouseUp(const MouseEvent&) override { if (onToggle) onToggle(); }
@@ -111,7 +129,7 @@ public:
     private:
         static void appendInline(juce::AttributedString& as, juce::String const& s, juce::Font const& base, juce::Colour col, bool forceBold)
         {
-            auto const mono = juce::Font(juce::Font::getDefaultMonospacedFontName(), base.getHeight(), juce::Font::plain);
+            auto const mono = Fonts::getMonospaceFont().withHeight(base.getHeight());
             bool bold = forceBold, italic = false, code = false;
             juce::String run;
             auto flush = [&] {
@@ -157,11 +175,14 @@ public:
         {
             auto const bgCol = findColour(PlugDataColour::sidebarBackgroundColourId);
             auto const activeCol = findColour(PlugDataColour::toolbarActiveColourId);
-            auto const textCol = findColour(PlugDataColour::sidebarTextColourId);
+            bool const dark = (bgCol.getPerceivedBrightness() < 0.5f);
 
             int y = 8;
             int const w = getWidth();
             if (w <= 20) return;
+
+            auto const bodyFont = Fonts::getDefaultFont().withHeight(13.5f);
+            auto const roleFont = Fonts::getBoldFont().withHeight(11.5f);
 
             for (size_t i = 0; i < items.size(); ++i) {
                 auto const& m = items[i];
@@ -175,47 +196,64 @@ public:
                 juce::Colour roleCol = activeCol;
                 juce::String roleName = "Copilot";
                 if (isUser) {
-                    roleCol = activeCol.contrasting(0.4f);
+                    roleCol = dark ? juce::Colour(0xff9ecbff) : juce::Colour(0xff0969da);
                     roleName = "You";
                 } else if (isThought) {
-                    roleCol = Colours::orange.withAlpha(0.9f);
+                    roleCol = Colours::orange.withAlpha(0.95f);
                     roleName = "Working";
                 } else if (isError) {
                     roleCol = Colours::red;
                     roleName = "Alert";
                 }
 
-                as.append(roleName + "\n", Font(11.0f, Font::bold), roleCol);
-                appendMarkdown(as, m.text, Font(13.0f, Font::plain), textCol.withAlpha(isThought ? 0.8f : 1.0f));
+                as.append(roleName + "\n", roleFont, roleCol);
+
+                juce::Colour textCol = dark ? juce::Colour(0xfff0f2f5) : juce::Colour(0xff181a1f);
+                if (isThought) textCol = dark ? juce::Colour(0xffbdc1c6) : juce::Colour(0xff57606a);
+
+                appendMarkdown(as, m.text, bodyFont, textCol);
 
                 juce::TextLayout layout;
                 int const bubbleMaxWidth = std::max(60, w - 24);
-                layout.createLayout(as, static_cast<float>(bubbleMaxWidth));
+                layout.createLayout(as, static_cast<float>(bubbleMaxWidth - 18));
 
-                int const bubbleH = static_cast<int>(layout.getHeight()) + 16;
+                int const bubbleH = static_cast<int>(layout.getHeight()) + 18;
                 auto bubbleRect = juce::Rectangle<int>(12, y, bubbleMaxWidth, bubbleH);
 
+                // Bubble background
                 juce::Colour bubbleBg;
+                juce::Colour borderCol;
                 if (isUser) {
-                    bubbleBg = activeCol.withAlpha(0.15f);
+                    bubbleBg = dark ? juce::Colour(0xff1e2638) : juce::Colour(0xffeef5ff);
+                    borderCol = dark ? juce::Colour(0xff314260) : juce::Colour(0xffd0e2ff);
                 } else if (isThought) {
-                    bubbleBg = Colours::orange.withAlpha(0.08f);
+                    bubbleBg = dark ? juce::Colour(0xff26201a) : juce::Colour(0xfffff8f0);
+                    borderCol = dark ? juce::Colour(0xff453322) : juce::Colour(0xffffe0b2);
                 } else if (isError) {
-                    bubbleBg = Colours::red.withAlpha(0.15f);
+                    bubbleBg = dark ? juce::Colour(0xff331c1c) : juce::Colour(0xffffebee);
+                    borderCol = dark ? juce::Colour(0xff552626) : juce::Colour(0xffffcdd2);
                 } else {
-                    bubbleBg = bgCol.contrasting(0.06f);
+                    bubbleBg = dark ? juce::Colour(0xff20232a) : juce::Colour(0xffffffff);
+                    borderCol = dark ? juce::Colour(0xff333842) : juce::Colour(0xffd6dae2);
                 }
 
                 g.setColour(bubbleBg);
-                g.fillRoundedRectangle(bubbleRect.toFloat(), Corners::defaultCornerRadius);
+                g.fillRoundedRectangle(bubbleRect.toFloat(), 7.0f);
 
-                g.setColour(bubbleBg.contrasting(0.12f));
-                g.drawRoundedRectangle(bubbleRect.toFloat().reduced(0.5f), Corners::defaultCornerRadius, 1.0f);
+                g.setColour(borderCol);
+                g.drawRoundedRectangle(bubbleRect.toFloat().reduced(0.5f), 7.0f, 1.0f);
 
-                layout.draw(g, juce::Rectangle<float>(bubbleRect.getX() + 8.0f, bubbleRect.getY() + 7.0f,
-                                                      bubbleRect.getWidth() - 16.0f, layout.getHeight()));
+                // Sleek left accent indicator bar on AI/Thought bubbles
+                if (!isUser) {
+                    g.setColour(roleCol);
+                    g.fillRoundedRectangle(bubbleRect.getX() + 2.0f, bubbleRect.getY() + 5.0f, 3.5f, bubbleRect.getHeight() - 10.0f, 1.5f);
+                }
 
-                y += bubbleH + 8;
+                // Draw layout
+                layout.draw(g, juce::Rectangle<float>(bubbleRect.getX() + 11.0f, bubbleRect.getY() + 8.0f,
+                                                      bubbleRect.getWidth() - 18.0f, layout.getHeight()));
+
+                y += bubbleH + 10;
             }
         }
 
@@ -224,27 +262,89 @@ public:
             if (items.empty()) return 40;
             int total = 16;
             int const bubbleMaxWidth = std::max(60, width - 24);
+            auto const bodyFont = Fonts::getDefaultFont().withHeight(13.5f);
+            auto const roleFont = Fonts::getBoldFont().withHeight(11.5f);
 
             for (auto const& m : items) {
                 juce::AttributedString as;
                 as.setWordWrap(juce::AttributedString::WordWrap::byWord);
                 as.append((m.role == "user" ? "You\n" : (m.role == "thought" ? "Working\n" : "Copilot\n")),
-                          Font(11.0f, Font::bold), Colours::white);
-                appendMarkdown(as, m.text, Font(13.0f, Font::plain), Colours::white);
+                          roleFont, Colours::white);
+                appendMarkdown(as, m.text, bodyFont, Colours::white);
 
                 juce::TextLayout layout;
-                layout.createLayout(as, static_cast<float>(bubbleMaxWidth));
-                total += static_cast<int>(layout.getHeight()) + 24;
+                layout.createLayout(as, static_cast<float>(bubbleMaxWidth - 18));
+                total += static_cast<int>(layout.getHeight()) + 28;
             }
             return total;
+        }
+    };
+
+    // Antigravity-Style Input Capsule
+    class InputDockCapsule final : public Component {
+    public:
+        CopilotPanel* parent = nullptr;
+        SearchEditor editor;
+        SmallIconButton plusButton = SmallIconButton(Icons::Add);
+        SmallIconButton sendButton = SmallIconButton(Icons::Forward);
+
+        InputDockCapsule(CopilotPanel* p) : parent(p)
+        {
+            plusButton.setTooltip("Add context / Record take");
+            plusButton.onClick = [this] {
+                if (parent) parent->triggerPlusMenu();
+            };
+            addAndMakeVisible(plusButton);
+
+            editor.setTextToShowWhenEmpty("Ask Copilot, @ to mention, / for actions...", findColour(PlugDataColour::sidebarTextColourId).withAlpha(0.6f));
+            editor.setFont(Fonts::getDefaultFont().withHeight(13.5f));
+            editor.onReturnKey = [this] {
+                if (parent) parent->sendMessage();
+            };
+            addAndMakeVisible(editor);
+
+            sendButton.setTooltip("Send prompt (Enter)");
+            sendButton.onClick = [this] {
+                if (parent) parent->sendMessage();
+            };
+            addAndMakeVisible(sendButton);
+        }
+
+        void paint(Graphics& g) override
+        {
+            auto b = getLocalBounds().toFloat().reduced(1.0f);
+            auto const bgCol = findColour(PlugDataColour::sidebarBackgroundColourId);
+            auto const activeCol = findColour(PlugDataColour::toolbarActiveColourId);
+            bool const dark = (bgCol.getPerceivedBrightness() < 0.5f);
+
+            juce::Colour capsuleBg = dark ? juce::Colour(0xff1e2129) : juce::Colour(0xffffffff);
+            juce::Colour borderCol = editor.hasKeyboardFocus(true)
+                ? activeCol.withAlpha(0.85f)
+                : (dark ? juce::Colour(0xff363c48) : juce::Colour(0xffcfd4dd));
+
+            g.setColour(capsuleBg);
+            g.fillRoundedRectangle(b, 8.0f);
+            g.setColour(borderCol);
+            g.drawRoundedRectangle(b, 8.0f, editor.hasKeyboardFocus(true) ? 1.5f : 1.0f);
+        }
+
+        void resized() override
+        {
+            auto b = getLocalBounds().reduced(4, 3);
+            plusButton.setBounds(b.removeFromLeft(26).reduced(1));
+            b.removeFromLeft(3);
+            sendButton.setBounds(b.removeFromRight(26).reduced(1));
+            b.removeFromRight(3);
+            editor.setBounds(b);
         }
     };
 
     explicit CopilotPanel(PluginProcessor* instance, PluginEditor* parentEditor)
         : pd(instance)
         , editor(parentEditor)
-        , midiWidgetCard(parentEditor, "ai.midi", "[MIDI]", "#X obj 0 0 ai.midi 240 64;\n")
-        , voiceWidgetCard(parentEditor, "ai.voice", "[MIC]", "#X obj 0 0 ai.voice 240 64;\n")
+        , midiWidgetCard(parentEditor, "ai.midi", "MIDI Looper - Drag", juce::Colour(0xffb388ff), "#X obj 0 0 ai.midi 240 64;\n")
+        , voiceWidgetCard(parentEditor, "ai.voice", "Mic Capsule - Drag", juce::Colour(0xff00e676), "#X obj 0 0 ai.voice 240 64;\n")
+        , inputCapsule(this)
     {
         // Clear Button
         clearButton.setTooltip("Clear conversation history");
@@ -261,9 +361,15 @@ public:
 
         // Header Title
         headerTitleLabel.setText("Copilot", juce::dontSendNotification);
-        headerTitleLabel.setFont(Font(13.5f, Font::bold));
+        headerTitleLabel.setFont(Fonts::getBoldFont().withHeight(15.0f));
         headerTitleLabel.setColour(Label::textColourId, findColour(PlugDataColour::sidebarTextColourId));
         addAndMakeVisible(headerTitleLabel);
+
+        // Rack Label
+        rackLabel.setText("MODULE RACK  *  DRAG TO PATCH", juce::dontSendNotification);
+        rackLabel.setFont(Fonts::getSemiBoldFont().withHeight(9.5f));
+        rackLabel.setColour(Label::textColourId, findColour(PlugDataColour::sidebarTextColourId).withAlpha(0.6f));
+        addAndMakeVisible(rackLabel);
 
         // Widgets
         addAndMakeVisible(midiWidgetCard);
@@ -280,19 +386,8 @@ public:
         };
         addAndMakeVisible(shelfBar);
 
-        // Input Editor
-        inputEditor.setTextToShowWhenEmpty("Describe what to build...", findColour(PlugDataColour::sidebarTextColourId).withAlpha(0.5f));
-        inputEditor.onReturnKey = [this] {
-            sendMessage();
-        };
-        addAndMakeVisible(inputEditor);
-
-        // Send Button
-        sendButton.setTooltip("Send prompt to Copilot");
-        sendButton.onClick = [this] {
-            sendMessage();
-        };
-        addAndMakeVisible(sendButton);
+        // Input Capsule Dock
+        addAndMakeVisible(inputCapsule);
 
         // Register listener with MCPBridge if present
         if (pd) {
@@ -339,8 +434,37 @@ public:
         }
     }
 
-    juce::String getStudioDraft() const { return inputEditor.getText().trim(); }
-    void clearStudioDraft() { inputEditor.setText("", false); }
+    void triggerPlusMenu()
+    {
+        PopupMenu menu;
+        menu.addItem(1, "Record MIDI Take (Keys)");
+        menu.addItem(2, "Record Voice Take (Mic)");
+        menu.addItem(3, "Attach Reference Image");
+
+        menu.showMenuAsync(PopupMenu::Options().withTargetComponent(&inputCapsule.plusButton), [this](int result) {
+            if (result == 1) {
+                // Record MIDI Take
+                if (pd && pd->getMCPBridge()) {
+                    pd->getMCPBridge()->startMidiCapture();
+                }
+            } else if (result == 2) {
+                // Record Voice Take
+                if (pd && pd->getMCPBridge()) {
+                    pd->getMCPBridge()->startVoiceCapture(1);
+                }
+            } else if (result == 3) {
+                // Attach Image from clipboard or file
+                if (editor) {
+                    if (auto* cnv = editor->getCurrentCanvas()) {
+                        cnv->pasteImageFromClipboard();
+                    }
+                }
+            }
+        });
+    }
+
+    juce::String getStudioDraft() const { return inputCapsule.editor.getText().trim(); }
+    void clearStudioDraft() { inputCapsule.editor.setText("", false); }
     void refreshNotebook() {}
     void refreshStudio() {}
     void deleteAnnotation(size_t) {}
@@ -351,44 +475,45 @@ public:
         auto bounds = getLocalBounds();
         if (bounds.getWidth() <= 0) return;
 
-        // 1. Header (height 30)
-        auto header = bounds.removeFromTop(30).reduced(8, 2);
+        // 1. Header (height 32)
+        auto header = bounds.removeFromTop(32).reduced(10, 2);
         clearButton.setBounds(header.removeFromRight(24));
-        header.removeFromRight(4);
+        header.removeFromRight(6);
         headerTitleLabel.setBounds(header);
 
-        // 2. Drag-to-canvas widgets strip (height 32)
-        auto widgetsStrip = bounds.removeFromTop(32).reduced(8, 2);
-        int const cardW = (widgetsStrip.getWidth() - 6) / 2;
+        // 2. Rack title (height 14)
+        auto rLabel = bounds.removeFromTop(14).reduced(10, 0);
+        rackLabel.setBounds(rLabel);
+
+        // 3. Drag-to-canvas widgets strip (height 38)
+        auto widgetsStrip = bounds.removeFromTop(38).reduced(10, 2);
+        int const cardW = (widgetsStrip.getWidth() - 8) / 2;
         midiWidgetCard.setBounds(widgetsStrip.removeFromLeft(cardW));
-        widgetsStrip.removeFromLeft(6);
+        widgetsStrip.removeFromLeft(8);
         voiceWidgetCard.setBounds(widgetsStrip);
 
-        // 3. Bottom dock: Shelf bar (24px) + Input bar (40px)
-        int const shelfH = 24;
-        int const inputBarH = 40;
-        auto bottomArea = bounds.removeFromBottom(shelfH + inputBarH + 6);
+        // 4. Bottom dock: Shelf bar (24px) + Input Capsule (44px)
+        int const shelfH = 26;
+        int const inputBarH = 46;
+        auto bottomArea = bounds.removeFromBottom(shelfH + inputBarH + 10);
 
-        // Input bar
-        auto inputBar = bottomArea.removeFromBottom(inputBarH).reduced(6, 4);
-        sendButton.setBounds(inputBar.removeFromRight(30));
-        inputBar.removeFromRight(4);
-        inputEditor.setBounds(inputBar);
+        // Input capsule
+        inputCapsule.setBounds(bottomArea.removeFromBottom(inputBarH).reduced(10, 2));
 
         // Shelf Bar
-        shelfBar.setBounds(bottomArea.removeFromBottom(shelfH).reduced(6, 1));
+        shelfBar.setBounds(bottomArea.removeFromBottom(shelfH).reduced(10, 2));
 
-        // 4. Middle Viewport (Chat conversation)
-        viewport.setBounds(bounds.reduced(2, 2));
+        // 5. Middle Viewport (Chat conversation)
+        viewport.setBounds(bounds.reduced(4, 2));
         updateChatLayout();
     }
 
     void sendMessage()
     {
-        auto text = inputEditor.getText().trim();
+        auto text = inputCapsule.editor.getText().trim();
         if (text.isEmpty() || !pd) return;
 
-        inputEditor.setText("", false);
+        inputCapsule.editor.setText("", false);
 
         // Collect selection if any for Chat prompt
         juce::StringArray targetIds;
@@ -457,6 +582,7 @@ private:
     PluginEditor* editor;
 
     Label headerTitleLabel;
+    Label rackLabel;
     SmallIconButton clearButton = SmallIconButton(Icons::Trash);
 
     DraggableWidgetCard midiWidgetCard;
@@ -466,9 +592,7 @@ private:
     ChatListContent chatContent;
 
     ShelfBar shelfBar;
-
-    SearchEditor inputEditor;
-    SmallIconButton sendButton = SmallIconButton(Icons::Forward);
+    InputDockCapsule inputCapsule;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(CopilotPanel)
 };
