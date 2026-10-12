@@ -61,6 +61,7 @@ void canvas_click(t_canvas* x, t_floatarg xpos, t_floatarg ypos, t_floatarg shif
 #include "MessboxObject.h"
 #include "MousePadObject.h"
 #include "ParticlePadObject.h"
+#include "AiMidiObject.h"
 #include "NumberObject.h"
 #include "NumboxTildeObject.h"
 #include "CanvasObject.h"
@@ -635,6 +636,9 @@ ObjectBase* ObjectBase::createGui(pd::WeakReference ptr, Object* parent)
         case hash("particlepad"):
         case hash("particles"):
             return new ParticlePadObject(ptr, parent);
+        case hash("ai.midi"):
+        case hash("aimidi"):
+            return new AiMidiObject(ptr, parent);
         case hash("keyboard"):
             return new KeyboardObject(ptr, parent);
         case hash("pic"):

@@ -1121,6 +1121,7 @@ void scope_tilde_setup();
 void pack2_setup();
 void pad_setup();
 void particlepad_setup();
+void ai_midi_setup();
 void pan2_tilde_setup();
 void pan4_tilde_setup();
 void panic_setup();
@@ -1627,6 +1628,7 @@ void Setup::initialiseELSE()
     pack2_setup();
     pad_setup();
     particlepad_setup();
+    ai_midi_setup();
     pan2_tilde_setup();
     pan4_tilde_setup();
     panic_setup();
