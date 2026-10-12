@@ -2301,8 +2301,7 @@ bool Canvas::shouldShowAIHud() const
 
 bool Canvas::shouldShowAISketch() const
 {
-    if (presentationMode.getValue()) return false;
-    return showAiSketch;
+    return false; // Canvas pen is disabled — canvas stays clean Pure Data
 }
 
 bool Canvas::shouldShowAIReferences() const
@@ -2366,9 +2365,8 @@ bool Canvas::isSketchingActive() const
 
 void Canvas::setStudioMode(bool active)
 {
-    mcpStudioMode = active;
-    // Brainstorm mode = pen up; edit mode = pen down, pill back in charge.
-    setSketchToolActive(active);
+    mcpStudioMode = false;
+    setSketchToolActive(false);
     updateSelectionPill();
     repaint();
     if (editor) editor->nvgSurface.renderAll();
@@ -5212,10 +5210,14 @@ void Canvas::updateSelectionPill()
     // re-selecting the SAME object later always brings it back.
     if (juce::Time::getMillisecondCounter() < mcpSelectionPillHideUntil) return;
 
-    // Phase 1B: no PD object selected but ink exists -> the pill becomes the
-    // Moodboard Chisel, anchored 14px beneath the combined stroke bounding box.
-    bool const sketchMode = selectedObjects.empty();
-    mcpPillSketchMode = sketchMode;
+    // Keep canvas 100% clean — never pop up floating chisel bar on empty canvas!
+    if (selectedObjects.empty()) {
+        mcpPillSketchMode = false;
+        hideSelectionPill();
+        return;
+    }
+    bool const sketchMode = false;
+    mcpPillSketchMode = false;
 
     int pillH = 32;
     int pillW = 0;
