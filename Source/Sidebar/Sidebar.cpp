@@ -526,7 +526,9 @@ void Sidebar::showParameters(SmallArray<Component*>& objects, SmallArray<ObjectP
 
     auto const haveParams = showOnSelect && params.not_empty() && activeParams;
 
-    auto const isVis = (inspectorButton.isInspectorAuto() && params.not_empty() && showOnSelect && activeParams) || inspectorButton.isInspectorPinned();
+    // Do not let Auto-Inspector clobber the Copilot / AI Studio panel when an object is selected
+    bool const suppressAutoInspector = (currentPanel == SidePanel::CopilotPan);
+    auto const isVis = (!suppressAutoInspector && inspectorButton.isInspectorAuto() && params.not_empty() && showOnSelect && activeParams) || inspectorButton.isInspectorPinned();
 
     // Reset console notifications if the inspector is not visible and console is
     if (!isVis && currentPanel == SidePanel::ConsolePan) {

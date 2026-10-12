@@ -1582,139 +1582,20 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
             nvgStrokeWidth(nvg, 1.6f);
             nvgStroke(nvg);
 
-            // Surgical attachment chips: [✏ attach-sketch] [T attach-text] [🖼 attach-image]
-            // Same tools as the Studio lane, but bound to the selected object.
+            // Right ~26px: sleek submit button ↵
             {
-                float const chipW = 24.0f;
-                float const chipH = 20.0f;
-                float const chipY = (h - chipH) * 0.5f;
-                struct AttachChip { float x; };
-                float const sketchX = w - 144.0f;
-                float const textX = w - 116.0f;
-                float const imageX = w - 88.0f;
-
-                bool const sketchArmed = mcpSketchToolActive;
-                bool const textArmed = mcpTextToolActive;
-
-                // ✏ attach-sketch
-                nvgDrawRoundedRect(nvg, sketchX, chipY, chipW, chipH,
-                                   sketchArmed ? nvgRGBA(0, 180, 220, 240) : nvgRGBA(38, 42, 50, 230),
-                                   sketchArmed ? nvgRGBA(0, 245, 255, 255) : nvgRGBA(160, 175, 200, 80), 4.0f);
-                {
-                    float const pcx = sketchX + chipW * 0.5f;
-                    float const pcy = chipY + chipH * 0.5f;
-                    nvgBeginPath(nvg);
-                    nvgMoveTo(nvg, pcx - 4.0f, pcy + 4.0f);
-                    nvgLineTo(nvg, pcx + 2.5f, pcy - 4.5f);
-                    nvgLineTo(nvg, pcx + 4.5f, pcy - 2.0f);
-                    nvgLineTo(nvg, pcx - 2.0f, pcy + 5.0f);
-                    nvgClosePath(nvg);
-                    nvgStrokeColor(nvg, sketchArmed ? nvgRGBA(255, 255, 255, 255) : nvgRGBA(200, 215, 235, 220));
-                    nvgStrokeWidth(nvg, 1.2f);
-                    nvgStroke(nvg);
-                }
-
-                // T attach-text
-                nvgDrawRoundedRect(nvg, textX, chipY, chipW, chipH,
-                                   textArmed ? nvgRGBA(74, 158, 255, 240) : nvgRGBA(38, 42, 50, 230),
-                                   textArmed ? nvgRGBA(140, 195, 255, 255) : nvgRGBA(160, 175, 200, 80), 4.0f);
+                float const subW = 20.0f;
+                float const subH = 18.0f;
+                float const subX = w - 25.0f;
+                float const subY = (h - subH) * 0.5f;
+                nvgDrawRoundedRect(nvg, subX, subY, subW, subH, nvgRGBA(74, 158, 255, 220), nvgRGBA(140, 195, 255, 255), 4.0f);
                 nvgFontFace(nvg, "Inter");
-                nvgFontSize(nvg, 12.0f);
+                nvgFontSize(nvg, 11.5f);
                 nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-                nvgFillColor(nvg, textArmed ? nvgRGBA(255, 255, 255, 255) : nvgRGBA(200, 215, 235, 220));
-                nvgText(nvg, textX + chipW * 0.5f, chipY + chipH * 0.5f, "T", nullptr);
-
-                // 🖼 attach-image (picture frame glyph)
-                nvgDrawRoundedRect(nvg, imageX, chipY, chipW, chipH, nvgRGBA(38, 42, 50, 230), nvgRGBA(160, 175, 200, 80), 4.0f);
-                {
-                    float const icx = imageX + chipW * 0.5f;
-                    float const icy = chipY + chipH * 0.5f;
-                    nvgBeginPath(nvg);
-                    nvgRoundedRect(nvg, icx - 5.0f, icy - 4.0f, 10.0f, 8.5f, 1.5f);
-                    nvgStrokeColor(nvg, nvgRGBA(200, 215, 235, 220));
-                    nvgStrokeWidth(nvg, 1.1f);
-                    nvgStroke(nvg);
-                    nvgBeginPath(nvg);
-                    nvgMoveTo(nvg, icx - 4.0f, icy + 2.5f);
-                    nvgLineTo(nvg, icx - 1.0f, icy - 0.5f);
-                    nvgLineTo(nvg, icx + 1.5f, icy + 1.5f);
-                    nvgLineTo(nvg, icx + 4.0f, icy + 0.5f);
-                    nvgStrokeColor(nvg, nvgRGBA(160, 230, 200, 200));
-                    nvgStrokeWidth(nvg, 1.0f);
-                    nvgStroke(nvg);
-                }
+                nvgFillColor(nvg, nvgRGBA(255, 255, 255, 255));
+                nvgText(nvg, subX + subW * 0.5f, subY + subH * 0.5f, "↵", nullptr);
             }
-
-            // Right: ✏️ Pen / Sketch button
-            float const pw = 24.0f;
-            float const ph = 20.0f;
-            float const px = w - 58.0f;
-            float const py = (h - ph) * 0.5f;
-
-            if (mcpSketchToolActive) {
-                nvgDrawRoundedRect(nvg, px, py, pw, ph, nvgRGBA(0, 180, 220, 240), nvgRGBA(0, 245, 255, 255), 4.0f);
-            } else {
-                nvgDrawRoundedRect(nvg, px, py, pw, ph, nvgRGBA(38, 42, 50, 230), nvgRGBA(160, 175, 200, 80), 4.0f);
-            }
-
-            float const pcx = px + pw * 0.5f;
-            float const pcy = py + ph * 0.5f;
-            nvgBeginPath(nvg);
-            nvgMoveTo(nvg, pcx - 4.5f, pcy + 4.5f);
-            nvgLineTo(nvg, pcx + 2.5f, pcy - 4.5f);
-            nvgLineTo(nvg, pcx + 5.0f, pcy - 2.0f);
-            nvgLineTo(nvg, pcx - 2.0f, pcy + 5.0f);
-            nvgClosePath(nvg);
-            nvgStrokeColor(nvg, mcpSketchToolActive ? nvgRGBA(255, 255, 255, 255) : nvgRGBA(200, 215, 235, 220));
-            nvgStrokeWidth(nvg, 1.2f);
-            nvgStroke(nvg);
-            nvgBeginPath(nvg);
-            nvgMoveTo(nvg, pcx - 4.5f, pcy + 4.5f);
-            nvgLineTo(nvg, pcx - 6.0f, pcy + 6.0f);
-            nvgStrokeColor(nvg, mcpSketchToolActive ? nvgRGBA(255, 255, 255, 255) : nvgRGBA(0, 230, 255, 220));
-            nvgStrokeWidth(nvg, 1.4f);
-            nvgStroke(nvg);
-
-            // Right: 🎙️ Mic / Voice button
-            float const mw = 24.0f;
-            float const mh = 20.0f;
-            float const mx = w - 30.0f;
-            float const my = (h - mh) * 0.5f;
-
-            if (isVoiceRec) {
-                float const pulse = 0.8f + 0.2f * std::sin(static_cast<float>(juce::Time::getMillisecondCounter()) * 0.008f);
-                float const levelExp = juce::jlimit(0.0f, 1.0f, voiceLvl * 3.5f);
-                // Glowing outer aura reacting to live mic input level
-                nvgDrawRoundedRect(nvg, mx - 2.0f - levelExp * 3.0f, my - 2.0f - levelExp * 3.0f,
-                                   mw + 4.0f + levelExp * 6.0f, mh + 4.0f + levelExp * 6.0f,
-                                   nvgRGBA(255, 45, 35, static_cast<int>(50 * pulse + levelExp * 100)),
-                                   nvgRGBA(255, 60, 45, static_cast<int>(180 * pulse)), 5.0f);
-                nvgDrawRoundedRect(nvg, mx, my, mw, mh, nvgRGBA(255, 50, 35, 240), nvgRGBA(255, 140, 120, 255), 4.0f);
-            } else {
-                nvgDrawRoundedRect(nvg, mx, my, mw, mh, nvgRGBA(38, 42, 50, 230), nvgRGBA(160, 175, 200, 80), 4.0f);
-            }
-
-            // Crisp vector microphone icon
-            float const mcx = mx + mw * 0.5f;
-            float const mcy = my + mh * 0.5f - 1.0f;
-            nvgBeginPath(nvg);
-            nvgRoundedRect(nvg, mcx - 2.5f, mcy - 5.0f, 5.0f, 8.0f, 2.5f);
-            nvgFillColor(nvg, isVoiceRec ? nvgRGBA(255, 255, 255, 255) : nvgRGBA(200, 215, 235, 220));
-            nvgFill(nvg);
-            nvgBeginPath(nvg);
-            nvgArc(nvg, mcx, mcy, 4.5f, 0.0f, juce::MathConstants<float>::pi, NVG_HOLE);
-            nvgStrokeColor(nvg, isVoiceRec ? nvgRGBA(255, 255, 255, 255) : nvgRGBA(200, 215, 235, 220));
-            nvgStrokeWidth(nvg, 1.2f);
-            nvgStroke(nvg);
-            nvgBeginPath(nvg);
-            nvgMoveTo(nvg, mcx, mcy + 4.5f);
-            nvgLineTo(nvg, mcx, mcy + 7.5f);
-            nvgMoveTo(nvg, mcx - 3.0f, mcy + 7.5f);
-            nvgLineTo(nvg, mcx + 3.0f, mcy + 7.5f);
-            nvgStrokeColor(nvg, isVoiceRec ? nvgRGBA(255, 255, 255, 255) : nvgRGBA(200, 215, 235, 220));
-            nvgStrokeWidth(nvg, 1.2f);
-            nvgStroke(nvg);
-            } // else: object-pill controls (+ / pen / mic)
+            } // else: object-pill controls
         }
 
         // Ambient blinking caret when unfocused & empty to clearly signal interactive input affordance
@@ -1754,7 +1635,7 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
                 hint = "[" + mcpActiveLens.toUpperCase() + "] Ask AI on selection...";
                 nvgFillColor(nvg, nvgRGBA(140, 155, 175, mcpSelectionPill->hasKeyboardFocus(true) ? 90 : 170));
             } else {
-                hint = "Ask AI on selection...  (/ skills & actions)";
+                hint = "Ask AI on selection... (Enter to mutate, Esc to cancel)";
                 nvgFillColor(nvg, nvgRGBA(140, 155, 175, mcpSelectionPill->hasKeyboardFocus(true) ? 90 : 170));
             }
             nvgText(nvg, panel.getX() + (mcpPillSketchMode ? 96.0f : 38.0f), panel.getY() + panel.getHeight() * 0.5f, hint.toRawUTF8(), nullptr);
@@ -4345,45 +4226,9 @@ bool Canvas::handleNoteClick(Point<int> canvasPt)
                 return true;
             }
 
-            // Surgical attachment chips — same tools as Studio, bound to the selection:
-            // [✏ attach-sketch] [T attach-text] [🖼 attach-image]
-            if (relX >= panel.getWidth() - 148 && relX < panel.getWidth() - 118) {
-                setSketchToolActive(!isSketchToolActive());
-                repaint();
-                if (editor) editor->nvgSurface.renderAll();
-                return true;
-            }
-            if (relX >= panel.getWidth() - 118 && relX < panel.getWidth() - 90) {
-                setTextToolActive(!isTextToolActive());
-                repaint();
-                if (editor) editor->nvgSurface.renderAll();
-                return true;
-            }
-            if (relX >= panel.getWidth() - 90 && relX < panel.getWidth() - 62) {
-                pasteImageFromClipboard();
-                return true;
-            }
-
-            // Right ~60px..~34px: ✏️ Pen / Sketch tool button
-            if (relX >= panel.getWidth() - 60 && relX < panel.getWidth() - 32) {
-                setSketchToolActive(!isSketchToolActive());
-                repaint();
-                if (editor) editor->nvgSurface.renderAll();
-                return true;
-            }
-
-            // Right ~36px: 🎙️ Mic / Voice button
-            if (relX >= panel.getWidth() - 36) {
-                if (pd) {
-                    if (auto* br = pd->getMCPBridge()) {
-                        if (br->isVoiceCapturing())
-                            br->stopVoiceCaptureAndAnalyze();
-                        else
-                            br->startVoiceCapture(60);
-                        repaint();
-                        if (editor) editor->nvgSurface.renderAll();
-                    }
-                }
+            // Right ~32px: ↵ Submit button
+            if (relX >= panel.getWidth() - 32) {
+                submitSelectionPill(false);
                 return true;
             }
             // Middle: Text field focus!
@@ -5211,7 +5056,6 @@ bool Canvas::keyPressed(KeyPress const& key)
             if (mcpSelectionPill) {
                 mcpSelectionPill->grabKeyboardFocus();
             }
-            showPillToolsMenu();
             return true;
         }
     }
@@ -5385,7 +5229,7 @@ void Canvas::updateSelectionPill()
     bool const sketchMode = selectedObjects.empty();
     mcpPillSketchMode = sketchMode;
 
-    constexpr int pillH = 34;
+    int pillH = 32;
     int pillW = 0;
     int pillX = 0;
     int pillY = 0;
@@ -5434,14 +5278,13 @@ void Canvas::updateSelectionPill()
             return;
         }
 
-        pillW = 480;
+        pillW = 380;
+        pillH = 28;
         // Position purely in CANVAS content coords (same space as obj->getBounds()).
-        // Do NOT clamp against viewport->getViewArea(): that returns zoomed/screen
-        // coords, so at any zoom != 100% it threw the pill off-screen.
         pillX = bounds.getCentreX() - pillW / 2;
-        pillY = bounds.getBottom() + 12;
-        editorX = 36;
-        editorW = pillW - 36 - 148; // ...prompt field... [attach ✏ T 🖼] [pen] [mic]
+        pillY = bounds.getBottom() + 10;
+        editorX = 30;
+        editorW = pillW - 30 - 32; // [⚡] ...prompt field... [↵]
     }
 
     mcpSelectionPillFrame = juce::Rectangle<int>(pillX, pillY, pillW, pillH);

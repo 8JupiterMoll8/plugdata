@@ -1383,6 +1383,10 @@ juce::String MCPBridge::computeSignalTrace(PluginProcessor* processor, t_canvas*
     std::vector<int> outgoingSigWires(numObjs, 0);
     std::vector<std::unordered_map<int, float>> inletPeaks(numObjs);
     std::vector<std::unordered_map<int, std::vector<int>>> inletSources(numObjs);
+    // CONTROL wires (non-signal): inlet -> upstream object indices. Needed to
+    // name WHY a silent envelope never triggered (e.g. [sel 1] on the gate path
+    // never matches the note velocity — the classic silent VCA).
+    std::vector<std::unordered_map<int, std::vector<int>>> controlSources(numObjs);
 
     t_linetraverser lt;
     t_outconnect* oc = nullptr;
@@ -1396,7 +1400,10 @@ juce::String MCPBridge::computeSignalTrace(PluginProcessor* processor, t_canvas*
         if (si < 0 || di < 0) continue;
 
         bool isSig = (lt.tr_outlet->o_sym == gensym("signal"));
-        if (!isSig) continue;
+        if (!isSig) {
+            controlSources[di][lt.tr_inno].push_back(si);
+            continue;
+        }
 
         float wirePeak = 0.0f;
         t_signal* sig = outconnect_get_signal(oc);
@@ -1454,6 +1461,60 @@ juce::String MCPBridge::computeSignalTrace(PluginProcessor* processor, t_canvas*
         }
     }
 
+    // ── Cause naming for silent envelopes ───────────────────────────────────
+    // The harness delivers the note gate as VELOCITY (1..127; 0 = release) —
+    // see midi-gate.ts sendNote(). A [sel N] with N != velocity on the gate
+    // path NEVER matches → no bang → no envelope → silent VCA. Walk the control
+    // wires upstream from a silent envelope; if a numeric [sel] AND a gate
+    // receiver share that chain, name the trap instead of leaving the generic
+    // "envelope did not trigger" verdict.
+    auto objTextOf = [&](int i) -> juce::String {
+        t_object* o = pd::Interface::checkObject(objs[i]);
+        if (!o) return {};
+        char* text = nullptr; int len = 0;
+        pd::Interface::getObjectText(o, &text, &len);
+        if (!text || len <= 0) return {};
+        juce::String s = juce::String::fromUTF8(text, len);
+        freebytes(text, len);
+        return s;
+    };
+    auto gateSelUpstreamNote = [&](int envIndex) -> juce::String {
+        std::vector<int> frontier{ envIndex };
+        std::unordered_set<int> seen{ envIndex };
+        int selIdx = -1, gateIdx = -1;
+        for (int depth = 0; depth < 6 && !frontier.empty() && (selIdx < 0 || gateIdx < 0); ++depth) {
+            std::vector<int> next;
+            for (int idx : frontier) {
+                for (auto& [inletNo, srcs] : controlSources[idx]) {
+                    juce::ignoreUnused(inletNo);
+                    for (int s : srcs) {
+                        if (!seen.insert(s).second) continue;
+                        next.push_back(s);
+                        const juce::String& sc = classNames[s];
+                        // NOTE: Pd's raw class name for [sel] is "select" ("sel" is
+                        // only the creator alias — the census normalizes it for
+                        // display, class_getname does not).
+                        if (selIdx < 0 && (sc == "select" || sc == "sel")) {
+                            juce::String t = objTextOf(s);
+                            juce::String after = t.startsWith("select") ? t.substring(6).trim()
+                                                                       : t.substring(3).trim();
+                            if (after.isNotEmpty() && after.containsOnly("0123456789.-+ "))
+                                selIdx = s;
+                        } else if (gateIdx < 0 && (sc == "r" || sc == "receive")) {
+                            juce::String nm = objTextOf(s).fromFirstOccurrenceOf(" ", false, true).trim();
+                            if (nm.startsWith("gate")) gateIdx = s;
+                        }
+                    }
+                }
+            }
+            frontier = next;
+        }
+        if (selIdx >= 0 && gateIdx >= 0) {
+            return " — cause: [" + objTextOf(selIdx).trim() + "] ('" + names[selIdx] + "') filters the gate; the harness sends the note VELOCITY (1..127, e.g. 100), so only an exact match passes ([sel 1] never fires). Trigger on any non-zero ([t b] / [> 0]).";
+        }
+        return {};
+    };
+
     int chokeIndex = -1;
     juce::String chokeReason;
 
@@ -1474,7 +1535,8 @@ juce::String MCPBridge::computeSignalTrace(PluginProcessor* processor, t_canvas*
                 if (inletSources[i].count(1) && !inletSources[i][1].empty()) {
                     int srcI = inletSources[i][1][0];
                     if (inlet1Signal < ALIVE_THRESH) {
-                        chokeReason = "multiplier control inlet 1 is zero from envelope '" + names[srcI] + "' (envelope did not trigger or [r gate] missing)";
+                        chokeReason = "multiplier control inlet 1 is zero from envelope '" + names[srcI] + "' (envelope did not trigger or [r gate] missing)"
+                                    + gateSelUpstreamNote(srcI);
                     } else {
                         chokeReason = "multiplier output is silent despite control signal on inlet 1";
                     }
@@ -1501,7 +1563,11 @@ juce::String MCPBridge::computeSignalTrace(PluginProcessor* processor, t_canvas*
         } else if (!silentEnvelopes.empty() && liveSources.empty()) {
             chokeReason = "envelope generator '" + silentEnvelopes[0] + "' output is zero (envelope did not trigger)";
             for (int i = 0; i < numObjs; ++i) {
-                if (names[i] == silentEnvelopes[0]) { chokeIndex = i; break; }
+                if (names[i] == silentEnvelopes[0]) {
+                    chokeIndex = i;
+                    chokeReason += gateSelUpstreamNote(i);
+                    break;
+                }
             }
         } else if (!liveSources.empty()) {
             if (dacIndex >= 0 && maxInPeak[dacIndex] < ALIVE_THRESH) {
