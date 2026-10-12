@@ -429,6 +429,6 @@ public:
 
         drawBtn(Rectangle<int>(btnX, 6, btnW, btnH), "REC", nvgRGBA(255, 60, 60, 255), rec, true);
         drawBtn(Rectangle<int>(btnX, 8 + btnH, btnW, btnH), "PLAY", nvgRGBA(50, 220, 120, 255), play, false);
-        drawBtn(Rectangle<int>(btnX, 10 + btnH * 2, btnW, btnH), "TRANSMIT", nvgRGBA(200, 100, 255, 255), false, false);
+        drawBtn(Rectangle<int>(btnX, 10 + btnH * 2, btnW, btnH), "TO AI", nvgRGBA(200, 100, 255, 255), false, false);
     }
 };

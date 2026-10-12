@@ -217,8 +217,11 @@ public:
                 { Icons::GlyphMessbox, "messbox", "ELSE Message box", "Messbox", OtherObject },
                 { Icons::GlyphBicoeff, "#X obj 0 0 bicoeff 450 150 peaking", "Bicoeff generator", "Bicoeff", OtherObject },
                 { Icons::GlyphVUMeter, "vu", "(@keypress) VU meter", "VU Meter", NewVUMeter },
-                { Icons::GlyphFunction, "#X obj 0 0 particlepad 200 200 24", "2D Particle Pad", "Particle Pad", OtherObject },
-                { Icons::GlyphKeyboard, "#X obj 0 0 ai.midi 240 64", "AI MIDI Cassette", "AI MIDI", OtherObject },
+            } },
+        { "AI",
+            {
+                { Icons::GlyphKeyboard, "#X obj 0 0 ai.midi 240 64", "AI MIDI Cassette - record & audition takes", "AI MIDI", OtherObject },
+                { Icons::GlyphFunction, "#X obj 0 0 particlepad 200 200 24", "2D Particle Pad - kinetic touch pad", "Particle Pad", OtherObject },
             } },
         { "General",
             {

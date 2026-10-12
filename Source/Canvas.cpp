@@ -4491,13 +4491,7 @@ void Canvas::mouseDown(MouseEvent const& e)
             // The Mood Strip only appears when Studio Mode is explicitly active.
             mcpMoodPillActive = false;
             mcpPillRequested = false;
-            if (mcpStudioMode && getSelectionOfType<Object>().empty() && mcpCompletedStrokes.empty()) {
-                mcpMoodPillActive = true;
-                mcpMoodPillPos = e.getPosition();
-                updateSelectionPill();
-            } else if (!mcpStudioMode) {
-                hideSelectionPill();
-            }
+            hideSelectionPill();
 
             // Pill / note clicks were already handled above (before the pen branch).
             if (false && pd && !pd->getMcpAnnotations().empty()) {
@@ -4867,13 +4861,8 @@ void Canvas::mouseUp(MouseEvent const& e)
             // startSketchFadeTimer(); // PERSISTENT INK
         } else {
             mcpCurrentStroke.clear();
-            // A TAP (not a drag) opens the mood palette — only in Studio mode!
-            if (!wasEraseGesture && mcpCompletedStrokes.empty() && getSelectionOfType<Object>().empty()) {
-                if (mcpStudioMode) {
-                    mcpMoodPillActive = true;
-                    mcpMoodPillPos = e.getPosition();
-                }
-            }
+            // Empty canvas tap: zero popups, keep canvas 100% clean
+            mcpMoodPillActive = false;
         }
         // Ink persists -> anchor the Moodboard Chisel under the fresh bbox.
         updateSelectionPill();
@@ -5250,10 +5239,13 @@ void Canvas::updateSelectionPill()
             hideSelectionPill();
             return;
         }
-        // No ink yet -> compact icon strip (tool palette first, surfaces second).
-        // Ink exists -> the full chisel (Build / prompt / Undo / Clear).
-        sketchStrip = mcpCompletedStrokes.empty();
-        pillW = sketchStrip ? 216 : 520;
+        if (mcpCompletedStrokes.empty()) {
+            mcpPillSketchMode = false;
+            hideSelectionPill();
+            return;
+        }
+        sketchStrip = false;
+        pillW = 520;
         pillX = juce::roundToInt(sb.getCentreX()) - pillW / 2;
         pillY = juce::roundToInt(sb.getBottom()) + 14;
         editorX = 92; // [⚡ Build] chip
