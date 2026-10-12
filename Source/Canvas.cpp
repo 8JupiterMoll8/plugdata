@@ -1562,25 +1562,25 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
                     nvgStroke(nvg);
                 }
             } else {
-            // Left: + Add Context & Actions button (Antigravity vector plus!)
-            float const lw = 24.0f;
-            float const lh = 20.0f;
-            float const lx = 6.0f;
-            float const ly = (h - lh) * 0.5f;
-            bool const isPlusActive = (mcpPillDrawerMode == 3);
-            nvgDrawRoundedRect(nvg, lx, ly, lw, lh,
-                               isPlusActive ? nvgRGBA(74, 158, 255, 80) : nvgRGBA(38, 42, 50, 230),
-                               isPlusActive ? nvgRGBA(74, 158, 255, 240) : nvgRGBA(160, 175, 200, 100), 4.0f);
-            float const cx = lx + lw * 0.5f;
-            float const cy = ly + lh * 0.5f;
-            nvgBeginPath(nvg);
-            nvgMoveTo(nvg, cx - 4.5f, cy);
-            nvgLineTo(nvg, cx + 4.5f, cy);
-            nvgMoveTo(nvg, cx, cy - 4.5f);
-            nvgLineTo(nvg, cx, cy + 4.5f);
-            nvgStrokeColor(nvg, isPlusActive ? nvgRGBA(74, 180, 255, 255) : nvgRGBA(220, 230, 245, 230));
-            nvgStrokeWidth(nvg, 1.6f);
-            nvgStroke(nvg);
+            // Left: subtle generative AI sparkle icon ✨
+            {
+                float const cx = 15.0f;
+                float const cy = h * 0.5f;
+                nvgBeginPath(nvg);
+                nvgCircle(nvg, cx, cy, 6.0f);
+                nvgFillColor(nvg, nvgRGBA(74, 158, 255, 30));
+                nvgFill(nvg);
+                // 4-point sparkle star
+                nvgBeginPath(nvg);
+                nvgMoveTo(nvg, cx, cy - 4.5f);
+                nvgQuadTo(nvg, cx, cy, cx + 4.5f, cy);
+                nvgQuadTo(nvg, cx, cy, cx, cy + 4.5f);
+                nvgQuadTo(nvg, cx, cy, cx - 4.5f, cy);
+                nvgQuadTo(nvg, cx, cy, cx, cy - 4.5f);
+                nvgClosePath(nvg);
+                nvgFillColor(nvg, nvgRGBA(140, 195, 255, 220));
+                nvgFill(nvg);
+            }
 
             // Right ~26px: sleek submit button ↵
             {
@@ -4220,11 +4220,7 @@ bool Canvas::handleNoteClick(Point<int> canvasPt)
                 return true;
             }
 
-            // Left ~34px: + button (toggles Antigravity Actions/Skills popover!)
-            if (relX <= 34) {
-                showPillPalette();
-                return true;
-            }
+
 
             // Right ~32px: ↵ Submit button
             if (relX >= panel.getWidth() - 32) {
@@ -5052,8 +5048,11 @@ bool Canvas::keyPressed(KeyPress const& key)
     if (key.getTextCharacter() == '/' || key.getKeyCode() == '/') {
         if (!getSelectionOfType<Object>().empty() && !ObjectBase::isBeingEdited()) {
             mcpPillRequested = true;
+            mcpPillDrawerMode = 0;
+            mcpPaletteFrame = {};
             updateSelectionPill();
             if (mcpSelectionPill) {
+                mcpSelectionPill->setText(juce::String(), false);
                 mcpSelectionPill->grabKeyboardFocus();
             }
             return true;
@@ -5289,11 +5288,9 @@ void Canvas::updateSelectionPill()
 
     mcpSelectionPillFrame = juce::Rectangle<int>(pillX, pillY, pillW, pillH);
     if (!sketchMode) {
-        if (mcpPillDrawerMode != 0) {
-            mcpPillDrawerFrame = juce::Rectangle<int>(pillX, pillY + pillH + 5, pillW, 30);
-        } else {
-            mcpPillDrawerFrame = {};
-        }
+        mcpPillDrawerMode = 0;
+        mcpPillDrawerFrame = {};
+        mcpPaletteFrame = {};
     }
 
     if (!mcpSelectionPill) {
@@ -5333,19 +5330,6 @@ void Canvas::updateSelectionPill()
             dismissSelectionPill();
         };
         mcpSelectionPill->onTextChange = [this] {
-            if (mcpSelectionPill) {
-                auto const t = mcpSelectionPill->getText().trimStart();
-                if (t.startsWithChar('/')) {
-                    if (mcpPillDrawerMode != 3) {
-                        initPaletteItems();
-                        mcpPillDrawerMode = 3;
-                    }
-                    filterPaletteItems(t.substring(1));
-                } else if (mcpPillDrawerMode == 3) {
-                    mcpPillDrawerMode = 0;
-                    mcpPaletteFrame = {};
-                }
-            }
             repaint();
             if (editor) editor->nvgSurface.renderAll();
         };
