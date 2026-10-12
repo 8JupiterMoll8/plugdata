@@ -4835,7 +4835,6 @@ void Canvas::mouseUp(MouseEvent const& e)
 
     if (isSketching) {
         isSketching = false;
-        bool const wasEraseGesture = mcpEraseGesture;
         mcpEraseGesture = false;
         if (mcpCurrentStroke.size() >= 2) {
             mcpCompletedStrokes.push_back(mcpCurrentStroke);
