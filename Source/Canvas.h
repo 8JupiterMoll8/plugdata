@@ -305,6 +305,7 @@ public:
     // immediate sidebar refresh can't re-pop the pill. Time-based, NOT keyed
     // to the selection — re-selecting the same object must show it again.
     std::uint32_t mcpSelectionPillHideUntil = 0;
+    bool mcpPillRequested = false;
     void updateSelectionPill();
     void hideSelectionPill();
     void dismissSelectionPill();

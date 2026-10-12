@@ -4646,12 +4646,16 @@ void Canvas::mouseDown(MouseEvent const& e)
         }
 
         if (source == this) {
-            // Mood lane: a click on empty glass opens the pill as a "New Mood"
-            // palette (same tools + prompt) when there is no selection and no ink.
-            if (getSelectionOfType<Object>().empty() && mcpCompletedStrokes.empty()) {
+            // Empty glass click: let native PlugData handle deselect and lasso cleanly.
+            // The Mood Strip only appears when Studio Mode is explicitly active.
+            mcpMoodPillActive = false;
+            mcpPillRequested = false;
+            if (mcpStudioMode && getSelectionOfType<Object>().empty() && mcpCompletedStrokes.empty()) {
                 mcpMoodPillActive = true;
                 mcpMoodPillPos = e.getPosition();
                 updateSelectionPill();
+            } else if (!mcpStudioMode) {
+                hideSelectionPill();
             }
 
             // Pill / note clicks were already handled above (before the pen branch).
@@ -5022,11 +5026,12 @@ void Canvas::mouseUp(MouseEvent const& e)
             // startSketchFadeTimer(); // PERSISTENT INK
         } else {
             mcpCurrentStroke.clear();
-            // A TAP (not a drag) opens the mood palette — even with the pen armed.
-            // Studio entry auto-arms the pen, so this is how you call up the pill.
+            // A TAP (not a drag) opens the mood palette — only in Studio mode!
             if (!wasEraseGesture && mcpCompletedStrokes.empty() && getSelectionOfType<Object>().empty()) {
-                mcpMoodPillActive = true;
-                mcpMoodPillPos = e.getPosition();
+                if (mcpStudioMode) {
+                    mcpMoodPillActive = true;
+                    mcpMoodPillPos = e.getPosition();
+                }
             }
         }
         // Ink persists -> anchor the Moodboard Chisel under the fresh bbox.
@@ -5043,6 +5048,12 @@ void Canvas::mouseUp(MouseEvent const& e)
 
     // Double-click canvas to create new object (ignore clicks on AI notes)
     if (!isPointOverNote(e.getPosition()) && e.mods.isLeftButtonDown() && e.getNumberOfClicks() == 2 && e.originalComponent == this && !isGraph && !getValue<bool>(locked)) {
+        // IMMUNITY: Kill any open mood strip and suppress AI pills during object creation
+        mcpMoodPillActive = false;
+        mcpPillRequested = false;
+        hideSelectionPill();
+        mcpSelectionPillHideUntil = juce::Time::getMillisecondCounter() + 1500;
+
         auto* newObject = objects.add(this, "", e.getPosition());
         deselectAll();
         setSelected(newObject, true); // Select newly created object
@@ -5158,7 +5169,9 @@ bool Canvas::keyPressed(KeyPress const& key)
 
     // Moodboard hotkeys (Lane 1): T arms the type tool, Tab flips Pen <-> Eraser,
     // Z / Ctrl+Z pops the last ink stroke. Esc exits (handled above).
-    bool const moodboardArmed = mcpSketchToolActive || mcpEraserToolActive || mcpTextToolActive || mcpStudioMode || mcpMoodPillActive;
+    // Only hijack hotkeys if the pen/eraser is ACTIVELY in hand or Studio mode is explicitly ON.
+    // In regular patching, 't' must always create a native Toggle box!
+    bool const moodboardArmed = mcpSketchToolActive || mcpEraserToolActive || mcpTextToolActive || mcpStudioMode;
     if (moodboardArmed) {
         if (key.getKeyCode() == 't' || key.getKeyCode() == 'T') {
             setTextToolActive(!mcpTextToolActive);
@@ -5190,16 +5203,21 @@ bool Canvas::keyPressed(KeyPress const& key)
         return true;
     }
 
-    // Fast-focus / hotkey handling when the selection pill is visible but unfocused:
-    // - '/' opens the smart command palette or tools menu
-    // - Tab or Enter focuses the prompt text field immediately
-    // - Esc dismisses the pill
-    // All other keys (o, m, c, b, Delete, arrows) pass through to the canvas patch!
-    if (mcpSelectionPill && mcpSelectionPill->isVisible()) {
-        if (key.getTextCharacter() == '/' || key.getKeyCode() == '/') {
+    // Summon the AI on selected object(s) when "/" is pressed:
+    if (key.getTextCharacter() == '/' || key.getKeyCode() == '/') {
+        if (!getSelectionOfType<Object>().empty() && !ObjectBase::isBeingEdited()) {
+            mcpPillRequested = true;
+            updateSelectionPill();
+            if (mcpSelectionPill) {
+                mcpSelectionPill->grabKeyboardFocus();
+            }
             showPillToolsMenu();
             return true;
         }
+    }
+
+    // Fast-focus / hotkey handling when the selection pill is visible:
+    if (mcpSelectionPill && mcpSelectionPill->isVisible()) {
         if (key.getKeyCode() == juce::KeyPress::tabKey || key.getKeyCode() == juce::KeyPress::returnKey) {
             // Mood strip has no prompt field — focus keys do nothing there.
             if (mcpPillSketchMode && mcpCompletedStrokes.empty()) return true;
@@ -5207,6 +5225,7 @@ bool Canvas::keyPressed(KeyPress const& key)
             return true;
         }
         if (key.getKeyCode() == juce::KeyPress::escapeKey) {
+            mcpPillRequested = false;
             dismissSelectionPill();
             return true;
         }
@@ -5322,21 +5341,36 @@ void Canvas::hideAllActiveEditors()
 
 void Canvas::updateSelectionPill()
 {
-    if (isGraph || getValue<bool>(locked) || presentationMode.getValue()) {
+    // IMMUNITY: Never show the selection pill while ANY object or comment text is being edited!
+    // Native Pure Data object naming + autocomplete suggestor must have 100% exclusive priority.
+    if (ObjectBase::isBeingEdited()) {
         mcpPillSketchMode = false;
+        mcpPillRequested = false;
         hideSelectionPill();
         return;
     }
 
-    // NOTE: Studio mode deliberately does NOT suppress the pill anymore — the
-    // drawer is the cart/commit surface, while the pill is the workbench:
-    // empty glass → mood palette, selection → surgical palette, ink → chisel.
+    if (isGraph || getValue<bool>(locked) || presentationMode.getValue()) {
+        mcpPillSketchMode = false;
+        mcpPillRequested = false;
+        hideSelectionPill();
+        return;
+    }
 
     auto selectedObjects = getSelectionOfType<Object>();
     // The chisel owns the canvas while ink exists, the pen/eraser is up, or a
     // fresh mood palette was opened; otherwise hide.
     if (selectedObjects.empty() && mcpCompletedStrokes.empty() && !mcpSketchToolActive && !mcpEraserToolActive && !mcpMoodPillActive) {
         mcpPillSketchMode = false;
+        mcpPillRequested = false;
+        hideSelectionPill();
+        return;
+    }
+
+    // Object mode: only show the pill if the artist explicitly requested it (e.g. hit "/"),
+    // or if Studio mode is active, or if ink was sketched over the selection.
+    // This stops the 480px pill from obstructing cords during everyday box dragging!
+    if (!selectedObjects.empty() && !mcpPillRequested && !mcpStudioMode && mcpCompletedStrokes.empty()) {
         hideSelectionPill();
         return;
     }
@@ -5526,6 +5560,7 @@ void Canvas::dismissSelectionPill()
     mcpPillDrawerFrame = {};
     mcpPaletteFrame = {};
     mcpMoodPillActive = false;
+    mcpPillRequested = false;
     // Artist dismissed (send / Esc / empty focus-out): suppress re-show for a
     // short window so the immediate refresh can't re-pop it. Time-based, so
     // re-selecting the same object later always brings it back.
