@@ -4959,11 +4959,33 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                                 bool srcSig  = obj_issignaloutlet(so,  cc.srcOut) != 0;
                                 bool destSig = obj_issignalinlet(d_o, cc.destIn)  != 0;
                                 if (srcSig && !destSig) {
+                                    // Class-aware hint. The classic trap: [*~ 0.5] has a
+                                    // FLOAT inlet 1, so an envelope signal into it is
+                                    // correctly rejected — while a BARE [*~] has a SIGNAL
+                                    // inlet 1 and IS the canonical VCA. The old wording
+                                    // ("rewire via [*~]") left the model flailing, since
+                                    // the wire already pointed at [*~].
+                                    juce::String hint = " — Pd drops the audio; use [snapshot~] to read it as control";
+                                    {
+                                        const char* dcls = class_getname(pd_class(&d_o->ob_pd));
+                                        juce::String dclsStr(dcls ? dcls : "");
+                                        if (dclsStr == "*~" || dclsStr == "+~" || dclsStr == "-~" || dclsStr == "/~") {
+                                            char* otext = nullptr; int olen = 0;
+                                            pd::Interface::getObjectText(d_o, &otext, &olen);
+                                            juce::String objTxt = (otext && olen > 0)
+                                                ? juce::String::fromUTF8(otext, olen) : dclsStr;
+                                            if (otext && olen > 0) freebytes(otext, olen);
+                                            hint = " — [" + objTxt.trim()
+                                                 + "] has an ARGUMENT, so its inlet 1 is a FLOAT (control) inlet and a signal there is dropped. "
+                                                   "For an envelope VCA use a BARE [*~] (no args) — its inlet 1 IS a signal inlet — "
+                                                   "and keep the level in a separate [*~ gain].";
+                                        }
+                                    }
                                     connectFailures.push_back({
                                         cc.srcId.toStdString(), cc.destId.toStdString(),
                                         "rate: signal outlet " + std::to_string(cc.srcOut)
                                           + " -> control inlet " + std::to_string(cc.destIn)
-                                          + " — Pd drops the audio; use [snapshot~] or rewire via [*~]" });
+                                          + hint.toStdString() });
                                     continue;
                                 }
                                 // Guard 2: control outlet -> signal inlet. Pd accepts
