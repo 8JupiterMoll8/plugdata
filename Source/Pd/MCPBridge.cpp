@@ -4965,7 +4965,9 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                                     // inlet 1 and IS the canonical VCA. The old wording
                                     // ("rewire via [*~]") left the model flailing, since
                                     // the wire already pointed at [*~].
-                                    juce::String hint = " — Pd drops the audio; use [snapshot~] to read it as control";
+                                    // ASCII only: non-ASCII in a reply string is mangled to
+                                    // mojibake on the C++ -> OSC -> TS path (see line 667).
+                                    juce::String hint = " - Pd drops the audio; use [snapshot~] to read it as control";
                                     {
                                         const char* dcls = class_getname(pd_class(&d_o->ob_pd));
                                         juce::String dclsStr(dcls ? dcls : "");
@@ -4975,10 +4977,10 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                                             juce::String objTxt = (otext && olen > 0)
                                                 ? juce::String::fromUTF8(otext, olen) : dclsStr;
                                             if (otext && olen > 0) freebytes(otext, olen);
-                                            hint = " — [" + objTxt.trim()
+                                            hint = " - [" + objTxt.trim()
                                                  + "] has an ARGUMENT, so its inlet 1 is a FLOAT (control) inlet and a signal there is dropped. "
-                                                   "For an envelope VCA use a BARE [*~] (no args) — its inlet 1 IS a signal inlet — "
-                                                   "and keep the level in a separate [*~ gain].";
+                                                   "For an envelope VCA use a BARE [*~] (no args): its inlet 1 IS a signal inlet. "
+                                                   "Keep the level in a separate [*~ gain].";
                                         }
                                     }
                                     connectFailures.push_back({
