@@ -4279,7 +4279,11 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     CreateFailure cf;
                     cf.tempId = oid.toStdString();
                     cf.type = ot.toStdString();
-                    cf.reason = "tempId already exists on canvas — refusing to steal it (pick a new id or rename)";
+                    // On a RETRY the model re-sends the whole batch, including
+                    // objects its previous call already created — "pick a new
+                    // id" then sends it renaming things it already owns. The
+                    // object it wants IS there; say that.
+                    cf.reason = "tempId already exists on the canvas - it was NOT re-created. To USE it, wire or set it directly (connect[]/set[]); to REPLACE it, rename or delete it first";
                     createFailures.push_back(cf);
                     continue;
                 }
