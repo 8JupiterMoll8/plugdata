@@ -1,0 +1,231 @@
+From c670484c5e8bf08990ca085144b116b21944d84c Mon Sep 17 00:00:00 2001
+From: plugdata-fork <fork@localhost>
+Date: Fri, 16 Oct 2026 18:26:14 +0200
+Subject: [PATCH] feat(control): add particlepad external
+
+Interactive 2D particle pad. Source/Pd/Setup.cpp calls particlepad_setup()
+and ParticlePadObject.h is the GUI, so the build needs this file.
+---
+ Source/Control/particlepad.c | 213 +++++++++++++++++++++++++++++++++++
+ 1 file changed, 213 insertions(+)
+ create mode 100644 Source/Control/particlepad.c
+
+diff --git a/Source/Control/particlepad.c b/Source/Control/particlepad.c
+new file mode 100644
+index 00000000..5b94f0b8
+--- /dev/null
++++ b/Source/Control/particlepad.c
+@@ -0,0 +1,213 @@
++// particlepad.c - Interactive 2D Particle Pad for Pure Data & PlugData
++
++#include <m_pd.h>
++#include <g_canvas.h>
++#include <stdlib.h>
++#include <stdio.h>
++
++static t_class *particlepad_class;
++static t_widgetbehavior particlepad_widgetbehavior;
++
++typedef struct _particlepad {
++    t_object        x_obj;
++    t_glist        *x_glist;
++    t_symbol       *x_bindname;
++    int             x_w;
++    int             x_h;
++    int             x_count;
++    float           x_gravity_x;
++    float           x_gravity_y;
++    float           x_friction;
++    unsigned char   x_color[3];
++    int             x_zoom;
++    int             x_edit;
++    t_outlet       *x_out_pos;    // Outlet 1: list x y (centroid 0.0 - 1.0)
++    t_outlet       *x_out_energy; // Outlet 2: float (aggregate kinetic energy)
++    t_outlet       *x_out_bang;   // Outlet 3: bang on collision/bounce
++} t_particlepad;
++
++static void particlepad_erase(t_particlepad *x, t_glist *glist) {
++    sys_vgui(".x%lx.c delete %lxALL\n", glist_getcanvas(glist), x);
++}
++
++static void particlepad_draw(t_particlepad *x, t_glist *glist) {
++    int xpos = text_xpix(&x->x_obj, glist);
++    int ypos = text_ypix(&x->x_obj, glist);
++    sys_vgui(".x%lx.c create rectangle %d %d %d %d -width %d -outline black -fill #%2.2x%2.2x%2.2x -tags [list %lxBASE %lxALL]\n",
++        glist_getcanvas(glist), xpos, ypos, xpos + x->x_w * x->x_zoom, ypos + x->x_h * x->x_zoom,
++        x->x_zoom, x->x_color[0], x->x_color[1], x->x_color[2], x, x);
++}
++
++static void particlepad_update(t_particlepad *x) {
++    if (glist_isvisible(x->x_glist) && gobj_shouldvis((t_gobj *)x, x->x_glist)) {
++        particlepad_erase(x, x->x_glist);
++        particlepad_draw(x, x->x_glist);
++        canvas_fixlinesfor(glist_getcanvas(x->x_glist), (t_text *)x);
++    }
++}
++
++static void particlepad_vis(t_gobj *z, t_glist *glist, int vis) {
++    t_particlepad *x = (t_particlepad *)z;
++    if (vis) {
++        particlepad_draw(x, glist);
++    } else {
++        particlepad_erase(x, glist);
++    }
++}
++
++static void particlepad_getrect(t_gobj *z, t_glist *glist, int *xp1, int *yp1, int *xp2, int *yp2) {
++    t_particlepad *x = (t_particlepad *)z;
++    *xp1 = text_xpix(&x->x_obj, glist);
++    *yp1 = text_ypix(&x->x_obj, glist);
++    *xp2 = *xp1 + x->x_w * x->x_zoom;
++    *yp2 = *yp1 + x->x_h * x->x_zoom;
++}
++
++static void particlepad_displace(t_gobj *z, t_glist *glist, int dx, int dy) {
++    t_particlepad *x = (t_particlepad *)z;
++    x->x_obj.te_xpix += dx;
++    x->x_obj.te_ypix += dy;
++    if (glist_isvisible(glist)) {
++        sys_vgui(".x%lx.c move %lxALL %d %d\n", glist_getcanvas(glist), x, dx * x->x_zoom, dy * x->x_zoom);
++        canvas_fixlinesfor(glist_getcanvas(glist), (t_text *)x);
++    }
++}
++
++static void particlepad_select(t_gobj *z, t_glist *glist, int state) {
++    t_particlepad *x = (t_particlepad *)z;
++    if (glist_isvisible(glist)) {
++        sys_vgui(".x%lx.c itemconfigure %lxBASE -outline %s\n",
++            glist_getcanvas(glist), x, state ? "blue" : "black");
++    }
++}
++
++static void particlepad_delete(t_gobj *z, t_glist *glist) {
++    canvas_deletelinesfor(glist_getcanvas(glist), (t_text *)z);
++}
++
++static void particlepad_save(t_gobj *z, t_binbuf *b) {
++    t_particlepad *x = (t_particlepad *)z;
++    binbuf_addv(b, "ssiisiiii", gensym("#X"), gensym("obj"),
++        (int)x->x_obj.te_xpix, (int)x->x_obj.te_ypix,
++        atom_getsymbol(binbuf_getvec(x->x_obj.te_binbuf)),
++        x->x_w, x->x_h, x->x_count, (int)x->x_color[0]);
++    binbuf_addv(b, ";");
++}
++
++static void particlepad_bang(t_particlepad *x) {
++    t_atom at[2];
++    SETFLOAT(&at[0], 0.5f);
++    SETFLOAT(&at[1], 0.5f);
++    outlet_list(x->x_out_pos, &s_list, 2, at);
++    outlet_float(x->x_out_energy, 0.0f);
++}
++
++static void particlepad_gravity(t_particlepad *x, t_floatarg gx, t_floatarg gy) {
++    x->x_gravity_x = gx;
++    x->x_gravity_y = gy;
++}
++
++static void particlepad_friction(t_particlepad *x, t_floatarg f) {
++    if (f < 0.8f) f = 0.8f;
++    if (f > 1.0f) f = 1.0f;
++    x->x_friction = f;
++}
++
++static void particlepad_count(t_particlepad *x, t_floatarg n) {
++    int c = (int)n;
++    if (c < 1) c = 1;
++    if (c > 128) c = 128;
++    x->x_count = c;
++}
++
++static void particlepad_dim(t_particlepad *x, t_floatarg w, t_floatarg h) {
++    int nw = (int)w;
++    int nh = (int)h;
++    if (nw < 20) nw = 20;
++    if (nh < 20) nh = 20;
++    if (nw != x->x_w || nh != x->x_h) {
++        x->x_w = nw;
++        x->x_h = nh;
++        particlepad_update(x);
++    }
++}
++
++static void particlepad_color(t_particlepad *x, t_floatarg r, t_floatarg g, t_floatarg b) {
++    x->x_color[0] = (unsigned char)(r < 0 ? 0 : r > 255 ? 255 : r);
++    x->x_color[1] = (unsigned char)(g < 0 ? 0 : g > 255 ? 255 : g);
++    x->x_color[2] = (unsigned char)(b < 0 ? 0 : b > 255 ? 255 : b);
++    particlepad_update(x);
++}
++
++static void particlepad_free(t_particlepad *x) {
++    pd_unbind(&x->x_obj.ob_pd, x->x_bindname);
++    gfxstub_deleteforkey(x);
++}
++
++static void *particlepad_new(t_symbol *s, int ac, t_atom *av) {
++    (void)s;
++    t_particlepad *x = (t_particlepad *)pd_new(particlepad_class);
++    t_canvas *cv = canvas_getcurrent();
++    x->x_glist = (t_glist *)cv;
++    char buf[MAXPDSTRING];
++    sprintf(buf, "#%lx", (long)x);
++    pd_bind(&x->x_obj.ob_pd, x->x_bindname = gensym(buf));
++    x->x_zoom = x->x_glist ? x->x_glist->gl_zoom : 1;
++    x->x_w = 200;
++    x->x_h = 200;
++    x->x_count = 24;
++    x->x_gravity_x = 0.0f;
++    x->x_gravity_y = 0.0f;
++    x->x_friction = 0.98f;
++    x->x_color[0] = 30;
++    x->x_color[1] = 30;
++    x->x_color[2] = 36;
++
++    if (ac > 0 && av->a_type == A_FLOAT) {
++        x->x_w = (int)av->a_w.w_float;
++        ac--; av++;
++    }
++    if (ac > 0 && av->a_type == A_FLOAT) {
++        x->x_h = (int)av->a_w.w_float;
++        ac--; av++;
++    }
++    if (ac > 0 && av->a_type == A_FLOAT) {
++        x->x_count = (int)av->a_w.w_float;
++        ac--; av++;
++    }
++
++    // Three outlets:
++    x->x_out_pos = outlet_new(&x->x_obj, &s_list);
++    x->x_out_energy = outlet_new(&x->x_obj, &s_float);
++    x->x_out_bang = outlet_new(&x->x_obj, &s_bang);
++
++    return (void *)x;
++}
++
++void particlepad_setup(void) {
++    particlepad_class = class_new(gensym("particlepad"),
++        (t_newmethod)particlepad_new,
++        (t_method)particlepad_free,
++        sizeof(t_particlepad),
++        0, A_GIMME, 0);
++
++    class_addcreator((t_newmethod)particlepad_new, gensym("particles"), A_GIMME, 0);
++
++    class_addbang(particlepad_class, particlepad_bang);
++    class_addmethod(particlepad_class, (t_method)particlepad_gravity, gensym("gravity"), A_FLOAT, A_FLOAT, 0);
++    class_addmethod(particlepad_class, (t_method)particlepad_friction, gensym("friction"), A_FLOAT, 0);
++    class_addmethod(particlepad_class, (t_method)particlepad_count, gensym("count"), A_FLOAT, 0);
++    class_addmethod(particlepad_class, (t_method)particlepad_dim, gensym("dim"), A_FLOAT, A_FLOAT, 0);
++    class_addmethod(particlepad_class, (t_method)particlepad_color, gensym("color"), A_FLOAT, A_FLOAT, A_FLOAT, 0);
++
++    particlepad_widgetbehavior.w_getrectfn  = particlepad_getrect;
++    particlepad_widgetbehavior.w_displacefn = particlepad_displace;
++    particlepad_widgetbehavior.w_selectfn   = particlepad_select;
++    particlepad_widgetbehavior.w_activatefn = NULL;
++    particlepad_widgetbehavior.w_deletefn   = particlepad_delete;
++    particlepad_widgetbehavior.w_visfn      = particlepad_vis;
++    particlepad_widgetbehavior.w_clickfn    = NULL;
++
++    class_setsavefn(particlepad_class, particlepad_save);
++    class_setwidget(particlepad_class, &particlepad_widgetbehavior);
++}

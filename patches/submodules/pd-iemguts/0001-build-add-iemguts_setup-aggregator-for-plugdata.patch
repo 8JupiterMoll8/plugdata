@@ -1,0 +1,34 @@
+From 69f18d67b14910c1b19283df713bec3c67ee8c84 Mon Sep 17 00:00:00 2001
+From: plugdata-fork <fork@localhost>
+Date: Fri, 16 Oct 2026 18:26:14 +0200
+Subject: [PATCH] build: add iemguts_setup aggregator for plugdata
+
+plugdata links the iemguts objects statically and registers them through a
+single iemguts_setup(); upstream has no such file.
+---
+ src/iemguts.c | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+ create mode 100644 src/iemguts.c
+
+diff --git a/src/iemguts.c b/src/iemguts.c
+new file mode 100644
+index 0000000..d6ec618
+--- /dev/null
++++ b/src/iemguts.c
+@@ -0,0 +1,16 @@
++#include "m_pd.h"
++
++void canvasdelete_setup(void);
++void canvasindex_setup(void);
++void canvasname_setup(void);
++void receivecanvas_setup(void);
++void sendcanvas_setup(void);
++
++void iemguts_setup(void)
++{
++    canvasdelete_setup();
++    canvasindex_setup();
++    canvasname_setup();
++    receivecanvas_setup();
++    sendcanvas_setup();
++}
