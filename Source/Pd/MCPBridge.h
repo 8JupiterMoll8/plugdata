@@ -411,8 +411,14 @@ private:
     int listenPort = 9000;
     int sendPort = 19010;
 
+    // Bound to 127.0.0.1 only (Report F6): OSCReceiver::connect(port) would
+    // listen on every interface. Must outlive the receiver's connection.
+    std::unique_ptr<juce::DatagramSocket> listenSocket;
     juce::OSCReceiver receiver;
     juce::OSCSender sender;
+    // Current reply target, so /bridge/connect only reconnects on a change.
+    juce::String senderHost { "127.0.0.1" };
+    int senderPort = 0;
     std::atomic<bool> active { false };
 
     std::atomic<juce::int64> lastServerActivity { 0 };

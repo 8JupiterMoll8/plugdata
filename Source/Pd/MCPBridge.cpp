@@ -19,6 +19,7 @@
 #include <g_all_guis.h>       // t_slider live fields (x_min/x_max/x_fval) for obj_get
 #include "Pd/Interface.h"
 #include "McpIemArgs.h" // IEM GUI short-form creation-arg guard (shared)
+#include "MCPBridgeSafety.h" // loopback + output-path guards (Report F6)
 #include "Utility/Fonts.h"
 #include "Utility/SettingsFile.h" // compiledMode (hvcc_mode) in /pd/perf
 #include "Utility/Config.h"
@@ -61,6 +62,35 @@ extern t_class* clone_class; // defined in g_clone.c (pd core)
 extern int clone_get_n(t_gobj*);
 extern t_glist* clone_get_instance(t_gobj*, int);
 }
+
+// ── Output-path guard for /pd/record_start and /pd/render (Report F6) ──
+// Files may only be written below the render root: $PLUGDATA_MCP_RENDER_DIR
+// when set to an absolute path, else ~/Documents/plugdata/mcp-renders.
+// This file sits inside an open extern "C" block; these are C++ helpers.
+extern "C++" {
+static juce::File mcpRenderRoot()
+{
+    auto const env = juce::SystemStats::getEnvironmentVariable("PLUGDATA_MCP_RENDER_DIR", {});
+    if (env.isNotEmpty() && juce::File::isAbsolutePath(env))
+        return juce::File(env);
+    return juce::File::getSpecialLocation(juce::File::userDocumentsDirectory)
+        .getChildFile("plugdata")
+        .getChildFile("mcp-renders");
+}
+
+// The safe absolute path for a client-supplied one, or empty when it escapes
+// the render root (the caller must refuse the request).
+static juce::String resolveMcpOutputPath(juce::String const& requested)
+{
+    auto const root = mcpRenderRoot();
+    if (!root.createDirectory().wasOk())
+        return {};
+    auto const resolved = mcp::safety::resolveOutputPath(
+        std::filesystem::path(root.getFullPathName().toStdString()), requested.toStdString());
+    return resolved ? juce::String(resolved->string()) : juce::String();
+}
+} // extern "C++"
+
 
 extern t_class *text_class;
 
@@ -350,7 +380,12 @@ bool MCPBridge::start()
 {
     if (active.load()) return true;
 
-    bool recvOk = receiver.connect(listenPort);
+    // Loopback only: other hosts on the LAN must not be able to drive the patch.
+    listenSocket = std::make_unique<juce::DatagramSocket>(false);
+    bool const recvOk = listenSocket->bindToPort(listenPort, "127.0.0.1")
+        && receiver.connectToSocket(*listenSocket);
+    if (!recvOk)
+        listenSocket.reset();
     if (recvOk) {
         receiver.addListener(this);
         active.store(true);
@@ -358,7 +393,7 @@ bool MCPBridge::start()
         reportedLost = false;
         statusMessage = {};
         if (processor) {
-            processor->logMessage("MCP bridge listening on UDP " + juce::String(listenPort));
+            processor->logMessage("MCP bridge listening on UDP 127.0.0.1:" + juce::String(listenPort));
         }
     } else {
         statusMessage = "port " + juce::String(listenPort) + " in use";
@@ -368,6 +403,8 @@ bool MCPBridge::start()
     }
 
     sender.connect("127.0.0.1", sendPort);
+    senderHost = "127.0.0.1";
+    senderPort = sendPort;
 
     return active.load();
 }
@@ -379,6 +416,7 @@ void MCPBridge::stop()
 
     receiver.removeListener(this);
     receiver.disconnect();
+    listenSocket.reset();
     sender.disconnect();
     active.store(false);
     reportedConnected = false;
@@ -5627,9 +5665,14 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
     // Reply: /pd/record_start/reply/<corrId>  1.0=ok, 0.0=failed
     if (action == "record_start") {
         if (msg.size() >= 1 && processor) {
-            auto filePath      = getArgString(msg[0]);
             auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : "0";
             juce::String replyAddr = "/pd/record_start/reply/" + correlationId;
+            auto const filePath = resolveMcpOutputPath(getArgString(msg[0]));
+            if (filePath.isEmpty()) {
+                post("MCP record_start: refused, path is outside %s", mcpRenderRoot().getFullPathName().toRawUTF8());
+                sendReply(replyAddr, 0.0f);
+                return;
+            }
 
             // Fail fast if we can't create the parent directory.
             juce::File destFile(filePath);
@@ -5682,12 +5725,18 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
     //   /pd/render/error/<corrId> <reason>   (failure after the ack)
     if (action == "render") {
         if (msg.size() >= 2 && processor) {
-            auto filePath      = getArgString(msg[0]);
+            auto const filePath = resolveMcpOutputPath(getArgString(msg[0]));
             float durationSec  = getArgFloat(msg[1]);
             bool analyze       = (msg.size() >= 3) ? (getArgFloat(msg[2]) > 0.5f) : false;
             auto correlationId = (msg.size() >= 4) ? getArgString(msg[3]) : "0";
 
             durationSec = juce::jlimit(0.1f, 60.0f, durationSec);
+
+            if (filePath.isEmpty()) {
+                sendReply("/pd/render/error/" + correlationId,
+                    "path is outside the render folder " + mcpRenderRoot().getFullPathName());
+                return;
+            }
 
             // Single-flight: one render at a time.
             if (mcpRenderActive.exchange(true)) {
@@ -10060,9 +10109,18 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
         if (msg.size() >= 2) {
             auto ip = getArgString(msg[0]);
             int port = static_cast<int>(getArgFloat(msg[1]));
-            if (port > 0) {
+            // Report F6: never redirect replies/telemetry off this machine.
+            if (!mcp::safety::isLoopbackHost(ip.toStdString())) {
+                if (processor)
+                    processor->logError("MCP bridge: refused /bridge/connect to non-loopback host " + ip);
+                return;
+            }
+            auto const host = (ip.isEmpty() || ip == "localhost" || ip == "::1") ? juce::String("127.0.0.1") : ip;
+            if (port > 0 && port < 65536 && (host != senderHost || port != senderPort)) {
                 sender.disconnect();
-                sender.connect(ip.isNotEmpty() ? ip : "127.0.0.1", port);
+                sender.connect(host, port);
+                senderHost = host;
+                senderPort = port;
             }
         }
         sendReply("/bridge/connect/ack", "127.0.0.1");
