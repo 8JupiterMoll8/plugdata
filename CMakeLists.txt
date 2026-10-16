@@ -28,10 +28,6 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-if("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
-    set(LINUX TRUE)
-endif()
-
 option(QUICK_BUILD "Disable sfizz, ffmpeg, gem and xz for a fast build" OFF)
 option(ENABLE_TESTING "Enable end-to-end test suite" OFF)
 option(ENABLE_SFIZZ "Enable sfizz for the [sfz~] object" ON)
@@ -113,6 +109,11 @@ if("${CMAKE_SYSTEM_NAME}" MATCHES "iOS")
 endif()
 
 project(plugdata VERSION 0.9.4 LANGUAGES C CXX)
+
+# CMake < 3.25 has no built-in LINUX variable; it needs CMAKE_SYSTEM_NAME, so after project()
+if("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
+    set(LINUX TRUE)
+endif()
 
 include(CheckIPOSupported)
 check_ipo_supported(RESULT ipo_supported OUTPUT ipo_error)
