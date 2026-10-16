@@ -670,9 +670,16 @@ private:
     // MCP zero-dropout WAV recorder — taps outputFifo directly in processBlock.
     // No canvas objects created, no DSP recompile, zero audio dropout.
     CriticalSection mcpRecorderLock;
-    std::unique_ptr<juce::AudioFormatWriter> mcpWavWriter;
+    // Report F3: the audio thread only pushes samples into the ThreadedWriter's
+    // FIFO; file creation and disk writes happen off the audio thread.
+    // Declared before the writer so the writer is destroyed first.
+    juce::TimeSliceThread mcpRecorderThread { "MCP recorder" };
+    std::unique_ptr<juce::AudioFormatWriter::ThreadedWriter> mcpThreadedWriter;
     std::atomic<bool> mcpRecording { false };
     juce::String mcpRecorderPath;
+    // Open/close the WAV take. Never call these on the audio thread.
+    bool mcpOpenRecorder(juce::String const& path);
+    void mcpCloseRecorder();
 
     // Armed peak-hold for trigger verification (/meter/arm → trigger → /meter/read).
     // Accumulated on the audio thread over the FINAL output, so a one-shot fired

@@ -1237,52 +1237,78 @@ void PluginProcessor::processVariable(dsp::AudioBlock<float> buffer, MidiBuffer&
     writeRecorderTap(buffer);
 }
 
+bool PluginProcessor::mcpOpenRecorder(juce::String const& path)
+{
+    juce::File const destFile(path);
+    auto outStream = std::unique_ptr<juce::FileOutputStream>(destFile.createOutputStream());
+    if (!outStream || outStream->failedToOpen()) {
+        post("MCP record: could not create output stream for %s", path.toRawUTF8());
+        return false;
+    }
+    // FileOutputStream appends to an existing file; a take must start empty.
+    outStream->setPosition(0);
+    outStream->truncate();
+
+    double sampleRate = getSampleRate();
+    if (sampleRate <= 0)
+        sampleRate = 44100.0;
+    // Cap at stereo so the file plays everywhere; the audible mix is on 0-1.
+    int const numCh = jlimit(1, 2, getTotalNumOutputChannels());
+
+    // 16-bit PCM = maximum player compatibility.
+    juce::WavAudioFormat wavFormat;
+    std::unique_ptr<juce::AudioFormatWriter> writer(
+        wavFormat.createWriterFor(outStream.get(), sampleRate, static_cast<unsigned int>(numCh), 16, {}, 0));
+    if (!writer) {
+        post("MCP record: createWriterFor failed (sr=%.0f ch=%d)", sampleRate, numCh);
+        return false;
+    }
+    outStream.release(); // the writer owns the stream now
+
+    if (!mcpRecorderThread.isThreadRunning())
+        mcpRecorderThread.startThread();
+    // ~3 s of FIFO at 44.1 kHz between the audio thread and the disk.
+    auto threaded = std::make_unique<juce::AudioFormatWriter::ThreadedWriter>(writer.release(), mcpRecorderThread, 1 << 17);
+
+    std::unique_ptr<juce::AudioFormatWriter::ThreadedWriter> previous;
+    {
+        const ScopedLock sl(mcpRecorderLock);
+        previous = std::move(mcpThreadedWriter);
+        mcpThreadedWriter = std::move(threaded);
+        mcpRecorderPath = path;
+    }
+    previous.reset(); // flush any stale take outside the lock
+    post("MCP record: writer created sr=%.0f ch=%d path=%s", sampleRate, numCh, path.toRawUTF8());
+    return true;
+}
+
+void PluginProcessor::mcpCloseRecorder()
+{
+    mcpRecording.store(false, std::memory_order_release);
+    std::unique_ptr<juce::AudioFormatWriter::ThreadedWriter> finished;
+    {
+        const ScopedLock sl(mcpRecorderLock);
+        finished = std::move(mcpThreadedWriter);
+    }
+    finished.reset(); // flushes the FIFO and closes the file, off the audio thread
+}
+
 void PluginProcessor::writeRecorderTap(dsp::AudioBlock<float> const& buffer)
 {
-    if (!mcpRecording.load(std::memory_order_relaxed))
+    if (!mcpRecording.load(std::memory_order_acquire))
         return;
 
     const ScopedTryLock sl(mcpRecorderLock);
-    if (!sl.isLocked())
+    if (!sl.isLocked() || !mcpThreadedWriter)
         return;
 
-    // Lazily create the WAV writer on the first tap so its channel count matches
-    // the actual output buffer (getTotalNumOutputChannels can report a larger bus layout).
-    if (!mcpWavWriter) {
-        juce::File destFile(mcpRecorderPath);
-        juce::WavAudioFormat wavFormat;
-        auto outStream = std::unique_ptr<juce::FileOutputStream>(destFile.createOutputStream());
-        if (!outStream) {
-            post("MCP record: could not create output stream for %s", mcpRecorderPath.toRawUTF8());
-            mcpRecording.store(false, std::memory_order_release);
-            return;
-        }
-
-        double sampleRate = getSampleRate();
-        if (sampleRate <= 0) sampleRate = 44100.0;
-
-        // Cap at stereo (2ch) so the file is playable everywhere — PlugData's
-        // output bus can be 32+ channels, but the audible mix is on channels 0-1.
-        int numCh = jmin(2, (int)buffer.getNumChannels());
-        if (numCh <= 0) numCh = 2;
-
-        // 16-bit PCM = maximum player compatibility.
-        mcpWavWriter.reset(wavFormat.createWriterFor(outStream.get(), sampleRate, numCh, 16, {}, 0));
-        if (!mcpWavWriter) {
-            post("MCP record: createWriterFor failed (sr=%.0f ch=%d)", sampleRate, numCh);
-            mcpRecording.store(false, std::memory_order_release);
-            return;
-        }
-        outStream.release(); // writer owns the stream now
-        post("MCP record: writer created sr=%.0f ch=%d path=%s", sampleRate, numCh, mcpRecorderPath.toRawUTF8());
-    }
-
-    int recCh = (int)mcpWavWriter->getNumChannels();
-    int numSamples = (int)buffer.getNumSamples();
-    juce::AudioBuffer<float> tmpBuf(recCh, numSamples);
-    for (int ch = 0; ch < recCh; ++ch)
-        tmpBuf.copyFrom(ch, 0, buffer.getChannelPointer(ch), numSamples);
-    mcpWavWriter->writeFromAudioSampleBuffer(tmpBuf, 0, numSamples);
+    // Audio thread: no allocation, no file I/O. ThreadedWriter::write only
+    // copies into its FIFO; a full FIFO drops this block instead of blocking.
+    int const available = static_cast<int>(buffer.getNumChannels());
+    if (available <= 0)
+        return;
+    float const* channels[2] = { buffer.getChannelPointer(0), buffer.getChannelPointer(available > 1 ? 1 : 0) };
+    mcpThreadedWriter->write(channels, static_cast<int>(buffer.getNumSamples()));
 }
 
 void PluginProcessor::sendPlayhead()
@@ -2122,31 +2148,16 @@ t_gobj* PluginProcessor::resolveStableId(const String& canvasName, const String&
     auto it = canvasMap.find(idStr);
     if (it != canvasMap.end()) {
         if (canvas) {
-            uint64_t expectedSerial = 0;
-            auto serialIt = mcpStableSerialMap.find(it->second);
-            if (serialIt != mcpStableSerialMap.end()) {
-                expectedSerial = serialIt->second;
-            }
+            // KNOWN GAP (Report F3): this cannot detect a freed object whose
+            // address Pd's allocator recycled for a new object on the same
+            // canvas. The old "serial" check compared mcpStableSerialMap[ptr]
+            // with itself (y_obj == it->second), so it never fired and was
+            // removed. A real check needs a serial recorded per stable ID at
+            // registration (14 sites); that belongs to the identity service
+            // (Plan 3 Phase 5), not a local patch.
             for (t_gobj* y_obj = canvas->gl_list; y_obj; y_obj = y_obj->g_next) {
-                if (y_obj == it->second) {
-                    // Verify serial — defends against memory-slot
-                    // reuse by Pd's allocator after a free+realloc.
-                    if (expectedSerial != 0) {
-                        auto liveSerialIt = mcpStableSerialMap.find(y_obj);
-                        if (liveSerialIt == mcpStableSerialMap.end() ||
-                            liveSerialIt->second != expectedSerial) {
-                            // Pointer address matches but serial is wrong:
-                            // the original gobj was freed and the slot was
-                            // recycled for a different object.
-                            canvasMap.erase(it);
-                            if (liveSerialIt != mcpStableSerialMap.end()) {
-                                mcpStableSerialMap.erase(liveSerialIt);
-                            }
-                            return nullptr;
-                        }
-                    }
+                if (y_obj == it->second)
                     return it->second;
-                }
             }
         }
         canvasMap.erase(it);

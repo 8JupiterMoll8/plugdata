@@ -20,6 +20,7 @@
 #include "Pd/Interface.h"
 #include "McpIemArgs.h" // IEM GUI short-form creation-arg guard (shared)
 #include "MCPBridgeSafety.h" // loopback + output-path guards (Report F6)
+#include "MCPBridgeHandoff.h" // safe timed waits on queued lambdas (Report F3)
 #include "Utility/Fonts.h"
 #include "Utility/SettingsFile.h" // compiledMode (hvcc_mode) in /pd/perf
 #include "Utility/Config.h"
@@ -4447,14 +4448,19 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             // BEFORE performDSP(). We do exactly the same thing here.
 
             extern int dsp_update_deferred;  // defined in m_obj.c
-            juce::WaitableEvent done;
+            // Report F3: the lambda below captures this frame by reference. The
+            // handoff guarantees we never return while it can still touch it.
+            auto handoff = std::make_shared<mcp::OneShotHandoff>();
             t_canvas* cnv = nullptr;
             // Bug #11 (fault gauntlet 2026-09-09): strict canvas resolution.
             // Unknown names must NOT silently fall back to the focused/root
             // canvas — name the failure instead of mutating the wrong patch.
             bool canvasNotFound = false;
 
-            processor->enqueueFunctionAsync([&]() {
+            processor->enqueueFunctionAsync([&, handoff]() {
+                if (!handoff->begin())
+                    return; // the caller gave up: this frame may be gone, touch nothing
+                mcp::OneShotHandoff::FinishGuard finishGuard(*handoff);
                 auto tLambdaStart = std::chrono::high_resolution_clock::now();
                 cnv = processor->getCanvasBySymbolStrict(canvasName);
                 if (!cnv && (canvasName == "pd-main" || canvasName == "main" || canvasName.isEmpty()))
@@ -5141,23 +5147,25 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 auto tLambdaEnd = std::chrono::high_resolution_clock::now();
                 auto totalUs = std::chrono::duration_cast<std::chrono::microseconds>(tLambdaEnd - tLambdaStart).count();
                 post("batch_atomic: TOTAL lambda took %lld us", (long long)totalUs);
-
-                done.signal();
-            }); // end enqueueFunctionAsync lambda
+            }); // end enqueueFunctionAsync lambda (finishGuard signals the caller)
 
             // Wait for audio thread to complete (max 2000ms)
             auto tWaitStart = std::chrono::high_resolution_clock::now();
-            bool waitOk = done.wait(2000);
+            // Returns early only if the lambda never started; once it runs, we
+            // wait for it to finish however long that takes.
+            bool const waitOk = handoff->waitOrAbandon(std::chrono::milliseconds(2000))
+                == mcp::OneShotHandoff::Result::Finished;
+            if (waitOk && handoff->wasLate())
+                post("batch_atomic: finished after the 2000ms budget (audio thread was slow)");
             auto tWaitEnd = std::chrono::high_resolution_clock::now();
             auto waitUs = std::chrono::duration_cast<std::chrono::microseconds>(tWaitEnd - tWaitStart).count();
             post("batch_atomic: done.wait() took %lld us (%.1f ms)", (long long)waitUs, waitUs / 1000.0f);
-            // R3b — if the audio thread did not finish in 2000ms, the batch
-            // state is UNKNOWN (partial mutation). Do NOT send a success-shaped
-            // reply (it would look like a normal result and the TS retry would
-            // double-apply). Send an explicit error address.
+            // R3b + Report F3: !waitOk now means the lambda was abandoned before
+            // it began, so NOTHING was applied (a started batch is always waited
+            // for). Say so plainly; the TS side classifies this as "rejected".
             if (!waitOk) {
                 juce::OSCMessage errReply { juce::OSCAddressPattern("/pd/batch_atomic/error/" + correlationId) };
-                errReply.addArgument(juce::String("busy: audio thread did not finish in 2000ms — batch state UNKNOWN"));
+                errReply.addArgument(juce::String("rejected: the audio thread did not start the batch within 2000ms; nothing was applied"));
                 sender.send(errReply);
                 return;
             }
@@ -5189,12 +5197,17 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 if (juce::MessageManager::getInstance()->isThisTheMessageThread()) {
                     runLayout();
                 } else {
-                    juce::WaitableEvent sanitizeDone;
-                    juce::MessageManager::callAsync([&runLayout, &sanitizeDone]() {
+                    // Report F3: runLayout captures this frame by reference.
+                    auto layoutHandoff = std::make_shared<mcp::OneShotHandoff>();
+                    juce::MessageManager::callAsync([&runLayout, layoutHandoff]() {
+                        if (!layoutHandoff->begin())
+                            return; // abandoned: the frame may be gone
+                        mcp::OneShotHandoff::FinishGuard finishGuard(*layoutHandoff);
                         runLayout();
-                        sanitizeDone.signal();
                     });
-                    sanitizeDone.wait(6000);
+                    if (layoutHandoff->waitOrAbandon(std::chrono::milliseconds(6000))
+                        == mcp::OneShotHandoff::Result::Abandoned)
+                        post("batch_atomic: layout guard skipped, message thread busy for 6000ms");
                 }
             } else {
                 if (juce::MessageManager::getInstance()->isThisTheMessageThread()) {
@@ -5683,13 +5696,13 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 return;
             }
 
-            {
-                const juce::ScopedLock sl(processor->mcpRecorderLock);
-                processor->mcpWavWriter.reset();      // drop any stale writer
-                processor->mcpRecorderPath = filePath;
-                processor->mcpRecording.store(true, std::memory_order_release);
+            // Report F3: open the file and writer here, never on the audio thread.
+            if (!processor->mcpOpenRecorder(filePath)) {
+                sendReply(replyAddr, 0.0f);
+                return;
             }
-            post("MCP record_start: armed (lazy writer) path=%s", filePath.toRawUTF8());
+            processor->mcpRecording.store(true, std::memory_order_release);
+            post("MCP record_start: recording path=%s", filePath.toRawUTF8());
             sendReply(replyAddr, 1.0f);
         }
         return;
@@ -5701,11 +5714,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
     if (action == "record_stop") {
         auto correlationId = msg.size() > 0 ? getArgString(msg[0]) : "0";
         if (processor) {
-            processor->mcpRecording.store(false, std::memory_order_release);
-            {
-                const juce::ScopedLock sl(processor->mcpRecorderLock);
-                processor->mcpWavWriter.reset(); // flushes and closes the file
-            }
+            processor->mcpCloseRecorder(); // flushes and closes the file
         }
         sendReply("/pd/record_stop/reply/" + correlationId, 1.0f);
         return;

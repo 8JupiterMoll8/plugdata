@@ -175,6 +175,32 @@ private:
     bool debugWasEnabledByUs = false;
 };
 
+// juce::OSCSender is not thread-safe, and the bridge sends from the OSC
+// thread, the render thread and timers (Report F3). Same interface, one lock.
+class LockedOscSender {
+public:
+    bool connect(juce::String const& host, int port)
+    {
+        juce::ScopedLock const sl(lock);
+        return inner.connect(host, port);
+    }
+    bool disconnect()
+    {
+        juce::ScopedLock const sl(lock);
+        return inner.disconnect();
+    }
+    template<typename... Args>
+    bool send(Args&&... args)
+    {
+        juce::ScopedLock const sl(lock);
+        return inner.send(std::forward<Args>(args)...);
+    }
+
+private:
+    juce::CriticalSection lock;
+    juce::OSCSender inner;
+};
+
 class MCPBridge final : public juce::OSCReceiver::Listener<juce::OSCReceiver::RealtimeCallback>
                       , private juce::Timer
 {
@@ -415,7 +441,7 @@ private:
     // listen on every interface. Must outlive the receiver's connection.
     std::unique_ptr<juce::DatagramSocket> listenSocket;
     juce::OSCReceiver receiver;
-    juce::OSCSender sender;
+    LockedOscSender sender;
     // Current reply target, so /bridge/connect only reconnects on a change.
     juce::String senderHost { "127.0.0.1" };
     int senderPort = 0;
