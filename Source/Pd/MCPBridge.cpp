@@ -3184,9 +3184,8 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             juce::MessageManager::callAsync([proc = processor] {
                 proc->getConsoleMessages().clear();
                 for (auto* editor : proc->getEditors()) {
-                    if (editor && editor->sidebar) {
-                        editor->sidebar->clearConsole();
-                    }
+                    if (auto* consoleSidebar = editor ? editor->getSidebarForPanel(Sidebar::ConsolePanel) : nullptr)
+                        consoleSidebar->clearConsole();
                 }
             });
             auto correlationId = msg.size() > 0 ? getArgString(msg[0]) : "0";
@@ -11203,7 +11202,7 @@ void MCPBridge::stopMidiTake()
                 for (auto* c : pe->getCanvases()) {
                     if (c) c->repaint();
                 }
-                pe->nvgSurface.renderAll();
+                pe->nvgSurface.invalidateAll();
             }
         }
     }

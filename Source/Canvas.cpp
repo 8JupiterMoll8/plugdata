@@ -2259,7 +2259,7 @@ void Canvas::setSketchToolActive(bool active)
     // it (when the board is empty). Keeps the mode state always visible.
     updateSelectionPill();
     repaint();
-    if (editor) editor->nvgSurface.renderAll();
+    if (editor) editor->nvgSurface.invalidateAll();
 }
 
 void Canvas::setEraserToolActive(bool active)
@@ -2272,7 +2272,7 @@ void Canvas::setEraserToolActive(bool active)
     setMouseCursor((active || mcpSketchToolActive) ? MouseCursor::CrosshairCursor : MouseCursor::NormalCursor);
     updateSelectionPill();
     repaint();
-    if (editor) editor->nvgSurface.renderAll();
+    if (editor) editor->nvgSurface.invalidateAll();
 }
 
 void Canvas::setTextToolActive(bool active)
@@ -2287,7 +2287,7 @@ void Canvas::setTextToolActive(bool active)
     }
     updateSelectionPill();
     repaint();
-    if (editor) editor->nvgSurface.renderAll();
+    if (editor) editor->nvgSurface.invalidateAll();
 }
 
 bool Canvas::isSketchToolActive() const
@@ -2306,25 +2306,25 @@ void Canvas::setStudioMode(bool active)
     setSketchToolActive(false);
     updateSelectionPill();
     repaint();
-    if (editor) editor->nvgSurface.renderAll();
+    if (editor) editor->nvgSurface.invalidateAll();
 }
 
 void Canvas::setStudioInkVisible(bool visible)
 {
     mcpStudioInkVisible = visible;
     repaint();
-    if (editor) editor->nvgSurface.renderAll();
+    if (editor) editor->nvgSurface.invalidateAll();
 }
 
 void Canvas::commitStudioFromCanvas()
 {
     juce::String draft;
-    if (editor && editor->sidebar) {
-        if (auto* cp = editor->sidebar->getCopilotPanel()) draft = cp->getStudioDraft();
+    if (editor) {
+        if (auto* cp = editor->getCopilotPanel()) draft = cp->getStudioDraft();
     }
     sendSketchBuild(draft);
-    if (editor && editor->sidebar) {
-        if (auto* cp = editor->sidebar->getCopilotPanel()) cp->clearStudioDraft();
+    if (editor) {
+        if (auto* cp = editor->getCopilotPanel()) cp->clearStudioDraft();
     }
 }
 
@@ -2407,7 +2407,7 @@ void Canvas::openNoteEditorForIndex(int index)
             mcpNoteEditIndex = -1;
             if (mcpNoteEditor) mcpNoteEditor->setVisible(false);
             repaint();
-            if (editor) editor->nvgSurface.renderAll();
+            if (editor) editor->nvgSurface.invalidateAll();
         };
 
         mcpNoteEditor->onReturnKey = [commit] { commit(); };
@@ -2423,7 +2423,7 @@ void Canvas::openNoteEditorForIndex(int index)
                     pd->mcpAnnotations[static_cast<size_t>(mcpNoteEditIndex)].text = mcpNoteEditor->getText();
             }
             repaint();
-            if (editor) editor->nvgSurface.renderAll();
+            if (editor) editor->nvgSurface.invalidateAll();
         };
         mcpNoteEditor->onEscapeKey = [commit] { commit(); }; // Esc = finish editing
 
@@ -2456,7 +2456,7 @@ void Canvas::openNoteEditorForIndex(int index)
     });
 
     repaint();
-    if (editor) editor->nvgSurface.renderAll();
+    if (editor) editor->nvgSurface.invalidateAll();
 }
 
 void Canvas::SketchFadeTimer::timerCallback()
@@ -2469,7 +2469,7 @@ void Canvas::SketchFadeTimer::timerCallback()
         stopTimer();
     }
     canvas->repaint();
-    if (canvas->editor) canvas->editor->nvgSurface.renderAll();
+    if (canvas->editor) canvas->editor->nvgSurface.invalidateAll();
 }
 
 void Canvas::startSketchFadeTimer()
@@ -2594,8 +2594,8 @@ void Canvas::sendSketchBuild(const juce::String& prompt)
     }
 
     // Park the artist's words in the sidebar log (canvas stays calm).
-    if (editor && editor->sidebar) {
-        if (auto* cp = editor->sidebar->getCopilotPanel()) {
+    if (editor) {
+        if (auto* cp = editor->getCopilotPanel()) {
             cp->receiveMessage("user", prompt.isNotEmpty() ? prompt : juce::String("Build from moodboard"));
         }
     }
@@ -2615,7 +2615,7 @@ void Canvas::sendSketchBuild(const juce::String& prompt)
 
     updateSelectionPill();
     repaint();
-    if (editor) editor->nvgSurface.renderAll();
+    if (editor) editor->nvgSurface.invalidateAll();
 }
 
 void Canvas::undoLastStroke()
@@ -2624,7 +2624,7 @@ void Canvas::undoLastStroke()
     mcpCompletedStrokes.pop_back();
     updateSelectionPill();
     repaint();
-    if (editor) editor->nvgSurface.renderAll();
+    if (editor) editor->nvgSurface.invalidateAll();
 }
 
 void Canvas::clearAllInk()
@@ -2635,7 +2635,7 @@ void Canvas::clearAllInk()
     if (mcpSketchFadeTimer) mcpSketchFadeTimer->stopTimer();
     updateSelectionPill();
     repaint();
-    if (editor) editor->nvgSurface.renderAll();
+    if (editor) editor->nvgSurface.invalidateAll();
 }
 
 //===----------------------------------------------------------------------===//
@@ -2787,7 +2787,7 @@ bool Canvas::pasteImageFromClipboard()
             mcpMoodHint = "Clipboard has no image — copy one, then Ctrl+V here";
             mcpMoodHintUntil = juce::Time::getMillisecondCounter() + 2600;
             repaint();
-            if (editor) editor->nvgSurface.renderAll();
+            if (editor) editor->nvgSurface.invalidateAll();
         }
         return false;
     }
@@ -2849,7 +2849,7 @@ bool Canvas::pasteImageFromClipboard()
     if (!mcpStudioMode) setSketchToolActive(false);
 
     repaint();
-    if (editor) editor->nvgSurface.renderAll();
+    if (editor) editor->nvgSurface.invalidateAll();
     return true;
 }
 
@@ -3023,7 +3023,7 @@ bool Canvas::handleVoiceTakeClick(MouseEvent const& e, Point<int> mousePos)
             // ▶ / ■ audition toggle
             if (br) br->playVoiceTake(take.id, take.wavPath);
             repaint();
-            if (editor) editor->nvgSurface.renderAll();
+            if (editor) editor->nvgSurface.invalidateAll();
             return true;
         }
         if (relX >= b.getWidth() - 30) {
@@ -3031,7 +3031,7 @@ bool Canvas::handleVoiceTakeClick(MouseEvent const& e, Point<int> mousePos)
             if (br && br->getPlayingVoiceTakeId() == take.id) br->stopVoiceTake();
             pd->removeMcpVoiceTake(take.id);
             repaint();
-            if (editor) editor->nvgSurface.renderAll();
+            if (editor) editor->nvgSurface.invalidateAll();
             return true;
         }
 
@@ -3181,7 +3181,7 @@ bool Canvas::handleMidiTakeClick(MouseEvent const& e, Point<int> mousePos)
             // ▶ / ⏸ audition toggle
             if (br) br->playMidiTake(take.id, take.json);
             repaint();
-            if (editor) editor->nvgSurface.renderAll();
+            if (editor) editor->nvgSurface.invalidateAll();
             return true;
         }
 
@@ -3190,7 +3190,7 @@ bool Canvas::handleMidiTakeClick(MouseEvent const& e, Point<int> mousePos)
             if (br && br->getPlayingMidiTakeId() == take.id) br->stopMidiTake();
             pd->removeMcpMidiTake(take.id);
             repaint();
-            if (editor) editor->nvgSurface.renderAll();
+            if (editor) editor->nvgSurface.invalidateAll();
             return true;
         }
 
@@ -3241,8 +3241,8 @@ bool Canvas::handleReferenceImageClick(MouseEvent const& e, Point<int> mousePos,
 
                 if (result == 1) {
                     auto const prompt = "[REFERENCE IMAGE] Analyze the pasted schematic \"" + title + "\" on the canvas and build a live patch that matches its circuit or panel.";
-                    if (canvas->editor && canvas->editor->sidebar) {
-                        if (auto* cp = canvas->editor->sidebar->getCopilotPanel()) cp->receiveMessage("user", prompt);
+                    if (canvas->editor) {
+                        if (auto* cp = canvas->editor->getCopilotPanel()) cp->receiveMessage("user", prompt);
                     }
                     canvas->sendPillPrompt(prompt, false);
                 } else if (result == 2) {
@@ -3253,12 +3253,12 @@ bool Canvas::handleReferenceImageClick(MouseEvent const& e, Point<int> mousePos,
                         }
                     }
                     canvas->repaint();
-                    if (canvas->editor) canvas->editor->nvgSurface.renderAll();
+                    if (canvas->editor) canvas->editor->nvgSurface.invalidateAll();
                 } else if (result == 3) {
                     canvas->pd->removeMcpReferenceImage(imageId);
                     canvas->mcpRefImageCache.erase(imageId.toStdString());
                     canvas->repaint();
-                    if (canvas->editor) canvas->editor->nvgSurface.renderAll();
+                    if (canvas->editor) canvas->editor->nvgSurface.invalidateAll();
                 }
             });
         return true;
@@ -3283,7 +3283,7 @@ void Canvas::sendApproval(bool approve)
     mcpApprovalNo = {};
     sendPillPrompt(approve ? "approve" : "deny");
     repaint();
-    if (editor) editor->nvgSurface.renderAll();
+    if (editor) editor->nvgSurface.invalidateAll();
 }
 
 bool Canvas::shouldShowConnectionDirection() const
@@ -3921,7 +3921,7 @@ void Canvas::mouseMove(MouseEvent const& e)
         mcpNoteHoverClose = hoverClose;
         mcpNoteHoverChip = hoverChip;
         repaint();
-        if (editor) editor->nvgSurface.renderAll();
+        if (editor) editor->nvgSurface.invalidateAll();
     }
 }
 
@@ -3932,7 +3932,7 @@ void Canvas::mouseExit(MouseEvent const& e)
         mcpNoteHoverClose = false;
         mcpNoteHoverChip = -1;
         repaint();
-        if (editor) editor->nvgSurface.renderAll();
+        if (editor) editor->nvgSurface.invalidateAll();
     }
 }
 
@@ -4005,7 +4005,7 @@ bool Canvas::handleNoteClick(Point<int> canvasPt)
                     mcpPillDrawerMode = 0;
                     mcpPillDrawerFrame = {};
                     repaint();
-                    if (editor) editor->nvgSurface.renderAll();
+                    if (editor) editor->nvgSurface.invalidateAll();
                     return true;
                 }
             } else if (mcpPillDrawerMode == 2) {
@@ -4044,7 +4044,7 @@ bool Canvas::handleNoteClick(Point<int> canvasPt)
                     case 0:
                         setSketchToolActive(!isSketchToolActive());
                         repaint();
-                        if (editor) editor->nvgSurface.renderAll();
+                        if (editor) editor->nvgSurface.invalidateAll();
                         return true;
                     case 1:
                         createTextNoteAt(mcpMoodPillActive ? mcpMoodPillPos : juce::Point<int>(panel.getCentreX(), panel.getBottom()));
@@ -4060,7 +4060,7 @@ bool Canvas::handleNoteClick(Point<int> canvasPt)
                         // swallowed by a lingering tape-note editor.
                         grabKeyboardFocus();
                         repaint();
-                        if (editor) editor->nvgSurface.renderAll();
+                        if (editor) editor->nvgSurface.invalidateAll();
                         return true;
                     case 3:
                         // Melody record: declared intent — sing (no guessing).
@@ -4076,7 +4076,7 @@ bool Canvas::handleNoteClick(Point<int> canvasPt)
                                     br->startVoiceCapture(60, 1);
                                 }
                                 repaint();
-                                if (editor) editor->nvgSurface.renderAll();
+                                if (editor) editor->nvgSurface.invalidateAll();
                             }
                         }
                         return true;
@@ -4094,7 +4094,7 @@ bool Canvas::handleNoteClick(Point<int> canvasPt)
                                     br->startVoiceCapture(60, 2);
                                 }
                                 repaint();
-                                if (editor) editor->nvgSurface.renderAll();
+                                if (editor) editor->nvgSurface.invalidateAll();
                             }
                         }
                         return true;
@@ -4112,7 +4112,7 @@ bool Canvas::handleNoteClick(Point<int> canvasPt)
                                     br->startMidiCapture(120, "canvas");
                                 }
                                 repaint();
-                                if (editor) editor->nvgSurface.renderAll();
+                                if (editor) editor->nvgSurface.invalidateAll();
                             }
                         }
                         return true;
@@ -4130,7 +4130,7 @@ bool Canvas::handleNoteClick(Point<int> canvasPt)
                 if (relX >= panel.getWidth() - 238 && relX < panel.getWidth() - 210) {
                     setTextToolActive(!isTextToolActive());
                     repaint();
-                    if (editor) editor->nvgSurface.renderAll();
+                    if (editor) editor->nvgSurface.invalidateAll();
                     return true;
                 }
                 if (relX >= panel.getWidth() - 210 && relX < panel.getWidth() - 182) {
@@ -4193,7 +4193,7 @@ bool Canvas::handleNoteClick(Point<int> canvasPt)
             if (i < static_cast<int>(pd->mcpAnnotations.size()))
                 pd->mcpAnnotations.erase(pd->mcpAnnotations.begin() + i);
             repaint();
-            if (editor) editor->nvgSurface.renderAll();
+            if (editor) editor->nvgSurface.invalidateAll();
             return true;
         }
 
@@ -4212,7 +4212,7 @@ bool Canvas::handleNoteClick(Point<int> canvasPt)
                         mcpNoteHover = -1;
                         mcpNoteHoverChip = -1;
                         repaint();
-                        if (editor) editor->nvgSurface.renderAll();
+                        if (editor) editor->nvgSurface.invalidateAll();
                         return true;
                     }
                     if (chip.prompt == "__reply__") {
@@ -4252,8 +4252,8 @@ bool Canvas::handleNoteClick(Point<int> canvasPt)
                                         }
                                     }
                                     sendPillPrompt(replyTxt, false);
-                                    if (editor && editor->sidebar) {
-                                        if (auto* cp = editor->sidebar->getCopilotPanel())
+                                    if (editor) {
+                                        if (auto* cp = editor->getCopilotPanel())
                                             cp->receiveMessage("user", replyTxt);
                                     }
                                     if (auto* br = pd->getMCPBridge())
@@ -4263,20 +4263,20 @@ bool Canvas::handleNoteClick(Point<int> canvasPt)
                             mcpNoteEditIndex = -1;
                             if (mcpNoteEditor) mcpNoteEditor->setVisible(false);
                             repaint();
-                            if (editor) editor->nvgSurface.renderAll();
+                            if (editor) editor->nvgSurface.invalidateAll();
                         };
                         mcpNoteEditor->onEscapeKey = [this] {
                             mcpNoteEditIndex = -1;
                             if (mcpNoteEditor) mcpNoteEditor->setVisible(false);
                             repaint();
-                            if (editor) editor->nvgSurface.renderAll();
+                            if (editor) editor->nvgSurface.invalidateAll();
                         };
                         mcpNoteEditor->onFocusLost = [this] {
                             if (juce::Time::getMillisecondCounter() - mcpNoteOpenedAt < 500) return;
                             mcpNoteEditIndex = -1;
                             if (mcpNoteEditor) mcpNoteEditor->setVisible(false);
                             repaint();
-                            if (editor) editor->nvgSurface.renderAll();
+                            if (editor) editor->nvgSurface.invalidateAll();
                         };
                         mcpNoteEditor->setBounds(juce::roundToInt(tb.getX()),
                                                  juce::roundToInt(tb.getY() + tb.getHeight() + 2.0f),
@@ -4290,7 +4290,7 @@ bool Canvas::handleNoteClick(Point<int> canvasPt)
                             juce::MessageManager::callAsync([ed] { if (ed) ed->grabKeyboardFocus(); });
                         }
                         repaint();
-                        if (editor) editor->nvgSurface.renderAll();
+                        if (editor) editor->nvgSurface.invalidateAll();
                         return true;
                     }
 
@@ -4306,14 +4306,14 @@ bool Canvas::handleNoteClick(Point<int> canvasPt)
                     // 2. Dispatch prompt
                     sendPillPrompt(chip.prompt, false);
                     // 3. Log to Sidebar chat
-                    if (editor && editor->sidebar) {
-                        if (auto* cp = editor->sidebar->getCopilotPanel())
+                    if (editor) {
+                        if (auto* cp = editor->getCopilotPanel())
                             cp->receiveMessage("user", chip.prompt);
                     }
                     mcpNoteHover = -1;
                     mcpNoteHoverChip = -1;
                     repaint();
-                    if (editor) editor->nvgSurface.renderAll();
+                    if (editor) editor->nvgSurface.invalidateAll();
                     return true;
                 }
                 curChipX += cw + 4.0f;
@@ -4330,15 +4330,15 @@ bool Canvas::handleNoteClick(Point<int> canvasPt)
                 if (auto* obj = findObjectByStableId(tid)) setSelected(obj, true);
             }
         }
-        if (editor && editor->sidebar) {
-            editor->sidebar->showSidebar(true);
-            editor->sidebar->showPanel(Sidebar::SidePanel::CopilotPan);
-            if (auto* cp = editor->sidebar->getCopilotPanel()) {
+        if (auto* copilotSidebar = editor ? editor->getSidebarForPanel(Sidebar::CopilotChatPanel) : nullptr) {
+            copilotSidebar->showSidebar(true);
+            copilotSidebar->showPanel(Sidebar::CopilotChatPanel);
+            if (auto* cp = editor->getCopilotPanel()) {
                 cp->showAnnotationNote(a.text, a.kind, a.targetIds);
             }
         }
         repaint();
-        if (editor) editor->nvgSurface.renderAll();
+        if (editor) editor->nvgSurface.invalidateAll();
         return true;
     }
     return false;
@@ -4369,7 +4369,7 @@ void Canvas::mouseDown(MouseEvent const& e)
         } else {
             mcpImageSlotActive = false;
             repaint();
-            if (editor) editor->nvgSurface.renderAll();
+            if (editor) editor->nvgSurface.invalidateAll();
         }
         return;
     }
@@ -4416,7 +4416,7 @@ void Canvas::mouseDown(MouseEvent const& e)
                 mcpCurrentStroke.push_back({static_cast<float>(pt.x), static_cast<float>(pt.y), juce::Time::getMillisecondCounterHiRes()});
             }
             repaint();
-            if (editor) editor->nvgSurface.renderAll();
+            if (editor) editor->nvgSurface.invalidateAll();
             return;
         }
 
@@ -4484,7 +4484,7 @@ void Canvas::mouseDown(MouseEvent const& e)
                                             pd->mcpAnnotations[static_cast<size_t>(mcpNoteEditIndex)].text = mcpNoteEditor->getText();
                                     }
                                     repaint();
-                                    if (editor) editor->nvgSurface.renderAll();
+                                    if (editor) editor->nvgSurface.invalidateAll();
                                 };
                                 mcpNoteEditor->onEscapeKey = [this] {
                                     mcpNoteEditIndex = -1;
@@ -4568,7 +4568,7 @@ void Canvas::mouseDown(MouseEvent const& e)
             if (mcpSketchFadeTimer) mcpSketchFadeTimer->stopTimer();
             mcpCurrentStroke.clear();
             repaint();
-            if (editor) editor->nvgSurface.renderAll();
+            if (editor) editor->nvgSurface.invalidateAll();
             return;
         }
         Dialogs::showCanvasRightClickMenu(this, source, e.getScreenPosition());
@@ -4597,7 +4597,7 @@ void Canvas::mouseDrag(MouseEvent const& e)
         auto const pdPos = pt - mcpTakeDragOffset - canvasOrigin;
         if (pd) pd->setMcpVoiceTakePos(mcpDraggingTakeId, static_cast<float>(pdPos.x), static_cast<float>(pdPos.y));
         repaint();
-        if (editor) editor->nvgSurface.renderAll();
+        if (editor) editor->nvgSurface.invalidateAll();
         return;
     }
 
@@ -4607,7 +4607,7 @@ void Canvas::mouseDrag(MouseEvent const& e)
         auto const pdPos = pt - mcpMidiTakeDragOffset - canvasOrigin;
         if (pd) pd->setMcpMidiTakePos(mcpDraggingMidiTakeId, static_cast<float>(pdPos.x), static_cast<float>(pdPos.y));
         repaint();
-        if (editor) editor->nvgSurface.renderAll();
+        if (editor) editor->nvgSurface.invalidateAll();
         return;
     }
 
@@ -4617,7 +4617,7 @@ void Canvas::mouseDrag(MouseEvent const& e)
         auto const pdPos = pt - mcpRefImageDragOffset - canvasOrigin;
         if (pd) pd->moveMcpReferenceImage(mcpDraggingRefImageId, static_cast<float>(pdPos.x), static_cast<float>(pdPos.y));
         repaint();
-        if (editor) editor->nvgSurface.renderAll();
+        if (editor) editor->nvgSurface.invalidateAll();
         return;
     }
 
@@ -4648,14 +4648,14 @@ void Canvas::mouseDrag(MouseEvent const& e)
             if (erasedAny) {
                 updateSelectionPill();
                 repaint();
-                if (editor) editor->nvgSurface.renderAll();
+                if (editor) editor->nvgSurface.invalidateAll();
             }
             return;
         }
 
         mcpCurrentStroke.push_back({static_cast<float>(pt.x), static_cast<float>(pt.y), juce::Time::getMillisecondCounterHiRes()});
         repaint();
-        if (editor) editor->nvgSurface.renderAll();
+        if (editor) editor->nvgSurface.invalidateAll();
         return;
     }
 
@@ -4755,7 +4755,7 @@ void Canvas::mouseUp(MouseEvent const& e)
         mcpDraggingTakeId.clear();
         setMouseCursor(juce::MouseCursor::NormalCursor);
         repaint();
-        if (editor) editor->nvgSurface.renderAll();
+        if (editor) editor->nvgSurface.invalidateAll();
         return;
     }
 
@@ -4764,7 +4764,7 @@ void Canvas::mouseUp(MouseEvent const& e)
         mcpDraggingMidiTakeId.clear();
         setMouseCursor(juce::MouseCursor::NormalCursor);
         repaint();
-        if (editor) editor->nvgSurface.renderAll();
+        if (editor) editor->nvgSurface.invalidateAll();
         return;
     }
 
@@ -4773,7 +4773,7 @@ void Canvas::mouseUp(MouseEvent const& e)
         mcpDraggingRefImageId.clear();
         setMouseCursor(juce::MouseCursor::NormalCursor);
         repaint();
-        if (editor) editor->nvgSurface.renderAll();
+        if (editor) editor->nvgSurface.invalidateAll();
         return;
     }
 
@@ -4808,7 +4808,7 @@ void Canvas::mouseUp(MouseEvent const& e)
         // Ink persists -> anchor the Moodboard Chisel under the fresh bbox.
         updateSelectionPill();
         repaint();
-        if (editor) editor->nvgSurface.renderAll();
+        if (editor) editor->nvgSurface.invalidateAll();
         return;
     }
 
@@ -4930,7 +4930,7 @@ bool Canvas::keyPressed(KeyPress const& key)
     if (mcpImageSlotActive && key.getKeyCode() == juce::KeyPress::escapeKey) {
         mcpImageSlotActive = false;
         repaint();
-        if (editor) editor->nvgSurface.renderAll();
+        if (editor) editor->nvgSurface.invalidateAll();
         return true;
     }
 
@@ -5271,7 +5271,7 @@ void Canvas::updateSelectionPill()
                 mcpPillDrawerFrame = {};
                 mcpPaletteFrame = {};
                 repaint();
-                if (editor) editor->nvgSurface.renderAll();
+                if (editor) editor->nvgSurface.invalidateAll();
                 return;
             }
             if (mcpSelectionPill) mcpSelectionPill->setText(juce::String(), false);
@@ -5279,7 +5279,7 @@ void Canvas::updateSelectionPill()
         };
         mcpSelectionPill->onTextChange = [this] {
             repaint();
-            if (editor) editor->nvgSurface.renderAll();
+            if (editor) editor->nvgSurface.invalidateAll();
         };
         mcpSelectionPill->onFocusLost = [this] {
             // Keep a typed prompt, but if it's empty and drawer is closed get out of the way.
@@ -5311,7 +5311,7 @@ void Canvas::updateSelectionPill()
     }
     mcpPillAnimator->startTimerHz(6);
     repaint();
-    if (editor) editor->nvgSurface.renderAll();
+    if (editor) editor->nvgSurface.invalidateAll();
 }
 
 void Canvas::hideSelectionPill()
@@ -5325,7 +5325,7 @@ void Canvas::hideSelectionPill()
     if (mcpSelectionPill && mcpSelectionPill->isVisible()) {
         mcpSelectionPill->setVisible(false);
         repaint();
-        if (editor) editor->nvgSurface.renderAll();
+        if (editor) editor->nvgSurface.invalidateAll();
     }
 }
 
@@ -5381,7 +5381,7 @@ void Canvas::parkSelectionPill()
     if (mcpSelectionPill) mcpSelectionPill->setText(juce::String(), false);
     dismissSelectionPill();
     repaint();
-    if (editor) editor->nvgSurface.renderAll();
+    if (editor) editor->nvgSurface.invalidateAll();
 }
 
 void Canvas::submitSelectionPill(bool queueForChat)
@@ -5400,7 +5400,7 @@ void Canvas::submitSelectionPill(bool queueForChat)
         // Keep the chisel parked so [↩ Undo] / [🗑 Clear] stay one tap away.
         updateSelectionPill();
         repaint();
-        if (editor) editor->nvgSurface.renderAll();
+        if (editor) editor->nvgSurface.invalidateAll();
         return;
     }
 
@@ -5433,8 +5433,8 @@ void Canvas::submitSelectionPill(bool queueForChat)
         }
 
         // Park the prompt in the Sidebar Copilot chat log (no clutter on canvas)
-        if (editor && editor->sidebar) {
-            if (auto* cp = editor->sidebar->getCopilotPanel()) {
+        if (editor) {
+            if (auto* cp = editor->getCopilotPanel()) {
                 cp->receiveMessage("user", prompt);
             }
         }
@@ -5447,7 +5447,7 @@ void Canvas::submitSelectionPill(bool queueForChat)
 
     dismissSelectionPill();
     repaint();
-    if (editor) editor->nvgSurface.renderAll();
+    if (editor) editor->nvgSurface.invalidateAll();
 }
 
 bool Canvas::SlotPasteKeyListener::keyPressed(const juce::KeyPress& key, juce::Component*)
@@ -5469,13 +5469,13 @@ bool Canvas::SelectionPillKeyListener::keyPressed(const juce::KeyPress& key, juc
         if (key.getKeyCode() == juce::KeyPress::upKey && count > 0) {
             canvas->mcpPaletteSelectedIndex = (canvas->mcpPaletteSelectedIndex - 1 + count) % count;
             canvas->repaint();
-            if (canvas->editor) canvas->editor->nvgSurface.renderAll();
+            if (canvas->editor) canvas->editor->nvgSurface.invalidateAll();
             return true;
         }
         if (key.getKeyCode() == juce::KeyPress::downKey && count > 0) {
             canvas->mcpPaletteSelectedIndex = (canvas->mcpPaletteSelectedIndex + 1) % count;
             canvas->repaint();
-            if (canvas->editor) canvas->editor->nvgSurface.renderAll();
+            if (canvas->editor) canvas->editor->nvgSurface.invalidateAll();
             return true;
         }
         if (key.getKeyCode() == juce::KeyPress::returnKey && !key.getModifiers().isShiftDown() && count > 0) {
@@ -5486,7 +5486,7 @@ bool Canvas::SelectionPillKeyListener::keyPressed(const juce::KeyPress& key, juc
             canvas->mcpPillDrawerMode = 0;
             canvas->mcpPaletteFrame = {};
             canvas->repaint();
-            if (canvas->editor) canvas->editor->nvgSurface.renderAll();
+            if (canvas->editor) canvas->editor->nvgSurface.invalidateAll();
             return true;
         }
     }
@@ -5517,7 +5517,7 @@ void Canvas::SelectionPillAnimator::timerCallback()
 {
     if (canvas && canvas->mcpSelectionPill && canvas->mcpSelectionPill->isVisible()) {
         canvas->repaint();
-        if (canvas->editor) canvas->editor->nvgSurface.renderAll();
+        if (canvas->editor) canvas->editor->nvgSurface.invalidateAll();
     } else {
         stopTimer();
     }
@@ -5534,7 +5534,7 @@ void Canvas::showPillLensesMenu()
         mcpPillDrawerFrame = {};
     }
     repaint();
-    if (editor) editor->nvgSurface.renderAll();
+    if (editor) editor->nvgSurface.invalidateAll();
 }
 
 void Canvas::configurePillLookAndFeel()
@@ -5600,7 +5600,7 @@ void Canvas::showPillPalette()
         mcpPaletteFrame = {};
     }
     repaint();
-    if (editor) editor->nvgSurface.renderAll();
+    if (editor) editor->nvgSurface.invalidateAll();
 }
 
 void Canvas::triggerPaletteItem(int index)
@@ -5629,7 +5629,7 @@ void Canvas::triggerPaletteItem(int index)
             mcpSelectionPill->grabKeyboardFocus();
         }
         repaint();
-        if (editor) editor->nvgSurface.renderAll();
+        if (editor) editor->nvgSurface.invalidateAll();
     }
 }
 
