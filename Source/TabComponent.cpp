@@ -5,11 +5,10 @@
 #include "Sidebar/Sidebar.h"
 #include "Dialogs/Dialogs.h"
 #include "Utility/Autosave.h"
-#include "Components/ObjectDragAndDrop.h"
+#include "Components/TouchPopupMenu.h"
 #include "NVGSurface.h"
 #include "PluginMode.h"
 #include "Standalone/PlugDataWindow.h"
-
 
 class TabComponent::TabBarButtonComponent final : public Component {
 
@@ -21,8 +20,9 @@ class TabComponent::TabBarButtonComponent final : public Component {
         }
         void checkBounds(Rectangle<int>& bounds, Rectangle<int> const&, Rectangle<int> const& limits, bool, bool, bool, bool) override
         {
-            bounds = bounds.withPosition(std::clamp(bounds.getX(), 30, parent->getWidth() - bounds.getWidth()), 0);
+            bounds = bounds.withPosition(std::clamp(bounds.getX(), 0, parent->getWidth() - bounds.getWidth()), 0);
         }
+
     private:
         TabComponent* parent;
     };
@@ -33,29 +33,26 @@ class TabComponent::TabBarButtonComponent final : public Component {
 
         void paint(Graphics& g) override
         {
-            auto const font = Fonts::getIconFont().withHeight(12);
-            g.setFont(font);
+            auto const& colours = getThemeColours(*this);
 
-            if (!isEnabled()) {
-                g.setColour(Colours::grey);
-            } else if (getToggleState()) {
-                g.setColour(findColour(PlugDataColour::toolbarActiveColourId));
-            } else if (isMouseOver()) {
-                g.setColour(findColour(PlugDataColour::toolbarTextColourId).brighter(0.8f));
-            } else {
-                g.setColour(findColour(PlugDataColour::toolbarTextColourId));
+            // Rounded hover background behind the close icon
+            if (isMouseOver() && isEnabled()) {
+                g.setColour(colours.toolbarTextColour.withAlpha(0.14f));
+                g.fillRoundedRectangle(getLocalBounds().toFloat().reduced(1.0f), Corners::defaultCornerRadius);
             }
 
-            int const yIndent = jmin(4, proportionOfHeight(0.3f));
-            int const cornerSize = jmin(getHeight(), getWidth()) / 2;
+            Colour colour;
+            if (!isEnabled()) {
+                colour = Colours::grey;
+            } else if (getToggleState()) {
+                colour = colours.toolbarActiveColour;
+            } else if (isMouseOver()) {
+                colour = colours.toolbarTextColour;
+            } else {
+                colour = colours.toolbarTextColour.withAlpha(0.7f);
+            }
 
-            int const fontHeight = roundToInt(font.getHeight() * 0.6f);
-            int const leftIndent = jmin(fontHeight, 2 + cornerSize / (isConnectedOnLeft() ? 4 : 2));
-            int const rightIndent = jmin(fontHeight, 2 + cornerSize / (isConnectedOnRight() ? 4 : 2));
-            int const textWidth = getWidth() - leftIndent - rightIndent;
-
-            if (textWidth > 0)
-                g.drawFittedText(getButtonText(), leftIndent, yIndent, textWidth, getHeight() - yIndent * 2, Justification::centred, 2);
+            Fonts::drawIcon(g, getButtonText(), getLocalBounds(), colour, 11);
         }
     };
 
@@ -73,52 +70,75 @@ public:
         closeButton.setSize(28, 28);
         addAndMakeVisible(closeButton);
         setRepaintsOnMouseActivity(true);
+
+        updater.addAnimator(tabAnimator);
+    }
+
+    // Tabs are sized to their content, but shrink to fill the bar once it runs out of space
+    int getIdealWidth() const
+    {
+        if (!cnv)
+            return 104;
+        auto const font = Fonts::getDefaultFont().withHeight(14.0f);
+        int const textWidth = static_cast<int>(std::ceil(Fonts::getStringWidth(cnv->patch.getTitle(), font)));
+        // equal side reserves for the dot / close button + text + pill padding
+        return jlimit(104, 248, textWidth + 60);
     }
 
     void paint(Graphics& g) override
     {
+        auto const& colours = getThemeColours(*this);
+
         auto const mouseOver = isMouseOver();
         auto const active = isActive();
+
+        // Only the active tab gets a solid pill; inactive tabs get a subtle hover fill
+        auto const pill = getLocalBounds().toFloat().reduced(3.0f);
         if (active) {
-            g.setColour(findColour(PlugDataColour::activeTabBackgroundColourId));
+            // Subtle shadow to lift the active pill off the bar
+            StackShadow::drawShadowForRect(g, pill.toNearestInt(), 5, Corners::defaultCornerRadius, 0.1f, 2);
+            g.setColour(colours.activeTabBackgroundColour);
+            g.fillRoundedRectangle(pill, Corners::defaultCornerRadius);
         } else if (mouseOver) {
-            g.setColour(findColour(PlugDataColour::activeTabBackgroundColourId).interpolatedWith(findColour(PlugDataColour::toolbarBackgroundColourId), 0.4f));
-        } else {
-            g.setColour(findColour(PlugDataColour::toolbarBackgroundColourId));
+            g.setColour(colours.activeTabBackgroundColour.interpolatedWith(colours.toolbarBackgroundColour, 0.5f));
+            g.fillRoundedRectangle(pill, Corners::defaultCornerRadius);
         }
 
-        g.fillRoundedRectangle(getLocalBounds().toFloat().reduced(4.5f), Corners::defaultCornerRadius);
+        if (!cnv)
+            return;
 
-        auto const area = getLocalBounds().reduced(4, 1).toFloat();
+        auto content = getLocalBounds().reduced(4, 1).toFloat();
+        constexpr float sideReserve = 22.0f;
 
-        // Use a gradient to make it fade out when it gets near to the close button
-        auto const fadeX = mouseOver || active ? area.getRight() - 25 : area.getRight() - 8;
-        auto const textColour = findColour(PlugDataColour::toolbarTextColourId);
-        g.setGradientFill(ColourGradient(textColour, fadeX - 18, area.getY(), Colours::transparentBlack, fadeX, area.getY(), false));
-
-        if (cnv) {
-            auto const text = cnv->patch.getTitle() + (cnv->patch.isDirty() ? String("*") : String());
-
-            g.setFont(Fonts::getCurrentFont().withHeight(14.0f));
-            g.drawText(text, area.reduced(4, 0), Justification::centred, false);
+        // Unsaved-changes indicator on the left
+        if (cnv->patch.isDirty()) {
+            constexpr float dotSize = 6.0f;
+            g.setColour(colours.dataColour);
+            g.fillEllipse(content.getX() + 8.0f, content.getCentreY() - dotSize * 0.5f, dotSize, dotSize);
         }
+
+        g.setColour(active ? colours.toolbarTextColour : colours.toolbarTextColour.withAlpha(0.65f));
+        g.setFont(Fonts::getDefaultFont().withHeight(14.0f));
+        g.drawText(cnv->patch.getTitle(), content.reduced(sideReserve, 0), Justification::centred, false);
     }
 
     void resized() override
     {
-        closeButton.setCentrePosition(getLocalBounds().getCentre().withX(getWidth() - 15).translated(0, 1));
+        closeButton.setBounds(getLocalBounds().reduced(4, 1).removeFromRight(22).withSizeKeepingCentre(20, 20).translated(-1, 1));
     }
 
     ScaledImage generateTabBarButtonImage() const
     {
+        auto const& colours = getThemeColours(*this);
+
         if (!cnv)
-            return {};
+            return { };
 
         constexpr auto scale = 2.0f;
         // we calculate the best size for the tab DnD image
         auto const text = cnv->patch.getTitle();
-        Font const font(Fonts::getCurrentFont());
-        auto const length = font.getStringWidth(text) + 32;
+        Font const font(Fonts::getDefaultFont());
+        auto const length = Fonts::getStringWidth(text, font) + 32;
         constexpr auto boundsOffset = 10;
 
         // we need to expand the bounds, but reset the position to top left
@@ -129,15 +149,14 @@ public:
         auto const image = Image(Image::PixelFormat::ARGB, bounds.getWidth() * scale, bounds.getHeight() * scale, true);
         auto g = Graphics(image);
         g.addTransform(AffineTransform::scale(scale));
-        Path path;
-        path.addRoundedRectangle(bounds.reduced(12), 5.0f);
-        StackShadow::renderDropShadow(0, g, path, Colour(0, 0, 0).withAlpha(0.2f), 6, { 0, 1 }, scale);
+
+        StackShadow::drawShadowForRect(g, bounds.reduced(12), 7, Corners::defaultCornerRadius, 0.2f, 1);
         g.setOpacity(1.0f);
 
-        g.setColour(findColour(PlugDataColour::activeTabBackgroundColourId));
+        g.setColour(colours.activeTabBackgroundColour);
         g.fillRoundedRectangle(textBounds.withPosition(10, 10).reduced(2).toFloat(), Corners::defaultCornerRadius);
 
-        g.setColour(findColour(PlugDataColour::toolbarTextColourId));
+        g.setColour(colours.toolbarTextColour);
 
         g.setFont(font);
         g.drawText(text, textBounds.withPosition(10, 10), Justification::centred, false);
@@ -215,10 +234,12 @@ public:
     {
         if (e.getDistanceFromDragStart() > 10 && !isDragging) {
             isDragging = true;
-            auto const dragContainer = ZoomableDragAndDropContainer::findParentDragContainerFor(this);
+            auto const dragContainer = DragAndDropContainer::findParentDragContainerFor(this);
 
             tabImage = generateTabBarButtonImage();
-            dragContainer->startDragging(1, this, tabImage, tabImage, nullptr);
+            var description = var(new DynamicObject());
+            description.getDynamicObject()->setProperty("dropped", false);
+            dragContainer->startDragging(description, this, tabImage, true);
         } else if (parent->draggingOverTabbar) {
             dragger.dragComponent(this, e, &tabDragConstrainer);
         }
@@ -236,15 +257,80 @@ public:
         return cnv && (parent->splits[0] == cnv || parent->splits[1] == cnv);
     }
 
+    void animate(Rectangle<int> targetBounds)
+    {
+        animationStartBounds = getBounds();
+        animationEndBounds = targetBounds;
+        tabAnimator.complete();
+        tabAnimator.start();
+    }
+
     // close button, etc.
     SafePointer<Canvas> cnv;
     TabComponent* parent;
     ScaledImage tabImage;
-    bool isDragging = false;
     ComponentDragger dragger;
     TabDragConstrainer tabDragConstrainer;
 
     CloseTabButton closeButton = CloseTabButton(Icons::Clear);
+    bool isDragging : 1 = false;
+
+    Rectangle<int> animationStartBounds, animationEndBounds;
+    VBlankAnimatorUpdater updater { this };
+    Animator tabAnimator = ValueAnimatorBuilder { }
+                               .withEasing(Easings::createEaseInOut())
+                               .withDurationMs(220)
+                               .withValueChangedCallback([this](float v) {
+                                   auto start = std::make_tuple(animationStartBounds.getX(), animationStartBounds.getY(), animationStartBounds.getWidth(), animationStartBounds.getHeight());
+                                   auto end = std::make_tuple(animationEndBounds.getX(), animationEndBounds.getY(), animationEndBounds.getWidth(), animationEndBounds.getHeight());
+                                   auto const [x, y, w, h] = makeAnimationLimits(start, end).lerp(v);
+                                   setBounds(x, y, w, h);
+                               })
+                               .build();
+};
+
+class TabComponent::NewTabButton final : public Component {
+public:
+    NewTabButton()
+    {
+        addAndMakeVisible(button);
+        updater.addAnimator(animator);
+    }
+
+    void resized() override
+    {
+        button.setBounds(getLocalBounds());
+    }
+
+    void updateBounds(Rectangle<int> const targetBounds, bool animate)
+    {
+        if(!animate)
+        {
+            animator.complete();
+            setBounds(targetBounds);
+        }
+
+        animationStartBounds = getBounds();
+        animationEndBounds = targetBounds;
+        animator.complete();
+        animator.start();
+    }
+
+    MainToolbarButton button = MainToolbarButton(Icons::Add);
+
+private:
+    Rectangle<int> animationStartBounds, animationEndBounds;
+    VBlankAnimatorUpdater updater { this };
+    Animator animator = ValueAnimatorBuilder { }
+                            .withEasing(Easings::createEaseInOut())
+                            .withDurationMs(220)
+                            .withValueChangedCallback([this](float v) {
+                                auto start = std::make_tuple(animationStartBounds.getX(), animationStartBounds.getY(), animationStartBounds.getWidth(), animationStartBounds.getHeight());
+                                auto end = std::make_tuple(animationEndBounds.getX(), animationEndBounds.getY(), animationEndBounds.getWidth(), animationEndBounds.getHeight());
+                                auto const [x, y, w, h] = makeAnimationLimits(start, end).lerp(v);
+                                setBounds(x, y, w, h);
+                            })
+                            .build();
 };
 
 TabComponent::TabComponent(PluginEditor* editor)
@@ -252,8 +338,9 @@ TabComponent::TabComponent(PluginEditor* editor)
     , pd(editor->pd)
 {
     for (int i = 0; i < tabbars.size(); i++) {
-        addChildComponent(newTabButtons[i]);
-        newTabButtons[i].onClick = [this, i] {
+        newTabButtons[i] = std::make_unique<NewTabButton>();
+        addChildComponent(*newTabButtons[i]);
+        newTabButtons[i]->button.onClick = [this, i] {
             activeSplitIndex = i;
             newPatch();
         };
@@ -286,6 +373,18 @@ Canvas* TabComponent::newPatch()
 
 void TabComponent::openHelpPatch(const URL& path)
 {
+    for (auto* editor : pd->getEditors()) {
+        for (auto* cnv : editor->getCanvases()) {
+            if (cnv->patch.getCurrentFile() == path.getLocalFile()) {
+                pd->logError("Patch is already open");
+                editor->getTopLevelComponent()->toFront(true);
+                editor->getTabComponent().showTab(cnv, cnv->patch.splitViewIndex);
+                editor->getTabComponent().setActiveSplit(cnv);
+                return;
+            }
+        }
+    }
+
     auto const patch = pd->loadPatch(path);
     
     if (auto p = patch->getPointer()) {
@@ -299,15 +398,13 @@ void TabComponent::openPatch(const URL& path)
 {
     editor->pd->autosave->checkForMoreRecentAutosave(path, editor, [this](URL const& file, URL const& patchPath) {
         auto checkQuarantine = [this](File const& f, std::function<void()> callback) {
-            if(OSUtils::isFileQuarantined(f))
-            {
-                Dialogs::showMultiChoiceDialog(&editor->openedDialog, editor, "This patch was downloaded from the internet. Opening patches from untrusted sources may pose security risks. Do you want to proceed?" , [callback, f](int const choice) {
+            if (OSUtils::isFileQuarantined(f)) {
+                Dialogs::showMultiChoiceDialog(&editor->openedDialog, editor, "This patch was downloaded from the internet. Opening patches from untrusted sources may pose security risks. Do you want to proceed?", [callback, f](int const choice) {
                         if (choice == 0) {
                             OSUtils::removeFromQuarantine(f);
                             callback();
                         } }, { "Trust and Open", "Cancel" }, Icons::Warning);
-            }
-            else {
+            } else {
                 callback();
             }
         };
@@ -321,26 +418,31 @@ void TabComponent::openPatch(const URL& path)
                     editor->getTopLevelComponent()->toFront(true);
                     editor->getTabComponent().showTab(cnv, cnv->patch.splitViewIndex);
                     editor->getTabComponent().setActiveSplit(cnv);
+                    return;
                 }
             }
         }
         
-        checkQuarantine(patchFile, [this, file, patchPath](){
-            auto const patch = pd->loadPatch(file);
+        checkQuarantine(patchFile, [this, url = file, patchPath]() mutable {
+#if JUCE_IOS
+            url.setBookmarkData(patchPath.getBookmarkData());
+#endif
+            auto const patch = pd->loadPatch(url);
+            if (!patch)
+                return;
             
             // If we're opening a temp file, assume it's dirty upon opening
             // This is so that you can recover an autosave without directly overewriting it, but still be prompted to save if you close the autosaved patch
-            if(file.getLocalFile().getParentDirectory() == File::getSpecialLocation(File::tempDirectory))
-            {
-                if(auto p = patch->getPointer()) {
+            if (url.getLocalFile().getParentDirectory() == File::getSpecialLocation(File::tempDirectory)) {
+                if (auto p = patch->getPointer()) {
                     canvas_dirty(p.get(), 1.0f);
                 }
             }
             
-            if(auto* cnv = openPatch(patch, true)) {
+            if (auto* cnv = openPatch(patch, true)) {
                 cnv->patch.setCurrentFile(patchPath);
             }
-            SettingsFile::getInstance()->addToRecentlyOpened(patchPath.getLocalFile());
+            SettingsFile::getInstance()->addToRecentlyOpened(patchPath);
         });
     });
 }
@@ -348,11 +450,13 @@ void TabComponent::openPatch(const URL& path)
 Canvas* TabComponent::openPatch(String const& patchContent)
 {
     auto const patch = pd->loadPatch(patchContent);
+    if (!patch)
+        return nullptr;
     patch->setUntitled();
     return openPatch(patch);
 }
 
-Canvas* TabComponent::openPatch(pd::Patch::Ptr existingPatch, bool const warnIfAlreadyOpen)
+Canvas* TabComponent::openPatch(pd::Patch::Ptr existingPatch, bool const warnIfAlreadyOpen, bool const sendVisMessage)
 {
     if (!existingPatch)
         return nullptr;
@@ -406,6 +510,10 @@ Canvas* TabComponent::openPatch(pd::Patch::Ptr existingPatch, bool const warnIfA
         alreadyOpeningInNewWindow = false;
     }
 
+    if (sendVisMessage && !cnv->isGraph) {
+        cnv->patch.setVisible(true);
+    }
+
     return cnv;
 }
 
@@ -419,6 +527,41 @@ void TabComponent::openPatch()
     },
         true, false, "*.pd", "Patch", this);
 }
+
+#if JUCE_IOS
+void TabComponent::openPatchFolder()
+{
+    Dialogs::showOpenDialog([this](URL resultURL) {
+        auto result = resultURL.getLocalFile();
+        HeapArray<File> pdFiles;
+        StringArray pdFileNames;
+
+        for (auto file : OSUtils::iterateDirectory(result, false, false)) {
+            if (file.hasFileExtension("pd")) {
+                pdFiles.add(file);
+                pdFileNames.add(file.getFileName());
+            }
+        }
+
+        if (pdFiles.size() == 1) {
+            auto patchURL = URL(pdFiles[0]);
+            patchURL.setBookmarkData(resultURL.getBookmarkData());
+            openPatch(patchURL);
+        } else if (pdFiles.size() != 0) {
+            TouchPopupMenu patchChoiceMenu;
+            for (int i = 0; i < pdFiles.size(); i++) {
+                patchChoiceMenu.addItem(pdFileNames[i], [this, resultURL, patchURL = URL(pdFiles[0])]() mutable {
+                    patchURL.setBookmarkData(resultURL.getBookmarkData());
+                    openPatch(patchURL);
+                });
+            }
+
+            patchChoiceMenu.showMenu(editor, editor, "Choose patch");
+        }
+    },
+        false, true, "", "PatchFolder", this);
+}
+#endif
 
 void TabComponent::moveToLeftSplit(TabBarButtonComponent const* tab)
 {
@@ -532,6 +675,8 @@ void TabComponent::nextTab()
 {
     auto const splitIndex = activeSplitIndex && splits[1];
     auto const& tabbar = tabbars[splitIndex];
+    if(!tabbar.size()) return;
+    
     auto oldTabIndex = 0;
     for (int i = 0; i < tabbar.size(); i++) {
         if (tabbar[i]->cnv == splits[splitIndex]) {
@@ -547,6 +692,8 @@ void TabComponent::previousTab()
 {
     auto const splitIndex = activeSplitIndex && splits[1];
     auto const& tabbar = tabbars[splitIndex];
+    if(!tabbar.size()) return;
+    
     auto oldTabIndex = 0;
     for (int i = 0; i < tabbar.size(); i++) {
         if (tabbar[i]->cnv == splits[splitIndex]) {
@@ -560,11 +707,10 @@ void TabComponent::previousTab()
 
 void TabComponent::createNewWindowFromTab(Component* draggedTab)
 {
-    auto const* tab = dynamic_cast<TabBarButtonComponent*>(draggedTab);
-    if (!tab)
-        return;
-    if(canvases.size() > 1) {
+    if (auto const* tab = dynamic_cast<TabBarButtonComponent*>(draggedTab)) {
+        if (canvases.size() > 1) {
         createNewWindow(tab->cnv);
+    }
     }
 }
 
@@ -596,8 +742,8 @@ Canvas* TabComponent::createNewWindow(Canvas* cnv)
 
     if (SettingsFile::getInstance()->getProperty<bool>("open_patches_in_window")) {
         auto const patchBounds = newCanvas->patch.getBounds() * (SettingsFile::getInstance()->getProperty<float>("default_zoom") / 100.0f);
-        auto const screenBounds = Desktop::getInstance().getDisplays().getPrimaryDisplay()->userArea;
-        auto const windowBounds = screenBounds.withSizeKeepingCentre(patchBounds.getWidth() + newEditor->sidebar->getWidth() + 30, patchBounds.getHeight() + 94);
+        auto const screenBounds = Desktop::getInstance().getDisplays().getPrimaryDisplay()->userBounds.getSmallestIntegerContainer();
+        auto const windowBounds = screenBounds.withSizeKeepingCentre(patchBounds.getWidth() + newEditor->rightSidebar->getWidth() + 30, patchBounds.getHeight() + 94);
         newEditor->getTopLevelComponent()->setBounds(windowBounds);
     }
 
@@ -640,7 +786,7 @@ void TabComponent::handleAsyncUpdate()
                 editorHasPatches = true;
         }
         
-        if(!editorHasPatches) {
+        if (!editorHasPatches) {
             auto* pdInstance = pd; // Copy pd because we might self-destruct
             pdInstance->openedEditors.removeObject(editor);
             auto const* editor = pdInstance->openedEditors.getFirst();
@@ -667,6 +813,14 @@ void TabComponent::handleAsyncUpdate()
         cnv->saveViewportState();
     }
 
+    UnorderedMap<Canvas*, Rectangle<int>> oldTabBounds;
+    for (auto& tabbar : tabbars) {
+        for (auto* tab : tabbar) {
+            oldTabBounds.insert({ tab->cnv, tab->getBounds() });
+        }
+    }
+    animateTabs = oldTabBounds.size() > 0;
+
     tabbars[0].clear();
     tabbars[1].clear();
 
@@ -679,6 +833,7 @@ void TabComponent::handleAsyncUpdate()
             editor->showWelcomePanel(false);
             if (!editor->isInPluginMode() || editor->pluginMode->getPatch()->getPointer().get() != patchInPluginMode->getUncheckedPointer()) {
                 editor->pluginMode = std::make_unique<PluginMode>(editor, patchInPluginMode);
+                editor->updateStandaloneWindowControls();
             }
             editor->pluginMode->updateSize();
             editor->parentSizeChanged(); // hack to force the window title buttons to hide
@@ -687,6 +842,7 @@ void TabComponent::handleAsyncUpdate()
         // if the editor is in pluginmode
     } else if (editor->isInPluginMode()) {
         editor->pluginMode.reset(nullptr);
+        editor->updateStandaloneWindowControls();
     }
 
     // First, remove canvases that no longer exist
@@ -723,6 +879,13 @@ void TabComponent::handleAsyncUpdate()
 
         // Create tab buttons
         auto* newTabButton = new TabBarButtonComponent(cnv, this);
+        if (oldTabBounds.contains(cnv)) {
+            newTabButton->setBounds(oldTabBounds[cnv]);
+        } else {
+            auto* lastTab = tabbars[patch->splitViewIndex == 1].getLast();
+            newTabButton->setBounds(lastTab ? lastTab->getRight() : 0, 0, 0, 30);
+        }
+
         tabbars[patch->splitViewIndex == 1].add(newTabButton);
         addAndMakeVisible(newTabButton);
     }
@@ -732,7 +895,6 @@ void TabComponent::handleAsyncUpdate()
     // Show welcome panel if there are no tabs
     if (tabbars[0].size() == 0 && tabbars[1].size() == 0) {
         editor->showWelcomePanel(true);
-        editor->nvgSurface.renderAll();
         editor->resized();
         editor->parentSizeChanged();
     } else {
@@ -815,7 +977,8 @@ void TabComponent::showTab(Canvas* cnv, int const splitIndex)
 
     if (cnv && cnv != getCurrentCanvas()) {
         cnv->deselectAll();
-        editor->sidebar->updateSearch(true);
+        if (auto* s = editor->getSidebarForPanel(Sidebar::PatchSearchPanel))
+            s->updateSearch(true);
     }
 
     if (splits[splitIndex] && splits[splitIndex] != splits[!splitIndex]) {
@@ -826,6 +989,7 @@ void TabComponent::showTab(Canvas* cnv, int const splitIndex)
     splits[splitIndex] = cnv;
 
     if (cnv) {
+        editor->showWelcomePanel(false);
         addAndMakeVisible(cnv->viewport.get());
         cnv->setVisible(true);
         cnv->patch.splitViewIndex = splitIndex;
@@ -835,12 +999,14 @@ void TabComponent::showTab(Canvas* cnv, int const splitIndex)
     resized();
     repaint();
 
-    editor->nvgSurface.invalidateAll();
-
     tabVisibilityMessageUpdater.triggerAsyncUpdate();
 
-    editor->sidebar->hideParameters();
-    editor->sidebar->clearSearchOutliner();
+    if (auto* s = editor->getSidebarForPanel(Sidebar::InspectorPanel))
+        s->hideParameters();
+    if (auto* s = editor->getSidebarForPanel(Sidebar::PatchSearchPanel))
+        s->clearSearchOutliner();
+
+    editor->updateSelection(getCurrentCanvas());
     editor->updateCommandStatus();
 
     addLastShownTab(cnv, splitIndex);
@@ -869,34 +1035,24 @@ SmallArray<Canvas*> TabComponent::getCanvases()
     return allCanvases;
 }
 
-void TabComponent::renderArea(NVGcontext* nvg, Rectangle<int> area)
+void TabComponent::paintOverChildren(Graphics& g)
 {
-    if (splits[0]) {
-        NVGScopedState scopedState(nvg);
-        nvgScissor(nvg, 0, 0, splits[1] ? splitSize - 3 : getWidth(), getHeight());
-        splits[0]->performRender(nvg, area);
-    }
-    if (splits[1]) {
-        NVGScopedState scopedState(nvg);
-        nvgTranslate(nvg, splitSize + 3, 0);
-        nvgScissor(nvg, 0, 0, getWidth() - (splitSize + 3), getHeight());
-        splits[1]->performRender(nvg, area.translated(-(splitSize + 3), 0));
-    }
+    auto const& colours = getThemeColours(*this);
 
     if (!splitDropBounds.isEmpty()) {
-        nvgFillColor(nvg, NVGComponent::convertColour(findColour(PlugDataColour::dataColourId).withAlpha(0.1f)));
-        nvgFillRect(nvg, splitDropBounds.getX(), splitDropBounds.getY(), splitDropBounds.getWidth(), splitDropBounds.getHeight());
+        g.setColour(colours.dataColour.withAlpha(0.1f));
+        g.fillRect(splitDropBounds);
     }
 
     if (splits[1]) {
-        nvgFillColor(nvg, NVGComponent::convertColour(findColour(PlugDataColour::canvasBackgroundColourId)));
-        nvgFillRect(nvg, splitSize - 3, 0, 6, getHeight());
+        g.setColour(colours.canvasBackgroundColour);
+        g.fillRect(splitSize - 3, 31, 6, getHeight());
 
-        auto const activeSplitBounds = activeSplitIndex ? Rectangle<int>(splitSize, 0, getWidth() - splitSize, getHeight() - 31) : Rectangle<int>(0, 0, splitSize, getHeight() - 31);
+        auto const activeSplitBounds = activeSplitIndex ? Rectangle<int>(splitSize, 31, getWidth() - splitSize, getHeight() - 31)
+                                                        : Rectangle<int>(0, 31, splitSize, getHeight() - 31);
 
-        nvgStrokeWidth(nvg, 3.0f);
-        nvgStrokeColor(nvg, NVGComponent::convertColour(findColour(PlugDataColour::objectSelectedOutlineColourId).withAlpha(0.25f)));
-        nvgStrokeRect(nvg, activeSplitBounds.getX(), activeSplitBounds.getY(), activeSplitBounds.getWidth(), activeSplitBounds.getHeight());
+        g.setColour(colours.objectSelectedOutlineColour.withAlpha(0.25f));
+        g.drawRect(activeSplitBounds, 3);
     }
 }
 
@@ -941,38 +1097,72 @@ void TabComponent::resized()
 {
     auto const isSplit = splits[1] != nullptr;
     auto bounds = getLocalBounds();
+    bool boundsChanged = lastBounds != bounds;
+    lastBounds = bounds;
+
     auto tabbarBounds = bounds.removeFromTop(30);
-    auto& animator = Desktop::getInstance().getAnimator();
 
     splitSize = getWidth() / splitProportion;
 
     for (int i = 0; i < tabbars.size(); i++) {
         auto& tabButtons = tabbars[i];
-        auto splitBounds = tabbarBounds.removeFromLeft(isSplit && i == 0 ? splitSize : getWidth());
-        newTabButtons[i].setBounds(splitBounds.removeFromLeft(30));
+        auto splitBounds = tabbarBounds.removeFromLeft(isSplit && i == 0 ? splitSize : getWidth()).withTrimmedLeft(6);
 
-        auto const totalWidth = splitBounds.getWidth();
-        auto tabWidth = splitBounds.getWidth() / std::max(1, tabButtons.size());
-        constexpr auto minTabWidth = 75;
+        auto const fullWidth = splitBounds.getWidth();
+        constexpr int overflowButtonWidth = 30;
+        constexpr int newTabButtonWidth = 30;
+        constexpr int minTabWidth = 80;
 
-        if (minTabWidth * tabButtons.size() > totalWidth) {
-            int tabsThatFit = totalWidth / 150;
-            tabWidth = (totalWidth - 30) / std::max(1, std::min(tabButtons.size(), tabsThatFit));
+        int const numTabs = tabButtons.size();
+
+        int totalIdeal = 0;
+        for (auto const* tabButton : tabButtons)
+            totalIdeal += tabButton->getIdealWidth();
+
+        int const availableNoOverflow = fullWidth - newTabButtonWidth;
+
+        bool const fillArea = numTabs > 0 && totalIdeal > availableNoOverflow;
+        bool const overflow = fillArea && numTabs * minTabWidth > availableNoOverflow;
+        int const available = availableNoOverflow - (overflow ? overflowButtonWidth : 0);
+        int const visibleCount = overflow ? jmax(1, available / minTabWidth) : numTabs;
+
+        SmallArray<int> tabWidths;
+        tabWidths.reserve(numTabs);
+        if (fillArea) {
+            int visibleIdealSum = 0;
+            for (int t = 0; t < visibleCount; t++)
+                visibleIdealSum += tabButtons[t]->getIdealWidth();
+
+            int assigned = 0;
+            for (int t = 0; t < visibleCount; t++) {
+                int w;
+                if (t == visibleCount - 1) {
+                    w = jmax(0, available - assigned); // last visible tab fills the remainder exactly
+                } else {
+                    int const ideal = tabButtons[t]->getIdealWidth();
+                    w = jmax(minTabWidth, roundToInt(static_cast<double>(ideal) * available / jmax(1, visibleIdealSum)));
+                    // Leave enough room for the remaining tabs to keep their minimum width
+                    w = jmin(w, available - assigned - (visibleCount - 1 - t) * minTabWidth);
+                }
+                tabWidths.add(w);
+                assigned += w;
+            }
+        } else {
+            for (int t = 0; t < numTabs; t++)
+                tabWidths.add(tabButtons[t]->getIdealWidth());
         }
 
-        bool wasOverflown = false;
+        for (int t = 0; t < numTabs; t++) {
+            auto* tabButton = tabButtons[t];
 
-        for (auto* tabButton : tabButtons) {
-            if (tabWidth > splitBounds.getWidth()) {
-                wasOverflown = true;
-            }
-            if (wasOverflown) {
+            if (t >= visibleCount) {
                 tabButton->setVisible(false);
                 continue;
             }
             tabButton->setVisible(true);
 
-            auto targetBounds = splitBounds.removeFromLeft(tabWidth);
+            int const tabWidth = tabWidths[t];
+            auto targetBounds = splitBounds.removeFromLeft(tabWidth).translated(0, -1);
             if (tabButton->isDragging) {
                 tabButton->setSize(tabWidth, 30);
                 if (splits[1]) {
@@ -981,15 +1171,18 @@ void TabComponent::resized()
                 continue; // We reserve space for it, but don't set the bounds to create a ghost tab
             }
 
-            if (draggingOverTabbar) {
-                animator.animateComponent(tabButton, targetBounds, 1.0f, 200, false, 3.0, 0.0);
-            } else {
+            if (boundsChanged || draggingSplitResizer || !animateTabs) {
                 tabButton->setBounds(targetBounds);
+            } else {
+                tabButton->animate(targetBounds);
             }
         }
 
-        tabOverflowButtons[i].setVisible(wasOverflown);
-        tabOverflowButtons[i].setBounds(splitBounds.removeFromRight(wasOverflown ? 30 : 0));
+        tabOverflowButtons[i].setVisible(overflow);
+        tabOverflowButtons[i].setBounds(splitBounds.removeFromRight(overflow ? overflowButtonWidth : 0));
+
+        auto const newTabBounds = splitBounds.removeFromLeft(newTabButtonWidth).translated(2, 0);
+        newTabButtons[i]->updateBounds(newTabBounds, animateTabs && !boundsChanged && !draggingSplitResizer);
     }
 
     // go over all canvases in each split (a split is simply a pointer to the active canvas)
@@ -1006,8 +1199,8 @@ void TabComponent::resized()
         }
     }
 
-    newTabButtons[0].setVisible(!tabbars[0].isEmpty());
-    newTabButtons[1].setVisible(!tabbars[1].isEmpty());
+    newTabButtons[0]->setVisible(!tabbars[0].isEmpty());
+    newTabButtons[1]->setVisible(!tabbars[1].isEmpty());
 }
 
 void TabComponent::askToCloseTab(Canvas* cnv)
@@ -1032,14 +1225,14 @@ void TabComponent::askToCloseTab(Canvas* cnv)
     });
 }
 
-void TabComponent::closeTab(Canvas* cnv)
+void TabComponent::closeTab(Canvas* cnv, bool const sendVisMessage)
 {
     auto const patch = cnv->refCountedPatch;
 
-    editor->sidebar->hideParameters();
-    editor->sidebar->clearSearchOutliner();
-
-    patch->setVisible(false);
+    if (auto* s = editor->getSidebarForPanel(Sidebar::InspectorPanel))
+        s->hideParameters();
+    if (auto* s = editor->getSidebarForPanel(Sidebar::PatchSearchPanel))
+        s->clearSearchOutliner();
 
     auto const* tab = [this, cnv] {
         for (auto& tabbar : tabbars) {
@@ -1070,6 +1263,8 @@ void TabComponent::closeTab(Canvas* cnv)
     }
 
     canvases.removeObject(cnv);
+    patch->setVisible(false);
+
     pd->patches.remove_one(patch, [](auto const& ptr1, auto const& ptr2) {
         return *ptr1 == *ptr2;
     });
@@ -1177,7 +1372,10 @@ void TabComponent::setActiveSplit(Canvas* cnv)
         activeSplitIndex = cnv == splits[1] ? 1 : 0;
         editor->nvgSurface.invalidateAll();
 
-        editor->sidebar->updateSearch(true);
+        if (auto* s = editor->getSidebarForPanel(Sidebar::PatchSearchPanel))
+            s->updateSearch(true);
+
+        editor->updateSelection(getCurrentCanvas());
     }
 }
 
@@ -1203,31 +1401,11 @@ TabComponent::VisibleCanvasArray TabComponent::getVisibleCanvases()
 
 bool TabComponent::isInterestedInDragSource(SourceDetails const& dragSourceDetails)
 {
-    return dynamic_cast<TabBarButtonComponent*>(dragSourceDetails.sourceComponent.get()) || dynamic_cast<ObjectDragAndDrop*>(dragSourceDetails.sourceComponent.get());
+    return dynamic_cast<TabBarButtonComponent*>(dragSourceDetails.sourceComponent.get());
 }
 
 void TabComponent::itemDropped(SourceDetails const& dragSourceDetails)
 {
-    if (dynamic_cast<ObjectDragAndDrop*>(dragSourceDetails.sourceComponent.get())) {
-        auto const screenPosition = localPointToGlobal(dragSourceDetails.localPosition);
-
-        auto* cnv = getCanvasAtScreenPosition(screenPosition);
-        if (!cnv)
-            return;
-
-        auto const mousePos = cnv->getLocalPoint(this, dragSourceDetails.localPosition) - cnv->canvasOrigin;
-
-        // Extract the VarArray from the var
-        auto const patchWithSize = *dragSourceDetails.description.getArray();
-        auto const patchSize = Point<int>(patchWithSize[0], patchWithSize[1]);
-        auto const patchData = patchWithSize[2].toString();
-        auto const patchName = patchWithSize[3].toString();
-
-        cnv->dragAndDropPaste(patchData, mousePos, patchSize.x, patchSize.y, patchName);
-        setActiveSplit(cnv);
-        return;
-    }
-
     if (auto const* tab = dynamic_cast<TabBarButtonComponent*>(dragSourceDetails.sourceComponent.get())) {
         if (getLocalBounds().removeFromRight(getWidth() - splitSize).contains(dragSourceDetails.localPosition) && (dragSourceDetails.localPosition.y > 30 || splits[1])) // Dragging to right split
         {
@@ -1240,6 +1418,7 @@ void TabComponent::itemDropped(SourceDetails const& dragSourceDetails)
     closeEmptySplits();
     saveTabPositions();
 
+    dragSourceDetails.description.getDynamicObject()->setProperty("dropped", true);
     draggingOverTabbar = false;
     splitDropBounds = Rectangle<int>();
     editor->nvgSurface.invalidateAll();
@@ -1258,6 +1437,14 @@ void TabComponent::itemDragExit(SourceDetails const& dragSourceDetails)
     splitDropBounds = Rectangle<int>();
     draggingOverTabbar = false;
     editor->nvgSurface.invalidateAll();
+}
+
+bool TabComponent::shouldDrawDragImageWhenOver()
+{
+    if (getMouseXYRelative().y < 0 || getMouseXYRelative().y > 30)
+        return true;
+
+    return false;
 }
 
 void TabComponent::saveTabPositions()
@@ -1319,17 +1506,22 @@ void TabComponent::itemDragMove(SourceDetails const& dragSourceDetails)
         tab->setVisible(true);
 
         auto const centreX = tab->getBounds().getCentreX();
-        auto const tabBarWidth = splits[1] ? getWidth() / 2 : getWidth();
         int const hoveredSplit = splits[1] && centreX > splitSize;
 
-        // Calculate target tab index based on tabbar width and tab centre position
-        auto const targetTabPos = tabBarWidth / std::max(1, tabbars[hoveredSplit].size());
-        auto const tabPos = (centreX - (hoveredSplit ? tabBarWidth : 0)) / targetTabPos;
+        auto& targetBar = tabbars[hoveredSplit];
+        int tabPos = 0;
+        for (auto const* other : targetBar) {
+            if (other == tab)
+                continue;
+            if (centreX <= other->getBounds().getCentreX())
+                break; // tabs are ordered left-to-right, so we've found the insertion point
+            ++tabPos;
+        }
 
-        auto const oldPos = tabbars[hoveredSplit].indexOf(tab);
+        auto const oldPos = targetBar.indexOf(tab);
         if (oldPos != tabPos) {
             if (oldPos != -1) { // Dragging inside same tabbar
-                tabbars[hoveredSplit].move(oldPos, tabPos);
+                targetBar.move(oldPos, tabPos);
                 resized();
             } else if (splits[1]) { // Dragging to another tabbar
                 tabbars[hoveredSplit].insert(tabPos, tabbars[!hoveredSplit].removeAndReturn(tabbars[!hoveredSplit].indexOf(tab)));
@@ -1410,22 +1602,24 @@ void TabComponent::showHiddenTabsMenu(int const splitIndex)
 
         void paint(Graphics& g) override
         {
+            auto const& colours = getThemeColours(*this);
+
 
             if (tabbar.getVisibleCanvases().contains(cnv)) {
-                g.setColour(findColour(PlugDataColour::popupMenuActiveBackgroundColourId));
+                g.setColour(colours.popupMenuActiveBackgroundColour);
             } else if (isItemHighlighted()) {
-                g.setColour(findColour(PlugDataColour::popupMenuActiveBackgroundColourId).interpolatedWith(findColour(PlugDataColour::popupMenuBackgroundColourId), 0.4f));
+                g.setColour(colours.popupMenuActiveBackgroundColour.interpolatedWith(colours.popupMenuBackgroundColour, 0.4f));
             } else {
-                g.setColour(findColour(PlugDataColour::popupMenuBackgroundColourId));
+                g.setColour(colours.popupMenuBackgroundColour);
             }
 
             g.fillRoundedRectangle(getLocalBounds().reduced(1).toFloat(), Corners::defaultCornerRadius);
 
             auto const area = getLocalBounds().reduced(4, 1).toFloat();
 
-            auto const font = Font(14);
+            auto const font = Font(FontOptions(14));
 
-            g.setColour(findColour(PlugDataColour::toolbarTextColourId));
+            g.setColour(colours.toolbarTextColour);
             g.setFont(font);
             g.drawText(tabTitle.trim(), area.reduced(4, 0), Justification::centred, false);
         }

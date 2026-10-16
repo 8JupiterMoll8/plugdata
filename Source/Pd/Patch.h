@@ -29,7 +29,7 @@ public:
     // The compare equal operator.
     bool operator==(Patch const& other) const
     {
-        return getRawPointer() == other.getRawPointer();
+        return getUncheckedPointer() == other.getUncheckedPointer() && ptr.isDeleted() == other.ptr.isDeleted();
     }
 
     // Gets the bounds of the patch.
@@ -72,8 +72,6 @@ public:
         Move
     };
 
-    void setCurrent();
-
     bool isDirty() const;
     bool canUndo() const;
     bool canRedo() const;
@@ -81,6 +79,7 @@ public:
     void savePatch(URL const& location);
     void savePatch();
 
+    URL getCurrentURL() const;
     File getCurrentFile() const;
     File getPatchFile() const;
 
@@ -134,7 +133,7 @@ public:
     int splitViewIndex = 0;
     int windowIndex = 0;
 
-    Point<int> lastViewportPosition = { 1, 1 };
+    Point<float> lastViewportPosition = { 1, 1 };
     float lastViewportScale;
 
     SmallString lastUndoSequence;

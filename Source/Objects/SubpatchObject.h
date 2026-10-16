@@ -5,14 +5,14 @@
  */
 #pragma once
 
-class SubpatchObject final : public TextBase {
+class SubpatchObject final : public TextObjectBase {
 
     pd::Patch::Ptr subpatch;
     Value isGraphChild = SynchronousValue(var(false));
 
 public:
     SubpatchObject(pd::WeakReference obj, Object* object)
-        : TextBase(obj, object)
+        : TextObjectBase(obj, object)
         , subpatch(new pd::Patch(obj, cnv->pd, false))
     {
         objectParameters.addParamBool("Is graph", cGeneral, &isGraphChild, { "No", "Yes" });
@@ -20,13 +20,17 @@ public:
         // There is a possibility that a donecanvasdialog message is sent inbetween the initialisation in pd and the initialisation of the plugdata object, making it possible to miss this message. This especially tends to happen if the messagebox is connected to a loadbang.
         // By running another update call asynchrounously, we can still respond to the new state
         MessageManager::callAsync([_this = SafePointer(this)] {
-            if (_this) {
-                _this->update();
-                _this->propertyChanged(_this->isGraphChild);
+            if (!_this)
+                return;
+            if (auto glist = _this->ptr.get<t_canvas>()) {
+                if (glist->gl_isgraph) {
+                    _this->cnv->setSelected(_this->object, false);
+                    if (auto* s = _this->object->editor->getSidebarForPanel(Sidebar::InspectorPanel))
+                        s->hideParameters();
+                    _this->object->setType(_this->getText().toString(), _this->ptr);
+                }
             }
         });
-
-        setRepaintsOnMouseActivity(true);
     }
 
     ~SubpatchObject() override
@@ -36,17 +40,13 @@ public:
         }
     }
 
-    void render(NVGcontext* nvg) override
-    {
-        TextBase::render(nvg);
-    }
-
     void update() override
     {
         // Change from subpatch to graph
         if (auto canvas = ptr.get<t_canvas>()) {
             isGraphChild = static_cast<bool>(canvas->gl_isgraph);
         }
+        TextObjectBase::update();
     }
 
     void mouseDown(MouseEvent const& e) override
@@ -63,7 +63,7 @@ public:
             openSubpatch();
             return;
         }
-        TextBase::mouseDown(e);
+        TextObjectBase::mouseDown(e);
     }
 
     pd::Patch::Ptr getPatch() override
@@ -75,7 +75,7 @@ public:
     {
         if (v.refersToSameSourceAs(sizeProperty)) {
             // forward the value change to the text object
-            TextBase::propertyChanged(v);
+            TextObjectBase::propertyChanged(v);
         } else if (v.refersToSameSourceAs(isGraphChild)) {
             int const isGraph = getValue<bool>(isGraphChild);
             if (auto glist = ptr.get<t_glist>()) {
@@ -88,8 +88,9 @@ public:
                         return;
 
                     _this->cnv->setSelected(object, false);
-                    _this->object->editor->sidebar->hideParameters();
-                    _this->object->setType(_this->getText(), ptr);
+                    if (auto* s = _this->object->editor->getSidebarForPanel(Sidebar::InspectorPanel))
+                        s->hideParameters();
+                    _this->object->setType(_this->getText().toString(), ptr);
                 });
             }
         }
@@ -121,44 +122,5 @@ public:
     bool checkHvccCompatibility() override
     {
         return recurseHvccCompatibility(objectText, subpatch.get());
-    }
-
-    static bool recurseHvccCompatibility(String const& objectText, pd::Patch::Ptr patch, String const& prefix = "")
-    {
-        auto const instance = patch->instance;
-
-        if (objectText.startsWith("pd @hv_obj") || HeavyCompatibleObjects::isCompatible(objectText)) {
-            return true;
-        }
-
-        bool compatible = true;
-
-        for (auto object : patch->getObjects()) {
-            if (auto ptr = object.get<t_pd>()) {
-                String const type = pd::Interface::getObjectClassName(ptr.get());
-
-                if (type == "canvas" || type == "graph") {
-                    pd::Patch::Ptr const subpatch = new pd::Patch(object, instance, false);
-
-                    if (subpatch->isSubpatch()) {
-                        char* text = nullptr;
-                        int size = 0;
-                        pd::Interface::getObjectText(&ptr.cast<t_canvas>()->gl_obj, &text, &size);
-                        auto objName = String::fromUTF8(text, size);
-
-                        compatible = recurseHvccCompatibility(objName, subpatch, prefix + objName + " -> ") && compatible;
-                        freebytes(text, static_cast<size_t>(size) * sizeof(char));
-                    } else if (!HeavyCompatibleObjects::isCompatible(type)) {
-                        compatible = false;
-                        instance->logWarning(String("Warning: object \"" + prefix + type + "\" is not supported in Compiled Mode"));
-                    }
-                } else if (!HeavyCompatibleObjects::isCompatible(type)) {
-                    compatible = false;
-                    instance->logWarning(String("Warning: object \"" + prefix + type + "\" is not supported in Compiled Mode"));
-                }
-            }
-        }
-
-        return compatible;
     }
 };

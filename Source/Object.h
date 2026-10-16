@@ -8,22 +8,18 @@
 
 #include "Utility/ModifierKeyListener.h"
 #include <juce_gui_basics/juce_gui_basics.h>
+#include <juce_animation/juce_animation.h>
 #include "Utility/SettingsFile.h"
 #include "Utility/RateReducer.h"
 #include "Utility/NVGUtils.h"
 #include "Pd/WeakReference.h"
 #include "Iolet.h"
 
-#include <nanovg.h>
+#include <nanovg_async.h>
 #ifdef NANOVG_GL_IMPLEMENTATION
 #    include <juce_opengl/juce_opengl.h>
 using namespace juce::gl;
-#    undef NANOVG_GL_IMPLEMENTATION
-#    include <nanovg_gl_utils.h>
-#    define NANOVG_GL_IMPLEMENTATION 1
 #endif
-
-#define ACTIVITY_UPDATE_RATE 30
 
 struct ObjectDragState;
 class ObjectBase;
@@ -34,7 +30,6 @@ class Connection;
 class Object final : public Component
     , public Value::Listener
     , public ChangeListener
-    , public Timer
     , public KeyListener
     , public NVGComponent
     , public SettingsFileListener
@@ -50,8 +45,8 @@ public:
     void valueChanged(Value& v) override;
 
     void changeListenerCallback(ChangeBroadcaster* source) override;
-    void timerCallback() override;
 
+    void moved() override;
     void resized() override;
 
     void updateIoletGeometry();
@@ -68,7 +63,7 @@ public:
     void hideEditor();
     bool isInitialEditorShown() const;
 
-    String getType(bool withOriginPrefix = true) const;
+    SmallString getType(bool withOriginPrefix = true) const;
 
     Rectangle<int> getSelectableBounds() const;
     Rectangle<int> getObjectBounds() const;
@@ -85,7 +80,7 @@ public:
     void mouseExit(MouseEvent const& e) override;
 
     void render(NVGcontext* nvg) override;
-
+    void performRender(NVGcontext* nvg);
     void renderIolets(NVGcontext* nvg);
     void renderLabel(NVGcontext* nvg);
 
@@ -103,7 +98,7 @@ public:
 
     void triggerOverlayActiveState();
 
-    SmallArray<Rectangle<float>> getCorners() const;
+    StackArray<Rectangle<float>, 4> getCorners() const;
 
     uint16_t numInputs = 0;
     uint16_t numOutputs = 0;
@@ -111,28 +106,23 @@ public:
     Value locked;
     Value commandLocked;
     Value presentationMode;
-    CachedValue<bool> hvccMode;
-    CachedValue<bool> patchDownwardsOnly;
+    Value hvccMode;
+    Value patchDownwardsOnly;
 
     Canvas* cnv;
     PluginEditor* editor;
 
     std::unique_ptr<ObjectBase> gui;
 
-    PooledPtrArray<Iolet, 8, 6> iolets;
+    PooledPtrArray<Iolet, 8, 4> iolets;
     ResizableBorderComponent::Zone resizeZone;
 
-    bool drawIoletExpanded : 1 = false;
-    bool validResizeZone : 1 = false;
-
     static constexpr int margin = 6;
-
     static constexpr int doubleMargin = margin * 2;
     static constexpr int height = 32;
+    static constexpr int minimumSize = 9;
 
     Rectangle<int> originalBounds;
-
-    static constexpr int minimumSize = 9;
 
     bool isSelected() const;
 
@@ -149,7 +139,7 @@ public:
         Recursive // Trigger activity of object itself, and all parent GOPs recursively.
     };
 
-    ObjectActivityPolicy objectActivityPolicy = ObjectActivityPolicy::Self;
+    ObjectActivityPolicy objectActivityPolicy : 2 = ObjectActivityPolicy::Self;
 
 private:
     void initialise();
@@ -159,25 +149,40 @@ private:
     void openNewObjectEditor();
 
     void setSelected(bool shouldBeSelected);
+
     bool selectedFlag : 1 = false;
     bool showHandles : 1 = true;
     bool selectionStateChanged : 1 = false;
-
+    bool drawIoletExpanded : 1 = false;
+    bool validResizeZone : 1 = false;
     bool wasLockedOnMouseDown : 1 = false;
     bool isHvccCompatible : 1 = true;
     bool isGemObject : 1 = false;
     bool isObjectMouseActive : 1 = false;
+        
+    bool commandBufferDirty : 1 = true;
+    nanovg::CommandBuffer commandBuffer;
 
-    float activeStateAlpha = 0.0f;
-
-    NVGImage textEditorRenderer;
 
     ObjectDragState& ds;
 
-    RateReducer rateReducer = RateReducer(ACTIVITY_UPDATE_RATE);
+    RateReducer rateReducer = RateReducer(30);
+
+    float activeStateAlpha = 0.0f;
+    VBlankAnimatorUpdater updater { this };
+    Animator activityStateFade = ValueAnimatorBuilder { }
+                                     .withDurationMs(450)
+                                     .withEasing(Easings::createEaseInOut())
+                                     .withValueChangedCallback([this](float v) {
+                                         activeStateAlpha = 1.0f - v;
+                                         repaint();
+                                     })
+                                     .build();
 
     std::unique_ptr<TextEditor> newObjectEditor;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(Object)
     JUCE_DECLARE_WEAK_REFERENCEABLE(Object)
+
+    friend class Iolet;
 };

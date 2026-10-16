@@ -22,6 +22,7 @@
 #include "Components/ArrowPopupMenu.h"
 #include "Components/Buttons.h"
 #include "Components/SearchEditor.h"
+#include "Components/TouchPopupMenu.h"
 
 #include "Sidebar/Sidebar.h"
 #include "Object.h"
@@ -31,6 +32,8 @@
 #include "TextEditorDialog.h"
 #include "ObjectBrowserDialog.h"
 #include "ObjectReferenceDialog.h"
+#include "AudioExportDialog.h"
+#include "OnboardingDialog.h"
 #include "Heavy/HeavyExportDialog.h"
 #include "MainMenu.h"
 #include "AddObjectMenu.h"
@@ -75,10 +78,6 @@ Dialog::Dialog(std::unique_ptr<Dialog>* ownerPtr, Component* editor, int const c
         }
         window->repaint();
     }
-
-    if (auto* pluginEditor = dynamic_cast<PluginEditor*>(editor)) {
-        pluginEditor->nvgSurface.setRenderThroughImage(true);
-    }
 }
 
 bool Dialog::wantsRoundedCorners() const
@@ -91,12 +90,12 @@ bool Dialog::wantsRoundedCorners() const
     return true;
 }
 
-Component* Dialogs::showTextEditorDialog(String const& text, String filename, std::function<void(String, bool)> closeCallback, std::function<void(String)> saveCallback, float const desktopScale, bool const enableSyntaxHighlighting)
+Component* Dialogs::showTextEditorDialog(String const& text, String filename, std::function<void(String, bool)> closeCallback, std::function<void(String)> saveCallback, float const desktopScale, bool const enableSyntaxHighlighting, File const& associatedFile)
 {
 #if ENABLE_TESTING
     return nullptr;
 #endif
-    auto* editor = new TextEditorDialog(std::move(filename), enableSyntaxHighlighting, std::move(closeCallback), std::move(saveCallback), desktopScale);
+    auto* editor = new TextEditorDialog(std::move(filename), enableSyntaxHighlighting, std::move(closeCallback), std::move(saveCallback), desktopScale, associatedFile);
     editor->editor.setText(text);
     return editor;
 }
@@ -131,73 +130,140 @@ void Dialogs::showAskToSaveDialog(std::unique_ptr<Dialog>* target, Component* ce
     target->reset(dialog);
 
 #if !JUCE_IOS
+    Process::makeForegroundProcess();
     centre->getTopLevelComponent()->toFront(true);
 #endif
 }
 
-void Dialogs::showSettingsDialog(PluginEditor* editor)
+void Dialogs::showSettingsDialog(PluginEditor* editor, int initialPanel)
 {
     auto* dialog = new Dialog(&editor->openedDialog, editor, 690, 500, true);
-    auto* settingsDialog = new SettingsDialog(editor);
+    auto* settingsDialog = new SettingsDialog(editor, initialPanel);
     dialog->setViewedComponent(settingsDialog);
     editor->openedDialog.reset(dialog);
 }
 
 void Dialogs::showMainMenu(PluginEditor* editor, Component* centre)
 {
-#if JUCE_IOS
-    OSUtils::showMobileMainMenu(editor->getPeer(), [editor](int result) {
-        if (result < 0)
-            return;
+    if (SettingsFile::getInstance()->isUsingTouchMode()) {
+        TouchPopupMenu touchMenu;
 
-        switch (result) {
-        case 1: {
-            editor->getTabComponent().newPatch();
-            break;
-        }
-        case 2: {
-            editor->getTabComponent().openPatch();
-            break;
-        }
-        case 3: {
+        touchMenu.addItem("New Patch", [editor] { editor->getTabComponent().newPatch(); });
+        touchMenu.addItem("Open Patch", [editor] { editor->getTabComponent().openPatch(); });
+#if JUCE_IOS
+        touchMenu.addItem("Open Folder", [editor] { editor->getTabComponent().openPatchFolder(); });
+#endif
+        touchMenu.addItem("Save Patch", [editor] {
             if (auto* cnv = editor->getCurrentCanvas())
                 cnv->save();
-            break;
-        }
-        case 4: {
+        });
+        touchMenu.addItem("Save Patch As", [editor] {
             if (auto* cnv = editor->getCurrentCanvas())
                 cnv->saveAs();
-            break;
+        });
+
+        TouchPopupMenu recentlyOpenedMenu;
+
+        auto& recentlyOpened = SettingsFile::getInstance()->getProperty<VarArray>("recently_opened");
+        auto hasItems = recentlyOpened.size() > 0;
+        for (int i = 0; i < std::min(10, recentlyOpened.size()); i++) {
+            auto path = File(recentlyOpened[i].getProperty("Path", "").toString());
+            recentlyOpenedMenu.addItem(path.getFileName(), [path, editor]() mutable {
+                if (path.existsAsFile()) {
+                    editor->getTabComponent().openPatch(URL(path));
+                } else {
+                    editor->pd->logError("Patch not found");
         }
-        case 5: {
-            Dialogs::showSettingsDialog(editor);
-            break;
+            });
         }
-        case 6: {
+        if (hasItems) {
+            recentlyOpenedMenu.addItem("Clear recently opened", [recentlyOpened, editor]() mutable {
+                recentlyOpened.clear();
+                // Make sure to clear the recent items in the current welcome panel
+                if (editor->welcomePanel)
+                    editor->welcomePanel->triggerAsyncUpdate();
+                SettingsFile::getInstance()->reloadSettings();
+            });
+        }
+        touchMenu.addSubMenu("Recently Opened", recentlyOpenedMenu, hasItems);
+
+        TouchPopupMenu themeMenu;
+
+        themeMenu.addItem("First Theme (" + PlugDataLook::selectedThemes[0] + ")", [] {
+            SettingsFile::getInstance()->setProperty("theme", PlugDataLook::selectedThemes[0]);
+        });
+        themeMenu.addItem("Second Theme (" + PlugDataLook::selectedThemes[1] + ")", [] {
+            SettingsFile::getInstance()->setProperty("theme", PlugDataLook::selectedThemes[1]);
+        });
+        touchMenu.addSubMenu("Select Theme", themeMenu);
+
+        TouchPopupMenu workspaceMenu;
+        workspaceMenu.addItem("Import workspace", [editor]() mutable {
+            static auto openChooser = std::make_unique<FileChooser>("Choose file to open", SettingsFile::getInstance()->getLastBrowserPathForId("WorkspacePath"), "*.pdproj", SettingsFile::getInstance()->wantsNativeDialog());
+
+            openChooser->launchAsync(FileBrowserComponent::openMode | FileBrowserComponent::canSelectFiles, [editor](FileChooser const& f) {
+                auto file = f.getResult();
+                if (file != File { }) {
+                    MemoryBlock block;
+                    file.loadFileAsData(block);
+                    editor->processor.setStateInformation(block.getData(), block.getSize());
+                    SettingsFile::getInstance()->setLastBrowserPathForId("WorkspacePath", file.getParentDirectory());
+                }
+            });
+        });
+
+        workspaceMenu.addItem("Export workspace", [editor]() mutable {
+            static auto saveChooser = std::make_unique<FileChooser>("Choose save location", SettingsFile::getInstance()->getLastBrowserPathForId("WorkspacePath"), "*.pdproj", SettingsFile::getInstance()->wantsNativeDialog());
+
+            saveChooser->launchAsync(FileBrowserComponent::saveMode | FileBrowserComponent::canSelectFiles, [editor](FileChooser const& f) {
+                auto const file = f.getResult().withFileExtension(".pdproj");
+                if (file != File { } && file.getParentDirectory().exists()) {
+                    MemoryBlock destData;
+                    editor->processor.getStateInformation(destData);
+                    file.replaceWithData(destData.getData(), destData.getSize());
+                    SettingsFile::getInstance()->setLastBrowserPathForId("WorkspacePath", file.getParentDirectory());
+                }
+            });
+        });
+        touchMenu.addSubMenu("Workspace", workspaceMenu);
+
+#if !JUCE_IOS
+        TouchPopupMenu heavyMenu;
+        heavyMenu.addItem("Toggle compiled mode", [] {
+            auto* settingsFile = SettingsFile::getInstance();
+            settingsFile->setProperty("hvcc_mode", !settingsFile->getProperty<bool>("hvcc_mode"));
+        });
+        heavyMenu.addItem("Compile...", [editor] {
+            Dialogs::showHeavyExportDialog(&editor->openedDialog, editor);
+        });
+        touchMenu.addSubMenu("Heavy compiler", heavyMenu);
+#endif
+
+        touchMenu.addItem("Discover", [editor]() {
+            Dialogs::showStore(editor);
+        });
+
+        touchMenu.addItem("Find Externals", [editor]() {
+            Dialogs::showDeken(editor);
+        });
+
+        touchMenu.addItem("Settings", [editor] { Dialogs::showSettingsDialog(editor); });
+        touchMenu.addItem("About", [editor] {
             auto* dialog = new Dialog(&editor->openedDialog, editor, 360, 490, true);
             auto* aboutPanel = new AboutPanel();
             dialog->setViewedComponent(aboutPanel);
             editor->openedDialog.reset(dialog);
-            break;
-        }
-        case 7: {
-            SettingsFile::getInstance()->setProperty("theme", PlugDataLook::selectedThemes[0]);
-            break;
-        }
-        case 8: {
-            SettingsFile::getInstance()->setProperty("theme", PlugDataLook::selectedThemes[1]);
-            break;
-        }
-        }
     });
+
+        touchMenu.showMenu(editor, centre, "Main Menu");
     return;
-#endif
+    }
 
     auto* popup = new MainMenu(editor);
     auto* parent = ProjectInfo::canUseSemiTransparentWindows() ? editor->getCalloutAreaComponent() : nullptr;
 
     ArrowPopupMenu::showMenuAsync(popup, PopupMenu::Options().withMinimumWidth(210).withMaximumNumColumns(1).withTargetComponent(centre).withParentComponent(parent),
-        [editor, popup, settingsTree = SettingsFile::getInstance()->getValueTree()](int const result) mutable {
+        [editor, popup](int const result) mutable {
             switch (result) {
             case MainMenu::MenuItem::NewPatch: {
                 editor->getTabComponent().newPatch();
@@ -215,11 +281,6 @@ void Dialogs::showMainMenu(PluginEditor* editor, Component* centre)
             case MainMenu::MenuItem::SaveAs: {
                 if (auto* cnv = editor->getCurrentCanvas())
                     cnv->saveAs();
-                break;
-            }
-            case MainMenu::MenuItem::CompiledMode: {
-                bool const ticked = settingsTree.hasProperty("hvcc_mode") && static_cast<bool>(settingsTree.getProperty("hvcc_mode"));
-                settingsTree.setProperty("hvcc_mode", !ticked, nullptr);
                 break;
             }
             case MainMenu::MenuItem::Compile: {
@@ -274,15 +335,17 @@ void Dialogs::showMultiChoiceDialog(std::unique_ptr<Dialog>* target, Component* 
             : icon(icon)
             , label("", title)
         {
+            auto const& colours = getThemeColours(*this);
+
             auto attributedTitle = AttributedString(title);
             attributedTitle.setJustification(Justification::horizontallyCentred);
             attributedTitle.setFont(Fonts::getBoldFont().withHeight(14));
-            attributedTitle.setColour(findColour(PlugDataColour::panelTextColourId));
+            attributedTitle.setColour(colours.panelTextColour);
 
             for (int i = 0; i < options.size(); i++) {
                 auto* button = buttons.add(new TextButton(options[i]));
 
-                auto backgroundColour = findColour(PlugDataColour::dialogBackgroundColourId);
+                auto backgroundColour = colours.dialogBackgroundColour;
                 button->setColour(TextButton::buttonColourId, backgroundColour.contrasting(0.05f));
                 button->setColour(TextButton::buttonOnColourId, backgroundColour.contrasting(0.1f));
                 button->setColour(ComboBox::outlineColourId, Colours::transparentBlack);
@@ -309,7 +372,7 @@ void Dialogs::showMultiChoiceDialog(std::unique_ptr<Dialog>* target, Component* 
         {
             AttributedString warningIcon(icon);
             warningIcon.setFont(Fonts::getIconFont().withHeight(48));
-            warningIcon.setColour(findColour(PlugDataColour::panelTextColourId));
+            warningIcon.setColour(getThemeColours(*this).panelTextColour);
             warningIcon.setJustification(Justification::centred);
             warningIcon.draw(g, getLocalBounds().toFloat().removeFromTop(90));
 
@@ -339,6 +402,11 @@ void Dialogs::showMultiChoiceDialog(std::unique_ptr<Dialog>* target, Component* 
     dialog->height = dialogContent->getBestHeight();
     dialog->setViewedComponent(dialogContent);
     target->reset(dialog);
+
+#if !JUCE_IOS
+    Process::makeForegroundProcess();
+    parent->getTopLevelComponent()->toFront(true);
+#endif
 }
 
 void Dialogs::showHeavyExportDialog(std::unique_ptr<Dialog>* target, Component* parent)
@@ -350,9 +418,28 @@ void Dialogs::showHeavyExportDialog(std::unique_ptr<Dialog>* target, Component* 
     target->reset(dialog);
 }
 
+void Dialogs::showOnboardingDialog(std::unique_ptr<Dialog>* target, Component* parent)
+{
+    auto* dialog = new Dialog(target, parent, 625, 430, false);
+    auto* editor = dynamic_cast<PluginEditor*>(parent);
+    auto* dialogContent = new OnboardingDialog(dialog, editor);
+
+    dialog->setViewedComponent(dialogContent);
+    dialog->setBlockFromClosing(true);
+    target->reset(dialog);
+}
+
+void Dialogs::showAudioExportDialog(std::unique_ptr<Dialog>* target, Component* parent, File const& recording)
+{
+    auto* dialog = new Dialog(target, parent, 520, 285, true);
+    auto* dialogContent = new AudioExportDialog(dialog, recording);
+    dialog->setViewedComponent(dialogContent);
+    dialog->setBlockFromClosing(true);
+    target->reset(dialog);
+}
+
 void Dialogs::showObjectBrowserDialog(std::unique_ptr<Dialog>* target, Component* parent)
 {
-
     auto* dialog = new Dialog(target, parent, 750, 480, true);
     auto* dialogContent = new ObjectBrowserDialog(parent);
 
@@ -405,89 +492,114 @@ StringArray DekenInterface::getExternalPaths()
 void Dialogs::showCanvasRightClickMenu(Canvas* cnv, Component* originalComponent, Point<int> const position)
 {
 #if JUCE_IOS
-    // OSUtils::showMobileCanvasMenu(cnv->getPeer());
     return;
 #endif
 
     struct QuickActionsBar : public PopupMenu::CustomComponent {
         struct QuickActionButton : public TextButton {
-            explicit QuickActionButton(String const& buttonText)
-                : TextButton(buttonText)
+            QuickActionButton(String const& icon, String const& label)
+                : TextButton(label)
+                , iconGlyph(icon)
             {
+            }
+
+            int getPreferredWidth() const
+            {
+                auto const font = Fonts::getDefaultFont().withHeight(11.0f);
+                auto const textWidth = Fonts::getStringWidth(getButtonText(), font);
+                return static_cast<int>(std::ceil(textWidth)) + 2;
             }
 
             void paint(Graphics& g) override
             {
-                auto textColour = findColour(PlugDataColour::sidebarTextColourId);
+                auto const& colours = getThemeColours(*this);
+                auto textColour = colours.sidebarTextColour;
 
                 if (!isEnabled()) {
                     textColour = textColour.withAlpha(0.35f);
                 } else if (isOver() || isDown()) {
-                    auto bounds = getLocalBounds().toFloat();
-                    bounds = bounds.withSizeKeepingCentre(bounds.getHeight(), bounds.getHeight());
-
-                    g.setColour(findColour(PlugDataColour::popupMenuActiveBackgroundColourId));
-                    g.fillRoundedRectangle(bounds, Corners::defaultCornerRadius);
-
-                    textColour = findColour(PlugDataColour::sidebarTextColourId);
+                    g.setColour(colours.popupMenuActiveBackgroundColour);
+                    g.fillRoundedRectangle(getLocalBounds().toFloat(), Corners::defaultCornerRadius);
                 }
 
-                Fonts::drawIcon(g, getButtonText(), std::max(0, getWidth() - getHeight()) / 2, 0, getHeight(), textColour, 12.8f);
+                Fonts::drawIcon(g, iconGlyph, 6, -2, getWidth() - 12, textColour, 15);
+
+                auto const labelBounds = Rectangle<int>(0, 22, getWidth(), 20);
+                g.setFont(Fonts::getDefaultFont().withHeight(11));
+                g.setColour(textColour);
+                g.drawText(getButtonText(), labelBounds, Justification::centred, false);
             }
+
+        private:
+            String iconGlyph;
         };
 
         explicit QuickActionsBar(PluginEditor* editor)
         {
-            auto commandIds = StackArray<CommandID, 5> { CommandIDs::Cut, CommandIDs::Copy, CommandIDs::Paste, CommandIDs::Duplicate, CommandIDs::Delete };
+            auto const commandIds = StackArray<CommandID, 5> {
+                CommandIDs::Cut,
+                CommandIDs::Copy,
+                CommandIDs::Paste,
+                CommandIDs::Duplicate,
+                CommandIDs::Delete
+            };
 
             int index = 0;
-            for (auto* button : StackArray<QuickActionButton*, 5> { &cut, &copy, &paste, &duplicate, &remove }) {
+            for (auto* button : getButtons()) {
                 addAndMakeVisible(button);
-                auto const id = commandIds[index];
+                auto const id = commandIds[index++];
 
                 button->setCommandToTrigger(&editor->commandManager, id, false);
 
                 if (auto* registeredInfo = editor->commandManager.getCommandForID(id)) {
                     ApplicationCommandInfo info(*registeredInfo);
                     editor->commandManager.getTargetForCommand(id, info);
+
                     bool const canPerformCommand = (info.flags & ApplicationCommandInfo::isDisabled) == 0;
                     button->setEnabled(canPerformCommand);
                 } else {
                     button->setEnabled(false);
                 }
-                index++;
             }
-
-            cut.setTooltip("Cut");
-            copy.setTooltip("Copy");
-            paste.setTooltip("Paste");
-            duplicate.setTooltip("Duplicate");
-            remove.setTooltip("Delete");
         }
 
         void getIdealSize(int& idealWidth, int& idealHeight) override
         {
-            idealWidth = 130;
-            idealHeight = 26;
+            int buttonWidth = 32;
+            for (auto* button : getButtons())
+                buttonWidth = std::max(buttonWidth, button->getPreferredWidth());
+
+            idealWidth = buttonWidth * 5;
+            idealHeight = 42;
         }
 
         void resized() override
         {
-            auto const buttonWidth = getWidth() / 5;
-            auto bounds = getLocalBounds();
+            auto const bounds = getLocalBounds();
+            auto const buttons = getButtons();
 
-            for (auto* button : SmallArray<TextButton*> { &cut, &copy, &paste, &duplicate, &remove }) {
-                constexpr auto buttonHeight = 26;
-                button->setBounds(bounds.removeFromLeft(buttonWidth).withHeight(buttonHeight));
+            for (int i = 0; i < 5; ++i) {
+                auto const left = bounds.getX() + bounds.getWidth() * i / 5;
+                auto const right = bounds.getX() + bounds.getWidth() * (i + 1) / 5;
+
+                buttons[i]->setBounds(
+                    left, bounds.getY(),
+                    right - left, bounds.getHeight());
             }
         }
 
-        QuickActionButton cut = QuickActionButton(Icons::Cut);
-        QuickActionButton copy = QuickActionButton(Icons::Copy);
-        QuickActionButton paste = QuickActionButton(Icons::Paste);
-        QuickActionButton duplicate = QuickActionButton(Icons::Duplicate);
-        QuickActionButton remove = QuickActionButton(Icons::Trash);
-    };
+    private:
+        StackArray<QuickActionButton*, 5> getButtons()
+        {
+            return { &cut, &copy, &paste, &duplicate, &remove };
+        }
+
+        QuickActionButton cut { Icons::Cut, "Cut" };
+        QuickActionButton copy { Icons::Copy, "Copy" };
+        QuickActionButton paste { Icons::Paste, "Paste" };
+        QuickActionButton duplicate { Icons::Duplicate, "Duplicate" };
+        QuickActionButton remove { Icons::Trash, "Delete" };
+    };;
 
     // We have a custom function for this, instead of the default JUCE way, because the default JUCE way is broken on Linux
     // It will not find a target to apply the command to once the popupmenu grabs focus...
@@ -509,23 +621,23 @@ void Dialogs::showCanvasRightClickMenu(Canvas* cnv, Component* originalComponent
     cnv->cancelConnectionCreation();
 
     // Info about selection status
-    auto selectedBoxes = cnv->getSelectionOfType<Object>();
+    auto selectedObjects = cnv->getSelectionOfType<Object>();
 
     // If we directly right-clicked on an object, make sure it has been added to selection
     if (!originalComponent) {
         return;
     }
     if (auto* obj = dynamic_cast<Object*>(originalComponent)) {
-        selectedBoxes.add_unique(obj);
+        selectedObjects.add_unique(obj);
     } else if (auto* parentOfTypeObject = originalComponent->findParentComponentOfClass<Object>()) {
-        selectedBoxes.add_unique(parentOfTypeObject);
+        selectedObjects.add_unique(parentOfTypeObject);
     }
 
-    bool const hasSelection = selectedBoxes.not_empty();
-    bool const multiple = selectedBoxes.size() > 1;
+    bool const hasSelection = selectedObjects.not_empty();
+    bool const multiple = selectedObjects.size() > 1;
     bool const locked = getValue<bool>(cnv->locked);
 
-    auto object = Component::SafePointer<Object>(hasSelection ? selectedBoxes.front() : nullptr);
+    auto object = Component::SafePointer<Object>(hasSelection ? selectedObjects.front() : nullptr);
 
     // Find top-level object, so we never trigger it on an object inside a graph
     if (object && object->findParentComponentOfClass<Object>()) {
@@ -638,7 +750,7 @@ void Dialogs::showCanvasRightClickMenu(Canvas* cnv, Component* originalComponent
 
             auto const colour = findColour(PopupMenu::textColourId).withMultipliedAlpha(isActive ? 1.0f : 0.5f);
             if (isItemHighlighted() && isActive) {
-                g.setColour(findColour(PlugDataColour::popupMenuActiveBackgroundColourId));
+                g.setColour(getThemeColours(*this).popupMenuActiveBackgroundColour);
                 g.fillRoundedRectangle(r.toFloat().reduced(0, 1), Corners::defaultCornerRadius);
             }
             g.setColour(colour);
@@ -679,8 +791,14 @@ void Dialogs::showCanvasRightClickMenu(Canvas* cnv, Component* originalComponent
 
     popupMenu.addSeparator();
     popupMenu.addItem(Properties, "Properties", (originalComponent == cnv || (object && params.getParameters().not_empty())) && !locked);
-    // showObjectReferenceDialog
-    auto callback = [cnv, editor, object, originalComponent, selectedBoxes](int const result) mutable {
+    
+    auto callback = [cnvPtr = Component::SafePointer<Canvas>(cnv), editor, objectPtr = Component::SafePointer<Object>(object), originalPtr = Component::SafePointer<Component>(originalComponent), selectedObjects](int const result) mutable {
+        auto* cnv = cnvPtr.getComponent();
+        if (!cnv)
+            return;
+        auto* object = objectPtr.getComponent();
+        auto* originalComponent = originalPtr.getComponent();
+
         cnv->grabKeyboardFocus();
         editor->showCalloutArea(false);
 
@@ -705,7 +823,8 @@ void Dialogs::showCanvasRightClickMenu(Canvas* cnv, Component* originalComponent
             if (originalComponent == cnv) {
                 SmallArray<ObjectParameters, 6> parameters = { cnv->getInspectorParameters() };
                 toShow.add(cnv);
-                editor->sidebar->forceShowParameters(toShow, parameters);
+                if (auto* s = editor->getSidebarForPanel(Sidebar::InspectorPanel))
+                    s->forceShowParameters(toShow, parameters);
             } else if (object && object->gui) {
                 // this makes sure that objects can handle the "properties" message as well if they like, for example for [else/properties]
                 if (auto gobj = object->gui->ptr.get<t_gobj>()) {
@@ -717,7 +836,8 @@ void Dialogs::showCanvasRightClickMenu(Canvas* cnv, Component* originalComponent
 
                 SmallArray<ObjectParameters, 6> parameters = { object->gui->getParameters() };
                 toShow.add(object);
-                editor->sidebar->forceShowParameters(toShow, parameters);
+                if (auto* s = editor->getSidebarForPanel(Sidebar::InspectorPanel))
+                    s->forceShowParameters(toShow, parameters);
             }
 
             return;
@@ -737,11 +857,11 @@ void Dialogs::showCanvasRightClickMenu(Canvas* cnv, Component* originalComponent
             // The FORWARD double for loop makes sure that they keep their original order
             cnv->patch.startUndoSequence("ToFront");
             for (auto& o : objects) {
-                for (auto* selectedBox : selectedBoxes) {
-                    if (o == selectedBox->getPointer()) {
-                        selectedBox->toFront(false);
-                        if (selectedBox->gui)
-                            selectedBox->gui->moveToFront();
+                for (auto* selectedObject : selectedObjects) {
+                    if (o == selectedObject->getPointer()) {
+                        selectedObject->toFront(false);
+                        if (selectedObject->gui)
+                            selectedObject->gui->moveToFront();
                     }
                 }
             }
@@ -755,11 +875,11 @@ void Dialogs::showCanvasRightClickMenu(Canvas* cnv, Component* originalComponent
             // The FORWARD double for loop makes sure that they keep their original order
             cnv->patch.startUndoSequence("MoveForward");
             for (auto& o : objects) {
-                for (auto* selectedBox : selectedBoxes) {
-                    if (o == selectedBox->getPointer()) {
-                        selectedBox->toFront(false);
-                        if (selectedBox->gui)
-                            selectedBox->gui->moveForward();
+                for (auto* selectedObject : selectedObjects) {
+                    if (o == selectedObject->getPointer()) {
+                        selectedObject->toFront(false);
+                        if (selectedObject->gui)
+                            selectedObject->gui->moveForward();
                     }
                 }
             }
@@ -773,11 +893,11 @@ void Dialogs::showCanvasRightClickMenu(Canvas* cnv, Component* originalComponent
             cnv->patch.startUndoSequence("MoveBackward");
             // The REVERSE double for loop makes sure that they keep their original order
             for (int i = objects.size() - 1; i >= 0; i--) {
-                for (auto* selectedBox : selectedBoxes) {
-                    if (objects[i] == selectedBox->getPointer()) {
-                        selectedBox->toBack();
-                        if (selectedBox->gui)
-                            selectedBox->gui->moveBackward();
+                for (auto* selectedObject : selectedObjects) {
+                    if (objects[i] == selectedObject->getPointer()) {
+                        selectedObject->toBack();
+                        if (selectedObject->gui)
+                            selectedObject->gui->moveBackward();
                     }
                 }
             }
@@ -791,11 +911,11 @@ void Dialogs::showCanvasRightClickMenu(Canvas* cnv, Component* originalComponent
             cnv->patch.startUndoSequence("ToBack");
             // The REVERSE double for loop makes sure that they keep their original order
             for (int i = objects.size() - 1; i >= 0; i--) {
-                for (auto* selectedBox : selectedBoxes) {
-                    if (objects[i] == selectedBox->getPointer()) {
-                        selectedBox->toBack();
-                        if (selectedBox->gui)
-                            selectedBox->gui->moveToBack();
+                for (auto* selectedObject : selectedObjects) {
+                    if (objects[i] == selectedObject->getPointer()) {
+                        selectedObject->toBack();
+                        if (selectedObject->gui)
+                            selectedObject->gui->moveToBack();
                     }
                 }
             }
@@ -807,7 +927,7 @@ void Dialogs::showCanvasRightClickMenu(Canvas* cnv, Component* originalComponent
             object->openHelpPatch();
             break;
         case Reference:
-            Dialogs::showObjectReferenceDialog(&editor->openedDialog, editor, object->getType());
+            Dialogs::showObjectReferenceDialog(&editor->openedDialog, editor, object->getType().toString());
             break;
         case AlignLeft:
             cnv->alignObjects(Align::Left);
@@ -857,6 +977,9 @@ void Dialogs::dismissFileDialog()
 
 void Dialogs::showOpenDialog(std::function<void(URL)> const& callback, bool const canSelectFiles, bool const canSelectDirectories, String const& extension, String const& lastFileId, Component* parentComponent)
 {
+#if ENABLE_TESTING
+    return; // Don't open file dialogs during testing
+#endif
     bool nativeDialog = SettingsFile::getInstance()->wantsNativeDialog();
     auto initialFile = lastFileId.isNotEmpty() ? SettingsFile::getInstance()->getLastBrowserPathForId(lastFileId) : ProjectInfo::appDataDir;
     if (!initialFile.exists())
@@ -883,25 +1006,33 @@ void Dialogs::showOpenDialog(std::function<void(URL)> const& callback, bool cons
     fileChooser->launchAsync(openChooserFlags,
         [callback, lastFileId](FileChooser const& fileChooser) {
             auto const result = fileChooser.getResult();
+            auto const resultURL = fileChooser.getURLResult();
 
             auto const lastDir = result.isDirectory() ? result : result.getParentDirectory();
             if (result.exists()) {
+#if JUCE_IOS
+                // Create an input stream to access the security scoped resource
+                auto scopedAccessStream = resultURL.createInputStream(URL::InputStreamOptions(URL::ParameterHandling::inAddress));
+#endif
                 SettingsFile::getInstance()->setLastBrowserPathForId(lastFileId, lastDir);
-                callback(fileChooser.getURLResult());
+                callback(resultURL);
             }
             Dialogs::fileChooser = nullptr;
         });
 }
 
-void Dialogs::showSaveDialog(std::function<void(URL)> const& callback, String const& extension, String const& lastFileId, Component* parentComponent, bool const directoryMode)
+void Dialogs::showSaveDialog(std::function<void(URL)> const& callback, String const& extension, String const& lastFileId, Component* parentComponent, bool const directoryMode, String const& defaultFileName)
 {
+#if ENABLE_TESTING
+    return; // Don't open file dialogs during testing
+#endif
     bool nativeDialog = SettingsFile::getInstance()->wantsNativeDialog();
     auto initialFile = lastFileId.isNotEmpty() ? SettingsFile::getInstance()->getLastBrowserPathForId(lastFileId) : ProjectInfo::appDataDir;
     if (!initialFile.exists())
         initialFile = ProjectInfo::appDataDir;
 
 #if JUCE_IOS
-    fileChooser = std::make_unique<FileChooser>("Choose save location...", initialFile, extension, nativeDialog, false, parentComponent);
+    fileChooser = std::make_unique<FileChooser>("Choose save location...", initialFile.getChildFile(defaultFileName), extension, nativeDialog, false, parentComponent);
 #else
     fileChooser = std::make_unique<FileChooser>("Choose save location...", initialFile, extension, nativeDialog, false, nullptr);
 #endif
@@ -912,10 +1043,7 @@ void Dialogs::showSaveDialog(std::function<void(URL)> const& callback, String co
     else
         saveChooserFlags = static_cast<FileBrowserComponent::FileChooserFlags>(saveChooserFlags | FileBrowserComponent::canSelectFiles);
 
-    // TODO: checks if this still causes issues
-#if !JUCE_LINUX && !JUCE_BSD
     saveChooserFlags = static_cast<FileBrowserComponent::FileChooserFlags>(saveChooserFlags | FileBrowserComponent::warnAboutOverwriting);
-#endif
 
     fileChooser->launchAsync(saveChooserFlags,
         [callback, lastFileId](FileChooser const& fileChooser) {

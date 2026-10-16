@@ -39,7 +39,6 @@ void canvas_click(t_canvas* x, t_floatarg xpos, t_floatarg ypos, t_floatarg shif
 #include "TabComponent.h"
 #include "Pd/Patch.h"
 #include "Sidebar/Sidebar.h"
-#include "Utility/CachedTextRender.h"
 #include "Utility/CachedStringWidth.h"
 
 #include "Dialogs/Dialogs.h"
@@ -86,6 +85,7 @@ void canvas_click(t_canvas* x, t_floatarg xpos, t_floatarg ypos, t_floatarg shif
 #include "PopMenu.h"
 #include "LuaObject.h"
 #include "DropzoneObject.h"
+#include "GemWindowObject.h"
 
 // Class for non-patchable objects
 class NonPatchable final : public ObjectBase {
@@ -182,8 +182,7 @@ ObjectBase::ObjectBase(pd::WeakReference obj, Object* parent)
     });
 
     setWantsKeyboardFocus(true);
-
-    setLookAndFeel(new PlugDataLook());
+    setViewportIgnoreDragFlag(true);
 
     propertyListener.onChange = [_this = SafePointer(this)] {
         if (!_this)
@@ -201,15 +200,12 @@ ObjectBase::~ObjectBase()
 {
     pd->unregisterMessageListener(this);
     object->removeComponentListener(&objectSizeListener);
-
-    auto const* lnf = &getLookAndFeel();
-    setLookAndFeel(nullptr);
-    delete lnf;
 }
 
 void ObjectBase::initialise()
 {
-    update();
+    updateProperties();
+
     constrainer = createConstrainer();
     onConstrainerCreate();
 
@@ -234,27 +230,16 @@ void ObjectBase::objectMovedOrResized(bool const resized)
     updateLabel();
 }
 
-String ObjectBase::getText()
+SmallString ObjectBase::getText()
 {
-    char* text = nullptr;
-    int size = 0;
-
     if (auto obj = ptr.get<t_gobj>()) {
-
         if (!pd::Interface::checkObject(obj.get()))
             return "";
 
-        pd::Interface::getObjectText(obj.cast<t_object>(), &text, &size);
+        return pd::Interface::getObjectText(obj.cast<t_object>());
     }
 
-    if (text && size) {
-
-        auto txt = String::fromUTF8(text, size);
-        freebytes(text, static_cast<size_t>(size) * sizeof(char));
-        return txt;
-    }
-
-    return "";
+    return { };
 }
 
 bool ObjectBase::checkHvccCompatibility()
@@ -274,19 +259,23 @@ bool ObjectBase::checkHvccCompatibility()
     } else if (HeavyCompatibleObjects::isCompatible(type)) {
         return true;
     } else {
-        pd->logWarning(String("Warning: object \"" + getType() + "\" is not supported in Compiled Mode").toRawUTF8());
+        pd->logWarning(String("Warning: object \"" + getType().toString() + "\" is not supported in Compiled Mode").toRawUTF8());
         return false;
     }
 }
 
-String ObjectBase::getTypeWithOriginPrefix() const
+SmallString ObjectBase::getTypeWithOriginPrefix() const
 {
     auto type = getType();
-    if (type.contains("/"))
+    if (type.containsChar('/'))
         return type;
 
+    String origin;
+    origin.preallocateBytes(32);
+
     if (auto* objectPtr = ptr.getRaw<t_gobj>()) {
-        auto const origin = pd::Library::getObjectOrigin(objectPtr);
+        origin = pd::Library::getObjectOrigin(objectPtr);
+    }
 
         if (origin == "ELSE" && type == "msg") {
             return "ELSE/message";
@@ -295,84 +284,96 @@ String ObjectBase::getTypeWithOriginPrefix() const
         if (origin.isEmpty())
             return type;
 
-        return origin + "/" + type;
-    }
-    return {};
+    return origin + "/" + type.toString();
 }
 
-String ObjectBase::getType() const
+void ObjectBase::sendMessage(SmallString const& message, SmallArray<pd::Atom> const& args, MessageCallbackType callbackType)
+{
+    if (callbackType == Sync) {
+        if (auto obj = ptr.get<void>()) {
+            pd->sendDirectMessage(obj.get(), message, std::move(args));
+        }
+    } else {
+        pd->enqueueFunctionAsync<t_pd>(ptr, [pd = this->pd, m = message, a = args](t_pd* obj) {
+            sys_lock();
+            pd->sendDirectMessage(obj, m, std::move(a));
+            sys_unlock();
+        });
+    }
+}
+
+SmallString ObjectBase::getType() const
 {
     return type;
 }
 
-void ObjectBase::setType()
+std::pair<SmallString, bool> ObjectBase::getTypeFromClass(pd::WeakReference classPtr)
 {
-    auto getObjectType = [this]() -> String {
-        if (auto obj = ptr.get<t_pd>()) {
-            // Check if it's an abstraction or subpatch
-            if (pd_class(obj.get()) == canvas_class && canvas_isabstraction(obj.cast<t_glist>())) {
+    auto getObjectText = [](t_object* ob) -> SmallString {
                 char namebuf[MAXPDSTRING];
-                auto const* ob = obj.cast<t_object>();
                 int const ac = binbuf_getnatom(ob->te_binbuf);
                 t_atom const* av = binbuf_getvec(ob->te_binbuf);
                 if (ac < 1)
-                    return {};
+            return { };
                 atom_string(av, namebuf, MAXPDSTRING);
 
-                return String::fromUTF8(namebuf).fromLastOccurrenceOf("/", false, false);
+        return SmallString(namebuf).fromLastOccurrenceOf("/");
+    };
+
+    if (auto obj = classPtr.get<t_pd>()) {
+        // Check if it's an abstraction or subpatch
+        auto* pdclass = pd_class(obj.get());
+        if (pdclass == canvas_class) {
+            if (canvas_isabstraction(obj.cast<t_glist>()))
+                return {getObjectText(obj.cast<t_object>()), true};
+            return {"canvas", true};
             }
 
-            auto* className = pd::Interface::getObjectClassName(obj.get());
-            if (!className)
-                return {};
+        auto const& className = pd::Interface::getObjectClassName(obj.get());
 
             // Deal with different text objects
             switch (hash(className)) {
             case hash("message"):
-                return "msg";
+            return {"msg", false};
             case hash("text"):
                 if (obj.cast<t_text>()->te_type == T_OBJECT)
-                    return "invalid";
+                return {"invalid", false};
                 if (obj.cast<t_text>()->te_type == T_TEXT)
-                    return "comment";
+                return {"comment", false};
                 if (obj.cast<t_text>()->te_type == T_MESSAGE)
-                    return "msg";
+                return {"msg", false};
                 break;
             // Deal with atoms
             case hash("gatom"):
                 if (obj.cast<t_fake_gatom>()->a_flavor == A_FLOAT)
-                    return "floatbox";
+                return {"floatbox", false};
                 if (obj.cast<t_fake_gatom>()->a_flavor == A_SYMBOL)
-                    return "symbolbox";
+                return {"symbolbox", false};
                 if (obj.cast<t_fake_gatom>()->a_flavor == A_NULL)
-                    return "listbox";
+                return {"listbox", false};
                 break;
             case hash("hsl"):
                 if (obj.cast<t_slider>()->x_orientation)
-                    return "vsl";
+                return {"vsl", false};
                 else
-                    return "hsl";
+                return {"hsl", false};
             case hash("hradio"):
                 if (obj.cast<t_radio>()->x_orientation)
-                    return "vradio";
+                return {"vradio", false};
                 else
-                    return "hradio";
+                return {"hradio", false};
             default:
                 break;
             }
 
-            return String::fromUTF8(className);
+        return {className, false};
         }
-        return {};
-    };
-
-    type = getObjectType();
+    return { };
 }
 
-// Make sure the object can't be triggered if that palette is in drag mode
-bool ObjectBase::hitTest(int const x, int const y)
+void ObjectBase::setType()
 {
-    return Component::hitTest(x, y);
+    type = getTypeFromClass(ptr).first;
 }
 
 // Gets position from pd and applies it to Object
@@ -400,7 +401,6 @@ void ObjectBase::closeOpenedSubpatchers()
 bool ObjectBase::click(Point<int> const position, bool const shift, bool const alt)
 {
     if (auto obj = ptr.get<t_text>()) {
-
         t_text* x = obj.get();
         if (x->te_type == T_OBJECT) {
             t_symbol* clicksym = gensym("click");
@@ -485,37 +485,23 @@ void ObjectBase::moveToBack()
     }
 }
 
-void ObjectBase::render(NVGcontext* nvg)
-{
-    imageRenderer.renderJUCEComponent(nvg, *this, getImageScale());
-}
-
 void ObjectBase::paint(Graphics& g)
 {
-    g.setColour(cnv->editor->getLookAndFeel().findColour(PlugDataColour::guiObjectBackgroundColourId));
-    g.fillRoundedRectangle(getLocalBounds().toFloat().reduced(0.5f), Corners::objectCornerRadius);
+    auto const& colours = getThemeColours();
+
+    g.setColour(colours.guiObjectBackgroundColour);
+    g.fillRoundedRectangle(getLocalBounds().toFloat().reduced(0.5f), getPlugDataLook(*this).getObjectCornerRadius());
 
     bool const selected = object->isSelected() && !cnv->isGraph;
-    auto const outlineColour = cnv->editor->getLookAndFeel().findColour(selected ? PlugDataColour::objectSelectedOutlineColourId : objectOutlineColourId);
+    auto const outlineColour = selected ? colours.objectSelectedOutlineColour : colours.objectOutlineColour;
 
     g.setColour(outlineColour);
-    g.drawRoundedRectangle(getLocalBounds().toFloat().reduced(0.5f), Corners::objectCornerRadius, 1.0f);
+    g.drawRoundedRectangle(getLocalBounds().toFloat().reduced(0.5f), getPlugDataLook(*this).getObjectCornerRadius(), 1.0f);
 }
 
-float ObjectBase::getImageScale()
+PlugDataColours const& ObjectBase::getThemeColours() const
 {
-    auto const* topLevel = cnv;
-    if (!hideInGraph()) { // No need to do this if we can't be visible in a graph anyway!
-        while (auto const* nextCnv = topLevel->findParentComponentOfClass<Canvas>()) {
-            topLevel = nextCnv;
-        }
-    }
-    if (topLevel->editor->pluginMode) {
-        auto const scale = std::sqrt(std::abs(topLevel->getTransform().getDeterminant()));
-        return object->editor->getRenderScale() * std::max(1.0f, scale);
-    }
-
-    return object->editor->getRenderScale() * getValue<float>(topLevel->zoomScale);
+    return ::getThemeColours(*cnv);
 }
 
 ObjectParameters ObjectBase::getParameters()
@@ -711,14 +697,15 @@ ObjectBase* ObjectBase::createGui(pd::WeakReference ptr, Object* parent)
             return new KnobObject(ptr, parent);
         case hash("popmenu"):
             return new PopMenu(ptr, parent);
+#if ENABLE_GEM
+        case hash("gemcanvas"):
+            return new GemCanvasObject(ptr, parent);
+#endif
             // case hash("dropzone"):
             //     return new DropzoneObject(ptr, parent);
         case hash("openfile"): {
             if (auto checked = ptr.get<t_gobj>()) {
-                char* text;
-                int size;
-                pd::Interface::getObjectText(checked.cast<t_text>(), &text, &size);
-                auto const objText = String::fromUTF8(text, size);
+                auto const objText = pd::Interface::getObjectText(checked.cast<t_text>());
                 if (objText.contains("openfile -h")) {
                     return new OpenFileObject(ptr, parent);
                 } else {
@@ -752,6 +739,13 @@ ObjectBase* ObjectBase::createGui(pd::WeakReference ptr, Object* parent)
     return new TextObject(ptr, parent);
 }
 
+void ObjectBase::updateProperties()
+{
+    propertyListener.setNoCallback(true);
+    update();
+    propertyListener.setNoCallback(false);
+}
+
 void ObjectBase::getMenuOptions(PopupMenu& menu)
 {
     if (auto obj = ptr.get<t_pd>()) {
@@ -759,9 +753,7 @@ void ObjectBase::getMenuOptions(PopupMenu& menu)
             menu.addItem("Open", [_this = SafePointer(this)] {
                 if (!_this)
                     return;
-                if (auto obj = _this->ptr.get<t_pd>()) {
-                    _this->pd->sendDirectMessage(obj.get(), "menu-open", {});
-                }
+                _this->sendMessage("menu-open");
             });
         } else {
             menu.addItem(-1, "Open", false);
@@ -793,7 +785,7 @@ String ObjectBase::getBinbufSymbol(int const argIndex) const
         }
     }
 
-    return {};
+    return { };
 }
 
 pd::Patch::Ptr ObjectBase::getPatch()
@@ -872,6 +864,11 @@ ComponentBoundsConstrainer* ObjectBase::getConstrainer() const
     return constrainer.get();
 }
 
+ObjectBase::ResizeDirection ObjectBase::getAllowedResizeDirections() const
+{
+    return Any;
+}
+
 std::unique_ptr<ComponentBoundsConstrainer> ObjectBase::createConstrainer()
 {
     class ObjectBoundsConstrainer : public ComponentBoundsConstrainer {
@@ -922,4 +919,36 @@ std::unique_ptr<ComponentBoundsConstrainer> ObjectBase::createConstrainer()
     };
 
     return std::make_unique<ObjectBoundsConstrainer>();
+}
+
+bool ObjectBase::recurseHvccCompatibility(SmallString const& objectText, pd::Patch::Ptr patch, String const& prefix)
+{
+    auto const instance = patch->instance;
+
+    if (objectText.startsWith("pd @hv_obj") || HeavyCompatibleObjects::isCompatible(objectText)) {
+        return true;
+    }
+
+    bool compatible = true;
+
+    for (auto object : patch->getObjects()) {
+        auto [type, isSubpatchOrAbstraction] = getTypeFromClass(object);
+        if(isSubpatchOrAbstraction)
+        {
+            SmallString objName = type;
+            pd::Patch::Ptr const subpatch = new pd::Patch(object, instance, false);
+            if (subpatch->isSubpatch()) {
+                if(auto ptr = object.get<t_canvas>()) {
+                    objName = pd::Interface::getObjectText(&ptr.cast<t_canvas>()->gl_obj);
+                }
+            }
+            compatible = recurseHvccCompatibility(objName, subpatch, prefix + objName.toString() + " -> ") && compatible;
+        }
+        else if (!HeavyCompatibleObjects::isCompatible(type)) {
+            compatible = false;
+            instance->logWarning(String("Warning: object \"" + prefix + type.toString() + "\" is not supported in Compiled Mode"));
+        }
+    }
+
+    return compatible;
 }

@@ -83,21 +83,6 @@ def makeArchive(name, root_dir, base_dir):
             full_path = os.path.join(root_dir, base_dir)
             tar.add(full_path, arcname=base_dir)
 
-def split(a, n):
-    k, m = divmod(len(a), n)
-    return (a[i*k+min(i, m):(i+1)*k+min(i+1, m)] for i in range(n))
-
-
-def splitFile(file, output_file, num_files):
-    with open(file, 'rb') as fd:
-        data_in = split(fd.read(), num_files)
-        count = 0
-        for entry in data_in:
-            with open(output_file.replace("%i", str(count)), "wb") as fd:
-                fd.write(entry)
-            count += 1
-
-
 def replaceTextInFile(file_path, old_string, new_string):
     with open(file_path, 'r', encoding='utf-8') as file:
         content = file.read()
@@ -117,106 +102,6 @@ def replaceTextInFolder(folder_path, old_string, new_string):
         for dir_name in dirs:
             replaceTextInFolder(os.path.join(
                 root, dir_name), old_string, new_string)
-
-
-def expand_glob_list(file_patterns):
-    expanded_files = []
-    for pattern in file_patterns:
-        expanded_files.extend(glob.glob(pattern))
-    return expanded_files
-
-
-def hash_resource_name(resource_name):
-    # Hashes a resource name using the same algorithm as in the C++ code.
-    hash_val = 0
-    for char in resource_name:
-        hash_val = 31 * hash_val + ord(char)
-    return hash_val & 0xFFFFFFFF  # Limit to 32-bit hash
-
-
-def generate_binary_data(output_dir, file_list):
-    os.makedirs(output_dir, exist_ok=True)  # Ensure output directory exists
-    file_data = []  # To store metadata for each file
-
-    # Gather file information and binary content
-    for index, filepath in enumerate(file_list):
-        filename = os.path.basename(filepath)
-        if os.path.isfile(filepath):
-            with open(filepath, "rb") as file:
-                binary_content = file.read()
-
-            var_name = filename.replace('.', '_').replace('-', '_')
-            temp_name = f"temp_binary_data_{index}"
-            data = {
-                "filename": filename,
-                "var_name": var_name,
-                "temp_name": temp_name,
-                "size": len(binary_content),
-                "binary": list(binary_content),
-                "index": str(index),
-                "hash": hash_resource_name(var_name)
-            }
-            file_data.append(data)
-
-    # Generate header file
-    with open(output_dir + "/BinaryData.h", "w") as header:
-        header.write("namespace BinaryData\n{\n")
-        for data in file_data:
-            header.write(f"    extern const char* {data['var_name']};\n")
-            header.write(f"    const int {data['var_name']}Size = {data['size']};\n")
-
-        header.write("\n    const int namedResourceListSize = {};\n".format(len(file_data)))
-        header.write("    extern const char* namedResourceList[];\n")
-        header.write("    extern const char* originalFilenames[];\n")
-        header.write("    const char* getNamedResource (const char* resourceNameUTF8, int& dataSizeInBytes);\n")
-        header.write("}\n")
-
-    with open(output_dir + "/BinaryData.cpp", "w") as source:
-        source.write("#include \"BinaryData.h\"\n\n")
-        source.write("namespace BinaryData\n{\n\n")
-
-        source.write("\n    const char* namedResourceList[] = {\n")
-        for data in file_data:
-            source.write(f"        \"{data['var_name']}\",\n")
-        source.write("    };\n\n")
-
-        source.write("const char* getNamedResource (const char* resourceNameUTF8, int& numBytes)\n")
-        source.write("{\n")
-        source.write("    unsigned int hash = 0;\n")
-        source.write("    if (resourceNameUTF8 != nullptr)\n")
-        source.write("        while (*resourceNameUTF8 != 0)\n")
-        source.write("            hash = 31 * hash + (unsigned int) *resourceNameUTF8++;\n\n")
-
-        source.write("    switch (hash)\n    {\n")
-        for data in file_data:
-            source.write(f"        case 0x{data['hash']:08x}:  numBytes = {data['size']}; return {data['var_name']};\n")
-        source.write("        default: break;\n")
-        source.write("    }\n\n")
-
-        source.write("    numBytes = 0;\n")
-        source.write("    return nullptr;\n")
-        source.write("}\n")
-        source.write("}\n")
-
-    # Generate .cpp files for each binary resource
-    for data in file_data:
-        cpp_filename = output_dir + "/BinaryData_" + data["index"] + ".cpp"
-        with open(cpp_filename, "w") as cpp_file:
-            cpp_file.write("namespace BinaryData\n{\n")
-            cpp_file.write(f"//================== {data['filename']} ==================\n")
-            cpp_file.write(f"static const unsigned char {data['temp_name']}[] =\n{{\n")
-
-            chunk_size = 64
-            for i in range(0, len(data['binary']), chunk_size):
-                chunk = data['binary'][i:i + chunk_size]
-                # Format and write each chunk without a trailing comma
-                hex_values = ','.join(str(byte) for byte in chunk) + ','
-                cpp_file.write(f"    {hex_values}\n")
-
-            cpp_file.write("};\n\n")
-            cpp_file.write(f"const char* {data['var_name']} = (const char*) {data['temp_name']};\n")
-            cpp_file.write("}\n")
-
 
 if existsAsFile("../Filesystem"):
     removeFile("../Filesystem")
@@ -239,10 +124,10 @@ globCopy(project_root + "/Libraries/pure-data/extra/**/*-help.pd", "./Abstractio
 globCopy(project_root + "/Libraries/pd-else/Abstractions/Control/*.pd", "./Abstractions/else")
 globCopy(project_root + "/Libraries/pd-else/Abstractions/Audio/*.pd", "./Abstractions/else")
 globCopy(project_root + "/Libraries/pd-else/Abstractions/Extra/*.pd", "./Abstractions/else")
-globCopy(project_root + "/Libraries/pd-else/Source/Control/*.pd_lua", "./Abstractions/else")
-globCopy(project_root + "/Libraries/pd-else/Source/Audio/*.pd_lua", "./Abstractions/else")
-globCopy(project_root + "/Libraries/pd-else/Abstractions/Extra/*.pd_lua", "./Abstractions/else")
-copyFile(project_root + "/Resources/Patches/lua.pd_lua", "./Abstractions/else")
+globCopy(project_root + "/Libraries/pd-else/Source/Extra/*.lua", "./Abstractions/else")
+globCopy(project_root + "/Libraries/pd-else/Source/Control/*.pd_luajit", "./Abstractions/else")
+globCopy(project_root + "/Libraries/pd-else/Source/Audio/*.pd_luajit", "./Abstractions/else")
+copyFile(project_root + "/Resources/Patches/lua.pd_luajit", "./Abstractions/else")
 copyFile(project_root + "/Resources/Patches/playhead.pd", "./Abstractions")
 copyFile(project_root + "/Resources/Patches/param.pd", "./Abstractions")
 copyFile(project_root + "/Resources/Patches/daw_storage.pd", "./Abstractions")
@@ -280,9 +165,13 @@ removeDir("Extra/else/audio")
 copyFile(project_root + "/Libraries/pd-else/Documentation/README.pdf", "Extra/else")
 copyDir(project_root + "/Libraries/pd-else/Source/Audio/sfz~/sfz", "Extra/else/sfz")
 copyDir(project_root + "/Resources/Patches/Presets", "./Extra/Presets")
-convert_merda.process(project_root + "/Libraries/pd-else/Abstractions/Merda/Modules/")
-globCopy(project_root + "/Libraries/pd-else/Abstractions/Merda/Modules/*.pd", "./Extra/else")
+
+convert_merda.process(project_root + "/Libraries/pd-else/Abstractions/Merda", output_dir + "/Merda_temp")
+
+globCopy(output_dir + "/Merda_temp/*", "./Extra/else")
 copyDir(project_root + "/Libraries/pd-else/Abstractions/Merda/Modules/brane-presets", "./Extra/else/brane-presets")
+removeDir(output_dir + "/Merda_temp")
+
 globCopy(project_root + "/Libraries/pure-data/doc/sound/*", "Extra/else")
 
 # Our folder is called "Documentation" instead of "doc", which makes some file paths in default helpfiles invalid
@@ -324,27 +213,148 @@ changeWorkingDir("../")
 
 makeArchive("Filesystem", "./", "./plugdata_version")
 
-with zipfile.ZipFile(output_dir + "/InterUnicode.ttf.zip", 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zipf:
-    zipf.write(project_root + "/Resources/Fonts/InterUnicode.ttf", arcname="InterUnicode.ttf")
-
 removeDir(output_dir + "/plugdata_version")
 
-splitFile(output_dir + "/InterUnicode.ttf.zip", output_dir + "/InterUnicode_%i", 3)
+def generateBinaryDataArchive(output_dir, file_list):
+    os.makedirs(output_dir, exist_ok=True)
 
-splitFile("./Filesystem", output_dir + "/Filesystem_%i", 8)
-removeFile("./Filesystem")
+    archive_data = bytearray()
+    file_index = []
 
-generate_binary_data("../BinaryData", expand_glob_list({
+    for filepath in file_list:
+        if os.path.isfile(filepath):
+            var_name = os.path.basename(filepath).replace('.', '_').replace('-', '_')
+            with open(filepath, "rb") as f:
+                content = f.read()
+            offset = len(archive_data)
+            size = len(content)
+            archive_data.extend(content)
+            file_index.append({'var_name': var_name, 'offset': offset, 'size': size})
+
+    with open(os.path.join(output_dir, "plugdata-resources.bin"), "wb") as f:
+        f.write(archive_data)
+
+    enum_values = ",\n    ".join(d['var_name'] for d in file_index)
+    resource_table = "\n".join(f"    {{ {d['offset']}, {d['size']} }}," for d in file_index)
+
+    header_content = f"""#pragma once
+
+#include <cstdint>
+#include <vector>
+#include <cstring>
+#include <juce_core/juce_core.h>
+#include <juce_audio_processors/juce_audio_processors.h>
+
+namespace BinaryData {{
+
+enum Resource {{
+    {enum_values}
+}};
+
+constexpr int namedResourceListSize = {len(file_index)};
+
+struct ResourceInfo {{
+    uint32_t offset;
+    uint32_t size;
+}};
+
+static constexpr ResourceInfo resources[] = {{
+{resource_table}
+}};
+
+inline juce::File getResourceFile() {{
+#if JUCE_IOS
+    auto destFile = juce::File::getContainerForSecurityApplicationGroupIdentifier("group.com.plugdata.plugdata").getChildFile("plugdata-resources.bin");
+    if (juce::PluginHostType::getPluginLoadedAs() != juce::AudioProcessor::wrapperType_AudioUnitv3) {{
+        auto srcFile = juce::File::getSpecialLocation(juce::File::currentExecutableFile).getParentDirectory().getChildFile("plugdata-resources.bin");
+        if(srcFile.existsAsFile())
+            srcFile.moveFileTo(destFile);
+        return srcFile;
+    }}
+    return destFile;
+#elif JUCE_MAC
+    // Inside a .lproj folder, because codesign seals files in there as optional (see package-macOS.sh)
+    if (juce::PluginHostType::getPluginLoadedAs() != juce::AudioProcessor::wrapperType_LV2)
+        return juce::File::getSpecialLocation(juce::File::currentExecutableFile)
+            .getParentDirectory().getParentDirectory()
+            .getChildFile("Resources/plugdata.lproj/plugdata-resources.bin");
+#endif
+    return juce::File::getSpecialLocation(juce::File::currentExecutableFile)
+        .getParentDirectory()
+        .getChildFile("plugdata-resources.bin");
+}}
+
+inline std::vector<char> getResource(Resource resource) {{
+    auto resourceFile = getResourceFile();
+    if (!resourceFile.existsAsFile()) {{
+        jassertfalse; // could not load resource file!
+        return {{}};
+    }}
+
+    const auto& r = resources[resource];
+    std::vector<char> data(r.size);
+
+    juce::FileInputStream stream(resourceFile);
+    if (stream.openedOk()) {{
+        stream.setPosition(r.offset);
+        stream.read(data.data(), r.size);
+    }}
+
+    return data;
+}}
+
+inline int getResourceSize(Resource resource) {{
+    return resources[resource].size;
+}}
+
+inline std::unique_ptr<juce::FileInputStream> createInputStream(Resource resource) {{
+    auto resourceFile = getResourceFile();
+    if (!resourceFile.existsAsFile())
+        return nullptr;
+
+    auto stream = std::make_unique<juce::FileInputStream>(resourceFile);
+    if (!stream->openedOk())
+        return nullptr;
+
+    const auto& r = resources[resource];
+    stream->setPosition(r.offset);
+    // Note: caller should only read up to r.size bytes
+    return stream;
+}}
+
+inline unsigned char* getResourceCopy(Resource resource) {{
+    auto data = getResource(resource);
+    if (data.empty())
+        return nullptr;
+    auto* copy = (unsigned char*)malloc(data.size());
+    std::memcpy(copy, data.data(), data.size());
+    return copy;
+}}
+
+inline juce::Image loadImage(Resource resource) {{
+    auto image = getResource(resource);
+    return juce::ImageFileFormat::loadFrom(image.data(), image.size());
+}}
+
+inline juce::Typeface::Ptr loadFont(Resource resource) {{
+    auto font = getResource(resource);
+    return juce::Typeface::createSystemTypefaceFor(font.data(), font.size());
+}}
+
+}} // namespace BinaryData
+"""
+    with open(os.path.join(output_dir, "BinaryData.h"), "w") as f:
+        f.write(header_content)
+
+resources = [
     project_root + "/Resources/Fonts/IconFont.ttf",
-    project_root + "/Resources/Fonts/InterTabular.ttf",
-    project_root + "/Resources/Fonts/InterBold.ttf",
-    project_root + "/Resources/Fonts/InterSemiBold.ttf",
     project_root + "/Resources/Fonts/InterVariable.ttf",
-    project_root + "/Resources/Fonts/InterRegular.ttf",
-    project_root + "/Resources/Fonts/RobotoMono-Regular.ttf",
+    project_root + "/Resources/Fonts/NotoEmoji.ttf",
+    project_root + "/Resources/Fonts/RobotoMonoVariable.ttf",
     project_root + "/Resources/Icons/plugdata_large_logo.png",
     project_root + "/Resources/Icons/plugdata_logo.png",
     "Documentation.bin",
-    "InterUnicode_*",
-    "Filesystem_*"
-}))
+    "Filesystem"
+]
+
+generateBinaryDataArchive("../BinaryData", resources)

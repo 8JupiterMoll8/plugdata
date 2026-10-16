@@ -18,7 +18,6 @@ public:
     Value clapEnableValue = Value(var(1));
     Value jackEnableValue = Value(var(0));
 
-    Value exportTypeValue = Value(var(1));
     Value pluginTypeValue = Value(var(1));
 
     Value disableSIMD = Value(var(0));
@@ -32,7 +31,7 @@ public:
         PropertiesArray properties;
         properties.add(new PropertiesPanel::EditableComponent<String>("Maker Name (optional)", makerNameValue));
         properties.add(new PropertiesPanel::EditableComponent<String>("Project License (optional)", projectLicenseValue));
-        properties.add(new PropertiesPanel::ComboComponent("Export type", exportTypeValue, { "Binary", "Binary + GUI", "Source code", "Source + GUI code" }));
+        properties.add(new PropertiesPanel::ComboComponent("Export type", exportTypeValue, getExportTypes()));
         properties.add(new PropertiesPanel::ComboComponent("Plugin type", pluginTypeValue, { "Effect", "Instrument", "Custom" }));
 
         midiinProperty = new PropertiesPanel::BoolComponent("Midi Input", midiinEnableValue, { "No", "yes" });
@@ -73,46 +72,50 @@ public:
         panel.addSection("Advanced", pro_properties);
     }
 
-    ValueTree getState() override
+    StringArray getExportTypes() const override
     {
-        ValueTree stateTree("DPF");
-
-        stateTree.setProperty("inputPatchValue", getValue<String>(inputPatchValue), nullptr);
-        stateTree.setProperty("projectNameValue", getValue<String>(projectNameValue), nullptr);
-        stateTree.setProperty("projectCopyrightValue", getValue<String>(projectCopyrightValue), nullptr);
-        stateTree.setProperty("makerNameValue", getValue<String>(makerNameValue), nullptr);
-        stateTree.setProperty("projectLicenseValue", getValue<String>(projectLicenseValue), nullptr);
-        stateTree.setProperty("midiinEnableValue", getValue<int>(midioutEnableValue), nullptr);
-        stateTree.setProperty("lv2EnableValue", getValue<int>(lv2EnableValue), nullptr);
-        stateTree.setProperty("vst2EnableValue", getValue<int>(vst2EnableValue), nullptr);
-        stateTree.setProperty("vst3EnableValue", getValue<int>(vst3EnableValue), nullptr);
-        stateTree.setProperty("clapEnableValue", getValue<int>(clapEnableValue), nullptr);
-        stateTree.setProperty("jackEnableValue", getValue<int>(jackEnableValue), nullptr);
-        stateTree.setProperty("exportTypeValue", getValue<int>(exportTypeValue), nullptr);
-        stateTree.setProperty("pluginTypeValue", getValue<int>(pluginTypeValue), nullptr);
-        stateTree.setProperty("disableSIMD", getValue<int>(disableSIMD), nullptr);
-
-        return stateTree;
+        return { "Binary", "Binary + GUI", "Source code", "Source + GUI code" };
     }
 
-    void setState(ValueTree& stateTree) override
+    void getState(DynamicObject::Ptr globalState) override
     {
-        auto const tree = stateTree.getChildWithName("DPF");
-        inputPatchValue = tree.getProperty("inputPatchValue");
-        projectNameValue = tree.getProperty("projectNameValue");
-        projectCopyrightValue = tree.getProperty("projectCopyrightValue");
-        makerNameValue = tree.getProperty("makerNameValue");
-        projectLicenseValue = tree.getProperty("projectLicenseValue");
-        midiinEnableValue = tree.getProperty("midiinEnableValue");
-        midioutEnableValue = tree.getProperty("midioutEnableValue");
-        lv2EnableValue = tree.getProperty("lv2EnableValue");
-        vst2EnableValue = tree.getProperty("vst2EnableValue");
-        vst3EnableValue = tree.getProperty("vst3EnableValue");
-        clapEnableValue = tree.getProperty("clapEnableValue");
-        jackEnableValue = tree.getProperty("jackEnableValue");
-        exportTypeValue = tree.getProperty("exportTypeValue");
-        pluginTypeValue = tree.getProperty("pluginTypeValue");
-        disableSIMD = tree.getProperty("disableSIMD");
+        auto* state = new DynamicObject();
+        state->setProperty("input_patch_value", getValue<String>(inputPatchValue));
+        state->setProperty("project_name_value", getValue<String>(projectNameValue));
+        state->setProperty("project_copyright_value", getValue<String>(projectCopyrightValue));
+        state->setProperty("maker_name_value", getValue<String>(makerNameValue));
+        state->setProperty("project_license_value", getValue<String>(projectLicenseValue));
+        state->setProperty("midiin_enable_value", getValue<int>(midioutEnableValue));
+        state->setProperty("lv2_enable_value", getValue<int>(lv2EnableValue));
+        state->setProperty("vst2_enable_value", getValue<int>(vst2EnableValue));
+        state->setProperty("vst3_enable_value", getValue<int>(vst3EnableValue));
+        state->setProperty("clap_enable_value", getValue<int>(clapEnableValue));
+        state->setProperty("jack_enable_value", getValue<int>(jackEnableValue));
+        state->setProperty("export_type_value", getValue<int>(exportTypeValue));
+        state->setProperty("plugin_type_value", getValue<int>(pluginTypeValue));
+        state->setProperty("disable_simd", getValue<int>(disableSIMD));
+        globalState->setProperty("dpf", state);
+    }
+
+    void setState(DynamicObject::Ptr globalState) override
+    {
+        auto const state = globalState->getProperty("dpf").getDynamicObject();
+        if (!state)
+            return;
+        inputPatchValue = state->getProperty("input_patch_value");
+        projectNameValue = state->getProperty("project_name_value");
+        projectCopyrightValue = state->getProperty("project_copyright_value");
+        makerNameValue = state->getProperty("maker_name_value");
+        projectLicenseValue = state->getProperty("project_license_value");
+        midioutEnableValue = state->getProperty("midiin_enable_value");
+        lv2EnableValue = state->getProperty("lv2_enable_value");
+        vst2EnableValue = state->getProperty("vst2_enable_value");
+        vst3EnableValue = state->getProperty("vst3_enable_value");
+        clapEnableValue = state->getProperty("clap_enable_value");
+        jackEnableValue = state->getProperty("jack_enable_value");
+        exportTypeValue = state->getProperty("export_type_value");
+        pluginTypeValue = state->getProperty("plugin_type_value");
+        disableSIMD = state->getProperty("disable_simd");
     }
 
     void valueChanged(Value& v) override
@@ -134,13 +137,7 @@ public:
 
     bool performExport(String const& pdPatch, String const& outdir, String const& name, String const& copyright, StringArray const& searchPaths) override
     {
-        exportingView->showState(ExportingProgressView::Exporting);
-
-#if JUCE_WINDOWS
-        auto const heavyPath = heavyExecutable.getFullPathName().replaceCharacter('\\', '/');
-#else
-        auto const heavyPath = heavyExecutable.getFullPathName();
-#endif
+        auto const heavyPath = pathToString(heavyExecutable);
         StringArray args = { heavyPath.quoted(), pdPatch.quoted(), "-o", outdir.quoted() };
 
         args.add("-n" + name);
@@ -153,7 +150,7 @@ public:
         auto const makerName = getValue<String>(makerNameValue);
         auto const projectLicense = getValue<String>(projectLicenseValue);
 
-        auto const exportType = getValue<int>(exportTypeValue);
+        auto const exportType = getExportType();
         auto const midiin = getValue<int>(midiinEnableValue);
         auto const midiout = getValue<int>(midioutEnableValue);
 
@@ -210,7 +207,7 @@ public:
         metaJson->setProperty("nosimd", nosimd);
 
         auto const metaJsonFile = createMetaJson(metaJson);
-        args.add("-m" + metaJsonFile.getFullPathName());
+        args.add("-m" + pathToString(metaJsonFile));
 
         args.add("-v");
         args.add("-gdpf");
@@ -224,8 +221,7 @@ public:
             return true;
 
         auto const command = args.joinIntoString(" ");
-        exportingView->logToConsole("Command: " + command + "\n");
-        Toolchain::startShellScript(command, this);
+        startShellScript(command);
 
         waitForProcessToFinish(-1);
         exportingView->flushConsole();
@@ -238,11 +234,11 @@ public:
         outputFile.getChildFile("hv").deleteRecursively();
         outputFile.getChildFile("c").deleteRecursively();
 
-        auto const DPF = Toolchain::dir.getChildFile("lib").getChildFile("dpf");
+        auto const DPF = toolchainDir.getChildFile("lib").getChildFile("dpf");
         DPF.copyDirectoryTo(outputFile.getChildFile("dpf"));
 
         if (exportType == 2 || exportType == 4) {
-            auto const DPFGui = Toolchain::dir.getChildFile("lib").getChildFile("dpf-widgets");
+            auto const DPFGui = toolchainDir.getChildFile("lib").getChildFile("dpf-widgets");
             DPFGui.copyDirectoryTo(outputFile.getChildFile("dpf-widgets"));
         }
 
@@ -256,35 +252,35 @@ public:
         bool const generationExitCode = getExitCode();
         // Check if we need to compile
         if (!generationExitCode && (exportType == 1 || exportType == 2)) {
+            exportingView->reportStatus("Compiling");
+
             auto const workingDir = File::getCurrentWorkingDirectory();
 
             outputFile.setAsCurrentWorkingDirectory();
 
-            auto const bin = Toolchain::dir.getChildFile("bin");
+            auto const bin = toolchainDir.getChildFile("bin");
             auto make = bin.getChildFile("make" + exeSuffix);
             auto makefile = outputFile.getChildFile("Makefile");
 
 #if JUCE_MAC
-            Toolchain::startShellScript("make -j4 -f " + makefile.getFullPathName(), this);
+            startShellScript("make -j4 -f " + makefile.getFullPathName());
 #elif JUCE_WINDOWS
-            auto path = "export PATH=\"$PATH:" + Toolchain::dir.getChildFile("bin").getFullPathName().replaceCharacter('\\', '/') + "\"\n";
-            auto cc = "CC=" + Toolchain::dir.getChildFile("bin").getChildFile("gcc.exe").getFullPathName().replaceCharacter('\\', '/') + " ";
-            auto cxx = "CXX=" + Toolchain::dir.getChildFile("bin").getChildFile("g++.exe").getFullPathName().replaceCharacter('\\', '/') + " ";
-            auto shell = " SHELL=" + Toolchain::dir.getChildFile("bin").getChildFile("bash.exe").getFullPathName().replaceCharacter('\\', '/').quoted();
-            Toolchain::startShellScript(path + cc + cxx + make.getFullPathName().replaceCharacter('\\', '/') + " -j4 -f " + makefile.getFullPathName().replaceCharacter('\\', '/') + shell, this);
-
+            auto path = "export PATH=\"$PATH:" + pathToString(toolchainDir.getChildFile("bin")) + "\"\n";
+            auto cc = "CC=" + pathToString(toolchainDir.getChildFile("bin").getChildFile("gcc.exe")) + " ";
+            auto cxx = "CXX=" + pathToString(toolchainDir.getChildFile("bin").getChildFile("g++.exe")) + " ";
+            auto shell = " SHELL=" + pathToString(toolchainDir.getChildFile("bin").getChildFile("bash.exe")).quoted();
+            startShellScript(path + cc + cxx + pathToString(make) + " -j4 -f " + pathToString(makefile) + shell);
 #else // Linux or BSD
-            auto prepareEnvironmentScript = Toolchain::dir.getChildFile("scripts").getChildFile("anywhere-setup.sh").getFullPathName() + "\n";
-
+            auto prepareEnvironmentScript = pathToString(toolchainDir.getChildFile("scripts").getChildFile("anywhere-setup.sh")) + "\n";
             auto buildScript = prepareEnvironmentScript
-                + make.getFullPathName()
-                + " -j4 -f " + makefile.getFullPathName();
+                + pathToString(make)
+                + " -j4 -f " + pathToString(makefile);
 
             // For some reason we need to do this again
             outputFile.getChildFile("dpf").getChildFile("utils").getChildFile("generate-ttl.sh").setExecutePermission(true);
-            Toolchain::dir.getChildFile("scripts").getChildFile("anywhere-setup.sh").getChildFile("generate-ttl.sh").setExecutePermission(true);
+            toolchainDir.getChildFile("scripts").getChildFile("anywhere-setup.sh").getChildFile("generate-ttl.sh").setExecutePermission(true);
 
-            Toolchain::startShellScript(buildScript, this);
+            startShellScript(buildScript);
 #endif
 
             waitForProcessToFinish(-1);
@@ -302,25 +298,25 @@ public:
                 outputFile.getChildFile("bin").getChildFile(name + ".vst3").copyDirectoryTo(outputFile.getChildFile(name + ".vst3"));
             if (vst2)
 #if JUCE_WINDOWS
-                outputFile.getChildFile("bin").getChildFile(name + "-vst.dll").moveFileTo(outputFile.getChildFile(name + "-vst.dll"));
+                OSUtils::moveFileTo(outputFile.getChildFile("bin").getChildFile(name + "-vst.dll"), outputFile.getChildFile(name + "-vst.dll"));
 #elif JUCE_LINUX
-                outputFile.getChildFile("bin").getChildFile(name + "-vst.so").moveFileTo(outputFile.getChildFile(name + "-vst.so"));
+                OSUtils::moveFileTo(outputFile.getChildFile("bin").getChildFile(name + "-vst.so"), outputFile.getChildFile(name + "-vst.so"));
 #elif JUCE_MAC
-                outputFile.getChildFile("bin").getChildFile(name + ".vst").copyDirectoryTo(outputFile.getChildFile(name + ".vst"));
+                OSUtils::moveFileTo(outputFile.getChildFile("bin").getChildFile(name + ".vst"), outputFile.getChildFile(name + ".vst"));
 #endif
             if (clap)
-                outputFile.getChildFile("bin").getChildFile(name + ".clap").moveFileTo(outputFile.getChildFile(name + ".clap"));
+                OSUtils::moveFileTo(outputFile.getChildFile("bin").getChildFile(name + ".clap"), outputFile.getChildFile(name + ".clap"));
             if (jack) {
 #if JUCE_MAC
                 if (exportType == 2) {
-                    outputFile.getChildFile("bin").getChildFile(name + ".app").moveFileTo(outputFile.getChildFile(name + ".app"));
+                    OSUtils::moveFileTo(outputFile.getChildFile("bin").getChildFile(name + ".app"), outputFile.getChildFile(name + ".app"));
                 } else {
-                    outputFile.getChildFile("bin").getChildFile(name).moveFileTo(outputFile.getChildFile(name));
+                    OSUtils::moveFileTo(outputFile.getChildFile("bin").getChildFile(name), outputFile.getChildFile(name));
                 }
 #elif JUCE_WINDOWS
-                outputFile.getChildFile("bin").getChildFile(name + ".exe").moveFileTo(outputFile.getChildFile(name + ".exe"));
+                OSUtils::moveFileTo(outputFile.getChildFile("bin").getChildFile(name + ".exe"), outputFile.getChildFile(name + ".exe"));
 #else
-                outputFile.getChildFile("bin").getChildFile(name).moveFileTo(outputFile.getChildFile(name));
+                OSUtils::moveFileTo(outputFile.getChildFile("bin").getChildFile(name), outputFile.getChildFile(name));
 #endif
             }
 

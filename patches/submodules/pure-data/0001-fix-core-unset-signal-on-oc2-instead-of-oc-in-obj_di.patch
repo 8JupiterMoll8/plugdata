@@ -1,4 +1,4 @@
-From e43bb440f848983a1f27cd0b85a37eec8425e5e0 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Alphi <alphi@starchaser.local>
 Date: Fri, 4 Sep 2026 10:25:22 +0200
 Subject: [PATCH 1/2] fix(core): unset signal on oc2 instead of oc in
@@ -9,7 +9,7 @@ Subject: [PATCH 1/2] fix(core): unset signal on oc2 instead of oc in
  1 file changed, 6 insertions(+), 3 deletions(-)
 
 diff --git a/src/m_obj.c b/src/m_obj.c
-index 5baf38bf..104da49b 100644
+index ebd23dc..3e6d3f4 100644
 --- a/src/m_obj.c
 +++ b/src/m_obj.c
 @@ -27,6 +27,9 @@ int is_reference_valid(void* ptr);

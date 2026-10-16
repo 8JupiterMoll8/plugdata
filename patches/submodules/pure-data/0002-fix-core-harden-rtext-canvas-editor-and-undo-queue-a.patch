@@ -1,32 +1,30 @@
-From 1629488f74ed6765d1fd83eccfaae8d3219b89a0 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Alphi <alphi@starchaser.local>
-Date: Mon, 21 Sep 2026 11:20:32 +0200
+Date: Fri, 16 Oct 2026 23:04:37 +0200
 Subject: [PATCH 2/2] fix(core): harden rtext, canvas editor, and undo queue
  against null-dereference crashes
 
-- g_rtext.c: add NULL checks to rtext_gettag/width/draw and dynamically instantiate rtext via rtext_new() if not yet registered in gl_editor. Prevents SIGSEGV when programmatically updating comments, text boxes, or overlays before GUI focus.
-- g_editor.c: guard canvas_displaceselection against NULL gl_editor during headless or subpatch object displacement.
-- g_undo.c: fix empty undo sequence memory corruption (freebytes on to_free), guard null pointer dereference at undo queue boundary (undo_action name), and properly zero out u_queue/u_last pointers in canvas_undo_free to prevent use-after-free.
+Rebased onto plugdata-pd 2002d63: upstream glist_getrtext now creates the rtext on demand, so the old glist_findrtext create-if-missing hunk and the rtext_width/height guards (functions removed upstream) are dropped. Null guards kept for rtext_gettag/draw/erase/displace/select, canvas_displaceselection, and the undo queue.
 ---
  src/g_editor.c |  4 +++-
- src/g_rtext.c  |  9 +++++++
+ src/g_rtext.c  |  5 ++++
  src/g_undo.c   | 65 +++++++++++++++++++++++++++++++-------------------
- 3 files changed, 52 insertions(+), 26 deletions(-)
+ 3 files changed, 48 insertions(+), 26 deletions(-)
 
 diff --git a/src/g_editor.c b/src/g_editor.c
-index b0516469..1d9d7056 100644
+index ba8b415..f2b82e6 100644
 --- a/src/g_editor.c
 +++ b/src/g_editor.c
-@@ -2944,6 +2944,8 @@ static void canvas_displaceselection(t_canvas *x, int dx, int dy)
+@@ -3129,6 +3129,8 @@ static void canvas_displaceselection(t_canvas *x, int dx, int dy)
  {
      t_selection *y;
      int resortin = 0, resortout = 0;
 +    if (!x || !x->gl_editor)
 +        return;
-     if (x->gl_editor->e_selection && !EDITOR->canvas_undo_already_set_move)
+     if (x->gl_editor->e_selection && !THISED->canvas_undo_already_set_move)
      {
          canvas_undo_add(x, UNDO_MOTION, "motion", canvas_undo_set_move(x, 1));
-@@ -2959,7 +2961,7 @@ static void canvas_displaceselection(t_canvas *x, int dx, int dy)
+@@ -3144,7 +3146,7 @@ static void canvas_displaceselection(t_canvas *x, int dx, int dy)
      if (resortin) canvas_resortinlets(x);
      if (resortout) canvas_resortoutlets(x);
      pdgui_vmess("pdtk_canvas_getscroll", "c", x);
@@ -36,10 +34,10 @@ index b0516469..1d9d7056 100644
  }
  
 diff --git a/src/g_rtext.c b/src/g_rtext.c
-index 4859d8b6..fccf38d4 100644
+index 29a6314..3730941 100644
 --- a/src/g_rtext.c
 +++ b/src/g_rtext.c
-@@ -75,6 +75,7 @@ void rtext_free(t_rtext *x)
+@@ -209,6 +209,7 @@ int rtext_charwidth(t_rtext *x)
  
  const char *rtext_gettag(t_rtext *x)
  {
@@ -47,59 +45,38 @@ index 4859d8b6..fccf38d4 100644
      return (x->x_tag);
  }
  
-@@ -493,11 +494,14 @@ t_rtext *glist_findrtext(t_glist *gl, t_text *who)
-         canvas_create_editor(gl);
-     for (x = gl->gl_editor->e_rtext; x && x->x_text != who; x = x->x_next)
-         ;
-+    if (!x && gl->gl_editor)
-+        x = rtext_new(gl, who);
-     return (x);
- }
- 
- int rtext_width(t_rtext *x)
- {
-+    if (!x) return 0;
-     int w = 0, h = 0, indx;
-     rtext_senditup(x, SEND_CHECK, &w, &h, &indx);
-     return (w);
-@@ -505,6 +509,7 @@ int rtext_width(t_rtext *x)
- 
- int rtext_height(t_rtext *x)
- {
-+    if (!x) return 0;
-     int w = 0, h = 0, indx;
-     rtext_senditup(x, SEND_CHECK, &w, &h, &indx);
-     return (h);
-@@ -512,23 +517,27 @@ int rtext_height(t_rtext *x)
+@@ -714,6 +715,7 @@ void rtext_getrect(t_rtext *x, int *x1p, int *y1p, int *x2p, int *y2p)
  
  void rtext_draw(t_rtext *x)
  {
 +    if (!x) return;
      int w = 0, h = 0, indx;
-     rtext_senditup(x, SEND_FIRST, &w, &h, &indx);
- }
+         /* subgraphs are displaced by simply erasing and redrawing -
+         so here we have to recheck our screen location */
+@@ -724,11 +726,13 @@ void rtext_draw(t_rtext *x)
  
  void rtext_erase(t_rtext *x)
  {
 +    if (!x) return;
-     pdgui_vmess(0, "crs", glist_getcanvas(x->x_glist), "delete", x->x_tag);
+     pdgui_vmess("pdtk_canvas_delete", "cs", glist_getcanvas(x->x_glist), x->x_tag);
  }
  
  void rtext_displace(t_rtext *x, int dx, int dy)
  {
 +    if (!x) return;
-     pdgui_vmess(0, "crs ii", glist_getcanvas(x->x_glist), "move", x->x_tag,
-         dx, dy);
- }
+     x->x_xpix += dx;
+     x->x_ypix += dy;
+     //pdgui_vmess(0, "crs ii", glist_getcanvas(x->x_glist), "move", x->x_tag,
+@@ -739,6 +743,7 @@ void rtext_displace(t_rtext *x, int dx, int dy)
  
  void rtext_select(t_rtext *x, int state)
  {
 +    if (!x) return;
-     pdgui_vmess(0, "crs rr",
+     pdgui_vmess(0, "crs rk",
          glist_getcanvas(x->x_glist), "itemconfigure", x->x_tag,
-         "-fill", (state? "blue" : "black"));
+         "-fill", (state? THISGUI->i_selectcolor:
 diff --git a/src/g_undo.c b/src/g_undo.c
-index 31bafc5b..f65505b7 100644
+index 31bafc5..f65505b 100644
 --- a/src/g_undo.c
 +++ b/src/g_undo.c
 @@ -203,12 +203,19 @@ t_undo_action *canvas_undo_add(t_canvas *x, t_undo_type type, const char *name,

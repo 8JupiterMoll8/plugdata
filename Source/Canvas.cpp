@@ -7,6 +7,7 @@
 #include <juce_cryptography/juce_cryptography.h>
 #include "Utility/Config.h"
 #include "Utility/Fonts.h"
+#include "Utility/NVGTextShim.h"
 
 #include "Sidebar/Sidebar.h"
 #include "Statusbar.h"
@@ -113,9 +114,9 @@ public:
         auto const scale = getValue<float>(canvasScale);
         auto const borderSize = std::max(12.0f, 12 / scale);
         if (mode == ResizerMode::Horizontal) {
-            border.setBorderThickness(juce::BorderSize<int>(0, borderSize, 0, borderSize));
+            border.setBorderThickness(BorderSize<int>(0, borderSize, 0, borderSize));
         } else {
-            border.setBorderThickness(juce::BorderSize<int>(borderSize, 0, borderSize, 0));
+            border.setBorderThickness(BorderSize<int>(borderSize, 0, borderSize, 0));
         }
     }
 
@@ -128,7 +129,7 @@ public:
 
     bool hitTest(int x, int y) override
     {
-        if (cnv->panningModifierDown() || ModifierKeys::getCurrentModifiers().isAnyModifierKeyDown())
+        if (cnv->panningModifierDown() || (cnv->viewport && cnv->viewport->isPerformingGesture()) || ModifierKeys::getCurrentModifiers().isAnyModifierKeyDown())
             return false;
 
         return true;
@@ -169,48 +170,17 @@ public:
 
     void render(NVGcontext* nvg) override
     {
+        auto const& colours = getThemeColours(*this);
+
         // draw background and outline
         auto const b = getBounds().reduced(tabMargin);
-        auto iCol = cnv->selectedOutlineCol;
+        auto iCol = nvgColour(colours.objectSelectedOutlineColour);
 
         iCol.a = 5; // Make the inner colour semi-transparent
-        nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), iCol, cnv->selectedOutlineCol, Corners::objectCornerRadius);
+        nanovg::nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), iCol, nvgColour(colours.objectSelectedOutlineColour), getPlugDataLook(*this).getObjectCornerRadius());
 
         // Draw handles at edge
-        auto getCorners = [this] {
-            auto const rect = getBounds().reduced(tabMargin);
-            constexpr float offset = 2.0f;
-
-            Array<Rectangle<float>> corners = { Rectangle<float>(9.0f, 9.0f).withCentre(rect.getTopLeft().toFloat()).translated(offset, offset), Rectangle<float>(9.0f, 9.0f).withCentre(rect.getBottomLeft().toFloat()).translated(offset, -offset),
-                Rectangle<float>(9.0f, 9.0f).withCentre(rect.getBottomRight().toFloat()).translated(-offset, -offset), Rectangle<float>(9.0f, 9.0f).withCentre(rect.getTopRight().toFloat()).translated(-offset, offset) };
-
-            return corners;
-        };
-
-        auto& resizeHandleImage = cnv->resizeHandleImage;
-        int angle = 360;
-        for (auto& corner : getCorners()) {
-            NVGScopedState scopedState(nvg);
-            // Rotate around centre
-            nvgTranslate(nvg, corner.getCentreX(), corner.getCentreY());
-            nvgRotate(nvg, degreesToRadians<float>(angle));
-            nvgTranslate(nvg, -4.5f, -4.5f);
-
-            nvgBeginPath(nvg);
-            nvgRect(nvg, 0, 0, 9, 9);
-            nvgFillPaint(nvg, nvgImageAlphaPattern(nvg, 0, 0, 9, 9, 0, resizeHandleImage.getImageId(), cnv->selectedOutlineCol));
-            nvgFill(nvg);
-            angle -= 90;
-        }
-// #define SPACER_TEXT
-#ifdef SPACER_TEXT
-        nvgBeginPath(nvg);
-        auto textPos = getPosition().translated(0, -25);
-        nvgFontSize(nvg, 20.0f);
-        nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
-        nvgFillColor(nvg, nvgRGBA(240, 240, 240, 255));
-        nvgText(nvg, textPos.x, textPos.y, String("Spacer size: " + String(spacer + 1.0f)).toRawUTF8(), nullptr);
-#endif
+        cnv->renderResizeHandles(nvg, nvgColour(colours.objectSelectedOutlineColour), b.toFloat().expanded(2.5f));
     }
 
 private:
@@ -287,6 +257,13 @@ Canvas::Canvas(PluginEditor* parent, pd::Patch::Ptr p, Component* parentGraph)
     canvasBorderResizer->setCentrePosition(canvasOrigin.x + patchBounds.getWidth(), canvasOrigin.y + patchBounds.getHeight());
     addAndMakeVisible(canvasBorderResizer.get());
 
+    // initialize to default zoom
+    auto const defaultZoom = SettingsFile::getInstance()->getPropertyAsValue("default_zoom");
+    zoomScale.setValue(getValue<float>(defaultZoom) / 100.0f);
+    zoomScale.addListener(this);
+
+    setSize(infiniteCanvasSize, infiniteCanvasSize);
+
     // Check if canvas belongs to a graph
     if (parentGraph) {
         setLookAndFeel(&editor->getLookAndFeel());
@@ -298,9 +275,6 @@ Canvas::Canvas(PluginEditor* parent, pd::Patch::Ptr p, Component* parentGraph)
     }
     if (!isGraph) {
         auto* canvasViewport = new CanvasViewport(editor, this);
-
-        canvasViewport->setViewedComponent(this, false);
-
         canvasViewport->onScroll = [this] {
             if (suggestor) {
                 suggestor->updateBounds();
@@ -309,9 +283,6 @@ Canvas::Canvas(PluginEditor* parent, pd::Patch::Ptr p, Component* parentGraph)
                 graphArea->updateBounds();
             }
         };
-
-        canvasViewport->setScrollBarsShown(true, true, true, true);
-
         viewport.reset(canvasViewport); // Owned by the tabbar, but doesn't exist for graph!
         restoreViewportState();
     }
@@ -326,26 +297,12 @@ Canvas::Canvas(PluginEditor* parent, pd::Patch::Ptr p, Component* parentGraph)
     if (!isGraph)
         commandLocked.setValue(false);
 
-    // init border for testing
-    settingsChanged("border", SettingsFile::getInstance()->getPropertyAsValue("border"));
-
     // Add draggable border for setting graph position
     if (getValue<bool>(isGraphChild) && !isGraph) {
         graphArea = std::make_unique<GraphArea>(this);
         addAndMakeVisible(*graphArea);
         graphArea->setAlwaysOnTop(true);
     }
-
-    if (!isGraph) {
-        editor->nvgSurface.addBufferedObject(this);
-    }
-
-    setSize(infiniteCanvasSize, infiniteCanvasSize);
-
-    // initialize to default zoom
-    auto const defaultZoom = SettingsFile::getInstance()->getPropertyAsValue("default_zoom");
-    zoomScale.setValue(getValue<float>(defaultZoom) / 100.0f);
-    zoomScale.addListener(this);
 
     // Add lasso component
     addAndMakeVisible(&lasso);
@@ -390,10 +347,6 @@ Canvas::Canvas(PluginEditor* parent, pd::Patch::Ptr p, Component* parentGraph)
     parameters.addParamInt("Width", cDimensions, &patchWidth, 527, true, 0, 1 << 30, onInteractionFn);
     parameters.addParamInt("Height", cDimensions, &patchHeight, 327, true, 0, 1 << 30, onInteractionFn);
 
-    if (!isGraph) {
-        patch.setVisible(true);
-    }
-
     lookAndFeelChanged();
 }
 
@@ -401,10 +354,6 @@ Canvas::~Canvas()
 {
     for (auto* object : objects) {
         object->hideEditor();
-    }
-
-    if (!isGraph) {
-        editor->nvgSurface.removeBufferedObject(this);
     }
 
     saveViewportState();
@@ -418,7 +367,9 @@ Canvas::~Canvas()
     if (!isGraph)
         pd->clearMcpTransactions(patch.getUncheckedPointer());
 
+    if (getValue<bool>(isGraphChild) && isGraph)
     patch.setVisible(false);
+
     selectedComponents.removeChangeListener(this);
 }
 
@@ -445,59 +396,8 @@ void Canvas::changeListenerCallback(ChangeBroadcaster* c)
 
 void Canvas::lookAndFeelChanged()
 {
-    // Canvas colours
-    auto const& lnf = editor->getLookAndFeel();
-    canvasBackgroundColJuce = lnf.findColour(PlugDataColour::canvasBackgroundColourId);
-    canvasBackgroundCol = convertColour(canvasBackgroundColJuce);
-    canvasMarkingsColJuce = lnf.findColour(PlugDataColour::canvasDotsColourId).interpolatedWith(canvasBackgroundColJuce, 0.2f);
-    canvasMarkingsCol = convertColour(canvasMarkingsColJuce);
-    canvasTextColJuce = lnf.findColour(PlugDataColour::canvasTextColourId);
-
-    // Object colours
-    objectOutlineCol = convertColour(lnf.findColour(PlugDataColour::objectOutlineColourId));
-    outlineCol = convertColour(lnf.findColour(PlugDataColour::outlineColourId));
-    textObjectBackgroundCol = convertColour(lnf.findColour(PlugDataColour::textObjectBackgroundColourId));
-    ioletLockedCol = convertColour(canvasBackgroundColJuce.contrasting(0.5f));
-
-    commentTextCol = convertColour(lnf.findColour(PlugDataColour::commentTextColourId));
-
-    guiObjectInternalOutlineColJuce = lnf.findColour(PlugDataColour::guiObjectInternalOutlineColour);
-    guiObjectInternalOutlineCol = convertColour(guiObjectInternalOutlineColJuce);
-    guiObjectBackgroundColJuce = lnf.findColour(PlugDataColour::guiObjectBackgroundColourId);
-    guiObjectBackgroundCol = convertColour(guiObjectBackgroundColJuce);
-
-    auto const selectedColJuce = lnf.findColour(PlugDataColour::objectSelectedOutlineColourId);
-    selectedOutlineCol = convertColour(selectedColJuce);
-    transparentObjectBackgroundCol = convertColour(canvasBackgroundColJuce.contrasting(0.35f).withAlpha(0.1f));
-    indexTextCol = convertColour(selectedColJuce.contrasting());
-
-    graphAreaCol = convertColour(lnf.findColour(PlugDataColour::graphAreaColourId));
-
-    // Lasso colours
-    lassoCol = convertColour(selectedColJuce.withAlpha(0.075f));
-    lassoOutlineCol = convertColour(canvasBackgroundColJuce.interpolatedWith(selectedColJuce, 0.65f));
-
-    // Presentation mode colors
-    auto const presentationBackgroundColJuce = lnf.findColour(PlugDataColour::presentationBackgroundColourId);
-    presentationBackgroundCol = convertColour(presentationBackgroundColJuce);
-    presentationWindowOutlineCol = convertColour(presentationBackgroundColJuce.contrasting(0.3f));
-
-    // Connection / Iolet colours
-    auto const dataColJuce = lnf.findColour(PlugDataColour::dataColourId);
-    dataCol = convertColour(dataColJuce);
-    auto const sigColJuce = lnf.findColour(PlugDataColour::signalColourId);
-    sigCol = convertColour(sigColJuce);
-    auto const gemColJuce = lnf.findColour(PlugDataColour::gemColourId);
-    gemCol = convertColour(gemColJuce);
-    auto const baseColJuce = lnf.findColour(PlugDataColour::connectionColourId);
-    baseCol = convertColour(baseColJuce);
-
-    dataColBrighter = convertColour(dataColJuce.brighter());
-    sigColBrighter = convertColour(sigColJuce.brighter());
-    gemColBrigher = convertColour(gemColJuce.brighter());
-    baseColBrigher = convertColour(baseColJuce.brighter());
-
-    dotsLargeImage.setDirty(); // Make sure bg colour actually gets updated
+    dotsLargeImage.setDirty();
+    resizeHandleImage.setDirty();
 }
 
 void Canvas::parentHierarchyChanged()
@@ -510,44 +410,30 @@ void Canvas::parentHierarchyChanged()
     }
 }
 
-void Canvas::updateFramebuffers(NVGcontext* nvg)
+void Canvas::updateCanvasDots(NVGcontext* nvg)
 {
     auto const pixelScale = editor->getRenderScale();
     auto zoom = getValue<float>(zoomScale);
 
-    constexpr int resizerLogicalSize = 9;
-    float const viewScale = pixelScale * zoom;
-    int const resizerBufferSize = resizerLogicalSize * viewScale;
-
-    if (resizeHandleImage.needsUpdate(resizerBufferSize, resizerBufferSize)) {
-        resizeHandleImage = NVGImage(nvg, resizerBufferSize, resizerBufferSize, [viewScale](Graphics& g) {
-            g.addTransform(AffineTransform::scale(viewScale, viewScale));
-            auto const b = Rectangle<int>(0, 0, 9, 9);
-            // use the path with a hole in it to exclude the inner rounded rect from painting
-            Path outerArea;
-            outerArea.addRectangle(b);
-            outerArea.setUsingNonZeroWinding(false);
-
-            Path innerArea;
-            auto const innerRect = b.translated(Object::margin / 2, Object::margin / 2);
-            innerArea.addRoundedRectangle(innerRect, Corners::objectCornerRadius);
-            outerArea.addPath(innerArea);
-            g.reduceClipRegion(outerArea);
-
-            g.setColour(Colours::white); // For alpha image colour isn't important
-            g.fillRoundedRectangle(0.0f, 0.0f, 9.0f, 9.0f, Corners::resizeHanleCornerRadius); }, NVGImage::AlphaImage);
-        editor->nvgSurface.invalidateAll();
-    }
-
     auto gridLogicalSize = objectGrid.gridSize ? objectGrid.gridSize : 25;
-    auto gridSizeCommon = 300;
+    auto constexpr gridSizeCommon = 300;
     auto const gridBufferSize = gridSizeCommon * pixelScale * zoom;
 
     if (dotsLargeImage.needsUpdate(gridBufferSize, gridBufferSize) || lastObjectGridSize != gridLogicalSize) {
         lastObjectGridSize = gridLogicalSize;
 
-        dotsLargeImage = NVGImage(nvg, gridBufferSize, gridBufferSize, [this, zoom, viewScale, gridLogicalSize, gridSizeCommon](Graphics& g) {
-            g.addTransform(AffineTransform::scale(viewScale, viewScale));
+        dotsLargeImage.renderToFramebuffer(nvg, gridBufferSize, gridBufferSize, [this, gridBufferSize, gridLogicalSize, zoom, pixelScale](NVGcontext* nvg){
+            auto const& colours = getThemeColours(*this);
+
+
+            nanovg::viewport(nvg, 0, 0, gridBufferSize, gridBufferSize);
+            nanovg::clear(nvg);
+            nanovg::nvgBeginFrame(nvg, gridSizeCommon * zoom, gridSizeCommon * zoom, pixelScale);
+            nanovg::nvgScale(nvg, zoom, zoom);
+
+            nanovg::nvgFillColor(nvg, nvgColour(colours.canvasBackgroundColour));
+            nanovg::nvgFillRect(nvg, 0, 0, gridSizeCommon, gridSizeCommon);
+
             float const ellipseRadius = zoom < 1.0f ? jmap(zoom, 0.25f, 1.0f, 3.0f, 1.0f) : 1.0f;
 
             int decim = 0;
@@ -581,29 +467,92 @@ void Canvas::updateFramebuffers(NVGcontext* nvg)
             default: break;
             }
 
-            auto const majorDotColour = canvasMarkingsColJuce.withAlpha(std::min(zoom * 0.8f, 1.0f));
+            auto markingColour = colours.canvasDotsColour.interpolatedWith(colours.canvasBackgroundColour, 0.2f);
+            auto const majorDotColour = markingColour.withAlpha(std::min(zoom * 0.8f, 1.0f));
 
-            g.setColour(majorDotColour);
+            nanovg::nvgFillColor(nvg, nvgColour(majorDotColour));
+
             // Draw ellipses on the grid
             for (int x = 0; x <= gridSizeCommon; x += gridLogicalSize)
             {
                 for (int y = 0; y <= gridSizeCommon; y += gridLogicalSize)
                 {
+                    NVGcolor c = nvgColour(majorDotColour);
                     if (decim != 0) {
                         if (x % decim && y % decim)
                             continue;
-                        g.setColour(majorDotColour);
                         if (x % decim == 0 && y % decim == 0)
-                            g.setColour(canvasMarkingsColJuce);
+                            c = nvgColour(markingColour);
                     }
                     // Add half smallest dot offset so the dot isn't at the edge of the texture
                     // We remove this when we position the texture on the canvas
                     float const centerX = static_cast<float>(x) + 2.5f;
                     float const centerY = static_cast<float>(y) + 2.5f;
-                    g.fillEllipse(centerX - ellipseRadius, centerY - ellipseRadius, ellipseRadius * 2.0f, ellipseRadius * 2.0f);
+                    float const ellipseSize = ellipseRadius * 2.0f;
+                    nanovg::nvgDrawRoundedRect(nvg, centerX - ellipseRadius, centerY - ellipseRadius, ellipseSize, ellipseSize, c, c, ellipseRadius);
                 }
-            } }, NVGImage::RepeatImage, canvasBackgroundColJuce);
-        editor->nvgSurface.invalidateAll();
+            }
+
+            nanovg::nvgGlobalScissor(nvg, 0, 0, gridBufferSize, gridBufferSize);
+            nanovg::nvgEndFrameWithoutPublishing(nvg);
+        }, NVG_IMAGE_REPEATX | NVG_IMAGE_REPEATY);
+    }
+}
+
+void Canvas::renderResizeHandles(NVGcontext* nvg, NVGcolor const colour, Rectangle<float> const bounds)
+{
+    auto constexpr resizeHandleSize = 9.0f;
+    auto constexpr resizeHandleMargin = 1.0f;
+    auto constexpr resizeHandleImageSize = resizeHandleSize + resizeHandleMargin * 2.0f;
+
+    auto const scale = getValue<float>(zoomScale) * editor->getRenderScale();
+    auto const pixelSize = jlimit(8, 256, nextPowerOfTwo(static_cast<int>(std::ceil(resizeHandleImageSize * scale))));
+
+    if (resizeHandleImage.needsUpdate(pixelSize, pixelSize)) {
+        constexpr float kappa = 0.5522847498307936f;
+        auto const innerOffset = static_cast<float>(Object::margin) / 2.0f;
+        auto const outerRadius = jlimit(0.0f, resizeHandleSize * 0.5f, Corners::resizeHanleCornerRadius);
+        auto const innerRadius = jlimit(0.0f, resizeHandleSize - innerOffset, getPlugDataLook(*this).getObjectCornerRadius());
+        auto const outerControl = outerRadius * (1.0f - kappa);
+        auto const innerControl = innerRadius * (1.0f - kappa);
+
+        Path handleShape;
+        handleShape.startNewSubPath(outerRadius, 0.0f);
+        handleShape.lineTo(resizeHandleSize - outerRadius, 0.0f);
+        handleShape.cubicTo(resizeHandleSize - outerControl, 0.0f, resizeHandleSize, outerControl, resizeHandleSize, outerRadius);
+        handleShape.lineTo(resizeHandleSize, innerOffset);
+        handleShape.lineTo(innerOffset + innerRadius, innerOffset);
+        if (innerRadius > 0.0f) {
+            handleShape.cubicTo(innerOffset + innerControl, innerOffset, innerOffset, innerOffset + innerControl, innerOffset, innerOffset + innerRadius);
+        } else {
+            handleShape.lineTo(innerOffset, innerOffset);
+        }
+        handleShape.lineTo(innerOffset, resizeHandleSize);
+        handleShape.lineTo(outerRadius, resizeHandleSize);
+        handleShape.cubicTo(outerControl, resizeHandleSize, 0.0f, resizeHandleSize - outerControl, 0.0f, resizeHandleSize - outerRadius);
+        handleShape.lineTo(0.0f, outerRadius);
+        handleShape.cubicTo(0.0f, outerControl, outerControl, 0.0f, outerRadius, 0.0f);
+        handleShape.closeSubPath();
+
+        resizeHandleImage = NVGImage(nvg, pixelSize, pixelSize, [handleShape, pixelSize](Graphics& g) {
+            g.setColour(Colours::white);
+            g.fillPath(handleShape, AffineTransform::translation(resizeHandleMargin, resizeHandleMargin).scaled(pixelSize / resizeHandleImageSize));
+        }, NVGImage::AlphaImage);
+    }
+
+    if (!resizeHandleImage.isValid())
+        return;
+    
+    auto const imageId = resizeHandleImage.getImageId();
+    NVGScopedState scopedState(nvg);
+    for (int i = 0; i < 4; i++) {
+        bool const isRight = i == 1 || i == 2;
+        bool const isBottom = i >= 2;
+        auto const x = isRight ? bounds.getRight() + resizeHandleMargin : bounds.getX() - resizeHandleMargin;
+        auto const y = isBottom ? bounds.getBottom() + resizeHandleMargin : bounds.getY() - resizeHandleMargin;
+
+        nanovg::nvgFillPaint(nvg, nanovg::nvgImageAlphaPattern(nvg, x, y, resizeHandleImageSize, resizeHandleImageSize, i * MathConstants<float>::halfPi, imageId, colour));
+        nanovg::nvgFillRect(nvg, isRight ? x - resizeHandleImageSize : x, isBottom ? y - resizeHandleImageSize : y, resizeHandleImageSize, resizeHandleImageSize);
     }
 }
 
@@ -650,41 +599,41 @@ static float getChipWidth(const juce::String& label)
 // Callback from canvasViewport to perform actual rendering
 void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
 {
+    auto const& colours = getThemeColours(*this);
+
     constexpr auto halfSize = infiniteCanvasSize / 2;
     auto const zoom = getValue<float>(zoomScale);
     bool const isLocked = getValue<bool>(locked);
-    nvgSave(nvg);
+    nanovg::nvgSave(nvg);
 
     if (viewport) {
-        nvgTranslate(nvg, -viewport->getViewPositionX(), -viewport->getViewPositionY());
-        nvgScale(nvg, zoom, zoom);
+        nanovg::nvgTranslate(nvg, -viewport->getViewPositionX(), -viewport->getViewPositionY());
+        nanovg::nvgScale(nvg, zoom, zoom);
         invalidRegion = invalidRegion.translated(viewport->getViewPositionX(), viewport->getViewPositionY());
         invalidRegion /= zoom;
 
         if (isLocked) {
-            nvgFillColor(nvg, canvasBackgroundCol);
-            nvgFillRect(nvg, invalidRegion.getX(), invalidRegion.getY(), invalidRegion.getWidth(), invalidRegion.getHeight());
+            nanovg::nvgFillColor(nvg, nvgColour(colours.canvasBackgroundColour));
+            nanovg::nvgFillRect(nvg, invalidRegion.getX(), invalidRegion.getY(), invalidRegion.getWidth(), invalidRegion.getHeight());
         } else {
-            nvgBeginPath(nvg);
-            nvgRect(nvg, 0, 0, infiniteCanvasSize, infiniteCanvasSize);
-
             // Use least common multiple of grid sizes: 5,10,15,20,25,30 for texture size for now
             // We repeat the texture on GPU, this is so the texture does not become too small for GPU processing
             // There will be a best fit depending on CPU/GPU calcuations.
             // But currently 300 works well on GPU.
             {
                 constexpr auto gridSizeCommon = 300;
+                updateCanvasDots(nvg);
+
                 NVGScopedState scopedState(nvg);
                 // offset image texture by 2.5f so no dots are on the edge of the texture
-                nvgTranslate(nvg, canvasOrigin.x - 2.5f, canvasOrigin.x - 2.5f);
+                nanovg::nvgTranslate(nvg, canvasOrigin.x - 2.5f, canvasOrigin.x - 2.5f);
 
-                nvgFillPaint(nvg, nvgImagePattern(nvg, 0, 0, gridSizeCommon, gridSizeCommon, 0, dotsLargeImage.getImageId(), 1));
-                nvgFill(nvg);
+                nanovg::nvgFillPaint(nvg, nanovg::nvgImagePattern(nvg, 0, 0, gridSizeCommon, gridSizeCommon, 0, dotsLargeImage.getImage(), 1));
+                auto startPos = infiniteCanvasSize / 2;
+                nanovg::nvgFillRect(nvg, -startPos, -startPos, infiniteCanvasSize, infiniteCanvasSize);
             }
         }
     }
-
-    currentRenderArea = invalidRegion;
 
     // PRD overlay: titled regions drawn BEHIND the objects (structure at a glance).
     if (pd && shouldShowAIRegions() && !pd->getMcpRegions().empty()) {
@@ -734,44 +683,44 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
             else if (k == "output") { ar = 0xff; ag = 0x5a; ab = 0x5a; } // Coral Red
 
             // 1. Module Chassis Backplate
-            nvgBeginPath(nvg);
-            nvgRoundedRect(nvg, rx, ry, rw, rh, 8.0f);
-            nvgFillColor(nvg, nvgRGBA(ar, ag, ab, 22));
-            nvgFill(nvg);
-            nvgStrokeColor(nvg, nvgRGBA(ar, ag, ab, 140));
-            nvgStrokeWidth(nvg, 1.2f);
-            nvgLineStyle(nvg, NVG_LINE_DASHED);
-            nvgDashLength(nvg, 6.0f);
-            nvgStroke(nvg);
-            nvgLineStyle(nvg, NVG_LINE_SOLID);
+            nanovg::nvgBeginPath(nvg);
+            nanovg::nvgRoundedRect(nvg, rx, ry, rw, rh, 8.0f);
+            nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(ar, ag, ab, 22));
+            nanovg::nvgFill(nvg);
+            nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(ar, ag, ab, 140));
+            nanovg::nvgStrokeWidth(nvg, 1.2f);
+            nanovg::nvgLineStyle(nvg, NVG_LINE_DASHED);
+            nanovg::nvgDashLength(nvg, 6.0f);
+            nanovg::nvgStroke(nvg);
+            nanovg::nvgLineStyle(nvg, NVG_LINE_SOLID);
 
             // 2. Hardware Module Faceplate Title Badge
             if (r.title.isNotEmpty()) {
-                nvgFontSize(nvg, 11.0f);
-                nvgFontFace(nvg, "Inter");
+                mcpnvg::nvgFontSize(nvg, 11.0f);
+                mcpnvg::nvgFontFace(nvg, "Inter");
                 float bounds[4];
-                nvgTextBounds(nvg, rx + 10.0f, ry + 6.0f, r.title.toRawUTF8(), nullptr, bounds);
+                mcpnvg::nvgTextBounds(nvg, rx + 10.0f, ry + 6.0f, r.title.toRawUTF8(), nullptr, bounds);
                 float const tw = bounds[2] - bounds[0];
 
                 // Dark chassis badge
-                nvgBeginPath(nvg);
-                nvgRoundedRect(nvg, rx + 8.0f, ry + 5.0f, tw + 22.0f, 18.0f, 4.0f);
-                nvgFillColor(nvg, nvgRGBA(16, 18, 22, 230));
-                nvgFill(nvg);
-                nvgStrokeColor(nvg, nvgRGBA(ar, ag, ab, 100));
-                nvgStrokeWidth(nvg, 1.0f);
-                nvgStroke(nvg);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgRoundedRect(nvg, rx + 8.0f, ry + 5.0f, tw + 22.0f, 18.0f, 4.0f);
+                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(16, 18, 22, 230));
+                nanovg::nvgFill(nvg);
+                nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(ar, ag, ab, 100));
+                nanovg::nvgStrokeWidth(nvg, 1.0f);
+                nanovg::nvgStroke(nvg);
 
                 // Status Jewel LED
-                nvgBeginPath(nvg);
-                nvgCircle(nvg, rx + 16.0f, ry + 14.0f, 2.5f);
-                nvgFillColor(nvg, nvgRGBA(ar, ag, ab, 255));
-                nvgFill(nvg);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgCircle(nvg, rx + 16.0f, ry + 14.0f, 2.5f);
+                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(ar, ag, ab, 255));
+                nanovg::nvgFill(nvg);
 
                 // Title Text
-                nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
-                nvgFillColor(nvg, nvgRGBA(ar, ag, ab, 245));
-                nvgText(nvg, rx + 23.0f, ry + 14.0f, r.title.toRawUTF8(), nullptr);
+                mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(ar, ag, ab, 245));
+                mcpnvg::nvgText(nvg, rx + 23.0f, ry + 14.0f, r.title.toRawUTF8(), nullptr);
             }
         }
     }
@@ -781,66 +730,64 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
     renderVoiceTakes(nvg, invalidRegion);
     renderMidiTakes(nvg, invalidRegion);
 
-    auto drawBorder = [this, nvg, zoom](bool const bg, bool const fg) {
+    auto drawBorder = [this, nvg](bool const bg, bool const fg) {
+        auto const& colours = getThemeColours(*this);
+
         if (viewport && (showOrigin || showBorder) && !::getValue<bool>(presentationMode)) {
             NVGScopedState scopedState(nvg);
-            nvgBeginPath(nvg);
+            nanovg::nvgBeginPath(nvg);
 
             auto const borderWidth = getValue<float>(patchWidth);
             auto const borderHeight = getValue<float>(patchHeight);
             constexpr auto pos = Point<int>(halfSize, halfSize);
 
-            auto scaledStrokeSize = zoom < 1.0f ? jmap(zoom, 1.0f, 0.25f, 1.5f, 4.0f) : 1.5f;
-            if (zoom < 0.3f && editor->getRenderScale() <= 1.0f)
-                scaledStrokeSize = jmap(zoom, 0.3f, 0.25f, 4.0f, 8.0f);
-
             if (bg) {
-                nvgBeginPath(nvg);
-                nvgMoveTo(nvg, pos.x, pos.y);
-                nvgLineTo(nvg, pos.x, pos.y + (showOrigin ? halfSize : borderHeight));
-                nvgMoveTo(nvg, pos.x, pos.y);
-                nvgLineTo(nvg, pos.x + (showOrigin ? halfSize : borderWidth), pos.y);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgMoveTo(nvg, pos.x, pos.y);
+                nanovg::nvgLineTo(nvg, pos.x, pos.y + (showOrigin ? halfSize : borderHeight));
+                nanovg::nvgMoveTo(nvg, pos.x, pos.y);
+                nanovg::nvgLineTo(nvg, pos.x + (showOrigin ? halfSize : borderWidth), pos.y);
 
                 if (showBorder) {
-                    nvgMoveTo(nvg, pos.x + borderWidth, pos.y);
-                    nvgLineTo(nvg, pos.x + borderWidth, pos.y + borderHeight);
-                    nvgLineTo(nvg, pos.x, pos.y + borderHeight);
+                    nanovg::nvgMoveTo(nvg, pos.x + borderWidth, pos.y);
+                    nanovg::nvgLineTo(nvg, pos.x + borderWidth, pos.y + borderHeight);
+                    nanovg::nvgLineTo(nvg, pos.x, pos.y + borderHeight);
                 }
-                nvgLineStyle(nvg, NVG_LINE_SOLID);
-                nvgStrokeColor(nvg, canvasBackgroundCol);
-                nvgStrokeWidth(nvg, 8.0f);
-                nvgStroke(nvg);
+                nanovg::nvgLineStyle(nvg, NVG_LINE_SOLID);
+                nanovg::nvgStrokeColor(nvg, nvgColour(colours.canvasBackgroundColour));
+                nanovg::nvgStrokeWidth(nvg, 8.0f);
+                nanovg::nvgStroke(nvg);
 
-                nvgFillColor(nvg, canvasBackgroundCol);
-                nvgFillRect(nvg, pos.x - 1.0f, pos.y - 1.0f, 2, 2);
+                nanovg::nvgFillColor(nvg, nvgColour(colours.canvasBackgroundColour));
+                nanovg::nvgFillRect(nvg, pos.x - 1.0f, pos.y - 1.0f, 2, 2);
             }
 
-            nvgStrokeColor(nvg, canvasMarkingsCol);
-            nvgStrokeWidth(nvg, scaledStrokeSize);
-            nvgDashLength(nvg, 8.0f);
-            nvgLineStyle(nvg, NVG_LINE_DASHED);
+            nanovg::nvgStrokeColor(nvg, nvgColour(colours.canvasDotsColour.interpolatedWith(colours.canvasBackgroundColour, 0.2f)));
+            nanovg::nvgStrokeWidth(nvg, 1.5f);
+            nanovg::nvgDashLength(nvg, 8.0f);
+            nanovg::nvgLineStyle(nvg, NVG_LINE_DASHED);
 
             if (fg) {
-                nvgBeginPath(nvg);
-                nvgMoveTo(nvg, pos.x, pos.y);
-                nvgLineTo(nvg, pos.x, pos.y + (showOrigin ? halfSize : borderHeight));
-                nvgStroke(nvg);
-                nvgBeginPath(nvg);
-                nvgMoveTo(nvg, pos.x, pos.y);
-                nvgLineTo(nvg, pos.x + (showOrigin ? halfSize : borderWidth), pos.y);
-                nvgStroke(nvg);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgMoveTo(nvg, pos.x, pos.y);
+                nanovg::nvgLineTo(nvg, pos.x, pos.y + (showOrigin ? halfSize : borderHeight));
+                nanovg::nvgStroke(nvg);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgMoveTo(nvg, pos.x, pos.y);
+                nanovg::nvgLineTo(nvg, pos.x + (showOrigin ? halfSize : borderWidth), pos.y);
+                nanovg::nvgStroke(nvg);
             }
             if (showBorder && fg) {
-                nvgStrokeWidth(nvg, scaledStrokeSize);
-                nvgLineStyle(nvg, NVG_LINE_DASHED);
-                nvgBeginPath(nvg);
-                nvgMoveTo(nvg, pos.x + borderWidth, pos.y + borderHeight);
-                nvgLineTo(nvg, pos.x + borderWidth, pos.y);
-                nvgStroke(nvg);
-                nvgBeginPath(nvg);
-                nvgMoveTo(nvg, pos.x + borderWidth, pos.y + borderHeight);
-                nvgLineTo(nvg, pos.x, pos.y + borderHeight);
-                nvgStroke(nvg);
+                nanovg::nvgStrokeWidth(nvg, 1.5f);
+                nanovg::nvgLineStyle(nvg, NVG_LINE_DASHED);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgMoveTo(nvg, pos.x + borderWidth, pos.y + borderHeight);
+                nanovg::nvgLineTo(nvg, pos.x + borderWidth, pos.y);
+                nanovg::nvgStroke(nvg);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgMoveTo(nvg, pos.x + borderWidth, pos.y + borderHeight);
+                nanovg::nvgLineTo(nvg, pos.x, pos.y + borderHeight);
+                nanovg::nvgStroke(nvg);
 
                 canvasBorderResizer->render(nvg);
             }
@@ -875,34 +822,31 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
             NVGScopedState scopedState(nvg);
 
             // background colour to crop outside of border area
-            nvgBeginPath(nvg);
-            nvgRect(nvg, 0, 0, infiniteCanvasSize, infiniteCanvasSize);
-            nvgPathWinding(nvg, NVG_HOLE);
-            nvgRoundedRect(nvg, pos.getX(), pos.getY(), borderWidth, borderHeight, windowCorner);
-            nvgFillColor(nvg, presentationBackgroundCol);
-            nvgFill(nvg);
+            nanovg::nvgBeginPath(nvg);
+            nanovg::nvgRect(nvg, 0, 0, infiniteCanvasSize, infiniteCanvasSize);
+            nanovg::nvgPathWinding(nvg, NVG_HOLE);
+            nanovg::nvgRoundedRect(nvg, pos.getX(), pos.getY(), borderWidth, borderHeight, windowCorner);
+            nanovg::nvgFillColor(nvg, nvgColour(colours.presentationBackgroundColour));
+            nanovg::nvgFill(nvg);
 
             // background drop shadow to simulate a virtual plugin
-            nvgBeginPath(nvg);
-            nvgRect(nvg, 0, 0, infiniteCanvasSize, infiniteCanvasSize);
-            nvgPathWinding(nvg, NVG_HOLE);
-            nvgRoundedRect(nvg, pos.getX(), pos.getY(), borderWidth, borderHeight, windowCorner);
+            nanovg::nvgBeginPath(nvg);
+            nanovg::nvgRect(nvg, 0, 0, infiniteCanvasSize, infiniteCanvasSize);
+            nanovg::nvgPathWinding(nvg, NVG_HOLE);
+            nanovg::nvgRoundedRect(nvg, pos.getX(), pos.getY(), borderWidth, borderHeight, windowCorner);
 
             int const shadowSize = 24 / scale;
             auto borderArea = Rectangle<int>(0, 0, borderWidth, borderHeight).expanded(shadowSize);
             if (presentationShadowImage.needsUpdate(borderArea.getWidth(), borderArea.getHeight())) {
-                presentationShadowImage = NVGImage(nvg, borderArea.getWidth(), borderArea.getHeight(), [borderArea, shadowSize, windowCorner](Graphics& g) {
-                    auto shadowPath = Path();
-                    shadowPath.addRoundedRectangle(borderArea.reduced(shadowSize).withPosition(shadowSize, shadowSize), windowCorner);
-                    StackShadow::renderDropShadow(0, g, shadowPath, Colours::white.withAlpha(0.3f), shadowSize, Point<int>(0, 2)); }, NVGImage::AlphaImage);
+                presentationShadowImage = NVGImage(nvg, borderArea.getWidth(), borderArea.getHeight(), [borderArea, shadowSize, windowCorner](Graphics& g) { StackShadow::drawShadowForRect(g, borderArea.reduced(shadowSize).withPosition(shadowSize, shadowSize), shadowSize, windowCorner, 0.3f, 2); }, NVGImage::AlphaImage);
             }
-            auto const shadowImage = nvgImageAlphaPattern(nvg, pos.getX() - shadowSize, pos.getY() - shadowSize, borderArea.getWidth(), borderArea.getHeight(), 0, presentationShadowImage.getImageId(), convertColour(Colours::black));
+            auto const shadowImage = nanovg::nvgImageAlphaPattern(nvg, pos.getX() - shadowSize, pos.getY() - shadowSize, borderArea.getWidth(), borderArea.getHeight(), 0, presentationShadowImage.getImageId(), nvgColour(Colours::black));
 
-            nvgStrokeColor(nvg, presentationWindowOutlineCol);
-            nvgStrokeWidth(nvg, 0.5f / scale);
-            nvgFillPaint(nvg, shadowImage);
-            nvgFill(nvg);
-            nvgStroke(nvg);
+            nanovg::nvgStrokeColor(nvg, nvgColour(colours.presentationBackgroundColour.contrasting(0.3f)));
+            nanovg::nvgStrokeWidth(nvg, 0.5f / scale);
+            nanovg::nvgFillPaint(nvg, shadowImage);
+            nanovg::nvgFill(nvg);
+            nanovg::nvgStroke(nvg);
         }
     }
     // render connections infront or behind objects depending on lock mode or overlay setting
@@ -948,7 +892,7 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
             if (k == "change") { ar = 0x3d; ag = 0xdd; ab = 0x8a; }      // green
             else if (k == "warn") { ar = 0xff; ag = 0x5a; ab = 0x5a; }   // red
             else if (k == "artist") { ar = 0xff; ag = 0xbe; ab = 0x50; } // amber
-            NVGcolor const accent = nvgRGBA(ar, ag, ab, 255);
+            NVGcolor const accent = nanovg::nvgRGBA(ar, ag, ab, 255);
             bool const isHovered = (noteIdx == mcpNoteHover);
             bool const isCloseHover = (isHovered && mcpNoteHoverClose);
 
@@ -960,16 +904,16 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
                 float const rw = static_cast<float>(grpBounds.getWidth() + pad * 2);
                 float const rh = static_cast<float>(grpBounds.getHeight() + pad * 2);
 
-                nvgBeginPath(nvg);
-                nvgRoundedRect(nvg, rx, ry, rw, rh, 5.0f);
-                nvgFillColor(nvg, nvgRGBA(ar, ag, ab, 22));
-                nvgFill(nvg);
-                nvgStrokeColor(nvg, nvgRGBA(ar, ag, ab, 170));
-                nvgStrokeWidth(nvg, 1.2f);
-                nvgLineStyle(nvg, NVG_LINE_DASHED);
-                nvgDashLength(nvg, 5.0f);
-                nvgStroke(nvg);
-                nvgLineStyle(nvg, NVG_LINE_SOLID);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgRoundedRect(nvg, rx, ry, rw, rh, 5.0f);
+                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(ar, ag, ab, 22));
+                nanovg::nvgFill(nvg);
+                nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(ar, ag, ab, 170));
+                nanovg::nvgStrokeWidth(nvg, 1.2f);
+                nanovg::nvgLineStyle(nvg, NVG_LINE_DASHED);
+                nanovg::nvgDashLength(nvg, 5.0f);
+                nanovg::nvgStroke(nvg);
+                nanovg::nvgLineStyle(nvg, NVG_LINE_SOLID);
             }
 
             // 2. Hardware Console Tape Anchor: vertical tick connecting tape to module
@@ -977,104 +921,104 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
                 float const tickX = ax + 14.0f;
                 float const tickY1 = ay + tapeH;
                 float const tickY2 = canvasOrigin.y + static_cast<float>(grpBounds.getY());
-                nvgBeginPath(nvg);
-                nvgMoveTo(nvg, tickX, tickY1);
-                nvgLineTo(nvg, tickX, tickY2);
-                nvgStrokeColor(nvg, nvgRGBA(ar, ag, ab, isHovered ? 200 : 120));
-                nvgStrokeWidth(nvg, 1.0f);
-                nvgStroke(nvg);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgMoveTo(nvg, tickX, tickY1);
+                nanovg::nvgLineTo(nvg, tickX, tickY2);
+                nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(ar, ag, ab, isHovered ? 200 : 120));
+                nanovg::nvgStrokeWidth(nvg, 1.0f);
+                nanovg::nvgStroke(nvg);
 
                 // Small anchor rivet dot at module top edge
-                nvgBeginPath(nvg);
-                nvgCircle(nvg, tickX, tickY2, 2.0f);
-                nvgFillColor(nvg, nvgRGBA(ar, ag, ab, isHovered ? 240 : 160));
-                nvgFill(nvg);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgCircle(nvg, tickX, tickY2, 2.0f);
+                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(ar, ag, ab, isHovered ? 240 : 160));
+                nanovg::nvgFill(nvg);
             }
 
             // 3. Drop Shadow for depth
-            nvgBeginPath(nvg);
-            nvgRoundedRect(nvg, ax, ay + 1.0f, tapeW, tapeH, 4.0f);
-            nvgFillColor(nvg, nvgRGBA(10, 10, 14, 180));
-            nvgFill(nvg);
+            nanovg::nvgBeginPath(nvg);
+            nanovg::nvgRoundedRect(nvg, ax, ay + 1.0f, tapeW, tapeH, 4.0f);
+            nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(10, 10, 14, 180));
+            nanovg::nvgFill(nvg);
 
             // 4. Console Tape Chassis (Matte dark Eurorack scribble strip)
-            nvgBeginPath(nvg);
-            nvgRoundedRect(nvg, ax, ay, tapeW, tapeH, 3.5f);
-            nvgFillColor(nvg, nvgRGBA(20, 21, 26, isHovered ? 250 : 230));
-            nvgFill(nvg);
-            nvgStrokeColor(nvg, isHovered ? accent : nvgRGBA(ar, ag, ab, 140));
-            nvgStrokeWidth(nvg, isHovered ? 1.4f : 1.0f);
-            nvgStroke(nvg);
+            nanovg::nvgBeginPath(nvg);
+            nanovg::nvgRoundedRect(nvg, ax, ay, tapeW, tapeH, 3.5f);
+            nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(20, 21, 26, isHovered ? 250 : 230));
+            nanovg::nvgFill(nvg);
+            nanovg::nvgStrokeColor(nvg, isHovered ? accent : nanovg::nvgRGBA(ar, ag, ab, 140));
+            nanovg::nvgStrokeWidth(nvg, isHovered ? 1.4f : 1.0f);
+            nanovg::nvgStroke(nvg);
 
             // 5. Top bevel reflection (milled brushed aluminum edge)
-            nvgBeginPath(nvg);
-            nvgMoveTo(nvg, ax + 3.0f, ay + 1.0f);
-            nvgLineTo(nvg, ax + tapeW - 3.0f, ay + 1.0f);
-            nvgStrokeColor(nvg, nvgRGBA(255, 255, 255, isHovered ? 50 : 25));
-            nvgStrokeWidth(nvg, 1.0f);
-            nvgStroke(nvg);
+            nanovg::nvgBeginPath(nvg);
+            nanovg::nvgMoveTo(nvg, ax + 3.0f, ay + 1.0f);
+            nanovg::nvgLineTo(nvg, ax + tapeW - 3.0f, ay + 1.0f);
+            nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(255, 255, 255, isHovered ? 50 : 25));
+            nanovg::nvgStrokeWidth(nvg, 1.0f);
+            nanovg::nvgStroke(nvg);
 
             // 6. Left accent bar
-            nvgBeginPath(nvg);
-            nvgRoundedRect(nvg, ax + 2.0f, ay + 2.5f, 2.5f, tapeH - 5.0f, 1.2f);
-            nvgFillColor(nvg, accent);
-            nvgFill(nvg);
+            nanovg::nvgBeginPath(nvg);
+            nanovg::nvgRoundedRect(nvg, ax + 2.0f, ay + 2.5f, 2.5f, tapeH - 5.0f, 1.2f);
+            nanovg::nvgFillColor(nvg, accent);
+            nanovg::nvgFill(nvg);
 
             // 7. Jewel LED Diode on tape
             float const ledX = ax + 14.0f;
             float const ledY = ay + tapeH * 0.5f;
 
             // Soft glow
-            nvgBeginPath(nvg);
-            nvgCircle(nvg, ledX, ledY, 5.0f);
-            nvgFillColor(nvg, nvgRGBA(ar, ag, ab, isHovered ? 60 : 30));
-            nvgFill(nvg);
+            nanovg::nvgBeginPath(nvg);
+            nanovg::nvgCircle(nvg, ledX, ledY, 5.0f);
+            nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(ar, ag, ab, isHovered ? 60 : 30));
+            nanovg::nvgFill(nvg);
 
             // Diode body
-            nvgBeginPath(nvg);
-            nvgCircle(nvg, ledX, ledY, 2.8f);
-            nvgFillColor(nvg, accent);
-            nvgFill(nvg);
+            nanovg::nvgBeginPath(nvg);
+            nanovg::nvgCircle(nvg, ledX, ledY, 2.8f);
+            nanovg::nvgFillColor(nvg, accent);
+            nanovg::nvgFill(nvg);
 
             // Specular glint
-            nvgBeginPath(nvg);
-            nvgCircle(nvg, ledX - 0.8f, ledY - 0.8f, 0.8f);
-            nvgFillColor(nvg, nvgRGBA(255, 255, 255, 220));
-            nvgFill(nvg);
+            nanovg::nvgBeginPath(nvg);
+            nanovg::nvgCircle(nvg, ledX - 0.8f, ledY - 0.8f, 0.8f);
+            nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(255, 255, 255, 220));
+            nanovg::nvgFill(nvg);
 
             // 8. Scribble text
-            nvgFontSize(nvg, 11.5f);
-            nvgFontFace(nvg, "Inter");
-            nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+            mcpnvg::nvgFontSize(nvg, 11.5f);
+            mcpnvg::nvgFontFace(nvg, "Inter");
+            mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
 
             // Scissor so text NEVER overflows past right action buttons
             float const textLeft = ax + 24.0f;
             float const rightZoneW = 32.0f; // space for sidebar icon + close x
             float const maxTextW = std::max(20.0f, tapeW - 24.0f - rightZoneW);
-            nvgScissor(nvg, textLeft, ay, maxTextW, tapeH);
-            nvgFillColor(nvg, isHovered ? nvgRGBA(255, 255, 255, 255) : nvgRGBA(225, 228, 238, 230));
-            nvgText(nvg, textLeft, ay + tapeH * 0.5f, a.text.toRawUTF8(), nullptr);
-            nvgResetScissor(nvg);
+            nanovg::nvgScissor(nvg, textLeft, ay, maxTextW, tapeH);
+            nanovg::nvgFillColor(nvg, isHovered ? nanovg::nvgRGBA(255, 255, 255, 255) : nanovg::nvgRGBA(225, 228, 238, 230));
+            mcpnvg::nvgText(nvg, textLeft, ay + tapeH * 0.5f, a.text.toRawUTF8(), nullptr);
+            nanovg::nvgResetScissor(nvg);
 
             // 9. Right Icons: Notebook link ↗ & Dismiss ✕
             // Sidebar Notebook link icon (subtle ↗ arrow)
             float const iconX = ax + tapeW - 23.0f;
-            nvgBeginPath(nvg);
-            nvgMoveTo(nvg, iconX - 2.5f, ay + tapeH * 0.5f + 2.5f);
-            nvgLineTo(nvg, iconX + 2.5f, ay + tapeH * 0.5f - 2.5f);
-            nvgMoveTo(nvg, iconX - 0.5f, ay + tapeH * 0.5f - 2.5f);
-            nvgLineTo(nvg, iconX + 2.5f, ay + tapeH * 0.5f - 2.5f);
-            nvgLineTo(nvg, iconX + 2.5f, ay + tapeH * 0.5f + 0.5f);
-            nvgStrokeColor(nvg, (!isCloseHover && isHovered) ? accent : nvgRGBA(ar, ag, ab, 120));
-            nvgStrokeWidth(nvg, 1.1f);
-            nvgStroke(nvg);
+            nanovg::nvgBeginPath(nvg);
+            nanovg::nvgMoveTo(nvg, iconX - 2.5f, ay + tapeH * 0.5f + 2.5f);
+            nanovg::nvgLineTo(nvg, iconX + 2.5f, ay + tapeH * 0.5f - 2.5f);
+            nanovg::nvgMoveTo(nvg, iconX - 0.5f, ay + tapeH * 0.5f - 2.5f);
+            nanovg::nvgLineTo(nvg, iconX + 2.5f, ay + tapeH * 0.5f - 2.5f);
+            nanovg::nvgLineTo(nvg, iconX + 2.5f, ay + tapeH * 0.5f + 0.5f);
+            nanovg::nvgStrokeColor(nvg, (!isCloseHover && isHovered) ? accent : nanovg::nvgRGBA(ar, ag, ab, 120));
+            nanovg::nvgStrokeWidth(nvg, 1.1f);
+            nanovg::nvgStroke(nvg);
 
             // Dismiss 'x'
             float const closeX = ax + tapeW - 9.0f;
-            nvgFontSize(nvg, 10.5f);
-            nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-            nvgFillColor(nvg, isCloseHover ? nvgRGBA(255, 90, 90, 255) : (isHovered ? nvgRGBA(255, 140, 140, 200) : nvgRGBA(ar, ag, ab, 130)));
-            nvgText(nvg, closeX, ay + tapeH * 0.5f, "x", nullptr);
+            mcpnvg::nvgFontSize(nvg, 10.5f);
+            mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+            nanovg::nvgFillColor(nvg, isCloseHover ? nanovg::nvgRGBA(255, 90, 90, 255) : (isHovered ? nanovg::nvgRGBA(255, 140, 140, 200) : nanovg::nvgRGBA(ar, ag, ab, 130)));
+            mcpnvg::nvgText(nvg, closeX, ay + tapeH * 0.5f, "x", nullptr);
 
             // 10. Pivot Chips Drawer (blooms below hovered tape)
             if (isHovered && mcpNoteEditIndex != noteIdx) {
@@ -1087,19 +1031,19 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
                 float const drawerH = 22.0f;
 
                 // Subtle drop shadow
-                nvgBeginPath(nvg);
-                nvgRoundedRect(nvg, drawerX, drawerY + 1.0f, drawerW, drawerH, 4.0f);
-                nvgFillColor(nvg, nvgRGBA(8, 9, 12, 160));
-                nvgFill(nvg);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgRoundedRect(nvg, drawerX, drawerY + 1.0f, drawerW, drawerH, 4.0f);
+                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(8, 9, 12, 160));
+                nanovg::nvgFill(nvg);
 
                 // Smoked glass chassis with subtle accent stroke
-                nvgBeginPath(nvg);
-                nvgRoundedRect(nvg, drawerX, drawerY, drawerW, drawerH, 3.5f);
-                nvgFillColor(nvg, nvgRGBA(18, 19, 24, 245));
-                nvgFill(nvg);
-                nvgStrokeColor(nvg, nvgRGBA(ar, ag, ab, 90));
-                nvgStrokeWidth(nvg, 1.0f);
-                nvgStroke(nvg);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgRoundedRect(nvg, drawerX, drawerY, drawerW, drawerH, 3.5f);
+                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(18, 19, 24, 245));
+                nanovg::nvgFill(nvg);
+                nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(ar, ag, ab, 90));
+                nanovg::nvgStrokeWidth(nvg, 1.0f);
+                nanovg::nvgStroke(nvg);
 
                 // Render each chip
                 float curChipX = drawerX + 4.0f;
@@ -1114,50 +1058,50 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
                     NVGcolor bgCol, strkCol, txtCol;
                     if (chip.prompt == "__undo__") {
                         if (isThisChipHovered) {
-                            bgCol = nvgRGBA(170, 45, 45, 240);
-                            strkCol = nvgRGBA(255, 90, 90, 255);
-                            txtCol = nvgRGBA(255, 255, 255, 255);
+                            bgCol = nanovg::nvgRGBA(170, 45, 45, 240);
+                            strkCol = nanovg::nvgRGBA(255, 90, 90, 255);
+                            txtCol = nanovg::nvgRGBA(255, 255, 255, 255);
                         } else {
-                            bgCol = nvgRGBA(34, 22, 24, 210);
-                            strkCol = nvgRGBA(110, 40, 40, 160);
-                            txtCol = nvgRGBA(230, 140, 140, 220);
+                            bgCol = nanovg::nvgRGBA(34, 22, 24, 210);
+                            strkCol = nanovg::nvgRGBA(110, 40, 40, 160);
+                            txtCol = nanovg::nvgRGBA(230, 140, 140, 220);
                         }
                     } else if (chip.prompt == "__reply__") {
                         if (isThisChipHovered) {
-                            bgCol = nvgRGBA(45, 115, 215, 240);
-                            strkCol = nvgRGBA(90, 175, 255, 255);
-                            txtCol = nvgRGBA(255, 255, 255, 255);
+                            bgCol = nanovg::nvgRGBA(45, 115, 215, 240);
+                            strkCol = nanovg::nvgRGBA(90, 175, 255, 255);
+                            txtCol = nanovg::nvgRGBA(255, 255, 255, 255);
                         } else {
-                            bgCol = nvgRGBA(24, 32, 46, 210);
-                            strkCol = nvgRGBA(55, 95, 150, 160);
-                            txtCol = nvgRGBA(155, 200, 255, 220);
+                            bgCol = nanovg::nvgRGBA(24, 32, 46, 210);
+                            strkCol = nanovg::nvgRGBA(55, 95, 150, 160);
+                            txtCol = nanovg::nvgRGBA(155, 200, 255, 220);
                         }
                     } else {
                         // Sound pivot chip
                         if (isThisChipHovered) {
-                            bgCol = nvgRGBA(ar, ag, ab, 220);
+                            bgCol = nanovg::nvgRGBA(ar, ag, ab, 220);
                             strkCol = accent;
-                            txtCol = nvgRGBA(14, 16, 20, 255);
+                            txtCol = nanovg::nvgRGBA(14, 16, 20, 255);
                         } else {
-                            bgCol = nvgRGBA(28, 30, 38, 220);
-                            strkCol = nvgRGBA(65, 75, 95, 160);
-                            txtCol = nvgRGBA(215, 222, 235, 230);
+                            bgCol = nanovg::nvgRGBA(28, 30, 38, 220);
+                            strkCol = nanovg::nvgRGBA(65, 75, 95, 160);
+                            txtCol = nanovg::nvgRGBA(215, 222, 235, 230);
                         }
                     }
 
-                    nvgBeginPath(nvg);
-                    nvgRoundedRect(nvg, curChipX, chipY, cw, chipH, 2.5f);
-                    nvgFillColor(nvg, bgCol);
-                    nvgFill(nvg);
-                    nvgStrokeColor(nvg, strkCol);
-                    nvgStrokeWidth(nvg, 1.0f);
-                    nvgStroke(nvg);
+                    nanovg::nvgBeginPath(nvg);
+                    nanovg::nvgRoundedRect(nvg, curChipX, chipY, cw, chipH, 2.5f);
+                    nanovg::nvgFillColor(nvg, bgCol);
+                    nanovg::nvgFill(nvg);
+                    nanovg::nvgStrokeColor(nvg, strkCol);
+                    nanovg::nvgStrokeWidth(nvg, 1.0f);
+                    nanovg::nvgStroke(nvg);
 
-                    nvgFontSize(nvg, 10.0f);
-                    nvgFontFace(nvg, "Inter");
-                    nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-                    nvgFillColor(nvg, txtCol);
-                    nvgText(nvg, curChipX + cw * 0.5f, chipY + chipH * 0.5f, chip.label.toRawUTF8(), nullptr);
+                    mcpnvg::nvgFontSize(nvg, 10.0f);
+                    mcpnvg::nvgFontFace(nvg, "Inter");
+                    mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+                    nanovg::nvgFillColor(nvg, txtCol);
+                    mcpnvg::nvgText(nvg, curChipX + cw * 0.5f, chipY + chipH * 0.5f, chip.label.toRawUTF8(), nullptr);
 
                     curChipX += cw + 4.0f;
                 }
@@ -1172,9 +1116,9 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
     if (mcpNoteEditor && mcpNoteEditor->isVisible()) {
         NVGScopedState scopedNote(nvg);
         auto const nb = mcpNoteEditor->getBounds();
-        nvgTranslate(nvg, static_cast<float>(nb.getX()), static_cast<float>(nb.getY()));
-        nvgDrawRoundedRect(nvg, 0, 0, static_cast<float>(nb.getWidth()), static_cast<float>(nb.getHeight()),
-                           nvgRGBA(22, 22, 28, 255), nvgRGBA(74, 158, 255, 255), 4.0f);
+        nanovg::nvgTranslate(nvg, static_cast<float>(nb.getX()), static_cast<float>(nb.getY()));
+        nanovg::nvgDrawRoundedRect(nvg, 0, 0, static_cast<float>(nb.getWidth()), static_cast<float>(nb.getHeight()),
+                           nanovg::nvgRGBA(22, 22, 28, 255), nanovg::nvgRGBA(74, 158, 255, 255), 4.0f);
         mcpNoteRenderer.renderJUCEComponent(nvg, *mcpNoteEditor, zoom * editor->getRenderScale());
     }
 
@@ -1196,26 +1140,26 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
         {
             // TE-lite hardware look: matte dark panel, top bevel, ✦ Lenses, / Tools, ▶ Send.
             NVGScopedState scopedPanel(nvg);
-            nvgTranslate(nvg, static_cast<float>(panel.getX()), static_cast<float>(panel.getY()));
-            nvgDrawRoundedRect(nvg, 0, 0, w, h, nvgRGBA(24, 26, 30, 250), nvgRGBA(55, 60, 72, 220), 8.0f);
+            nanovg::nvgTranslate(nvg, static_cast<float>(panel.getX()), static_cast<float>(panel.getY()));
+            nanovg::nvgDrawRoundedRect(nvg, 0, 0, w, h, nanovg::nvgRGBA(24, 26, 30, 250), nanovg::nvgRGBA(55, 60, 72, 220), 8.0f);
 
             // Audio-reactive border glow while recording voice / beatbox
             if (isVoiceRec) {
                 float const lvl = voiceLvl;
-                nvgBeginPath(nvg);
-                nvgRoundedRect(nvg, -1.0f, -1.0f, w + 2.0f, h + 2.0f, 9.0f);
-                nvgStrokeColor(nvg, nvgRGBA(255, 59, 48, static_cast<unsigned char>(130 + juce::jlimit(0.0f, 125.0f, lvl * 350.0f))));
-                nvgStrokeWidth(nvg, 1.5f + lvl * 3.5f);
-                nvgStroke(nvg);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgRoundedRect(nvg, -1.0f, -1.0f, w + 2.0f, h + 2.0f, 9.0f);
+                nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(255, 59, 48, static_cast<unsigned char>(130 + juce::jlimit(0.0f, 125.0f, lvl * 350.0f))));
+                nanovg::nvgStrokeWidth(nvg, 1.5f + lvl * 3.5f);
+                nanovg::nvgStroke(nvg);
             }
 
             // Subtle top highlight line
-            nvgBeginPath(nvg);
-            nvgMoveTo(nvg, 8.0f, 1.0f);
-            nvgLineTo(nvg, w - 8.0f, 1.0f);
-            nvgStrokeColor(nvg, nvgRGBA(255, 255, 255, 25));
-            nvgStrokeWidth(nvg, 1.0f);
-            nvgStroke(nvg);
+            nanovg::nvgBeginPath(nvg);
+            nanovg::nvgMoveTo(nvg, 8.0f, 1.0f);
+            nanovg::nvgLineTo(nvg, w - 8.0f, 1.0f);
+            nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(255, 255, 255, 25));
+            nanovg::nvgStrokeWidth(nvg, 1.0f);
+            nanovg::nvgStroke(nvg);
 
             if (mcpPillSketchMode && mcpCompletedStrokes.empty()) {
                 // Mood strip: icons first, surfaces second. [✏] [T] [🖼] [🎙 Melody] [🥁 Beat]
@@ -1233,141 +1177,141 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
                     float const bx = pad + i * (btn + gap);
                     bool const active = (i == 0 && mcpSketchToolActive) || (i == 1 && mcpTextToolActive) || (i == 3 && melodyRec) || (i == 4 && beatRec) || (i == 5 && midiRec);
 
-                    NVGcolor bg = nvgRGBA(38, 42, 50, 230);
-                    NVGcolor border = nvgRGBA(160, 175, 200, 100);
+                    NVGcolor bg = nanovg::nvgRGBA(38, 42, 50, 230);
+                    NVGcolor border = nanovg::nvgRGBA(160, 175, 200, 100);
                     if (active) {
                         if (i == 5) {
-                            bg = nvgRGBA(140, 60, 230, 245);
-                            border = nvgRGBA(180, 100, 255, 255);
+                            bg = nanovg::nvgRGBA(140, 60, 230, 245);
+                            border = nanovg::nvgRGBA(180, 100, 255, 255);
                         } else {
-                            bg = nvgRGBA(0, 190, 230, 245);
-                            border = nvgRGBA(0, 245, 255, 255);
+                            bg = nanovg::nvgRGBA(0, 190, 230, 245);
+                            border = nanovg::nvgRGBA(0, 245, 255, 255);
                         }
                     }
-                    nvgDrawRoundedRect(nvg, bx, by, btn, btn, bg, border, 6.0f);
+                    nanovg::nvgDrawRoundedRect(nvg, bx, by, btn, btn, bg, border, 6.0f);
 
                     float const cx = bx + btn * 0.5f;
                     float const cy = by + btn * 0.5f;
-                    NVGcolor const fg = active ? nvgRGBA(12, 14, 18, 255) : nvgRGBA(212, 224, 240, 235);
+                    NVGcolor const fg = active ? nanovg::nvgRGBA(12, 14, 18, 255) : nanovg::nvgRGBA(212, 224, 240, 235);
 
                     if (i == 0) { // pen
-                        nvgBeginPath(nvg);
-                        nvgMoveTo(nvg, cx - 5.0f, cy + 5.0f);
-                        nvgLineTo(nvg, cx + 3.0f, cy - 5.0f);
-                        nvgLineTo(nvg, cx + 5.5f, cy - 2.5f);
-                        nvgLineTo(nvg, cx - 2.5f, cy + 5.5f);
-                        nvgClosePath(nvg);
-                        nvgStrokeColor(nvg, fg);
-                        nvgStrokeWidth(nvg, 1.3f);
-                        nvgStroke(nvg);
-                        nvgBeginPath(nvg);
-                        nvgMoveTo(nvg, cx - 5.0f, cy + 5.0f);
-                        nvgLineTo(nvg, cx - 6.5f, cy + 6.5f);
-                        nvgStroke(nvg);
+                        nanovg::nvgBeginPath(nvg);
+                        nanovg::nvgMoveTo(nvg, cx - 5.0f, cy + 5.0f);
+                        nanovg::nvgLineTo(nvg, cx + 3.0f, cy - 5.0f);
+                        nanovg::nvgLineTo(nvg, cx + 5.5f, cy - 2.5f);
+                        nanovg::nvgLineTo(nvg, cx - 2.5f, cy + 5.5f);
+                        nanovg::nvgClosePath(nvg);
+                        nanovg::nvgStrokeColor(nvg, fg);
+                        nanovg::nvgStrokeWidth(nvg, 1.3f);
+                        nanovg::nvgStroke(nvg);
+                        nanovg::nvgBeginPath(nvg);
+                        nanovg::nvgMoveTo(nvg, cx - 5.0f, cy + 5.0f);
+                        nanovg::nvgLineTo(nvg, cx - 6.5f, cy + 6.5f);
+                        nanovg::nvgStroke(nvg);
                     } else if (i == 1) { // text
-                        nvgFontFace(nvg, "Inter");
-                        nvgFontSize(nvg, 13.0f);
-                        nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-                        nvgFillColor(nvg, fg);
-                        nvgText(nvg, cx, cy, "T", nullptr);
+                        mcpnvg::nvgFontFace(nvg, "Inter");
+                        mcpnvg::nvgFontSize(nvg, 13.0f);
+                        mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+                        nanovg::nvgFillColor(nvg, fg);
+                        mcpnvg::nvgText(nvg, cx, cy, "T", nullptr);
                     } else if (i == 2) { // image
-                        nvgBeginPath(nvg);
-                        nvgRoundedRect(nvg, cx - 6.0f, cy - 5.0f, 12.0f, 10.0f, 1.8f);
-                        nvgStrokeColor(nvg, fg);
-                        nvgStrokeWidth(nvg, 1.2f);
-                        nvgStroke(nvg);
-                        nvgBeginPath(nvg);
-                        nvgMoveTo(nvg, cx - 5.0f, cy + 3.0f);
-                        nvgLineTo(nvg, cx - 1.0f, cy - 1.0f);
-                        nvgLineTo(nvg, cx + 2.0f, cy + 1.5f);
-                        nvgLineTo(nvg, cx + 5.0f, cy - 2.0f);
-                        nvgStrokeColor(nvg, fg);
-                        nvgStrokeWidth(nvg, 1.1f);
-                        nvgStroke(nvg);
+                        nanovg::nvgBeginPath(nvg);
+                        nanovg::nvgRoundedRect(nvg, cx - 6.0f, cy - 5.0f, 12.0f, 10.0f, 1.8f);
+                        nanovg::nvgStrokeColor(nvg, fg);
+                        nanovg::nvgStrokeWidth(nvg, 1.2f);
+                        nanovg::nvgStroke(nvg);
+                        nanovg::nvgBeginPath(nvg);
+                        nanovg::nvgMoveTo(nvg, cx - 5.0f, cy + 3.0f);
+                        nanovg::nvgLineTo(nvg, cx - 1.0f, cy - 1.0f);
+                        nanovg::nvgLineTo(nvg, cx + 2.0f, cy + 1.5f);
+                        nanovg::nvgLineTo(nvg, cx + 5.0f, cy - 2.0f);
+                        nanovg::nvgStrokeColor(nvg, fg);
+                        nanovg::nvgStrokeWidth(nvg, 1.1f);
+                        nanovg::nvgStroke(nvg);
                     } else if (i == 3) { // melody (beamed notes)
-                        nvgBeginPath(nvg);
-                        nvgEllipse(nvg, cx - 3.5f, cy + 4.5f, 2.8f, 2.0f);
-                        nvgFillColor(nvg, fg);
-                        nvgFill(nvg);
-                        nvgBeginPath(nvg);
-                        nvgEllipse(nvg, cx + 4.0f, cy + 3.0f, 2.8f, 2.0f);
-                        nvgFillColor(nvg, fg);
-                        nvgFill(nvg);
-                        nvgBeginPath(nvg);
-                        nvgMoveTo(nvg, cx - 0.9f, cy + 4.4f);
-                        nvgLineTo(nvg, cx - 0.9f, cy - 5.5f);
-                        nvgLineTo(nvg, cx + 6.6f, cy - 6.8f);
-                        nvgLineTo(nvg, cx + 6.6f, cy + 2.9f);
-                        nvgStrokeColor(nvg, fg);
-                        nvgStrokeWidth(nvg, 1.4f);
-                        nvgStroke(nvg);
+                        nanovg::nvgBeginPath(nvg);
+                        nanovg::nvgEllipse(nvg, cx - 3.5f, cy + 4.5f, 2.8f, 2.0f);
+                        nanovg::nvgFillColor(nvg, fg);
+                        nanovg::nvgFill(nvg);
+                        nanovg::nvgBeginPath(nvg);
+                        nanovg::nvgEllipse(nvg, cx + 4.0f, cy + 3.0f, 2.8f, 2.0f);
+                        nanovg::nvgFillColor(nvg, fg);
+                        nanovg::nvgFill(nvg);
+                        nanovg::nvgBeginPath(nvg);
+                        nanovg::nvgMoveTo(nvg, cx - 0.9f, cy + 4.4f);
+                        nanovg::nvgLineTo(nvg, cx - 0.9f, cy - 5.5f);
+                        nanovg::nvgLineTo(nvg, cx + 6.6f, cy - 6.8f);
+                        nanovg::nvgLineTo(nvg, cx + 6.6f, cy + 2.9f);
+                        nanovg::nvgStrokeColor(nvg, fg);
+                        nanovg::nvgStrokeWidth(nvg, 1.4f);
+                        nanovg::nvgStroke(nvg);
 
                         if (melodyRec) { // live level aura
                             float const lvl = pd->getMCPBridge()->getVoiceLiveLevel();
-                            nvgBeginPath(nvg);
-                            nvgRoundedRect(nvg, bx - 2.0f - lvl * 4.0f, by - 2.0f - lvl * 4.0f,
+                            nanovg::nvgBeginPath(nvg);
+                            nanovg::nvgRoundedRect(nvg, bx - 2.0f - lvl * 4.0f, by - 2.0f - lvl * 4.0f,
                                            btn + 4.0f + lvl * 8.0f, btn + 4.0f + lvl * 8.0f, 8.0f);
-                            nvgStrokeColor(nvg, nvgRGBA(255, 60, 45, static_cast<unsigned char>(120 + juce::jlimit(0.0f, 130.0f, lvl * 350.0f))));
-                            nvgStrokeWidth(nvg, 1.5f);
-                            nvgStroke(nvg);
+                            nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(255, 60, 45, static_cast<unsigned char>(120 + juce::jlimit(0.0f, 130.0f, lvl * 350.0f))));
+                            nanovg::nvgStrokeWidth(nvg, 1.5f);
+                            nanovg::nvgStroke(nvg);
                         }
                     } else if (i == 4) { // beat (drum glyph)
-                        nvgBeginPath(nvg);
-                        nvgRoundedRect(nvg, cx - 6.0f, cy - 0.5f, 12.0f, 6.5f, 2.0f);
-                        nvgStrokeColor(nvg, fg);
-                        nvgStrokeWidth(nvg, 1.2f);
-                        nvgStroke(nvg);
-                        nvgBeginPath(nvg);
-                        nvgEllipse(nvg, cx, cy - 0.5f, 6.0f, 2.0f);
-                        nvgStrokeColor(nvg, fg);
-                        nvgStrokeWidth(nvg, 1.2f);
-                        nvgStroke(nvg);
+                        nanovg::nvgBeginPath(nvg);
+                        nanovg::nvgRoundedRect(nvg, cx - 6.0f, cy - 0.5f, 12.0f, 6.5f, 2.0f);
+                        nanovg::nvgStrokeColor(nvg, fg);
+                        nanovg::nvgStrokeWidth(nvg, 1.2f);
+                        nanovg::nvgStroke(nvg);
+                        nanovg::nvgBeginPath(nvg);
+                        nanovg::nvgEllipse(nvg, cx, cy - 0.5f, 6.0f, 2.0f);
+                        nanovg::nvgStrokeColor(nvg, fg);
+                        nanovg::nvgStrokeWidth(nvg, 1.2f);
+                        nanovg::nvgStroke(nvg);
                         // crossed beaters
-                        nvgBeginPath(nvg);
-                        nvgMoveTo(nvg, cx - 4.5f, cy - 7.0f);
-                        nvgLineTo(nvg, cx + 1.0f, cy - 1.5f);
-                        nvgMoveTo(nvg, cx + 4.5f, cy - 7.0f);
-                        nvgLineTo(nvg, cx - 1.0f, cy - 1.5f);
-                        nvgStrokeColor(nvg, fg);
-                        nvgStrokeWidth(nvg, 1.1f);
-                        nvgStroke(nvg);
+                        nanovg::nvgBeginPath(nvg);
+                        nanovg::nvgMoveTo(nvg, cx - 4.5f, cy - 7.0f);
+                        nanovg::nvgLineTo(nvg, cx + 1.0f, cy - 1.5f);
+                        nanovg::nvgMoveTo(nvg, cx + 4.5f, cy - 7.0f);
+                        nanovg::nvgLineTo(nvg, cx - 1.0f, cy - 1.5f);
+                        nanovg::nvgStrokeColor(nvg, fg);
+                        nanovg::nvgStrokeWidth(nvg, 1.1f);
+                        nanovg::nvgStroke(nvg);
 
                         if (beatRec) { // live level aura
                             float const lvl = pd->getMCPBridge()->getVoiceLiveLevel();
-                            nvgBeginPath(nvg);
-                            nvgRoundedRect(nvg, bx - 2.0f - lvl * 4.0f, by - 2.0f - lvl * 4.0f,
+                            nanovg::nvgBeginPath(nvg);
+                            nanovg::nvgRoundedRect(nvg, bx - 2.0f - lvl * 4.0f, by - 2.0f - lvl * 4.0f,
                                            btn + 4.0f + lvl * 8.0f, btn + 4.0f + lvl * 8.0f, 8.0f);
-                            nvgStrokeColor(nvg, nvgRGBA(255, 60, 45, static_cast<unsigned char>(120 + juce::jlimit(0.0f, 130.0f, lvl * 350.0f))));
-                            nvgStrokeWidth(nvg, 1.5f);
-                            nvgStroke(nvg);
+                            nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(255, 60, 45, static_cast<unsigned char>(120 + juce::jlimit(0.0f, 130.0f, lvl * 350.0f))));
+                            nanovg::nvgStrokeWidth(nvg, 1.5f);
+                            nanovg::nvgStroke(nvg);
                         }
                     } else { // i == 5: MIDI (piano keyboard glyph)
-                        nvgBeginPath(nvg);
-                        nvgRoundedRect(nvg, cx - 7.0f, cy - 6.0f, 14.0f, 12.0f, 1.5f);
-                        nvgStrokeColor(nvg, fg);
-                        nvgStrokeWidth(nvg, 1.2f);
-                        nvgStroke(nvg);
-                        nvgBeginPath(nvg);
-                        nvgMoveTo(nvg, cx - 2.5f, cy - 6.0f);
-                        nvgLineTo(nvg, cx - 2.5f, cy + 6.0f);
-                        nvgMoveTo(nvg, cx + 2.0f, cy - 6.0f);
-                        nvgLineTo(nvg, cx + 2.0f, cy + 6.0f);
-                        nvgStrokeColor(nvg, fg);
-                        nvgStrokeWidth(nvg, 1.0f);
-                        nvgStroke(nvg);
-                        nvgBeginPath(nvg);
-                        nvgRect(nvg, cx - 4.5f, cy - 6.0f, 1.8f, 6.5f);
-                        nvgRect(nvg, cx + 0.2f, cy - 6.0f, 1.8f, 6.5f);
-                        nvgFillColor(nvg, fg);
-                        nvgFill(nvg);
+                        nanovg::nvgBeginPath(nvg);
+                        nanovg::nvgRoundedRect(nvg, cx - 7.0f, cy - 6.0f, 14.0f, 12.0f, 1.5f);
+                        nanovg::nvgStrokeColor(nvg, fg);
+                        nanovg::nvgStrokeWidth(nvg, 1.2f);
+                        nanovg::nvgStroke(nvg);
+                        nanovg::nvgBeginPath(nvg);
+                        nanovg::nvgMoveTo(nvg, cx - 2.5f, cy - 6.0f);
+                        nanovg::nvgLineTo(nvg, cx - 2.5f, cy + 6.0f);
+                        nanovg::nvgMoveTo(nvg, cx + 2.0f, cy - 6.0f);
+                        nanovg::nvgLineTo(nvg, cx + 2.0f, cy + 6.0f);
+                        nanovg::nvgStrokeColor(nvg, fg);
+                        nanovg::nvgStrokeWidth(nvg, 1.0f);
+                        nanovg::nvgStroke(nvg);
+                        nanovg::nvgBeginPath(nvg);
+                        nanovg::nvgRect(nvg, cx - 4.5f, cy - 6.0f, 1.8f, 6.5f);
+                        nanovg::nvgRect(nvg, cx + 0.2f, cy - 6.0f, 1.8f, 6.5f);
+                        nanovg::nvgFillColor(nvg, fg);
+                        nanovg::nvgFill(nvg);
 
                         if (midiRec) {
                             float const pulse = 0.65f + 0.35f * std::sin(static_cast<float>(juce::Time::getMillisecondCounter()) * 0.008f);
-                            nvgBeginPath(nvg);
-                            nvgRoundedRect(nvg, bx - 2.0f, by - 2.0f, btn + 4.0f, btn + 4.0f, 8.0f);
-                            nvgStrokeColor(nvg, nvgRGBA(180, 70, 255, static_cast<unsigned char>(140 + 100 * pulse)));
-                            nvgStrokeWidth(nvg, 1.6f);
-                            nvgStroke(nvg);
+                            nanovg::nvgBeginPath(nvg);
+                            nanovg::nvgRoundedRect(nvg, bx - 2.0f, by - 2.0f, btn + 4.0f, btn + 4.0f, 8.0f);
+                            nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(180, 70, 255, static_cast<unsigned char>(140 + 100 * pulse)));
+                            nanovg::nvgStrokeWidth(nvg, 1.6f);
+                            nanovg::nvgStroke(nvg);
                         }
                     }
                 }
@@ -1381,44 +1325,44 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
                     float const boxW = midiRec ? 340.0f : 330.0f;
                     float const boxX = (w - boxW) * 0.5f;
                     float const boxY = -44.0f;
-                    NVGcolor const recBorder = midiRec ? nvgRGBA(180, 80, 255, 220) : nvgRGBA(255, 70, 58, 220);
-                    nvgDrawRoundedRect(nvg, boxX, boxY, boxW, 32.0f, nvgRGBA(26, 18, 20, 242), recBorder, 7.0f);
+                    NVGcolor const recBorder = midiRec ? nanovg::nvgRGBA(180, 80, 255, 220) : nanovg::nvgRGBA(255, 70, 58, 220);
+                    nanovg::nvgDrawRoundedRect(nvg, boxX, boxY, boxW, 32.0f, nanovg::nvgRGBA(26, 18, 20, 242), recBorder, 7.0f);
 
                     float const pulse = 0.65f + 0.35f * std::sin(static_cast<float>(juce::Time::getMillisecondCounter()) * 0.008f);
                     float const lvl = juce::jlimit(0.0f, 1.0f, pd->getMCPBridge()->getVoiceLiveLevel() * 3.5f);
-                    nvgBeginPath(nvg);
-                    nvgCircle(nvg, boxX + 15.0f, boxY + 16.0f, 4.0f);
+                    nanovg::nvgBeginPath(nvg);
+                    nanovg::nvgCircle(nvg, boxX + 15.0f, boxY + 16.0f, 4.0f);
                     NVGcolor const dotColor = midiRec
-                        ? nvgRGBA(190, 80, 255, static_cast<unsigned char>(160 + 95 * pulse))
-                        : nvgRGBA(255, 60, 45, static_cast<unsigned char>(160 + 95 * pulse));
-                    nvgFillColor(nvg, dotColor);
-                    nvgFill(nvg);
+                        ? nanovg::nvgRGBA(190, 80, 255, static_cast<unsigned char>(160 + 95 * pulse))
+                        : nanovg::nvgRGBA(255, 60, 45, static_cast<unsigned char>(160 + 95 * pulse));
+                    nanovg::nvgFillColor(nvg, dotColor);
+                    nanovg::nvgFill(nvg);
 
                     if (!midiRec) {
                         // live level meter
-                        nvgDrawRoundedRect(nvg, boxX + 26.0f, boxY + 13.0f, 70.0f, 6.0f, nvgRGBA(50, 30, 32, 230), nvgRGBA(90, 50, 52, 120), 3.0f);
-                        nvgDrawRoundedRect(nvg, boxX + 26.0f, boxY + 13.0f, 4.0f + lvl * 66.0f, 6.0f, nvgRGBA(255, 70, 55, 235), nvgRGBA(255, 120, 100, 120), 3.0f);
+                        nanovg::nvgDrawRoundedRect(nvg, boxX + 26.0f, boxY + 13.0f, 70.0f, 6.0f, nanovg::nvgRGBA(50, 30, 32, 230), nanovg::nvgRGBA(90, 50, 52, 120), 3.0f);
+                        nanovg::nvgDrawRoundedRect(nvg, boxX + 26.0f, boxY + 13.0f, 4.0f + lvl * 66.0f, 6.0f, nanovg::nvgRGBA(255, 70, 55, 235), nanovg::nvgRGBA(255, 120, 100, 120), 3.0f);
                     }
 
-                    nvgFontFace(nvg, "Inter");
-                    nvgFontSize(nvg, 10.5f);
-                    nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
-                    nvgFillColor(nvg, midiRec ? nvgRGBA(235, 220, 255, 240) : nvgRGBA(255, 214, 208, 240));
+                    mcpnvg::nvgFontFace(nvg, "Inter");
+                    mcpnvg::nvgFontSize(nvg, 10.5f);
+                    mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+                    nanovg::nvgFillColor(nvg, midiRec ? nanovg::nvgRGBA(235, 220, 255, 240) : nanovg::nvgRGBA(255, 214, 208, 240));
                     float const tx = midiRec ? (boxX + 28.0f) : (boxX + 104.0f);
-                    nvgText(nvg, tx, boxY + 16.0f, recText.toRawUTF8(), nullptr);
+                    mcpnvg::nvgText(nvg, tx, boxY + 16.0f, recText.toRawUTF8(), nullptr);
                 }
 
                 // Hint chip under the strip
                 if (mcpMoodHint.isNotEmpty() && juce::Time::getMillisecondCounter() < mcpMoodHintUntil) {
-                    nvgFontFace(nvg, "Inter");
-                    nvgFontSize(nvg, 11.0f);
-                    nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+                    mcpnvg::nvgFontFace(nvg, "Inter");
+                    mcpnvg::nvgFontSize(nvg, 11.0f);
+                    mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
                     float tb[4];
-                    nvgTextBounds(nvg, 0.0f, 0.0f, mcpMoodHint.toRawUTF8(), nullptr, tb);
+                    mcpnvg::nvgTextBounds(nvg, 0.0f, 0.0f, mcpMoodHint.toRawUTF8(), nullptr, tb);
                     float const hw = (tb[2] - tb[0]) + 16.0f;
-                    nvgDrawRoundedRect(nvg, 0.0f, h + 6.0f, hw, 20.0f, nvgRGBA(16, 18, 22, 232), nvgRGBA(255, 190, 80, 150), 5.0f);
-                    nvgFillColor(nvg, nvgRGBA(255, 214, 150, 240));
-                    nvgText(nvg, 8.0f, h + 16.0f, mcpMoodHint.toRawUTF8(), nullptr);
+                    nanovg::nvgDrawRoundedRect(nvg, 0.0f, h + 6.0f, hw, 20.0f, nanovg::nvgRGBA(16, 18, 22, 232), nanovg::nvgRGBA(255, 190, 80, 150), 5.0f);
+                    nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(255, 214, 150, 240));
+                    mcpnvg::nvgText(nvg, 8.0f, h + 16.0f, mcpMoodHint.toRawUTF8(), nullptr);
                 }
             } else if (mcpPillSketchMode) {
                 // Moodboard Chisel: [⚡ Build] | prompt | [T] [🖼] [↩ Undo] [🗑 Clear] [✏️ pen]
@@ -1429,38 +1373,38 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
                 {
                     float const bx = 6.0f;
                     float const bw = 80.0f;
-                    nvgDrawRoundedRect(nvg, bx, chipY, bw, chipH, nvgRGBA(32, 108, 214, 245), nvgRGBA(96, 178, 255, 255), 5.0f);
+                    nanovg::nvgDrawRoundedRect(nvg, bx, chipY, bw, chipH, nanovg::nvgRGBA(32, 108, 214, 245), nanovg::nvgRGBA(96, 178, 255, 255), 5.0f);
                     // vector lightning bolt
-                    nvgBeginPath(nvg);
-                    nvgMoveTo(nvg, bx + 15.0f, chipY + 3.5f);
-                    nvgLineTo(nvg, bx + 10.0f, chipY + 11.5f);
-                    nvgLineTo(nvg, bx + 14.0f, chipY + 11.5f);
-                    nvgLineTo(nvg, bx + 12.0f, chipY + 18.5f);
-                    nvgLineTo(nvg, bx + 19.0f, chipY + 9.5f);
-                    nvgLineTo(nvg, bx + 14.5f, chipY + 9.5f);
-                    nvgLineTo(nvg, bx + 17.0f, chipY + 3.5f);
-                    nvgClosePath(nvg);
-                    nvgFillColor(nvg, nvgRGBA(255, 235, 130, 255));
-                    nvgFill(nvg);
-                    nvgFontFace(nvg, "Inter");
-                    nvgFontSize(nvg, 11.5f);
-                    nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
-                    nvgFillColor(nvg, nvgRGBA(255, 255, 255, 255));
-                    nvgText(nvg, bx + 25.0f, chipY + chipH * 0.5f, "Build", nullptr);
+                    nanovg::nvgBeginPath(nvg);
+                    nanovg::nvgMoveTo(nvg, bx + 15.0f, chipY + 3.5f);
+                    nanovg::nvgLineTo(nvg, bx + 10.0f, chipY + 11.5f);
+                    nanovg::nvgLineTo(nvg, bx + 14.0f, chipY + 11.5f);
+                    nanovg::nvgLineTo(nvg, bx + 12.0f, chipY + 18.5f);
+                    nanovg::nvgLineTo(nvg, bx + 19.0f, chipY + 9.5f);
+                    nanovg::nvgLineTo(nvg, bx + 14.5f, chipY + 9.5f);
+                    nanovg::nvgLineTo(nvg, bx + 17.0f, chipY + 3.5f);
+                    nanovg::nvgClosePath(nvg);
+                    nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(255, 235, 130, 255));
+                    nanovg::nvgFill(nvg);
+                    mcpnvg::nvgFontFace(nvg, "Inter");
+                    mcpnvg::nvgFontSize(nvg, 11.5f);
+                    mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+                    nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(255, 255, 255, 255));
+                    mcpnvg::nvgText(nvg, bx + 25.0f, chipY + chipH * 0.5f, "Build", nullptr);
                 }
 
                 // T attach-text chip (same tools as the surgical lane)
                 {
                     float const tx = w - 234.0f;
                     float const tw2 = 24.0f;
-                    nvgDrawRoundedRect(nvg, tx, chipY, tw2, chipH,
-                                       mcpTextToolActive ? nvgRGBA(74, 158, 255, 240) : nvgRGBA(38, 42, 50, 230),
-                                       mcpTextToolActive ? nvgRGBA(140, 195, 255, 255) : nvgRGBA(160, 175, 200, 110), 4.0f);
-                    nvgFontFace(nvg, "Inter");
-                    nvgFontSize(nvg, 12.0f);
-                    nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-                    nvgFillColor(nvg, mcpTextToolActive ? nvgRGBA(255, 255, 255, 255) : nvgRGBA(215, 225, 240, 235));
-                    nvgText(nvg, tx + tw2 * 0.5f, chipY + chipH * 0.5f, "T", nullptr);
+                    nanovg::nvgDrawRoundedRect(nvg, tx, chipY, tw2, chipH,
+                                       mcpTextToolActive ? nanovg::nvgRGBA(74, 158, 255, 240) : nanovg::nvgRGBA(38, 42, 50, 230),
+                                       mcpTextToolActive ? nanovg::nvgRGBA(140, 195, 255, 255) : nanovg::nvgRGBA(160, 175, 200, 110), 4.0f);
+                    mcpnvg::nvgFontFace(nvg, "Inter");
+                    mcpnvg::nvgFontSize(nvg, 12.0f);
+                    mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+                    nanovg::nvgFillColor(nvg, mcpTextToolActive ? nanovg::nvgRGBA(255, 255, 255, 255) : nanovg::nvgRGBA(215, 225, 240, 235));
+                    mcpnvg::nvgText(nvg, tx + tw2 * 0.5f, chipY + chipH * 0.5f, "T", nullptr);
                 }
 
                 // 🖼 attach-image chip (pastes the clipboard onto the mood/sketch)
@@ -1469,20 +1413,20 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
                     float const iw = 24.0f;
                     float const icx = ix + iw * 0.5f;
                     float const icy = chipY + chipH * 0.5f;
-                    nvgDrawRoundedRect(nvg, ix, chipY, iw, chipH, nvgRGBA(38, 42, 50, 230), nvgRGBA(160, 175, 200, 110), 4.0f);
-                    nvgBeginPath(nvg);
-                    nvgRoundedRect(nvg, icx - 5.0f, icy - 4.0f, 10.0f, 8.5f, 1.5f);
-                    nvgStrokeColor(nvg, nvgRGBA(200, 215, 235, 220));
-                    nvgStrokeWidth(nvg, 1.1f);
-                    nvgStroke(nvg);
-                    nvgBeginPath(nvg);
-                    nvgMoveTo(nvg, icx - 4.0f, icy + 2.5f);
-                    nvgLineTo(nvg, icx - 1.0f, icy - 0.5f);
-                    nvgLineTo(nvg, icx + 1.5f, icy + 1.5f);
-                    nvgLineTo(nvg, icx + 4.0f, icy + 0.5f);
-                    nvgStrokeColor(nvg, nvgRGBA(160, 230, 200, 200));
-                    nvgStrokeWidth(nvg, 1.0f);
-                    nvgStroke(nvg);
+                    nanovg::nvgDrawRoundedRect(nvg, ix, chipY, iw, chipH, nanovg::nvgRGBA(38, 42, 50, 230), nanovg::nvgRGBA(160, 175, 200, 110), 4.0f);
+                    nanovg::nvgBeginPath(nvg);
+                    nanovg::nvgRoundedRect(nvg, icx - 5.0f, icy - 4.0f, 10.0f, 8.5f, 1.5f);
+                    nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(200, 215, 235, 220));
+                    nanovg::nvgStrokeWidth(nvg, 1.1f);
+                    nanovg::nvgStroke(nvg);
+                    nanovg::nvgBeginPath(nvg);
+                    nanovg::nvgMoveTo(nvg, icx - 4.0f, icy + 2.5f);
+                    nanovg::nvgLineTo(nvg, icx - 1.0f, icy - 0.5f);
+                    nanovg::nvgLineTo(nvg, icx + 1.5f, icy + 1.5f);
+                    nanovg::nvgLineTo(nvg, icx + 4.0f, icy + 0.5f);
+                    nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(160, 230, 200, 200));
+                    nanovg::nvgStrokeWidth(nvg, 1.0f);
+                    nanovg::nvgStroke(nvg);
                 }
 
                 // ↩ Undo chip
@@ -1490,22 +1434,22 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
                     float const ux = w - 178.0f;
                     float const uw = 70.0f;
                     float const ucy = chipY + chipH * 0.5f;
-                    nvgDrawRoundedRect(nvg, ux, chipY, uw, chipH, nvgRGBA(38, 42, 50, 235), nvgRGBA(160, 175, 200, 110), 4.0f);
+                    nanovg::nvgDrawRoundedRect(nvg, ux, chipY, uw, chipH, nanovg::nvgRGBA(38, 42, 50, 235), nanovg::nvgRGBA(160, 175, 200, 110), 4.0f);
                     // back-arrow glyph
-                    nvgBeginPath(nvg);
-                    nvgMoveTo(nvg, ux + 18.0f, ucy);
-                    nvgLineTo(nvg, ux + 10.0f, ucy);
-                    nvgMoveTo(nvg, ux + 13.5f, ucy - 3.0f);
-                    nvgLineTo(nvg, ux + 10.0f, ucy);
-                    nvgLineTo(nvg, ux + 13.5f, ucy + 3.0f);
-                    nvgStrokeColor(nvg, nvgRGBA(150, 200, 255, 235));
-                    nvgStrokeWidth(nvg, 1.4f);
-                    nvgStroke(nvg);
-                    nvgFontFace(nvg, "Inter");
-                    nvgFontSize(nvg, 10.5f);
-                    nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
-                    nvgFillColor(nvg, nvgRGBA(215, 225, 240, 235));
-                    nvgText(nvg, ux + 23.0f, ucy, "Undo", nullptr);
+                    nanovg::nvgBeginPath(nvg);
+                    nanovg::nvgMoveTo(nvg, ux + 18.0f, ucy);
+                    nanovg::nvgLineTo(nvg, ux + 10.0f, ucy);
+                    nanovg::nvgMoveTo(nvg, ux + 13.5f, ucy - 3.0f);
+                    nanovg::nvgLineTo(nvg, ux + 10.0f, ucy);
+                    nanovg::nvgLineTo(nvg, ux + 13.5f, ucy + 3.0f);
+                    nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(150, 200, 255, 235));
+                    nanovg::nvgStrokeWidth(nvg, 1.4f);
+                    nanovg::nvgStroke(nvg);
+                    mcpnvg::nvgFontFace(nvg, "Inter");
+                    mcpnvg::nvgFontSize(nvg, 10.5f);
+                    mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+                    nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(215, 225, 240, 235));
+                    mcpnvg::nvgText(nvg, ux + 23.0f, ucy, "Undo", nullptr);
                 }
 
                 // 🗑 Clear chip
@@ -1513,25 +1457,25 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
                     float const cxX = w - 104.0f;
                     float const cxW = 70.0f;
                     float const ccy = chipY + chipH * 0.5f;
-                    nvgDrawRoundedRect(nvg, cxX, chipY, cxW, chipH, nvgRGBA(58, 30, 34, 235), nvgRGBA(220, 110, 110, 140), 4.0f);
+                    nanovg::nvgDrawRoundedRect(nvg, cxX, chipY, cxW, chipH, nanovg::nvgRGBA(58, 30, 34, 235), nanovg::nvgRGBA(220, 110, 110, 140), 4.0f);
                     // trash glyph
                     float const tcx = cxX + 14.0f;
-                    nvgBeginPath(nvg);
-                    nvgRoundedRect(nvg, tcx - 3.5f, ccy - 3.0f, 7.0f, 8.5f, 1.5f);
-                    nvgStrokeColor(nvg, nvgRGBA(255, 175, 175, 240));
-                    nvgStrokeWidth(nvg, 1.3f);
-                    nvgStroke(nvg);
-                    nvgBeginPath(nvg);
-                    nvgMoveTo(nvg, tcx - 5.0f, ccy - 4.5f);
-                    nvgLineTo(nvg, tcx + 5.0f, ccy - 4.5f);
-                    nvgStrokeColor(nvg, nvgRGBA(255, 175, 175, 240));
-                    nvgStrokeWidth(nvg, 1.3f);
-                    nvgStroke(nvg);
-                    nvgFontFace(nvg, "Inter");
-                    nvgFontSize(nvg, 10.5f);
-                    nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
-                    nvgFillColor(nvg, nvgRGBA(255, 200, 200, 240));
-                    nvgText(nvg, cxX + 24.0f, ccy, "Clear", nullptr);
+                    nanovg::nvgBeginPath(nvg);
+                    nanovg::nvgRoundedRect(nvg, tcx - 3.5f, ccy - 3.0f, 7.0f, 8.5f, 1.5f);
+                    nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(255, 175, 175, 240));
+                    nanovg::nvgStrokeWidth(nvg, 1.3f);
+                    nanovg::nvgStroke(nvg);
+                    nanovg::nvgBeginPath(nvg);
+                    nanovg::nvgMoveTo(nvg, tcx - 5.0f, ccy - 4.5f);
+                    nanovg::nvgLineTo(nvg, tcx + 5.0f, ccy - 4.5f);
+                    nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(255, 175, 175, 240));
+                    nanovg::nvgStrokeWidth(nvg, 1.3f);
+                    nanovg::nvgStroke(nvg);
+                    mcpnvg::nvgFontFace(nvg, "Inter");
+                    mcpnvg::nvgFontSize(nvg, 10.5f);
+                    mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+                    nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(255, 200, 200, 240));
+                    mcpnvg::nvgText(nvg, cxX + 24.0f, ccy, "Clear", nullptr);
                 }
 
                 // ✏️ Pen toggle — put the pen down / pick it back up without knowing Esc
@@ -1540,46 +1484,46 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
                     float const pw = 24.0f;
                     float const pcy = chipY + chipH * 0.5f;
                     if (mcpSketchToolActive) {
-                        nvgDrawRoundedRect(nvg, px, chipY, pw, chipH, nvgRGBA(0, 180, 220, 240), nvgRGBA(0, 245, 255, 255), 4.0f);
+                        nanovg::nvgDrawRoundedRect(nvg, px, chipY, pw, chipH, nanovg::nvgRGBA(0, 180, 220, 240), nanovg::nvgRGBA(0, 245, 255, 255), 4.0f);
                     } else {
-                        nvgDrawRoundedRect(nvg, px, chipY, pw, chipH, nvgRGBA(38, 42, 50, 230), nvgRGBA(160, 175, 200, 80), 4.0f);
+                        nanovg::nvgDrawRoundedRect(nvg, px, chipY, pw, chipH, nanovg::nvgRGBA(38, 42, 50, 230), nanovg::nvgRGBA(160, 175, 200, 80), 4.0f);
                     }
                     float const pcx = px + pw * 0.5f;
-                    nvgBeginPath(nvg);
-                    nvgMoveTo(nvg, pcx - 4.5f, pcy + 4.5f);
-                    nvgLineTo(nvg, pcx + 2.5f, pcy - 4.5f);
-                    nvgLineTo(nvg, pcx + 5.0f, pcy - 2.0f);
-                    nvgLineTo(nvg, pcx - 2.0f, pcy + 5.0f);
-                    nvgClosePath(nvg);
-                    nvgStrokeColor(nvg, mcpSketchToolActive ? nvgRGBA(255, 255, 255, 255) : nvgRGBA(200, 215, 235, 220));
-                    nvgStrokeWidth(nvg, 1.2f);
-                    nvgStroke(nvg);
-                    nvgBeginPath(nvg);
-                    nvgMoveTo(nvg, pcx - 4.5f, pcy + 4.5f);
-                    nvgLineTo(nvg, pcx - 6.0f, pcy + 6.0f);
-                    nvgStrokeColor(nvg, mcpSketchToolActive ? nvgRGBA(255, 255, 255, 255) : nvgRGBA(0, 230, 255, 220));
-                    nvgStrokeWidth(nvg, 1.4f);
-                    nvgStroke(nvg);
+                    nanovg::nvgBeginPath(nvg);
+                    nanovg::nvgMoveTo(nvg, pcx - 4.5f, pcy + 4.5f);
+                    nanovg::nvgLineTo(nvg, pcx + 2.5f, pcy - 4.5f);
+                    nanovg::nvgLineTo(nvg, pcx + 5.0f, pcy - 2.0f);
+                    nanovg::nvgLineTo(nvg, pcx - 2.0f, pcy + 5.0f);
+                    nanovg::nvgClosePath(nvg);
+                    nanovg::nvgStrokeColor(nvg, mcpSketchToolActive ? nanovg::nvgRGBA(255, 255, 255, 255) : nanovg::nvgRGBA(200, 215, 235, 220));
+                    nanovg::nvgStrokeWidth(nvg, 1.2f);
+                    nanovg::nvgStroke(nvg);
+                    nanovg::nvgBeginPath(nvg);
+                    nanovg::nvgMoveTo(nvg, pcx - 4.5f, pcy + 4.5f);
+                    nanovg::nvgLineTo(nvg, pcx - 6.0f, pcy + 6.0f);
+                    nanovg::nvgStrokeColor(nvg, mcpSketchToolActive ? nanovg::nvgRGBA(255, 255, 255, 255) : nanovg::nvgRGBA(0, 230, 255, 220));
+                    nanovg::nvgStrokeWidth(nvg, 1.4f);
+                    nanovg::nvgStroke(nvg);
                 }
             } else {
             // Left: subtle generative AI sparkle icon ✨
             {
                 float const cx = 15.0f;
                 float const cy = h * 0.5f;
-                nvgBeginPath(nvg);
-                nvgCircle(nvg, cx, cy, 6.0f);
-                nvgFillColor(nvg, nvgRGBA(74, 158, 255, 30));
-                nvgFill(nvg);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgCircle(nvg, cx, cy, 6.0f);
+                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(74, 158, 255, 30));
+                nanovg::nvgFill(nvg);
                 // 4-point sparkle star
-                nvgBeginPath(nvg);
-                nvgMoveTo(nvg, cx, cy - 4.5f);
-                nvgQuadTo(nvg, cx, cy, cx + 4.5f, cy);
-                nvgQuadTo(nvg, cx, cy, cx, cy + 4.5f);
-                nvgQuadTo(nvg, cx, cy, cx - 4.5f, cy);
-                nvgQuadTo(nvg, cx, cy, cx, cy - 4.5f);
-                nvgClosePath(nvg);
-                nvgFillColor(nvg, nvgRGBA(140, 195, 255, 220));
-                nvgFill(nvg);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgMoveTo(nvg, cx, cy - 4.5f);
+                nanovg::nvgQuadTo(nvg, cx, cy, cx + 4.5f, cy);
+                nanovg::nvgQuadTo(nvg, cx, cy, cx, cy + 4.5f);
+                nanovg::nvgQuadTo(nvg, cx, cy, cx - 4.5f, cy);
+                nanovg::nvgQuadTo(nvg, cx, cy, cx, cy - 4.5f);
+                nanovg::nvgClosePath(nvg);
+                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(140, 195, 255, 220));
+                nanovg::nvgFill(nvg);
             }
 
             // Right ~26px: sleek submit button ↵
@@ -1588,12 +1532,12 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
                 float const subH = 18.0f;
                 float const subX = w - 25.0f;
                 float const subY = (h - subH) * 0.5f;
-                nvgDrawRoundedRect(nvg, subX, subY, subW, subH, nvgRGBA(74, 158, 255, 220), nvgRGBA(140, 195, 255, 255), 4.0f);
-                nvgFontFace(nvg, "Inter");
-                nvgFontSize(nvg, 11.5f);
-                nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-                nvgFillColor(nvg, nvgRGBA(255, 255, 255, 255));
-                nvgText(nvg, subX + subW * 0.5f, subY + subH * 0.5f, "↵", nullptr);
+                nanovg::nvgDrawRoundedRect(nvg, subX, subY, subW, subH, nanovg::nvgRGBA(74, 158, 255, 220), nanovg::nvgRGBA(140, 195, 255, 255), 4.0f);
+                mcpnvg::nvgFontFace(nvg, "Inter");
+                mcpnvg::nvgFontSize(nvg, 11.5f);
+                mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(255, 255, 255, 255));
+                mcpnvg::nvgText(nvg, subX + subW * 0.5f, subY + subH * 0.5f, "↵", nullptr);
             }
             } // else: object-pill controls
         }
@@ -1606,12 +1550,12 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
                 NVGScopedState scopedCaret(nvg);
                 float const caretX = panel.getX() + (mcpPillSketchMode ? 96.0f : 38.0f);
                 float const caretY = panel.getY() + panel.getHeight() * 0.5f;
-                nvgBeginPath(nvg);
-                nvgMoveTo(nvg, caretX, caretY - 7.0f);
-                nvgLineTo(nvg, caretX, caretY + 7.0f);
-                nvgStrokeColor(nvg, nvgRGBA(74, 158, 255, 230));
-                nvgStrokeWidth(nvg, 1.5f);
-                nvgStroke(nvg);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgMoveTo(nvg, caretX, caretY - 7.0f);
+                nanovg::nvgLineTo(nvg, caretX, caretY + 7.0f);
+                nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(74, 158, 255, 230));
+                nanovg::nvgStrokeWidth(nvg, 1.5f);
+                nanovg::nvgStroke(nvg);
             }
         }
 
@@ -1619,32 +1563,32 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
         if (mcpSelectionPill && mcpSelectionPill->getText().isEmpty()
             && !(mcpPillSketchMode && mcpCompletedStrokes.empty())) {
             NVGScopedState scopedHint(nvg);
-            nvgFontFace(nvg, "Inter");
-            nvgFontSize(nvg, 12.0f);
-            nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+            mcpnvg::nvgFontFace(nvg, "Inter");
+            mcpnvg::nvgFontSize(nvg, 12.0f);
+            mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
             juce::String hint;
             if (mcpPillSketchMode) {
                 hint = mcpCompletedStrokes.empty()
                     ? "New Mood — paint, paste, type... then Build"
                     : "Describe the build, or hit Build...";
-                nvgFillColor(nvg, nvgRGBA(140, 155, 175, mcpSelectionPill->hasKeyboardFocus(true) ? 90 : 170));
+                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(140, 155, 175, mcpSelectionPill->hasKeyboardFocus(true) ? 90 : 170));
             } else if (isVoiceRec) {
                 hint = "Listening... (speak prompt or beatbox groove)";
-                nvgFillColor(nvg, nvgRGBA(255, 110, 95, 240));
+                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(255, 110, 95, 240));
             } else if (mcpActiveLens.isNotEmpty()) {
                 hint = "[" + mcpActiveLens.toUpperCase() + "] Ask AI on selection...";
-                nvgFillColor(nvg, nvgRGBA(140, 155, 175, mcpSelectionPill->hasKeyboardFocus(true) ? 90 : 170));
+                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(140, 155, 175, mcpSelectionPill->hasKeyboardFocus(true) ? 90 : 170));
             } else {
                 hint = "Ask AI on selection... (Enter to mutate, Esc to cancel)";
-                nvgFillColor(nvg, nvgRGBA(140, 155, 175, mcpSelectionPill->hasKeyboardFocus(true) ? 90 : 170));
+                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(140, 155, 175, mcpSelectionPill->hasKeyboardFocus(true) ? 90 : 170));
             }
-            nvgText(nvg, panel.getX() + (mcpPillSketchMode ? 96.0f : 38.0f), panel.getY() + panel.getHeight() * 0.5f, hint.toRawUTF8(), nullptr);
+            mcpnvg::nvgText(nvg, panel.getX() + (mcpPillSketchMode ? 96.0f : 38.0f), panel.getY() + panel.getHeight() * 0.5f, hint.toRawUTF8(), nullptr);
         }
 
         {
             NVGScopedState scopedField(nvg);
             auto const fb = mcpSelectionPill->getBounds();
-            nvgTranslate(nvg, static_cast<float>(fb.getX()), static_cast<float>(fb.getY()));
+            nanovg::nvgTranslate(nvg, static_cast<float>(fb.getX()), static_cast<float>(fb.getY()));
             mcpSelectionPillRenderer.renderJUCEComponent(nvg, *mcpSelectionPill, zoom * editor->getRenderScale());
         }
 
@@ -1665,24 +1609,24 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
                 const_cast<Canvas*>(this)->mcpPaletteFrame = juce::Rectangle<int>(roundToInt(px), roundToInt(py), roundToInt(pw), roundToInt(ph));
 
                 NVGScopedState scopedPalette(nvg);
-                nvgTranslate(nvg, px, py);
+                nanovg::nvgTranslate(nvg, px, py);
                 // Frosted dark card container
-                nvgDrawRoundedRect(nvg, 0, 0, pw, ph, nvgRGBA(16, 18, 22, 252), nvgRGBA(55, 62, 75, 240), 7.0f);
+                nanovg::nvgDrawRoundedRect(nvg, 0, 0, pw, ph, nanovg::nvgRGBA(16, 18, 22, 252), nanovg::nvgRGBA(55, 62, 75, 240), 7.0f);
 
                 // Subtle top highlight
-                nvgBeginPath(nvg);
-                nvgMoveTo(nvg, 6.0f, 1.0f);
-                nvgLineTo(nvg, pw - 6.0f, 1.0f);
-                nvgStrokeColor(nvg, nvgRGBA(255, 255, 255, 25));
-                nvgStrokeWidth(nvg, 1.0f);
-                nvgStroke(nvg);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgMoveTo(nvg, 6.0f, 1.0f);
+                nanovg::nvgLineTo(nvg, pw - 6.0f, 1.0f);
+                nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(255, 255, 255, 25));
+                nanovg::nvgStrokeWidth(nvg, 1.0f);
+                nanovg::nvgStroke(nvg);
 
                 // Header title
-                nvgFontFace(nvg, "Inter");
-                nvgFontSize(nvg, 10.0f);
-                nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
-                nvgFillColor(nvg, nvgRGBA(140, 155, 180, 220));
-                nvgText(nvg, 12.0f, 14.0f, "ADD CONTEXT & ACTIONS (+)", nullptr);
+                mcpnvg::nvgFontFace(nvg, "Inter");
+                mcpnvg::nvgFontSize(nvg, 10.0f);
+                mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(140, 155, 180, 220));
+                mcpnvg::nvgText(nvg, 12.0f, 14.0f, "ADD CONTEXT & ACTIONS (+)", nullptr);
 
                 for (int i = 0; i < visibleCount; ++i) {
                     int const itemIdx = mcpFilteredPaletteIndices[static_cast<size_t>(i)];
@@ -1691,49 +1635,49 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
                     bool const isSelected = (i == mcpPaletteSelectedIndex);
 
                     if (isSelected) {
-                        nvgDrawRoundedRect(nvg, 4.0f, ry, pw - 8.0f, rowH - 2.0f,
-                                           nvgRGBA(74, 158, 255, 55), nvgRGBA(74, 158, 255, 210), 4.0f);
+                        nanovg::nvgDrawRoundedRect(nvg, 4.0f, ry, pw - 8.0f, rowH - 2.0f,
+                                           nanovg::nvgRGBA(74, 158, 255, 55), nanovg::nvgRGBA(74, 158, 255, 210), 4.0f);
                     }
 
                     // Icon / Prefix
-                    nvgFontSize(nvg, 11.5f);
-                    nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-                    nvgFillColor(nvg, isSelected ? nvgRGBA(74, 180, 255, 255) : nvgRGBA(150, 165, 190, 220));
-                    nvgText(nvg, 18.0f, ry + (rowH - 2.0f) * 0.5f, item.icon.toRawUTF8(), nullptr);
+                    mcpnvg::nvgFontSize(nvg, 11.5f);
+                    mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+                    nanovg::nvgFillColor(nvg, isSelected ? nanovg::nvgRGBA(74, 180, 255, 255) : nanovg::nvgRGBA(150, 165, 190, 220));
+                    mcpnvg::nvgText(nvg, 18.0f, ry + (rowH - 2.0f) * 0.5f, item.icon.toRawUTF8(), nullptr);
 
                     // Category badge chip (Action, Skill, Lens)
                     float const chipW = 42.0f;
                     float const chipH = 14.0f;
                     float const chipX = 30.0f;
                     float const chipY = ry + (rowH - 2.0f - chipH) * 0.5f;
-                    NVGcolor chipBg = nvgRGBA(40, 48, 62, 200);
-                    NVGcolor chipFg = nvgRGBA(160, 180, 210, 220);
+                    NVGcolor chipBg = nanovg::nvgRGBA(40, 48, 62, 200);
+                    NVGcolor chipFg = nanovg::nvgRGBA(160, 180, 210, 220);
                     if (item.category == "Action") {
-                        chipBg = nvgRGBA(30, 90, 60, 150);
-                        chipFg = nvgRGBA(100, 240, 160, 240);
+                        chipBg = nanovg::nvgRGBA(30, 90, 60, 150);
+                        chipFg = nanovg::nvgRGBA(100, 240, 160, 240);
                     } else if (item.category == "Skill") {
-                        chipBg = nvgRGBA(90, 40, 110, 150);
-                        chipFg = nvgRGBA(220, 140, 255, 240);
+                        chipBg = nanovg::nvgRGBA(90, 40, 110, 150);
+                        chipFg = nanovg::nvgRGBA(220, 140, 255, 240);
                     } else if (item.category == "Lens") {
-                        chipBg = nvgRGBA(30, 70, 110, 150);
-                        chipFg = nvgRGBA(100, 190, 255, 240);
+                        chipBg = nanovg::nvgRGBA(30, 70, 110, 150);
+                        chipFg = nanovg::nvgRGBA(100, 190, 255, 240);
                     }
-                    nvgDrawRoundedRect(nvg, chipX, chipY, chipW, chipH, chipBg, chipFg, 3.0f);
-                    nvgFontSize(nvg, 8.5f);
-                    nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-                    nvgFillColor(nvg, chipFg);
-                    nvgText(nvg, chipX + chipW * 0.5f, chipY + chipH * 0.5f, item.category.toRawUTF8(), nullptr);
+                    nanovg::nvgDrawRoundedRect(nvg, chipX, chipY, chipW, chipH, chipBg, chipFg, 3.0f);
+                    mcpnvg::nvgFontSize(nvg, 8.5f);
+                    mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+                    nanovg::nvgFillColor(nvg, chipFg);
+                    mcpnvg::nvgText(nvg, chipX + chipW * 0.5f, chipY + chipH * 0.5f, item.category.toRawUTF8(), nullptr);
 
                     // Title
-                    nvgFontSize(nvg, 11.0f);
-                    nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
-                    nvgFillColor(nvg, isSelected ? nvgRGBA(255, 255, 255, 255) : nvgRGBA(215, 225, 240, 230));
-                    nvgText(nvg, chipX + chipW + 8.0f, ry + (rowH - 2.0f) * 0.5f, item.title.toRawUTF8(), nullptr);
+                    mcpnvg::nvgFontSize(nvg, 11.0f);
+                    mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+                    nanovg::nvgFillColor(nvg, isSelected ? nanovg::nvgRGBA(255, 255, 255, 255) : nanovg::nvgRGBA(215, 225, 240, 230));
+                    mcpnvg::nvgText(nvg, chipX + chipW + 8.0f, ry + (rowH - 2.0f) * 0.5f, item.title.toRawUTF8(), nullptr);
 
                     // Description (dimmed)
-                    nvgFontSize(nvg, 10.0f);
-                    nvgFillColor(nvg, isSelected ? nvgRGBA(180, 205, 240, 240) : nvgRGBA(120, 135, 155, 200));
-                    nvgText(nvg, chipX + chipW + 130.0f, ry + (rowH - 2.0f) * 0.5f, item.desc.toRawUTF8(), nullptr);
+                    mcpnvg::nvgFontSize(nvg, 10.0f);
+                    nanovg::nvgFillColor(nvg, isSelected ? nanovg::nvgRGBA(180, 205, 240, 240) : nanovg::nvgRGBA(120, 135, 155, 200));
+                    mcpnvg::nvgText(nvg, chipX + chipW + 130.0f, ry + (rowH - 2.0f) * 0.5f, item.desc.toRawUTF8(), nullptr);
                 }
             } else {
                 float const dw = w;
@@ -1743,21 +1687,21 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
                 mcpPillDrawerFrame = juce::Rectangle<int>(roundToInt(dx), roundToInt(dy), roundToInt(dw), roundToInt(dh));
 
                 NVGScopedState scopedDrawer(nvg);
-                nvgTranslate(nvg, dx, dy);
+                nanovg::nvgTranslate(nvg, dx, dy);
                 // Frosted dark card background with soft border
-                nvgDrawRoundedRect(nvg, 0, 0, dw, dh, nvgRGBA(18, 20, 24, 250), nvgRGBA(55, 62, 75, 230), 6.0f);
+                nanovg::nvgDrawRoundedRect(nvg, 0, 0, dw, dh, nanovg::nvgRGBA(18, 20, 24, 250), nanovg::nvgRGBA(55, 62, 75, 230), 6.0f);
 
                 // Subtle top highlight line
-                nvgBeginPath(nvg);
-                nvgMoveTo(nvg, 6.0f, 1.0f);
-                nvgLineTo(nvg, dw - 6.0f, 1.0f);
-                nvgStrokeColor(nvg, nvgRGBA(255, 255, 255, 20));
-                nvgStrokeWidth(nvg, 1.0f);
-                nvgStroke(nvg);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgMoveTo(nvg, 6.0f, 1.0f);
+                nanovg::nvgLineTo(nvg, dw - 6.0f, 1.0f);
+                nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(255, 255, 255, 20));
+                nanovg::nvgStrokeWidth(nvg, 1.0f);
+                nanovg::nvgStroke(nvg);
 
-                nvgFontFace(nvg, "Inter");
-                nvgFontSize(nvg, 11.5f);
-                nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+                mcpnvg::nvgFontFace(nvg, "Inter");
+                mcpnvg::nvgFontSize(nvg, 11.5f);
+                mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
 
                 if (mcpPillDrawerMode == 1) {
                     // Lenses: Doctor | Jam | Genesis | Modular | Free
@@ -1771,13 +1715,13 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
                         float const ih = dh - 6.0f;
                         bool const isActive = (mcpActiveLens == lensKeys[i]) || (mcpActiveLens.isEmpty() && i == 4);
                         if (isActive) {
-                            nvgDrawRoundedRect(nvg, ix, iy, iw, ih, nvgRGBA(255, 102, 0, 235), nvgRGBA(255, 150, 60, 255), 4.0f);
-                            nvgFillColor(nvg, nvgRGBA(18, 18, 20, 255));
+                            nanovg::nvgDrawRoundedRect(nvg, ix, iy, iw, ih, nanovg::nvgRGBA(255, 102, 0, 235), nanovg::nvgRGBA(255, 150, 60, 255), 4.0f);
+                            nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(18, 18, 20, 255));
                         } else {
-                            nvgDrawRoundedRect(nvg, ix, iy, iw, ih, nvgRGBA(30, 34, 42, 220), nvgRGBA(50, 58, 70, 180), 4.0f);
-                            nvgFillColor(nvg, nvgRGBA(210, 220, 235, 230));
+                            nanovg::nvgDrawRoundedRect(nvg, ix, iy, iw, ih, nanovg::nvgRGBA(30, 34, 42, 220), nanovg::nvgRGBA(50, 58, 70, 180), 4.0f);
+                            nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(210, 220, 235, 230));
                         }
-                        nvgText(nvg, ix + iw * 0.5f, iy + ih * 0.5f, lenses[i], nullptr);
+                        mcpnvg::nvgText(nvg, ix + iw * 0.5f, iy + ih * 0.5f, lenses[i], nullptr);
                     }
                 } else if (mcpPillDrawerMode == 2) {
                     // Tools: Explain | Drive | Filter | Reverb | Pack GOP | Tidy
@@ -1788,9 +1732,9 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
                         float const iy = 3.0f;
                         float const iw = itemW - 3.0f;
                         float const ih = dh - 6.0f;
-                        nvgDrawRoundedRect(nvg, ix, iy, iw, ih, nvgRGBA(30, 34, 42, 220), nvgRGBA(50, 58, 70, 180), 4.0f);
-                        nvgFillColor(nvg, nvgRGBA(210, 220, 235, 230));
-                        nvgText(nvg, ix + iw * 0.5f, iy + ih * 0.5f, tools[i], nullptr);
+                        nanovg::nvgDrawRoundedRect(nvg, ix, iy, iw, ih, nanovg::nvgRGBA(30, 34, 42, 220), nanovg::nvgRGBA(50, 58, 70, 180), 4.0f);
+                        nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(210, 220, 235, 230));
+                        mcpnvg::nvgText(nvg, ix + iw * 0.5f, iy + ih * 0.5f, tools[i], nullptr);
                     }
                 }
             }
@@ -1830,22 +1774,22 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
         mcpApprovalNo = juce::Rectangle<int>(bx + 8 + half + 8, by + 8, half, barH - 16);
 
         NVGScopedState scopedAppr(nvg);
-        nvgTranslate(nvg, static_cast<float>(bx), static_cast<float>(by));
-        nvgDrawRoundedRect(nvg, 0, 0, static_cast<float>(barW), static_cast<float>(barH),
-                           nvgRGBA(28, 16, 16, 250), nvgRGBA(255, 90, 70, 225), 10.0f);
-        nvgFontFace(nvg, "Inter");
-        nvgFontSize(nvg, 15.0f);
-        nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+        nanovg::nvgTranslate(nvg, static_cast<float>(bx), static_cast<float>(by));
+        nanovg::nvgDrawRoundedRect(nvg, 0, 0, static_cast<float>(barW), static_cast<float>(barH),
+                           nanovg::nvgRGBA(28, 16, 16, 250), nanovg::nvgRGBA(255, 90, 70, 225), 10.0f);
+        mcpnvg::nvgFontFace(nvg, "Inter");
+        mcpnvg::nvgFontSize(nvg, 15.0f);
+        mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
         // Approve (green)
-        nvgDrawRoundedRect(nvg, 8, 8, static_cast<float>(half), static_cast<float>(barH - 16),
-                           nvgRGBA(40, 170, 90, 235), nvgRGBA(90, 225, 140, 255), 6.0f);
-        nvgFillColor(nvg, nvgRGBA(255, 255, 255, 255));
-        nvgText(nvg, 8 + half * 0.5f, barH * 0.5f, "Approve", nullptr);
+        nanovg::nvgDrawRoundedRect(nvg, 8, 8, static_cast<float>(half), static_cast<float>(barH - 16),
+                           nanovg::nvgRGBA(40, 170, 90, 235), nanovg::nvgRGBA(90, 225, 140, 255), 6.0f);
+        nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(255, 255, 255, 255));
+        mcpnvg::nvgText(nvg, 8 + half * 0.5f, barH * 0.5f, "Approve", nullptr);
         // Cancel (grey)
-        nvgDrawRoundedRect(nvg, 8 + half + 8, 8, static_cast<float>(half), static_cast<float>(barH - 16),
-                           nvgRGBA(40, 44, 52, 235), nvgRGBA(90, 98, 112, 255), 6.0f);
-        nvgFillColor(nvg, nvgRGBA(210, 220, 235, 235));
-        nvgText(nvg, 8 + half + 8 + half * 0.5f, barH * 0.5f, "Cancel", nullptr);
+        nanovg::nvgDrawRoundedRect(nvg, 8 + half + 8, 8, static_cast<float>(half), static_cast<float>(barH - 16),
+                           nanovg::nvgRGBA(40, 44, 52, 235), nanovg::nvgRGBA(90, 98, 112, 255), 6.0f);
+        nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(210, 220, 235, 235));
+        mcpnvg::nvgText(nvg, 8 + half + 8 + half * 0.5f, barH * 0.5f, "Cancel", nullptr);
     } else {
         mcpApprovalFrame = {};
         mcpApprovalYes = {};
@@ -1863,25 +1807,25 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
         float const sy = scy - 110.0f;
 
         NVGScopedState scopedSlot(nvg);
-        nvgBeginPath(nvg);
-        nvgRoundedRect(nvg, sx, sy, 320.0f, 220.0f, 8.0f);
-        nvgFillColor(nvg, nvgRGBA(20, 24, 30, 150));
-        nvgFill(nvg);
-        nvgStrokeColor(nvg, nvgRGBA(124, 77, 255, 200));
-        nvgStrokeWidth(nvg, 1.5f);
-        nvgLineStyle(nvg, NVG_LINE_DASHED);
-        nvgDashLength(nvg, 7.0f);
-        nvgStroke(nvg);
-        nvgLineStyle(nvg, NVG_LINE_SOLID);
+        nanovg::nvgBeginPath(nvg);
+        nanovg::nvgRoundedRect(nvg, sx, sy, 320.0f, 220.0f, 8.0f);
+        nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(20, 24, 30, 150));
+        nanovg::nvgFill(nvg);
+        nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(124, 77, 255, 200));
+        nanovg::nvgStrokeWidth(nvg, 1.5f);
+        nanovg::nvgLineStyle(nvg, NVG_LINE_DASHED);
+        nanovg::nvgDashLength(nvg, 7.0f);
+        nanovg::nvgStroke(nvg);
+        nanovg::nvgLineStyle(nvg, NVG_LINE_SOLID);
 
-        nvgFontFace(nvg, "Inter");
-        nvgFontSize(nvg, 13.0f);
-        nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-        nvgFillColor(nvg, nvgRGBA(198, 208, 226, 225));
-        nvgText(nvg, scx, scy - 8.0f, "Ctrl+V to paste image", nullptr);
-        nvgFontSize(nvg, 11.0f);
-        nvgFillColor(nvg, nvgRGBA(150, 160, 180, 170));
-        nvgText(nvg, scx, scy + 12.0f, "(Esc cancels)", nullptr);
+        mcpnvg::nvgFontFace(nvg, "Inter");
+        mcpnvg::nvgFontSize(nvg, 13.0f);
+        mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+        nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(198, 208, 226, 225));
+        mcpnvg::nvgText(nvg, scx, scy - 8.0f, "Ctrl+V to paste image", nullptr);
+        mcpnvg::nvgFontSize(nvg, 11.0f);
+        nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(150, 160, 180, 170));
+        mcpnvg::nvgText(nvg, scx, scy + 12.0f, "(Esc cancels)", nullptr);
     }
 
     // PRD overlay: ghost/preview of PROPOSED (uncommitted) changes. Drawn above
@@ -1894,43 +1838,43 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
                 float const gy = canvasOrigin.y + g.y;
                 float const gw = g.w > 0 ? g.w : 120.0f;
                 float const gh = g.h > 0 ? g.h : 22.0f;
-                nvgBeginPath(nvg);
-                nvgRoundedRect(nvg, gx, gy, gw, gh, Corners::objectCornerRadius);
-                nvgFillColor(nvg, nvgRGBA(74, 158, 255, 55));
-                nvgFill(nvg);
-                nvgStrokeColor(nvg, nvgRGBA(74, 158, 255, 220));
-                nvgStrokeWidth(nvg, 1.5f);
-                nvgLineStyle(nvg, NVG_LINE_DASHED);
-                nvgDashLength(nvg, 6.0f);
-                nvgStroke(nvg);
-                nvgLineStyle(nvg, NVG_LINE_SOLID);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgRoundedRect(nvg, gx, gy, gw, gh, Corners::objectCornerRadius);
+                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(74, 158, 255, 55));
+                nanovg::nvgFill(nvg);
+                nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(74, 158, 255, 220));
+                nanovg::nvgStrokeWidth(nvg, 1.5f);
+                nanovg::nvgLineStyle(nvg, NVG_LINE_DASHED);
+                nanovg::nvgDashLength(nvg, 6.0f);
+                nanovg::nvgStroke(nvg);
+                nanovg::nvgLineStyle(nvg, NVG_LINE_SOLID);
                 if (g.label.isNotEmpty()) {
-                    nvgFontSize(nvg, 12.0f);
-                    nvgFontFace(nvg, "Inter");
-                    nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
-                    nvgFillColor(nvg, nvgRGBA(74, 158, 255, 255));
-                    nvgText(nvg, gx + 6.0f, gy + gh * 0.5f, g.label.toRawUTF8(), nullptr);
+                    mcpnvg::nvgFontSize(nvg, 12.0f);
+                    mcpnvg::nvgFontFace(nvg, "Inter");
+                    mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+                    nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(74, 158, 255, 255));
+                    mcpnvg::nvgText(nvg, gx + 6.0f, gy + gh * 0.5f, g.label.toRawUTF8(), nullptr);
                 }
             } else {
                 float const x1 = canvasOrigin.x + g.x1, y1 = canvasOrigin.y + g.y1;
                 float const x2 = canvasOrigin.x + g.x2, y2 = canvasOrigin.y + g.y2;
-                nvgBeginPath(nvg);
-                nvgMoveTo(nvg, x1, y1);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgMoveTo(nvg, x1, y1);
                 float const dx = std::abs(x2 - x1) * 0.5f + 20.0f;
-                nvgBezierTo(nvg, x1, y1 + dx, x2, y2 - dx, x2, y2);
-                nvgStrokeColor(nvg, nvgRGBA(74, 158, 255, 220));
-                nvgStrokeWidth(nvg, 2.0f);
-                nvgLineStyle(nvg, NVG_LINE_DASHED);
-                nvgDashLength(nvg, 6.0f);
-                nvgStroke(nvg);
-                nvgLineStyle(nvg, NVG_LINE_SOLID);
+                nanovg::nvgBezierTo(nvg, x1, y1 + dx, x2, y2 - dx, x2, y2);
+                nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(74, 158, 255, 220));
+                nanovg::nvgStrokeWidth(nvg, 2.0f);
+                nanovg::nvgLineStyle(nvg, NVG_LINE_DASHED);
+                nanovg::nvgDashLength(nvg, 6.0f);
+                nanovg::nvgStroke(nvg);
+                nanovg::nvgLineStyle(nvg, NVG_LINE_SOLID);
             }
         }
     }
 
     if (graphArea) {
         NVGScopedState scopedState(nvg);
-        nvgTranslate(nvg, graphArea->getX(), graphArea->getY());
+        nanovg::nvgTranslate(nvg, graphArea->getX(), graphArea->getY());
         graphArea->render(nvg);
     }
 
@@ -1939,7 +1883,7 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
     if (viewport && lasso.isVisible() && !lasso.getBounds().isEmpty()) {
         auto lassoBounds = lasso.getBounds();
         lassoBounds = lassoBounds.withSize(jmax(lasso.getWidth(), 2), jmax(lasso.getHeight(), 2));
-        nvgDrawRoundedRect(nvg, lassoBounds.getX(), lassoBounds.getY(), lassoBounds.getWidth(), lassoBounds.getHeight(), lassoCol, lassoOutlineCol, 0.0f);
+        nanovg::nvgDrawRoundedRect(nvg, lassoBounds.getX(), lassoBounds.getY(), lassoBounds.getWidth(), lassoBounds.getHeight(), nvgColour(colours.objectSelectedOutlineColour.withAlpha(0.075f)), nvgColour(colours.canvasBackgroundColour.interpolatedWith(colours.objectSelectedOutlineColour, 0.65f)), 0.0f);
     }
 
     suggestor->renderAutocompletion(nvg);
@@ -1970,24 +1914,24 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
         float const inset = 2.0f / zoom;
 
         NVGScopedState scopedArmed(nvg);
-        nvgBeginPath(nvg);
-        nvgRect(nvg, vx + inset, vy + inset, vw - inset * 2.0f, vh - inset * 2.0f);
-        nvgStrokeColor(nvg, nvgRGBA(0, 230, 255, 22));
-        nvgStrokeWidth(nvg, 9.0f / zoom);
-        nvgStroke(nvg);
+        nanovg::nvgBeginPath(nvg);
+        nanovg::nvgRect(nvg, vx + inset, vy + inset, vw - inset * 2.0f, vh - inset * 2.0f);
+        nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(0, 230, 255, 22));
+        nanovg::nvgStrokeWidth(nvg, 9.0f / zoom);
+        nanovg::nvgStroke(nvg);
 
-        nvgBeginPath(nvg);
-        nvgRect(nvg, vx + inset, vy + inset, vw - inset * 2.0f, vh - inset * 2.0f);
-        nvgStrokeColor(nvg, nvgRGBA(0, 230, 255, 115));
-        nvgStrokeWidth(nvg, 1.5f / zoom);
-        nvgStroke(nvg);
+        nanovg::nvgBeginPath(nvg);
+        nanovg::nvgRect(nvg, vx + inset, vy + inset, vw - inset * 2.0f, vh - inset * 2.0f);
+        nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(0, 230, 255, 115));
+        nanovg::nvgStrokeWidth(nvg, 1.5f / zoom);
+        nanovg::nvgStroke(nvg);
     }
 
-    nvgRestore(nvg);
+    nanovg::nvgRestore(nvg);
 
     // Draw scrollbars
     if (viewport) {
-        reinterpret_cast<CanvasViewport*>(viewport.get())->render(nvg, viewport->getLocalArea(this, invalidRegion));
+        viewport->render(nvg, viewport->getLocalArea(this, invalidRegion));
     }
 
     // Cinematic Viewport HUD & Subtitle Overlay (Video & Tutorial Mode)
@@ -2030,10 +1974,10 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
             // Compute text height via nvgTextBoxBounds for multi-line wrapped text
             float descH = 0.0f;
             if (cleanDesc.isNotEmpty()) {
-                nvgFontSize(nvg, 14.5f);
-                nvgFontFace(nvg, "Inter");
+                mcpnvg::nvgFontSize(nvg, 14.5f);
+                mcpnvg::nvgFontFace(nvg, "Inter");
                 float bounds[4];
-                nvgTextBoxBounds(nvg, 0, 0, breakWidth, cleanDesc.toRawUTF8(), nullptr, bounds);
+                mcpnvg::nvgTextBoxBounds(nvg, 0, 0, breakWidth, cleanDesc.toRawUTF8(), nullptr, bounds);
                 descH = bounds[3] - bounds[1];
                 descH = jlimit(18.0f, 85.0f, descH);
             }
@@ -2048,127 +1992,127 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
 
             // Determine status accent color based on chapter
             juce::String const upperChapter = hud.chapter.toUpperCase();
-            NVGcolor accentCol = nvgRGBA(56, 189, 248, 255);    // Electric Cyan default (THINKING / WORKING / BUILDING)
-            NVGcolor badgeBg = nvgRGBA(56, 189, 248, 30);
-            NVGcolor badgeBorder = nvgRGBA(56, 189, 248, 110);
+            NVGcolor accentCol = nanovg::nvgRGBA(56, 189, 248, 255);    // Electric Cyan default (THINKING / WORKING / BUILDING)
+            NVGcolor badgeBg = nanovg::nvgRGBA(56, 189, 248, 30);
+            NVGcolor badgeBorder = nanovg::nvgRGBA(56, 189, 248, 110);
 
             if (upperChapter.contains("DONE") || upperChapter.contains("APPROVED") || upperChapter.contains("VOICE")) {
-                accentCol = nvgRGBA(16, 185, 129, 255);          // Emerald Green
-                badgeBg = nvgRGBA(16, 185, 129, 32);
-                badgeBorder = nvgRGBA(16, 185, 129, 120);
+                accentCol = nanovg::nvgRGBA(16, 185, 129, 255);          // Emerald Green
+                badgeBg = nanovg::nvgRGBA(16, 185, 129, 32);
+                badgeBorder = nanovg::nvgRGBA(16, 185, 129, 120);
             } else if (upperChapter.contains("APPROVE")) {
-                accentCol = nvgRGBA(245, 158, 11, 255);          // Amber Gold
-                badgeBg = nvgRGBA(245, 158, 11, 40);
-                badgeBorder = nvgRGBA(245, 158, 11, 140);
+                accentCol = nanovg::nvgRGBA(245, 158, 11, 255);          // Amber Gold
+                badgeBg = nanovg::nvgRGBA(245, 158, 11, 40);
+                badgeBorder = nanovg::nvgRGBA(245, 158, 11, 140);
             } else if (upperChapter.contains("ERROR") || upperChapter.contains("DENIED") || upperChapter.contains("FAIL")) {
-                accentCol = nvgRGBA(244, 63, 94, 255);           // Coral Red
-                badgeBg = nvgRGBA(244, 63, 94, 40);
-                badgeBorder = nvgRGBA(244, 63, 94, 140);
+                accentCol = nanovg::nvgRGBA(244, 63, 94, 255);           // Coral Red
+                badgeBg = nanovg::nvgRGBA(244, 63, 94, 40);
+                badgeBorder = nanovg::nvgRGBA(244, 63, 94, 140);
             }
 
             // 1. Soft Ambient Box-Gradient Shadow
-            NVGpaint shadowPaint = nvgBoxGradient(nvg, cardX, cardY + 5.0f, cardW, cardH, 14.0f, 24.0f, nvgRGBA(0, 0, 0, 160), nvgRGBA(0, 0, 0, 0));
-            nvgBeginPath(nvg);
-            nvgRect(nvg, cardX - 20.0f, cardY - 12.0f, cardW + 40.0f, cardH + 44.0f);
-            nvgFillPaint(nvg, shadowPaint);
-            nvgFill(nvg);
+            NVGpaint shadowPaint = nanovg::nvgBoxGradient(nvg, cardX, cardY + 5.0f, cardW, cardH, 14.0f, 24.0f, nanovg::nvgRGBA(0, 0, 0, 160), nanovg::nvgRGBA(0, 0, 0, 0));
+            nanovg::nvgBeginPath(nvg);
+            nanovg::nvgRect(nvg, cardX - 20.0f, cardY - 12.0f, cardW + 40.0f, cardH + 44.0f);
+            nanovg::nvgFillPaint(nvg, shadowPaint);
+            nanovg::nvgFill(nvg);
 
             // 2. Obsidian Glass Body with subtle linear gradient
-            NVGpaint bodyPaint = nvgLinearGradient(nvg, cardX, cardY, cardX, cardY + cardH,
-                                                   nvgRGBA(18, 22, 32, 246),
-                                                   nvgRGBA(10, 12, 17, 252));
-            nvgBeginPath(nvg);
-            nvgRoundedRect(nvg, cardX, cardY, cardW, cardH, 13.0f);
-            nvgFillPaint(nvg, bodyPaint);
-            nvgFill(nvg);
+            NVGpaint bodyPaint = nanovg::nvgLinearGradient(nvg, cardX, cardY, cardX, cardY + cardH,
+                                                   nanovg::nvgRGBA(18, 22, 32, 246),
+                                                   nanovg::nvgRGBA(10, 12, 17, 252));
+            nanovg::nvgBeginPath(nvg);
+            nanovg::nvgRoundedRect(nvg, cardX, cardY, cardW, cardH, 13.0f);
+            nanovg::nvgFillPaint(nvg, bodyPaint);
+            nanovg::nvgFill(nvg);
 
             // 3. Subtle Frosted Border
-            nvgBeginPath(nvg);
-            nvgRoundedRect(nvg, cardX, cardY, cardW, cardH, 13.0f);
-            nvgStrokeColor(nvg, nvgRGBA(255, 255, 255, 30));
-            nvgStrokeWidth(nvg, 1.0f);
-            nvgStroke(nvg);
+            nanovg::nvgBeginPath(nvg);
+            nanovg::nvgRoundedRect(nvg, cardX, cardY, cardW, cardH, 13.0f);
+            nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(255, 255, 255, 30));
+            nanovg::nvgStrokeWidth(nvg, 1.0f);
+            nanovg::nvgStroke(nvg);
 
             // 4. Specular Top Highlight
-            nvgBeginPath(nvg);
-            nvgRoundedRect(nvg, cardX + 1.5f, cardY + 1.0f, cardW - 3.0f, 1.5f, 1.0f);
-            nvgFillColor(nvg, nvgRGBA(255, 255, 255, 45));
-            nvgFill(nvg);
+            nanovg::nvgBeginPath(nvg);
+            nanovg::nvgRoundedRect(nvg, cardX + 1.5f, cardY + 1.0f, cardW - 3.0f, 1.5f, 1.0f);
+            nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(255, 255, 255, 45));
+            nanovg::nvgFill(nvg);
 
             // 5. Header Row (LED Capsule Badge + Tool Tag + Meta)
             float const headerY = cardY + 13.0f;
             float nextHeaderX = cardX + innerPadX;
 
             if (cardTitle.isNotEmpty()) {
-                nvgFontSize(nvg, 11.5f);
-                nvgFontFace(nvg, "Inter-Bold");
+                mcpnvg::nvgFontSize(nvg, 11.5f);
+                mcpnvg::nvgFontFace(nvg, "Inter-Bold");
                 float titleBounds[4];
-                nvgTextBounds(nvg, 0, 0, cardTitle.toRawUTF8(), nullptr, titleBounds);
+                mcpnvg::nvgTextBounds(nvg, 0, 0, cardTitle.toRawUTF8(), nullptr, titleBounds);
                 float const pillTextW = titleBounds[2] - titleBounds[0];
                 float const pillH = 22.0f;
                 float const pillW = pillTextW + 28.0f;
 
                 // Pill Background
-                nvgBeginPath(nvg);
-                nvgRoundedRect(nvg, nextHeaderX, headerY, pillW, pillH, 11.0f);
-                nvgFillColor(nvg, badgeBg);
-                nvgFill(nvg);
-                nvgStrokeColor(nvg, badgeBorder);
-                nvgStrokeWidth(nvg, 1.0f);
-                nvgStroke(nvg);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgRoundedRect(nvg, nextHeaderX, headerY, pillW, pillH, 11.0f);
+                nanovg::nvgFillColor(nvg, badgeBg);
+                nanovg::nvgFill(nvg);
+                nanovg::nvgStrokeColor(nvg, badgeBorder);
+                nanovg::nvgStrokeWidth(nvg, 1.0f);
+                nanovg::nvgStroke(nvg);
 
                 // Glowing LED Dot
                 float const ledX = nextHeaderX + 10.0f;
                 float const ledY = headerY + pillH * 0.5f;
-                NVGpaint ledGlow = nvgRadialGradient(nvg, ledX, ledY, 1.5f, 6.5f, accentCol, nvgRGBA(0, 0, 0, 0));
-                nvgBeginPath(nvg);
-                nvgCircle(nvg, ledX, ledY, 6.5f);
-                nvgFillPaint(nvg, ledGlow);
-                nvgFill(nvg);
+                NVGpaint ledGlow = nanovg::nvgRadialGradient(nvg, ledX, ledY, 1.5f, 6.5f, accentCol, nanovg::nvgRGBA(0, 0, 0, 0));
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgCircle(nvg, ledX, ledY, 6.5f);
+                nanovg::nvgFillPaint(nvg, ledGlow);
+                nanovg::nvgFill(nvg);
 
-                nvgBeginPath(nvg);
-                nvgCircle(nvg, ledX, ledY, 3.0f);
-                nvgFillColor(nvg, accentCol);
-                nvgFill(nvg);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgCircle(nvg, ledX, ledY, 3.0f);
+                nanovg::nvgFillColor(nvg, accentCol);
+                nanovg::nvgFill(nvg);
 
                 // Title Text inside Pill
-                nvgFontSize(nvg, 11.0f);
-                nvgFontFace(nvg, "Inter-Bold");
-                nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
-                nvgFillColor(nvg, nvgRGBA(248, 250, 252, 255));
-                nvgText(nvg, nextHeaderX + 18.0f, headerY + pillH * 0.5f + 0.5f, cardTitle.toRawUTF8(), nullptr);
+                mcpnvg::nvgFontSize(nvg, 11.0f);
+                mcpnvg::nvgFontFace(nvg, "Inter-Bold");
+                mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(248, 250, 252, 255));
+                mcpnvg::nvgText(nvg, nextHeaderX + 18.0f, headerY + pillH * 0.5f + 0.5f, cardTitle.toRawUTF8(), nullptr);
 
                 nextHeaderX += pillW + 10.0f;
             }
 
             // Secondary Tool Tag
             if (hasTool && hud.tool != cardTitle) {
-                nvgFontSize(nvg, 12.0f);
-                nvgFontFace(nvg, "Inter");
-                nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
-                nvgFillColor(nvg, nvgRGBA(148, 163, 184, 210));
+                mcpnvg::nvgFontSize(nvg, 12.0f);
+                mcpnvg::nvgFontFace(nvg, "Inter");
+                mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(148, 163, 184, 210));
                 juce::String const toolStr = "// " + hud.tool;
-                nvgText(nvg, nextHeaderX, headerY + 11.0f, toolStr.toRawUTF8(), nullptr);
+                mcpnvg::nvgText(nvg, nextHeaderX, headerY + 11.0f, toolStr.toRawUTF8(), nullptr);
             }
 
             // Right-aligned Telemetry / Latency
             juce::String const metaRight = hud.latency.isNotEmpty() ? hud.latency : hud.telemetry;
             if (metaRight.isNotEmpty()) {
-                nvgFontSize(nvg, 11.5f);
-                nvgFontFace(nvg, "Inter-Tabular");
-                nvgTextAlign(nvg, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
-                nvgFillColor(nvg, nvgRGBA(100, 116, 139, 230));
-                nvgText(nvg, cardX + cardW - innerPadX, headerY + 11.0f, metaRight.toRawUTF8(), nullptr);
+                mcpnvg::nvgFontSize(nvg, 11.5f);
+                mcpnvg::nvgFontFace(nvg, "Inter-Tabular");
+                mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
+                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(100, 116, 139, 230));
+                mcpnvg::nvgText(nvg, cardX + cardW - innerPadX, headerY + 11.0f, metaRight.toRawUTF8(), nullptr);
             }
 
             // 6. Direct Description with Word Wrapping (nvgTextBox)
             if (cleanDesc.isNotEmpty()) {
                 float const descY = cardTitle.isNotEmpty() ? (headerY + 22.0f + 8.0f) : (cardY + 13.0f);
-                nvgFontSize(nvg, 14.5f);
-                nvgFontFace(nvg, "Inter");
-                nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
-                nvgFillColor(nvg, nvgRGBA(226, 232, 240, 245));
-                nvgTextBox(nvg, cardX + innerPadX, descY, breakWidth, cleanDesc.toRawUTF8(), nullptr);
+                mcpnvg::nvgFontSize(nvg, 14.5f);
+                mcpnvg::nvgFontFace(nvg, "Inter");
+                mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(226, 232, 240, 245));
+                mcpnvg::nvgTextBox(nvg, cardX + innerPadX, descY, breakWidth, cleanDesc.toRawUTF8(), nullptr);
             }
         }
     }
@@ -2181,7 +2125,7 @@ void Canvas::renderAllObjects(NVGcontext* nvg, Rectangle<int> const area)
             auto b = obj->getBounds();
             if (b.intersects(area) && obj->isVisible()) {
                 NVGScopedState scopedState(nvg);
-                nvgTranslate(nvg, b.getX(), b.getY());
+                nanovg::nvgTranslate(nvg, b.getX(), b.getY());
                 obj->render(nvg);
             }
         }
@@ -2194,9 +2138,6 @@ void Canvas::renderAllConnections(NVGcontext* nvg, Rectangle<int> const area)
 {
     if (!connectionLayer.isVisible())
         return;
-
-    // TODO: Can we clean this up? We will want to have selected connections in-front,
-    //  and take precedence over non-selected for resize handles
 
     SmallArray<Connection*> connectionsToDraw;
     SmallArray<Connection*> connectionsToDrawSelected;
@@ -2247,11 +2188,7 @@ void Canvas::settingsChanged(String const& name, var const& value)
         showBorder = static_cast<int>(value);
         repaint();
         break;
-    case hash("edit"):
-    case hash("lock"):
-    case hash("run"):
-    case hash("alt"):
-    case hash("alt_mode"): {
+    case hash("overlays"): {
         updateOverlays();
         break;
     }
@@ -2552,40 +2489,40 @@ void Canvas::renderSketchOverlay(NVGcontext* nvg)
         if (stroke.size() < 2) return;
 
         // 1. Outer Glow (Electric Cyan, soft wide stroke)
-        nvgBeginPath(nvg);
-        nvgMoveTo(nvg, stroke[0].x, stroke[0].y);
+        nanovg::nvgBeginPath(nvg);
+        nanovg::nvgMoveTo(nvg, stroke[0].x, stroke[0].y);
         for (size_t i = 1; i < stroke.size(); ++i) {
-            nvgLineTo(nvg, stroke[i].x, stroke[i].y);
+            nanovg::nvgLineTo(nvg, stroke[i].x, stroke[i].y);
         }
-        nvgLineCap(nvg, NVG_ROUND);
-        nvgLineJoin(nvg, NVG_ROUND);
-        nvgStrokeWidth(nvg, 7.0f);
-        nvgStrokeColor(nvg, nvgRGBA(0, 230, 255, static_cast<unsigned char>(alpha * 120.0f)));
-        nvgStroke(nvg);
+        nanovg::nvgLineCap(nvg, NVG_ROUND);
+        nanovg::nvgLineJoin(nvg, NVG_ROUND);
+        nanovg::nvgStrokeWidth(nvg, 7.0f);
+        nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(0, 230, 255, static_cast<unsigned char>(alpha * 120.0f)));
+        nanovg::nvgStroke(nvg);
 
         // 2. Cyan Body
-        nvgBeginPath(nvg);
-        nvgMoveTo(nvg, stroke[0].x, stroke[0].y);
+        nanovg::nvgBeginPath(nvg);
+        nanovg::nvgMoveTo(nvg, stroke[0].x, stroke[0].y);
         for (size_t i = 1; i < stroke.size(); ++i) {
-            nvgLineTo(nvg, stroke[i].x, stroke[i].y);
+            nanovg::nvgLineTo(nvg, stroke[i].x, stroke[i].y);
         }
-        nvgLineCap(nvg, NVG_ROUND);
-        nvgLineJoin(nvg, NVG_ROUND);
-        nvgStrokeWidth(nvg, 3.5f);
-        nvgStrokeColor(nvg, nvgRGBA(0, 245, 255, static_cast<unsigned char>(alpha * 220.0f)));
-        nvgStroke(nvg);
+        nanovg::nvgLineCap(nvg, NVG_ROUND);
+        nanovg::nvgLineJoin(nvg, NVG_ROUND);
+        nanovg::nvgStrokeWidth(nvg, 3.5f);
+        nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(0, 245, 255, static_cast<unsigned char>(alpha * 220.0f)));
+        nanovg::nvgStroke(nvg);
 
         // 3. Hot White Center Core
-        nvgBeginPath(nvg);
-        nvgMoveTo(nvg, stroke[0].x, stroke[0].y);
+        nanovg::nvgBeginPath(nvg);
+        nanovg::nvgMoveTo(nvg, stroke[0].x, stroke[0].y);
         for (size_t i = 1; i < stroke.size(); ++i) {
-            nvgLineTo(nvg, stroke[i].x, stroke[i].y);
+            nanovg::nvgLineTo(nvg, stroke[i].x, stroke[i].y);
         }
-        nvgLineCap(nvg, NVG_ROUND);
-        nvgLineJoin(nvg, NVG_ROUND);
-        nvgStrokeWidth(nvg, 1.5f);
-        nvgStrokeColor(nvg, nvgRGBA(255, 255, 255, static_cast<unsigned char>(alpha * 240.0f)));
-        nvgStroke(nvg);
+        nanovg::nvgLineCap(nvg, NVG_ROUND);
+        nanovg::nvgLineJoin(nvg, NVG_ROUND);
+        nanovg::nvgStrokeWidth(nvg, 1.5f);
+        nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(255, 255, 255, static_cast<unsigned char>(alpha * 240.0f)));
+        nanovg::nvgStroke(nvg);
     };
 
     if (mcpSketchAlpha > 0.001f && mcpStudioInkVisible) {
@@ -2765,15 +2702,18 @@ void Canvas::renderReferenceImages(NVGcontext* nvg, Rectangle<int> invalidRegion
     for (auto const& img : images) {
         if (!img.visible) continue; // Visible-Only Ingestion Law
 
-        // Native nvg texture from the cached PNG (stb_image path). The JUCE-ARGB
-        // upload path proved unreliable for file-loaded colour images, so this
-        // bypasses NVGImage entirely.
+        // Decode with JUCE and upload as ARGB, like PictureObject. The old
+        // ::nvgCreateImage(filename) path is not allowed any more: with the async
+        // recorder only the render thread may touch the real GPU context.
         auto& entry = mcpRefImageCache.try_emplace(img.id.toStdString()).first->second;
-        if (entry.handle == 0 || entry.ctx != nvg) {
-            entry.handle = nvgCreateImage(nvg, img.filePath.toRawUTF8(), 0);
+        if (!entry.texture.isValid() || entry.ctx != nvg) {
+            auto const decoded = juce::ImageFileFormat::loadFrom(juce::File(img.filePath));
+            if (decoded.isValid())
+                entry.texture.loadJUCEImage(nvg, decoded.convertedToFormat(juce::Image::ARGB));
             entry.ctx = nvg;
         }
-        if (entry.handle == 0) continue;
+        if (!entry.texture.isValid()) continue;
+        int const imageHandle = entry.texture.getImageId();
 
         Rectangle<float> const b(static_cast<float>(canvasOrigin.x) + img.x,
                                  static_cast<float>(canvasOrigin.y) + img.y,
@@ -2784,56 +2724,56 @@ void Canvas::renderReferenceImages(NVGcontext* nvg, Rectangle<int> invalidRegion
 
         // Light paper matte behind the image — dark screenshots on a dark canvas
         // would otherwise blend into the background and look "missing".
-        nvgBeginPath(nvg);
-        nvgRoundedRect(nvg, b.getX() - 6.0f, b.getY() - 6.0f, b.getWidth() + 12.0f, b.getHeight() + 12.0f, 9.0f);
-        nvgFillColor(nvg, nvgRGBA(228, 230, 236, 240));
-        nvgFill(nvg);
+        nanovg::nvgBeginPath(nvg);
+        nanovg::nvgRoundedRect(nvg, b.getX() - 6.0f, b.getY() - 6.0f, b.getWidth() + 12.0f, b.getHeight() + 12.0f, 9.0f);
+        nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(228, 230, 236, 240));
+        nanovg::nvgFill(nvg);
 
         // The image itself — straight through nvgImagePattern.
         {
-            nvgBeginPath(nvg);
-            nvgRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), 4.0f);
-            nvgFillPaint(nvg, nvgImagePattern(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), 0.0f, entry.handle, img.alpha));
-            nvgFill(nvg);
+            nanovg::nvgBeginPath(nvg);
+            nanovg::nvgRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), 4.0f);
+            nanovg::nvgFillPaint(nvg, nanovg::nvgImagePattern(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), 0.0f, imageHandle, img.alpha));
+            nanovg::nvgFill(nvg);
         }
 
         // Hardware frame: cool slate normally, warm amber when locked
-        nvgBeginPath(nvg);
-        nvgRoundedRect(nvg, b.getX() - 1.0f, b.getY() - 1.0f, b.getWidth() + 2.0f, b.getHeight() + 2.0f, 5.0f);
-        nvgStrokeColor(nvg, img.isLocked ? nvgRGBA(255, 190, 80, 210) : nvgRGBA(150, 165, 190, 140));
-        nvgStrokeWidth(nvg, img.isLocked ? 1.6f : 1.2f);
-        nvgStroke(nvg);
+        nanovg::nvgBeginPath(nvg);
+        nanovg::nvgRoundedRect(nvg, b.getX() - 1.0f, b.getY() - 1.0f, b.getWidth() + 2.0f, b.getHeight() + 2.0f, 5.0f);
+        nanovg::nvgStrokeColor(nvg, img.isLocked ? nanovg::nvgRGBA(255, 190, 80, 210) : nanovg::nvgRGBA(150, 165, 190, 140));
+        nanovg::nvgStrokeWidth(nvg, img.isLocked ? 1.6f : 1.2f);
+        nanovg::nvgStroke(nvg);
 
         // Title tag above the image (+ lock glyph)
         juce::String const tag = img.title.isNotEmpty() ? img.title : juce::File(img.filePath).getFileName();
-        nvgFontFace(nvg, "Inter");
-        nvgFontSize(nvg, 10.0f);
-        nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+        mcpnvg::nvgFontFace(nvg, "Inter");
+        mcpnvg::nvgFontSize(nvg, 10.0f);
+        mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
         float textBounds[4];
-        nvgTextBounds(nvg, 0.0f, 0.0f, tag.toRawUTF8(), nullptr, textBounds);
+        mcpnvg::nvgTextBounds(nvg, 0.0f, 0.0f, tag.toRawUTF8(), nullptr, textBounds);
         float const tagW = (textBounds[2] - textBounds[0]) + (img.isLocked ? 34.0f : 18.0f);
-        nvgBeginPath(nvg);
-        nvgRoundedRect(nvg, b.getX(), b.getY() - 20.0f, tagW, 16.0f, 3.5f);
-        nvgFillColor(nvg, nvgRGBA(16, 18, 22, 225));
-        nvgFill(nvg);
-        nvgStrokeColor(nvg, nvgRGBA(120, 135, 160, 120));
-        nvgStrokeWidth(nvg, 1.0f);
-        nvgStroke(nvg);
-        nvgFillColor(nvg, nvgRGBA(205, 216, 232, 235));
-        nvgText(nvg, b.getX() + 8.0f, b.getY() - 12.0f, tag.toRawUTF8(), nullptr);
+        nanovg::nvgBeginPath(nvg);
+        nanovg::nvgRoundedRect(nvg, b.getX(), b.getY() - 20.0f, tagW, 16.0f, 3.5f);
+        nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(16, 18, 22, 225));
+        nanovg::nvgFill(nvg);
+        nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(120, 135, 160, 120));
+        nanovg::nvgStrokeWidth(nvg, 1.0f);
+        nanovg::nvgStroke(nvg);
+        nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(205, 216, 232, 235));
+        mcpnvg::nvgText(nvg, b.getX() + 8.0f, b.getY() - 12.0f, tag.toRawUTF8(), nullptr);
 
         if (img.isLocked) {
             float const lx = b.getX() + tagW - 12.0f;
             float const ly = b.getY() - 11.5f;
-            nvgBeginPath(nvg);
-            nvgRoundedRect(nvg, lx - 3.5f, ly - 0.5f, 7.0f, 5.5f, 1.0f);
-            nvgFillColor(nvg, nvgRGBA(255, 190, 80, 235));
-            nvgFill(nvg);
-            nvgBeginPath(nvg);
-            nvgArc(nvg, lx, ly - 2.0f, 2.6f, juce::MathConstants<float>::pi, 0.0f, NVG_HOLE);
-            nvgStrokeColor(nvg, nvgRGBA(255, 190, 80, 235));
-            nvgStrokeWidth(nvg, 1.2f);
-            nvgStroke(nvg);
+            nanovg::nvgBeginPath(nvg);
+            nanovg::nvgRoundedRect(nvg, lx - 3.5f, ly - 0.5f, 7.0f, 5.5f, 1.0f);
+            nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(255, 190, 80, 235));
+            nanovg::nvgFill(nvg);
+            nanovg::nvgBeginPath(nvg);
+            nanovg::nvgArc(nvg, lx, ly - 2.0f, 2.6f, juce::MathConstants<float>::pi, 0.0f, NVG_HOLE);
+            nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(255, 190, 80, 235));
+            nanovg::nvgStrokeWidth(nvg, 1.2f);
+            nanovg::nvgStroke(nvg);
         }
     }
 }
@@ -2951,51 +2891,51 @@ void Canvas::renderVoiceTakes(NVGcontext* nvg, Rectangle<int> invalidRegion)
 
         bool const playing = playingId == take.id;
         bool const melody = take.mode.startsWithIgnoreCase("melody");
-        NVGcolor const accent = melody ? nvgRGBA(255, 190, 60, playing ? 255 : 210)
-                                       : nvgRGBA(80, 220, 140, playing ? 255 : 210);
+        NVGcolor const accent = melody ? nanovg::nvgRGBA(255, 190, 60, playing ? 255 : 210)
+                                       : nanovg::nvgRGBA(80, 220, 140, playing ? 255 : 210);
 
         NVGScopedState scopedChip(nvg);
 
         // Cassette body: deep slate + per-type accent border (amber = melody, green = beat)
-        nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(),
-                           nvgRGBA(18, 22, 28, 242), accent, 6.0f);
+        nanovg::nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(),
+                           nanovg::nvgRGBA(18, 22, 28, 242), accent, 6.0f);
 
         // Type glyph: beamed notes (melody) or drum (beat) — the strip's language
         {
             float const gx = b.getX() + 18.0f;
             float const gy = b.getCentreY();
-            nvgStrokeColor(nvg, accent);
-            nvgFillColor(nvg, accent);
+            nanovg::nvgStrokeColor(nvg, accent);
+            nanovg::nvgFillColor(nvg, accent);
             if (melody) {
-                nvgBeginPath(nvg);
-                nvgEllipse(nvg, gx - 3.0f, gy + 3.5f, 2.4f, 1.7f);
-                nvgFill(nvg);
-                nvgBeginPath(nvg);
-                nvgEllipse(nvg, gx + 3.2f, gy + 2.2f, 2.4f, 1.7f);
-                nvgFill(nvg);
-                nvgBeginPath(nvg);
-                nvgMoveTo(nvg, gx - 0.7f, gy + 3.4f);
-                nvgLineTo(nvg, gx - 0.7f, gy - 4.5f);
-                nvgLineTo(nvg, gx + 5.6f, gy - 5.7f);
-                nvgLineTo(nvg, gx + 5.6f, gy + 2.1f);
-                nvgStrokeWidth(nvg, 1.3f);
-                nvgStroke(nvg);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgEllipse(nvg, gx - 3.0f, gy + 3.5f, 2.4f, 1.7f);
+                nanovg::nvgFill(nvg);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgEllipse(nvg, gx + 3.2f, gy + 2.2f, 2.4f, 1.7f);
+                nanovg::nvgFill(nvg);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgMoveTo(nvg, gx - 0.7f, gy + 3.4f);
+                nanovg::nvgLineTo(nvg, gx - 0.7f, gy - 4.5f);
+                nanovg::nvgLineTo(nvg, gx + 5.6f, gy - 5.7f);
+                nanovg::nvgLineTo(nvg, gx + 5.6f, gy + 2.1f);
+                nanovg::nvgStrokeWidth(nvg, 1.3f);
+                nanovg::nvgStroke(nvg);
             } else {
-                nvgBeginPath(nvg);
-                nvgRoundedRect(nvg, gx - 5.0f, gy - 0.5f, 10.0f, 5.5f, 1.7f);
-                nvgStrokeWidth(nvg, 1.1f);
-                nvgStroke(nvg);
-                nvgBeginPath(nvg);
-                nvgEllipse(nvg, gx, gy - 0.5f, 5.0f, 1.7f);
-                nvgStrokeWidth(nvg, 1.1f);
-                nvgStroke(nvg);
-                nvgBeginPath(nvg);
-                nvgMoveTo(nvg, gx - 3.8f, gy - 6.0f);
-                nvgLineTo(nvg, gx + 0.8f, gy - 1.2f);
-                nvgMoveTo(nvg, gx + 3.8f, gy - 6.0f);
-                nvgLineTo(nvg, gx - 0.8f, gy - 1.2f);
-                nvgStrokeWidth(nvg, 1.0f);
-                nvgStroke(nvg);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgRoundedRect(nvg, gx - 5.0f, gy - 0.5f, 10.0f, 5.5f, 1.7f);
+                nanovg::nvgStrokeWidth(nvg, 1.1f);
+                nanovg::nvgStroke(nvg);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgEllipse(nvg, gx, gy - 0.5f, 5.0f, 1.7f);
+                nanovg::nvgStrokeWidth(nvg, 1.1f);
+                nanovg::nvgStroke(nvg);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgMoveTo(nvg, gx - 3.8f, gy - 6.0f);
+                nanovg::nvgLineTo(nvg, gx + 0.8f, gy - 1.2f);
+                nanovg::nvgMoveTo(nvg, gx + 3.8f, gy - 6.0f);
+                nanovg::nvgLineTo(nvg, gx - 0.8f, gy - 1.2f);
+                nanovg::nvgStrokeWidth(nvg, 1.0f);
+                nanovg::nvgStroke(nvg);
             }
         }
 
@@ -3003,22 +2943,22 @@ void Canvas::renderVoiceTakes(NVGcontext* nvg, Rectangle<int> invalidRegion)
         float const pcx = b.getX() + 46.0f;
         float const pcy = b.getCentreY();
         if (playing) {
-            nvgBeginPath(nvg);
-            nvgRoundedRect(nvg, pcx - 4.5f, pcy - 5.0f, 3.4f, 10.0f, 1.2f);
-            nvgFillColor(nvg, accent);
-            nvgFill(nvg);
-            nvgBeginPath(nvg);
-            nvgRoundedRect(nvg, pcx + 1.1f, pcy - 5.0f, 3.4f, 10.0f, 1.2f);
-            nvgFillColor(nvg, accent);
-            nvgFill(nvg);
+            nanovg::nvgBeginPath(nvg);
+            nanovg::nvgRoundedRect(nvg, pcx - 4.5f, pcy - 5.0f, 3.4f, 10.0f, 1.2f);
+            nanovg::nvgFillColor(nvg, accent);
+            nanovg::nvgFill(nvg);
+            nanovg::nvgBeginPath(nvg);
+            nanovg::nvgRoundedRect(nvg, pcx + 1.1f, pcy - 5.0f, 3.4f, 10.0f, 1.2f);
+            nanovg::nvgFillColor(nvg, accent);
+            nanovg::nvgFill(nvg);
         } else {
-            nvgBeginPath(nvg);
-            nvgMoveTo(nvg, pcx - 4.5f, pcy - 6.5f);
-            nvgLineTo(nvg, pcx + 6.5f, pcy);
-            nvgLineTo(nvg, pcx - 4.5f, pcy + 6.5f);
-            nvgClosePath(nvg);
-            nvgFillColor(nvg, accent);
-            nvgFill(nvg);
+            nanovg::nvgBeginPath(nvg);
+            nanovg::nvgMoveTo(nvg, pcx - 4.5f, pcy - 6.5f);
+            nanovg::nvgLineTo(nvg, pcx + 6.5f, pcy);
+            nanovg::nvgLineTo(nvg, pcx - 4.5f, pcy + 6.5f);
+            nanovg::nvgClosePath(nvg);
+            nanovg::nvgFillColor(nvg, accent);
+            nanovg::nvgFill(nvg);
         }
 
         // Mini-waveform (64 peak buckets)
@@ -3028,41 +2968,41 @@ void Canvas::renderVoiceTakes(NVGcontext* nvg, Rectangle<int> invalidRegion)
         constexpr float wfMaxH = 22.0f;
         if (take.peaks.size() >= 2) {
             float const barW = wfW / static_cast<float>(take.peaks.size());
-            nvgBeginPath(nvg);
+            nanovg::nvgBeginPath(nvg);
             for (size_t k = 0; k < take.peaks.size(); ++k) {
                 float const h = juce::jmax(1.5f, juce::jlimit(0.0f, 1.0f, take.peaks[k]) * wfMaxH);
-                nvgRect(nvg, wfX + static_cast<float>(k) * barW, wfCy - h * 0.5f, juce::jmax(0.8f, barW - 0.4f), h);
+                nanovg::nvgRect(nvg, wfX + static_cast<float>(k) * barW, wfCy - h * 0.5f, juce::jmax(0.8f, barW - 0.4f), h);
             }
-            nvgFillColor(nvg, accent);
-            nvgFill(nvg);
+            nanovg::nvgFillColor(nvg, accent);
+            nanovg::nvgFill(nvg);
         } else {
-            nvgBeginPath(nvg);
-            nvgMoveTo(nvg, wfX, wfCy);
-            nvgLineTo(nvg, wfX + wfW, wfCy);
-            nvgStrokeColor(nvg, accent);
-            nvgStrokeWidth(nvg, 1.0f);
-            nvgStroke(nvg);
+            nanovg::nvgBeginPath(nvg);
+            nanovg::nvgMoveTo(nvg, wfX, wfCy);
+            nanovg::nvgLineTo(nvg, wfX + wfW, wfCy);
+            nanovg::nvgStrokeColor(nvg, accent);
+            nanovg::nvgStrokeWidth(nvg, 1.0f);
+            nanovg::nvgStroke(nvg);
         }
 
         // Duration m:ss
         int const totalSec = juce::roundToInt(take.durationSec);
         juce::String const dur = juce::String(totalSec / 60) + ":" + juce::String(totalSec % 60).paddedLeft('0', 2);
-        nvgFontFace(nvg, "Inter");
-        nvgFontSize(nvg, 10.0f);
-        nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
-        nvgFillColor(nvg, nvgRGBA(230, 220, 200, 220));
-        nvgText(nvg, b.getX() + b.getWidth() - 66.0f, pcy, dur.toRawUTF8(), nullptr);
+        mcpnvg::nvgFontFace(nvg, "Inter");
+        mcpnvg::nvgFontSize(nvg, 10.0f);
+        mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+        nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(230, 220, 200, 220));
+        mcpnvg::nvgText(nvg, b.getX() + b.getWidth() - 66.0f, pcy, dur.toRawUTF8(), nullptr);
 
         // ✕ remove
         float const xx = b.getRight() - 14.0f;
-        nvgBeginPath(nvg);
-        nvgMoveTo(nvg, xx - 4.0f, pcy - 4.0f);
-        nvgLineTo(nvg, xx + 4.0f, pcy + 4.0f);
-        nvgMoveTo(nvg, xx + 4.0f, pcy - 4.0f);
-        nvgLineTo(nvg, xx - 4.0f, pcy + 4.0f);
-        nvgStrokeColor(nvg, nvgRGBA(220, 150, 150, 230));
-        nvgStrokeWidth(nvg, 1.4f);
-        nvgStroke(nvg);
+        nanovg::nvgBeginPath(nvg);
+        nanovg::nvgMoveTo(nvg, xx - 4.0f, pcy - 4.0f);
+        nanovg::nvgLineTo(nvg, xx + 4.0f, pcy + 4.0f);
+        nanovg::nvgMoveTo(nvg, xx + 4.0f, pcy - 4.0f);
+        nanovg::nvgLineTo(nvg, xx - 4.0f, pcy + 4.0f);
+        nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(220, 150, 150, 230));
+        nanovg::nvgStrokeWidth(nvg, 1.4f);
+        nanovg::nvgStroke(nvg);
     }
 }
 
@@ -3139,88 +3079,88 @@ void Canvas::renderMidiTakes(NVGcontext* nvg, Rectangle<int> invalidRegion)
         if (!invalidRegion.intersects(b.getSmallestIntegerContainer())) continue;
 
         bool const playing = (playingId == take.id);
-        NVGcolor const accent = nvgRGBA(180, 90, 255, playing ? 255 : 220); // synth royal purple (bright glow while playing)
+        NVGcolor const accent = nanovg::nvgRGBA(180, 90, 255, playing ? 255 : 220); // synth royal purple (bright glow while playing)
 
         NVGScopedState scopedChip(nvg);
 
         // Cassette body: deep slate + royal purple border
-        nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(),
-                           nvgRGBA(20, 18, 28, 245), accent, 6.0f);
+        nanovg::nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(),
+                           nanovg::nvgRGBA(20, 18, 28, 245), accent, 6.0f);
 
         // 🎹 Piano keyboard glyph (at x = 16)
         {
             float const gx = b.getX() + 16.0f;
             float const gy = b.getCentreY();
-            nvgBeginPath(nvg);
-            nvgRoundedRect(nvg, gx - 7.0f, gy - 6.0f, 14.0f, 12.0f, 1.5f);
-            nvgStrokeColor(nvg, accent);
-            nvgStrokeWidth(nvg, 1.2f);
-            nvgStroke(nvg);
-            nvgBeginPath(nvg);
-            nvgMoveTo(nvg, gx - 2.5f, gy - 6.0f);
-            nvgLineTo(nvg, gx - 2.5f, gy + 6.0f);
-            nvgMoveTo(nvg, gx + 2.0f, gy - 6.0f);
-            nvgLineTo(nvg, gx + 2.0f, gy + 6.0f);
-            nvgStrokeColor(nvg, accent);
-            nvgStrokeWidth(nvg, 1.0f);
-            nvgStroke(nvg);
-            nvgBeginPath(nvg);
-            nvgRect(nvg, gx - 4.5f, gy - 6.0f, 1.8f, 6.5f);
-            nvgRect(nvg, gx + 0.2f, gy - 6.0f, 1.8f, 6.5f);
-            nvgFillColor(nvg, accent);
-            nvgFill(nvg);
+            nanovg::nvgBeginPath(nvg);
+            nanovg::nvgRoundedRect(nvg, gx - 7.0f, gy - 6.0f, 14.0f, 12.0f, 1.5f);
+            nanovg::nvgStrokeColor(nvg, accent);
+            nanovg::nvgStrokeWidth(nvg, 1.2f);
+            nanovg::nvgStroke(nvg);
+            nanovg::nvgBeginPath(nvg);
+            nanovg::nvgMoveTo(nvg, gx - 2.5f, gy - 6.0f);
+            nanovg::nvgLineTo(nvg, gx - 2.5f, gy + 6.0f);
+            nanovg::nvgMoveTo(nvg, gx + 2.0f, gy - 6.0f);
+            nanovg::nvgLineTo(nvg, gx + 2.0f, gy + 6.0f);
+            nanovg::nvgStrokeColor(nvg, accent);
+            nanovg::nvgStrokeWidth(nvg, 1.0f);
+            nanovg::nvgStroke(nvg);
+            nanovg::nvgBeginPath(nvg);
+            nanovg::nvgRect(nvg, gx - 4.5f, gy - 6.0f, 1.8f, 6.5f);
+            nanovg::nvgRect(nvg, gx + 0.2f, gy - 6.0f, 1.8f, 6.5f);
+            nanovg::nvgFillColor(nvg, accent);
+            nanovg::nvgFill(nvg);
         }
 
         // ▶ / ⏸ Audition toggle button (at x = 38)
         float const pcx = b.getX() + 38.0f;
         float const pcy = b.getCentreY();
         if (playing) {
-            nvgBeginPath(nvg);
-            nvgRoundedRect(nvg, pcx - 4.5f, pcy - 5.0f, 3.4f, 10.0f, 1.2f);
-            nvgFillColor(nvg, accent);
-            nvgFill(nvg);
-            nvgBeginPath(nvg);
-            nvgRoundedRect(nvg, pcx + 1.1f, pcy - 5.0f, 3.4f, 10.0f, 1.2f);
-            nvgFillColor(nvg, accent);
-            nvgFill(nvg);
+            nanovg::nvgBeginPath(nvg);
+            nanovg::nvgRoundedRect(nvg, pcx - 4.5f, pcy - 5.0f, 3.4f, 10.0f, 1.2f);
+            nanovg::nvgFillColor(nvg, accent);
+            nanovg::nvgFill(nvg);
+            nanovg::nvgBeginPath(nvg);
+            nanovg::nvgRoundedRect(nvg, pcx + 1.1f, pcy - 5.0f, 3.4f, 10.0f, 1.2f);
+            nanovg::nvgFillColor(nvg, accent);
+            nanovg::nvgFill(nvg);
         } else {
-            nvgBeginPath(nvg);
-            nvgMoveTo(nvg, pcx - 4.5f, pcy - 6.0f);
-            nvgLineTo(nvg, pcx + 6.0f, pcy);
-            nvgLineTo(nvg, pcx - 4.5f, pcy + 6.0f);
-            nvgClosePath(nvg);
-            nvgFillColor(nvg, accent);
-            nvgFill(nvg);
+            nanovg::nvgBeginPath(nvg);
+            nanovg::nvgMoveTo(nvg, pcx - 4.5f, pcy - 6.0f);
+            nanovg::nvgLineTo(nvg, pcx + 6.0f, pcy);
+            nanovg::nvgLineTo(nvg, pcx - 4.5f, pcy + 6.0f);
+            nanovg::nvgClosePath(nvg);
+            nanovg::nvgFillColor(nvg, accent);
+            nanovg::nvgFill(nvg);
         }
 
         // Title and notes (at x = 54)
         float const tx = b.getX() + 54.0f;
         float const ty = b.getY() + 14.0f;
-        nvgFontFace(nvg, "Inter-Medium");
-        nvgFontSize(nvg, 11.5f);
-        nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
-        nvgFillColor(nvg, nvgRGBA(235, 225, 250, 240));
+        mcpnvg::nvgFontFace(nvg, "Inter-Medium");
+        mcpnvg::nvgFontSize(nvg, 11.5f);
+        mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+        nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(235, 225, 250, 240));
         juce::String const title = take.id + " · " + juce::String(take.noteCount) + " notes";
-        nvgText(nvg, tx, ty, title.toRawUTF8(), nullptr);
+        mcpnvg::nvgText(nvg, tx, ty, title.toRawUTF8(), nullptr);
 
         // Subtitle: voice binding + duration (at x = 54)
         float const subY = b.getY() + 27.0f;
-        nvgFontFace(nvg, "Inter");
-        nvgFontSize(nvg, 9.5f);
-        nvgFillColor(nvg, nvgRGBA(180, 165, 205, 200));
+        mcpnvg::nvgFontFace(nvg, "Inter");
+        mcpnvg::nvgFontSize(nvg, 9.5f);
+        nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(180, 165, 205, 200));
         juce::String const sub = "voice: " + take.voice + " · " + juce::String(take.durationSec, 1) + "s";
-        nvgText(nvg, tx, subY, sub.toRawUTF8(), nullptr);
+        mcpnvg::nvgText(nvg, tx, subY, sub.toRawUTF8(), nullptr);
 
         // ✕ Remove button on the far right
         float const xx = b.getRight() - 14.0f;
-        nvgBeginPath(nvg);
-        nvgMoveTo(nvg, xx - 4.0f, pcy - 4.0f);
-        nvgLineTo(nvg, xx + 4.0f, pcy + 4.0f);
-        nvgMoveTo(nvg, xx + 4.0f, pcy - 4.0f);
-        nvgLineTo(nvg, xx - 4.0f, pcy + 4.0f);
-        nvgStrokeColor(nvg, nvgRGBA(200, 160, 220, 210));
-        nvgStrokeWidth(nvg, 1.3f);
-        nvgStroke(nvg);
+        nanovg::nvgBeginPath(nvg);
+        nanovg::nvgMoveTo(nvg, xx - 4.0f, pcy - 4.0f);
+        nanovg::nvgLineTo(nvg, xx + 4.0f, pcy + 4.0f);
+        nanovg::nvgMoveTo(nvg, xx + 4.0f, pcy - 4.0f);
+        nanovg::nvgLineTo(nvg, xx - 4.0f, pcy + 4.0f);
+        nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(200, 160, 220, 210));
+        nanovg::nvgStrokeWidth(nvg, 1.3f);
+        nanovg::nvgStroke(nvg);
     }
 }
 
@@ -3391,18 +3331,18 @@ int Canvas::getOverlays() const
 {
     int overlayState = 0;
 
-    auto const overlaysTree = SettingsFile::getInstance()->getValueTree().getChildWithName("Overlays");
+    auto const overlaysTree = SettingsFile::getInstance()->getProperty<DynamicObject>("overlays");
 
-    auto const altModeEnabled = overlaysTree.getProperty("alt_mode") && !isGraph;
+    auto const altModeEnabled = overlaysTree->getProperty("alt_mode") && !isGraph;
 
     if (!locked.getValue()) {
-        overlayState = overlaysTree.getProperty("edit");
+        overlayState = overlaysTree->getProperty("edit");
     }
     if (locked.getValue() || commandLocked.getValue()) {
-        overlayState = overlaysTree.getProperty("lock");
+        overlayState = overlaysTree->getProperty("lock");
     }
     if (altModeEnabled) {
-        overlayState = overlaysTree.getProperty("alt");
+        overlayState = overlaysTree->getProperty("alt");
     }
 
     return overlayState;
@@ -3437,23 +3377,22 @@ void Canvas::updateOverlays()
 void Canvas::jumpToOrigin()
 {
     if (viewport)
-        viewport->setViewPosition((canvasOrigin + Point<int>(1, 1)).transformedBy(getTransform()));
+        viewport->setViewPositionAnimated((canvasOrigin.toFloat() + Point<float>(1, 1)) * getValue<float>(zoomScale));
 }
 
 void Canvas::restoreViewportState()
 {
     if (viewport) {
-        viewport->setViewPosition((patch.lastViewportPosition + canvasOrigin).transformedBy(getTransform()));
         zoomScale.setValue(patch.lastViewportScale);
-        setTransform(AffineTransform().scaled(patch.lastViewportScale));
+        viewport->setViewPosition((patch.lastViewportPosition + canvasOrigin.toFloat()) * patch.lastViewportScale);
     }
 }
 
 void Canvas::saveViewportState()
 {
     if (viewport) {
-        patch.lastViewportPosition = viewport->getViewPosition().transformedBy(getTransform().inverted()) - canvasOrigin;
         patch.lastViewportScale = getValue<float>(zoomScale);
+        patch.lastViewportPosition = ((viewport->getViewPosition() / patch.lastViewportScale) - canvasOrigin.toFloat());
     }
 }
 
@@ -3462,45 +3401,33 @@ void Canvas::zoomToFitAll()
     if (objects.empty() || !viewport)
         return;
 
-    auto scale = getValue<float>(zoomScale);
-
-    auto regionOfInterest = Rectangle<int>(canvasOrigin.x, canvasOrigin.y, 20, 20);
-
+    auto regionOfInterest = Rectangle<float>(canvasOrigin.x, canvasOrigin.y, 20, 20);
     if (!presentationMode.getValue()) {
         for (auto const* object : objects) {
-            regionOfInterest = regionOfInterest.getUnion(object->getBounds().reduced(Object::margin));
+            regionOfInterest = regionOfInterest.getUnion(object->getBounds().toFloat());
         }
     }
+    regionOfInterest = regionOfInterest.expanded(24); // Nice margin
 
-    // Add a bit of margin to make it nice
-    regionOfInterest = regionOfInterest.expanded(16);
+    auto const viewportW = static_cast<float>(viewport->getWidth());
+    auto const viewportH = static_cast<float>(viewport->getHeight());
 
-    auto const viewArea = viewport->getViewArea() / scale;
+    auto const scaleX = viewportW / regionOfInterest.getWidth();
+    auto const scaleY = viewportH / regionOfInterest.getHeight();
 
-    auto const roiHeight = static_cast<float>(regionOfInterest.getHeight());
-    auto const roiWidth = static_cast<float>(regionOfInterest.getWidth());
+    auto targetScale = std::clamp(jmin(scaleX, scaleY), 0.25f, 3.0f);
 
-    auto const scaleWidth = viewArea.getWidth() / roiWidth;
-    auto const scaleHeight = viewArea.getHeight() / roiHeight;
-    scale = jmin(scaleWidth, scaleHeight);
-    scale = std::clamp(scale, 0.05f, 3.0f);
+    // zoomScale = targetScale;
 
-    auto transform = getTransform();
-    transform = transform.scaled(scale);
-    setTransform(transform);
+    auto const roiCentreScaled = regionOfInterest.getCentre() * targetScale;
+    auto const screenCentre = Point<float>(viewportW * 0.5f, viewportH * 0.5f);
 
-    scale = std::sqrt(std::abs(transform.getDeterminant()));
-    zoomScale.setValue(scale);
-
-    auto const viewportCentre = viewport->getViewArea().withZeroOrigin().getCentre();
-    auto const newViewPos = regionOfInterest.transformedBy(getTransform()).getCentre() - viewportCentre;
-    viewport->setViewPosition(newViewPos);
+    auto const targetViewPos = roiCentreScaled - screenCentre;
+    viewport->setViewPositionAnimated(targetViewPos, targetScale);
 }
 
 void Canvas::tabChanged()
 {
-    patch.setCurrent();
-
     synchronise();
     updateDrawables();
 
@@ -3515,20 +3442,26 @@ void Canvas::tabChanged()
     editor->repaint(); // Make sure everything it up to date
 }
 
-void Canvas::save(std::function<void()> const& nestedCallback)
+pd::Patch::Ptr Canvas::getPatchToSave() const
 {
-    auto const* canvasToSave = this;
+    // Subpatches get saved as part of the patch that contains them, which may be open in another window
     if (patch.isSubpatch()) {
-        for (auto const& parentCanvas : editor->getCanvases()) {
-            if (patch.getRoot() == parentCanvas->patch.getRawPointer()) {
-                canvasToSave = parentCanvas;
-            }
+        auto const* root = patch.getRoot();
+        for (auto const& openedPatch : pd->patches) {
+            if (openedPatch->getRawPointer() == root)
+                return openedPatch;
         }
     }
 
-    if (canvasToSave->patch.getCurrentFile().existsAsFile()) {
-        canvasToSave->patch.savePatch();
-        SettingsFile::getInstance()->addToRecentlyOpened(canvasToSave->patch.getCurrentFile());
+    return refCountedPatch;
+}
+
+void Canvas::save(std::function<void()> const& nestedCallback)
+{
+    auto const patchToSave = getPatchToSave();
+    if (patchToSave->getCurrentFile().existsAsFile()) {
+        patchToSave->savePatch();
+        SettingsFile::getInstance()->addToRecentlyOpened(patchToSave->getCurrentURL());
         pd->titleChanged();
         nestedCallback();
     } else {
@@ -3538,23 +3471,23 @@ void Canvas::save(std::function<void()> const& nestedCallback)
 
 void Canvas::saveAs(std::function<void()> const& nestedCallback)
 {
-    Dialogs::showSaveDialog([this, nestedCallback](URL const& resultURL) mutable {
+    // The dialog stays attached to this canvas, even when saving a parent patch:
+    // on iOS, the file picker is shown inside it, and the parent patch's tab might not be visible
+    auto const patchToSave = getPatchToSave();
+    Dialogs::showSaveDialog([this, patchToSave, nestedCallback](URL const& resultURL) mutable {
         auto result = resultURL.getLocalFile();
         if (result.getFullPathName().isNotEmpty()) {
             if (result.exists())
                 result.deleteFile();
 
-            if (!result.hasFileExtension("pd"))
-                result = result.getFullPathName() + ".pd";
-
-            patch.savePatch(resultURL);
-            SettingsFile::getInstance()->addToRecentlyOpened(result);
+            patchToSave->savePatch(resultURL);
+            SettingsFile::getInstance()->addToRecentlyOpened(patchToSave->getCurrentURL());
             pd->titleChanged();
         }
 
         nestedCallback();
     },
-        "*.pd", "Patch", this);
+        "*.pd", "Patch", this, false, patchToSave->getPatchFile().getFileNameWithoutExtension());
 }
 
 void Canvas::handleAsyncUpdate()
@@ -3647,8 +3580,9 @@ void Canvas::performSynchronise()
             object->toFront(false);
             if (object->gui && object->gui->getLabel())
                 object->gui->getLabel()->toFront(false);
+
             if (object->gui)
-                object->gui->update();
+                object->gui->updateProperties();
         }
     }
 
@@ -3719,7 +3653,7 @@ void Canvas::performSynchronise()
     }
 
     if (!isGraph) {
-        setTransform(AffineTransform().scaled(getValue<float>(zoomScale)));
+        viewport->updateCanvasTransform();
     }
 
     if (graphArea)
@@ -3748,7 +3682,8 @@ void Canvas::shiftKeyChanged(bool const isHeld)
     shiftDown = isHeld;
 
     if (!isGraph) {
-        SettingsFile::getInstance()->getValueTree().getChildWithName("Overlays").setProperty("alt_mode", altDown && shiftDown, nullptr);
+        SettingsFile::getInstance()->getProperty<DynamicObject>("overlays")->setProperty("alt_mode", altDown && shiftDown);
+        SettingsFile::getInstance()->triggerSettingsChange("overlays");
     }
 
     if (!isHeld)
@@ -3759,7 +3694,7 @@ void Canvas::shiftKeyChanged(bool const isHeld)
         Iolet* targetInlet = nullptr;
         for (auto const& object : objects) {
             for (auto const& iolet : object->iolets) {
-                if (iolet->isTargeted && iolet != connectingOutlet) {
+                if (iolet->isTargeted() && iolet != connectingOutlet) {
                     targetInlet = iolet;
                     break;
                 }
@@ -3767,15 +3702,15 @@ void Canvas::shiftKeyChanged(bool const isHeld)
         }
 
         if (targetInlet) {
-            bool const inverted = connectingOutlet->isInlet;
+            bool const inverted = connectingOutlet->isInlet();
             if (inverted)
                 std::swap(connectingOutlet, targetInlet);
 
             if (auto x = patch.getPointer()) {
-                auto* outObj = connectingOutlet->object->getPointer();
-                auto* inObj = targetInlet->object->getPointer();
-                auto const outletIndex = connectingOutlet->ioletIdx;
-                auto const inletIndex = targetInlet->ioletIdx;
+                auto* outObj = connectingOutlet->getObject()->getPointer();
+                auto* inObj = targetInlet->getObject()->getPointer();
+                auto const outletIndex = connectingOutlet->getIndex();
+                auto const inletIndex = targetInlet->getIndex();
 
                 SmallArray<t_gobj*> selectedObjects;
                 for (auto const* object : getSelectionOfType<Object>()) {
@@ -3816,7 +3751,8 @@ void Canvas::altKeyChanged(bool const isHeld)
     altDown = isHeld;
 
     if (!isGraph) {
-        SettingsFile::getInstance()->getValueTree().getChildWithName("Overlays").setProperty("alt_mode", altDown && shiftDown, nullptr);
+        SettingsFile::getInstance()->getProperty<DynamicObject>("overlays")->setProperty("alt_mode", altDown && shiftDown);
+        SettingsFile::getInstance()->triggerSettingsChange("overlays");
     }
 }
 
@@ -4642,7 +4578,7 @@ void Canvas::mouseDown(MouseEvent const& e)
 bool Canvas::hitTest(int const x, int const y)
 {
     // allow panning to happen anywhere, even when in presentation mode
-    if (panningModifierDown())
+    if (panningModifierDown() || (viewport && viewport->isPerformingGesture()))
         return true;
 
     // disregard mouse drag if outside of patch
@@ -4723,8 +4659,16 @@ void Canvas::mouseDrag(MouseEvent const& e)
         return;
     }
 
-    if (canvasRateReducer.tooFast() || panningModifierDown())
+    if (canvasRateReducer.tooFast())
         return;
+
+    if (panningModifierDown() || (viewport && viewport->isPerformingGesture())) {
+        if (isDraggingLasso) {
+            lasso.endLasso();
+            isDraggingLasso = false;
+        }
+        return;
+    }
 
     if (connectingWithDrag) {
         for (auto* obj : objects) {
@@ -4797,7 +4741,7 @@ bool Canvas::autoscroll(MouseEvent const& e)
     }
 
     if (x != oldX || y != oldY) {
-        viewport->setViewPosition(x, y);
+        viewport->setViewPosition(Point<float>(x, y));
         return true;
     }
 
@@ -4940,7 +4884,12 @@ void Canvas::updateSidebarSelection()
             toShow.add(object);
         }
 
-        editor->sidebar->showParameters(toShow, allParameters, showOnSelect);
+        if (auto* s = editor->getSidebarForPanel(Sidebar::InspectorPanel))
+            s->showParameters(toShow, allParameters, showOnSelect);
+
+        if (auto* s = editor->getSidebarForPanel(Sidebar::ObjectReferencePanel))
+            s->updateReference(lassoSelection.size() == 1 ? lassoSelection[0]->getType().toString() : String());
+
         updateSelectionPill();
     });
 }
@@ -5063,6 +5012,7 @@ bool Canvas::keyPressed(KeyPress const& key)
             return true;
         }
     }
+    pd->keyHandler.sendKeyPress(key); // Send keypress for listers to #key, #keyup and #keyname
 
     int const keycode = key.getKeyCode();
 
@@ -5087,8 +5037,6 @@ bool Canvas::keyPressed(KeyPress const& key)
             totalBounds = totalBounds.getUnion(object->getBounds());
         }
 
-        // TODO: consider calculating the totalBounds with object->getBounds().reduced(Object::margin)
-        // then adding viewport padding in screen pixels so it's consistent regardless of scale
         auto const scale = ::getValue<float>(zoomScale);
         constexpr auto viewportPadding = 10;
 
@@ -5106,7 +5054,7 @@ bool Canvas::keyPressed(KeyPress const& key)
         } else if (totalBounds.getBottom() > viewY + viewHeight) {
             viewY = totalBounds.getBottom() - viewHeight;
         }
-        viewport->setViewPosition(viewX * scale, viewY * scale);
+        viewport->setViewPosition(Point<float>(viewX * scale, viewY * scale));
         return true;
     };
 
@@ -5154,13 +5102,16 @@ void Canvas::deselectAll(bool const broadcastChange)
         selectedComponents.removeChangeListener(this);
 
     selectedComponents.deselectAll();
-    editor->sidebar->hideParameters();
+    if (auto* s = editor->getSidebarForPanel(Sidebar::InspectorPanel))
+        s->hideParameters();
     // Fall back to the sketch pill when ink exists; otherwise this hides it.
     updateSelectionPill();
 
     if (!broadcastChange) {
-        // Add back the listener, but make sure it's added back 'after' the last event on the message queue
-        MessageManager::callAsync([this] { selectedComponents.addChangeListener(this); });
+        MessageManager::callAsync([_this = SafePointer(this)] {
+            if (_this)
+                _this->selectedComponents.addChangeListener(_this);
+        });
     }
 }
 
@@ -5751,7 +5702,7 @@ void Canvas::focusLost(FocusChangeType cause)
     });
 }
 
-void Canvas::dragAndDropPaste(String const& patchString, Point<int> const mousePos, int const patchWidth, int const patchHeight, String const& name)
+void Canvas::dragAndDropPaste(String const& patchString, Point<int> const mousePos, int const patchWidth, int const patchHeight)
 {
     locked = false;
     presentationMode = false;
@@ -5765,10 +5716,8 @@ void Canvas::dragAndDropPaste(String const& patchString, Point<int> const mouseP
             _this->grabKeyboardFocus();
     });
 
-    auto undoText = String("Add object");
-    if (name.isNotEmpty())
-        undoText = String("Add " + name.toLowerCase());
-
+    auto args = StringArray::fromTokens(patchString, false);
+    auto undoText = args.size() > 4 ? String("Add " + args[4]) : String("Add object");
     patch.startUndoSequence(undoText);
 
     auto const patchSize = Point<int>(patchWidth, patchHeight);
@@ -5783,10 +5732,7 @@ void Canvas::dragAndDropPaste(String const& patchString, Point<int> const mouseP
     // Load state from pd
     performSynchronise();
 
-    patch.setCurrent();
-
     SmallArray<t_gobj*> pastedObjects;
-
     if (auto patchPtr = patch.getPointer()) {
         for (auto* object : objects) {
             auto* objectPtr = object->getPointer();
@@ -5828,8 +5774,6 @@ void Canvas::pasteSelection()
 
     // Load state from pd
     performSynchronise();
-
-    patch.setCurrent();
 
     SmallArray<t_gobj*> pastedObjects;
 
@@ -5924,7 +5868,7 @@ void Canvas::duplicateSelection()
         selectionBounds = selectionBounds.getUnion(obj->getBounds());
     }
 
-    selectionBounds = selectionBounds.transformedBy(getTransform());
+    selectionBounds = selectionBounds * getValue<float>(zoomScale);
 
     // Adjust the viewport position to ensure the duplicated objects are visible
     auto const viewportPos = viewport->getViewPosition();
@@ -5946,7 +5890,7 @@ void Canvas::duplicateSelection()
         }
 
         // Set the new viewport position
-        viewport->setViewPosition(viewportPos + Point<int>(deltaX, deltaY));
+        viewport->setViewPosition(viewportPos + Point<float>(deltaX, deltaY));
     }
 
     dragState.wasDuplicated = true;
@@ -5963,7 +5907,8 @@ void Canvas::removeSelection()
 {
     patch.startUndoSequence("Remove object/s");
     // Make sure object isn't selected and stop updating gui
-    editor->sidebar->hideParameters();
+    if (auto* s = editor->getSidebarForPanel(Sidebar::InspectorPanel))
+        s->hideParameters();
 
     // Find selected objects and make them selected in pd
     SmallArray<t_gobj*> objects;
@@ -6117,47 +6062,70 @@ void Canvas::encapsulateSelection(String const& subpatchName)
     encapsulateSelection(subpatchName, getSelectionOfType<Object>());
 }
 
+// The MCP bridge encapsulates an explicit object list under a chosen name, so the
+// selection and the "pd" name are parameters here (the menu command passes neither).
 void Canvas::encapsulateSelection(String const& subpatchName, SmallArray<Object*> const& objectsToEncapsulate)
 {
     auto selectedObjects = objectsToEncapsulate;
+
+    if(auto* sidebar = editor->getSidebarForPanel(Sidebar::SidePanel::InspectorPanel))
+        sidebar->clearInspector();
 
     // Sort by index in pd patch
     selectedObjects.sort([this](auto const* a, auto const* b) -> bool {
         return objects.index_of(a) < objects.index_of(b);
     });
 
-    // If two connections have the same target inlet/outlet, we only need 1 [inlet/outlet] object
-    auto usedIolets = SmallArray<Iolet*>();
-    auto targetIolets = UnorderedMap<Iolet*, SmallArray<Iolet*>>();
-
-    auto newInternalConnections = String();
-    auto newExternalConnections = UnorderedMap<int, SmallArray<Iolet*>>();
-
-    // First, find all the incoming and outgoing connections
-    for (auto* connection : connections) {
-        if (selectedObjects.contains(connection->inobj.get()) && !selectedObjects.contains(connection->outobj.get())) {
-            auto* inlet = connection->inlet.get();
-            targetIolets[inlet].add(connection->outlet.get());
-            usedIolets.add_unique(inlet);
-        }
-    }
-    for (auto* connection : connections) {
-        if (selectedObjects.contains(connection->outobj.get()) && !selectedObjects.contains(connection->inobj.get())) {
-            auto* outlet = connection->outlet.get();
-            targetIolets[outlet].add(connection->inlet.get());
-            usedIolets.add_unique(outlet);
+    // Objects without a valid pointer can't be copied, so they can't be part of the subpatch
+    auto encapsulatedObjects = SmallArray<Object*>();
+    auto encapsulatedPointers = SmallArray<t_gobj*>();
+    auto selectionBounds = Rectangle<int>();
+    for (auto* object : selectedObjects) {
+        if (auto* ptr = object->getPointer()) {
+            encapsulatedObjects.add(object);
+            encapsulatedPointers.add(ptr);
+            selectionBounds = selectionBounds.getUnion(object->getObjectBounds());
         }
     }
 
-    auto newEdgeObjects = String();
+    if (encapsulatedObjects.empty())
+        return;
 
-    usedIolets.sort([](auto* a, auto* b) -> bool {
-        // Inlets before outlets
-        if (a->isInlet != b->isInlet)
-            return a->isInlet;
+    struct IoletGroup {
+        bool isInlet;
+        bool isSignal;
+        SmallArray<Iolet*> internalIolets; // iolets on the objects that move into the subpatch
+        SmallArray<Iolet*> externalIolets; // iolets on the objects that stay behind
+    };
 
-        auto apos = a->getCanvasBounds().getPosition();
-        auto bpos = b->getCanvasBounds().getPosition();
+    auto internalIolets = SmallArray<Iolet*>();
+    auto externalIoletsFor = UnorderedMap<Iolet*, SmallArray<Iolet*>>();
+
+    for (auto* connection : connections) {
+        bool const inletInside = encapsulatedObjects.contains(connection->inobj.get());
+        bool const outletInside = encapsulatedObjects.contains(connection->outobj.get());
+
+        // Connections that are entirely inside or entirely outside the selection stay as they are
+        if (inletInside == outletInside)
+            continue;
+
+        auto* internalIolet = inletInside ? connection->inlet.get() : connection->outlet.get();
+        auto* externalIolet = inletInside ? connection->outlet.get() : connection->inlet.get();
+        if (!internalIolet || !externalIolet)
+            continue;
+
+        internalIolets.add_unique(internalIolet);
+        externalIoletsFor[internalIolet].add_unique(externalIolet);
+    }
+
+    // Inlets before outlets, then left to right. Pd numbers a subpatch's iolets by the horizontal
+    // position of the [inlet]/[outlet] objects, so this is also the order we lay them out in below
+    internalIolets.sort([](auto* a, auto* b) -> bool {
+        if (a->isInlet() != b->isInlet())
+            return a->isInlet();
+
+        auto const apos = a->getCanvasBounds().getPosition();
+        auto const bpos = b->getCanvasBounds().getPosition();
 
         if (apos.x == bpos.x) {
             return apos.y < bpos.y;
@@ -6166,90 +6134,120 @@ void Canvas::encapsulateSelection(String const& subpatchName, SmallArray<Object*
         return apos.x < bpos.x;
     });
 
-    int i = 0;
-    int numIn = 0;
-    for (auto* iolet : usedIolets) {
-        bool isSignal = iolet->isSignal;
-        if (iolet->isInlet) {
-            // If all incoming wires from outside are control-rate, create [inlet], not [inlet~]
-            bool hasSignalInput = false;
-            for (auto* outEdge : targetIolets[iolet]) {
-                if (outEdge && outEdge->isSignal) {
-                    hasSignalInput = true;
-                    break;
-                }
+    auto ioletGroups = SmallArray<IoletGroup>();
+    for (auto* iolet : internalIolets) {
+        auto const& externalIolets = externalIoletsFor[iolet];
+
+        // An inlet fed only by control-rate wires from outside becomes [inlet], not [inlet~]
+        bool const isSignal = iolet->isInlet()
+            ? std::any_of(externalIolets.begin(), externalIolets.end(), [](auto* source) { return source->isSignal(); })
+            : iolet->isSignal();
+
+        IoletGroup* group = nullptr;
+        for (auto& candidate : ioletGroups) {
+            // A signal and a data iolet can never share an object, even if they connect to the same things
+            if (candidate.isInlet != iolet->isInlet() || candidate.isSignal != isSignal)
+                continue;
+            if (candidate.externalIolets.size() != externalIolets.size())
+                continue;
+
+            if (std::all_of(externalIolets.begin(), externalIolets.end(), [&candidate](auto* target) { return candidate.externalIolets.contains(target); })) {
+                group = &candidate;
+                break;
             }
-            isSignal = hasSignalInput;
         }
 
-        auto type = String(iolet->isInlet ? "inlet" : "outlet") + String(isSignal ? "~" : "");
-        int xPos = 50 + (iolet->isInlet ? i : (i - numIn)) * 100;
-        int yPos = iolet->isInlet ? 20 : 400;
-        newEdgeObjects += "#X obj " + String(xPos) + " " + String(yPos) + " " + type + ";\n";
-
-        int objIdx = selectedObjects.index_of(iolet->object);
-        int ioletObjectIdx = selectedObjects.size() + i;
-        if (iolet->isInlet) {
-            newInternalConnections += "#X connect " + String(ioletObjectIdx) + " 0 " + String(objIdx) + " " + String(iolet->ioletIdx) + ";\n";
-            numIn++;
-        } else {
-            newInternalConnections += "#X connect " + String(objIdx) + " " + String(iolet->ioletIdx) + " " + String(ioletObjectIdx) + " 0;\n";
+        if (!group) {
+            ioletGroups.add(IoletGroup { iolet->isInlet(), isSignal, {}, externalIolets });
+            group = &ioletGroups.back();
         }
 
-        for (auto* target : targetIolets[iolet]) {
-            newExternalConnections[i].add(target);
+        group->internalIolets.add(iolet);
+    }
+
+    constexpr int ioletObjectSpacing = 45;
+
+    auto newIoletObjects = String();
+    auto newInternalConnections = String();
+
+    int numInlets = 0;
+    int lastX[2] = {};
+    bool hasPlaced[2] = {};
+
+    for (int i = 0; i < static_cast<int>(ioletGroups.size()); i++) {
+        auto const& group = ioletGroups[i];
+        int const row = group.isInlet ? 0 : 1;
+
+        // Put the object above (or below) the iolet it feeds, but never to the left of the previous one:
+        // pd derives the iolet index from the horizontal position, and the connections below rely on it
+        int x = group.internalIolets[0]->getCanvasBounds().getCentreX() - canvasOrigin.x;
+        if (hasPlaced[row])
+            x = jmax(x, lastX[row] + ioletObjectSpacing);
+        lastX[row] = x;
+        hasPlaced[row] = true;
+
+        int const y = group.isInlet ? selectionBounds.getY() - ioletObjectSpacing : selectionBounds.getBottom() + ioletObjectSpacing;
+        auto const type = String(group.isInlet ? "inlet" : "outlet") + String(group.isSignal ? "~" : "");
+        newIoletObjects += "#X obj " + String(x) + " " + String(y) + " " + type + ";\n";
+
+        int const ioletObjectIdx = static_cast<int>(encapsulatedObjects.size()) + i;
+        for (auto* internalIolet : group.internalIolets) {
+            int const objIdx = encapsulatedObjects.index_of(internalIolet->getObject());
+            if (objIdx < 0)
+                continue;
+
+            if (group.isInlet) {
+                newInternalConnections += "#X connect " + String(ioletObjectIdx) + " 0 " + String(objIdx) + " " + String(internalIolet->getIndex()) + ";\n";
+            } else {
+                newInternalConnections += "#X connect " + String(objIdx) + " " + String(internalIolet->getIndex()) + " " + String(ioletObjectIdx) + " 0;\n";
+            }
         }
 
-        i++;
+        numInlets += group.isInlet;
     }
 
     patch.deselectAll();
 
-    auto bounds = Rectangle<int>();
-    SmallArray<t_gobj*> objects;
-    for (auto* object : selectedObjects) {
-        if (auto* ptr = object->getPointer()) {
-            bounds = bounds.getUnion(object->getBounds());
-            objects.add(ptr);
-        }
-    }
-    auto centre = bounds.getCentre() - canvasOrigin;
-
-    auto nameToken = (subpatchName.isEmpty() || subpatchName == "pd") ? "pd" : ("pd " + subpatchName);
-    auto copypasta = String("#N canvas 733 172 450 300 0 1;\n") + "$$_COPY_HERE_$$" + newEdgeObjects + newInternalConnections + "#X restore " + String(centre.x) + " " + String(centre.y) + " " + nameToken + ";\n";
+    auto const centre = selectionBounds.getCentre();
+    auto const nameToken = (subpatchName.isEmpty() || subpatchName == "pd") ? String("pd") : ("pd " + subpatchName);
+    auto copypasta = String("#N canvas 733 172 450 300 0 1;\n") + "$$_COPY_HERE_$$" + newIoletObjects + newInternalConnections + "#X restore " + String(centre.x) + " " + String(centre.y) + " " + nameToken + ";\n";
 
     // Apply the changed on Pd's thread
     if (auto patchPtr = patch.getPointer()) {
         int size;
-        char const* text = pd::Interface::copy(patchPtr.get(), &size, objects);
+        char const* text = pd::Interface::copy(patchPtr.get(), &size, encapsulatedPointers);
         auto copied = String::fromUTF8(text, size);
 
         // Wrap it in an undo sequence, to allow undoing everything in 1 step
         patch.startUndoSequence("Encapsulate");
 
-        pd::Interface::removeObjects(patchPtr.get(), objects);
+        pd::Interface::removeObjects(patchPtr.get(), encapsulatedPointers);
 
         auto replacement = copypasta.replace("$$_COPY_HERE_$$", copied);
 
         pd::Interface::paste(patchPtr.get(), replacement.toRawUTF8());
-        auto lastObject = patch.getObjects().back();
-        if (!lastObject.isValid())
-            return;
 
-        auto* newObject = pd::Interface::checkObject(lastObject.getRaw<t_pd>());
-        if (!newObject) {
-            patch.endUndoSequence("Encapsulate");
-            pd->unlockAudioThread();
-            return;
-        }
+        auto patchObjects = patch.getObjects();
+        t_object* newObject = nullptr;
+        if (!patchObjects.empty() && patchObjects.back().isValid())
+            newObject = pd::Interface::checkObject(patchObjects.back().getRaw<t_pd>());
 
-        for (auto& [idx, iolets] : newExternalConnections) {
-            for (auto* iolet : iolets) {
-                if (auto* externalObject = reinterpret_cast<t_object*>(iolet->object->getPointer())) {
-                    if (iolet->isInlet) {
-                        pd::Interface::createConnection(patchPtr.get(), newObject, idx - numIn, externalObject, iolet->ioletIdx);
+        if (newObject) {
+            for (int i = 0; i < static_cast<int>(ioletGroups.size()); i++) {
+                auto const& group = ioletGroups[i];
+
+                // Inlets and outlets are numbered separately, and all the inlet groups come first
+                int const subpatchIoletIdx = group.isInlet ? i : i - numInlets;
+
+                for (auto* externalIolet : group.externalIolets) {
+                    auto* externalObject = reinterpret_cast<t_object*>(externalIolet->getObject()->getPointer());
+                    if (!externalObject)
+                        continue;
+
+                    if (group.isInlet) {
+                        pd::Interface::createConnection(patchPtr.get(), externalObject, externalIolet->getIndex(), newObject, subpatchIoletIdx);
                     } else {
-                        pd::Interface::createConnection(patchPtr.get(), externalObject, iolet->ioletIdx, newObject, idx);
+                        pd::Interface::createConnection(patchPtr.get(), newObject, subpatchIoletIdx, externalObject, externalIolet->getIndex());
                     }
                 }
             }
@@ -6292,8 +6290,7 @@ void Canvas::cancelConnectionCreation()
         connectingWithDrag = false;
         connectionCancelled = true;
         if (nearestIolet) {
-            nearestIolet->isTargeted = false;
-            nearestIolet->repaint();
+            nearestIolet->setTargeted(false);
             nearestIolet = nullptr;
         }
     }
@@ -6603,8 +6600,13 @@ void Canvas::valueChanged(Value& v)
         bool const editMode = !getValue<bool>(v);
 
         if (auto ptr = patch.getPointer()) {
+            if (ptr->gl_edit != editMode) {
             pd->sendDirectMessage(ptr.get(), "editmode", { static_cast<float>(editMode) });
         }
+        }
+
+        for(auto* object : objects)
+            object->repaint();
 
         cancelConnectionCreation();
         deselectAll();
@@ -6713,8 +6715,10 @@ void Canvas::setSelected(Component* component, bool const shouldNowBeSelected, b
     }
 
     if (!broadcastChange) {
-        // Add back the listener, but make sure it's added back 'after' the last event on the message queue
-        MessageManager::callAsync([this] { selectedComponents.addChangeListener(this); });
+        MessageManager::callAsync([_this = SafePointer(this)] {
+            if (_this)
+                _this->selectedComponents.addChangeListener(_this);
+        });
     }
 }
 
@@ -6733,7 +6737,7 @@ bool Canvas::checkPanDragMode()
 
 bool Canvas::setPanDragMode(bool const shouldPan)
 {
-    if (auto* v = dynamic_cast<CanvasViewport*>(viewport.get())) {
+    if (auto* v = viewport.get()) {
         v->enableMousePanning(shouldPan);
         return true;
     }
@@ -6793,9 +6797,12 @@ ObjectParameters& Canvas::getInspectorParameters()
 
 bool Canvas::panningModifierDown() const
 {
-#if JUCE_IOS
-    return OSUtils::ScrollTracker::isScrolling();
-#endif
+    if (isGraph)
+        return false;
+
+    if (viewport->isPerformingGesture())
+        return true;
+
     auto const& commandManager = editor->commandManager;
     // check the command manager for the keycode that is assigned to pan drag key
     auto const panDragKeycode = commandManager.getKeyMappings()->getKeyPressesAssignedToCommand(CommandIDs::PanDragKey).getFirst().getKeyCode();
@@ -6845,6 +6852,22 @@ void Canvas::receiveMessage(t_symbol* symbol, SmallArray<pd::Atom> const& atoms)
         synchronise();
         break;
     }
+    case hash("array"): {
+        if (isGraph) {
+            // Async because this will destroy the current canvas, which the caller might be in the middle of using
+            MessageManager::callAsync([_this = SafePointer<Canvas>(this)]() {
+                if (!_this)
+                    return;
+                if (auto* object = _this->findParentComponentOfClass<Object>()) {
+                    _this->setSelected(object, false);
+                    if (auto* s = _this->editor->getSidebarForPanel(Sidebar::InspectorPanel))
+                        s->hideParameters();
+                    object->setType(object->gui->getText().toString(), object->gui->ptr);
+                }
+            });
+        }
+        break;
+    }
     case hash("editmode"): {
         if (::getValue<bool>(commandLocked))
             return;
@@ -6870,7 +6893,11 @@ void Canvas::receiveMessage(t_symbol* symbol, SmallArray<pd::Atom> const& atoms)
 
         break;
     }
-    case hash("coords"):
+    case hash("goprect"): {
+        if (graphArea)
+            graphArea->updateBounds();
+        break;
+    }
     case hash("donecanvasdialog"): {
         synchroniseSplitCanvas();
         break;
@@ -6886,9 +6913,11 @@ void Canvas::resized()
     objectLayer.setBounds(getLocalBounds());
 }
 
-void Canvas::activateCanvasSearchHighlight(Object* obj)
+void Canvas::activateCanvasSearchHighlight(Point<float> viewPos, Object* obj)
 {
-    canvasSearchHighlight.reset(std::make_unique<CanvasSearchHighlight>(this, obj).release());
+    canvasSearchHighlight = std::make_unique<CanvasSearchHighlight>(this, obj);
+    if (viewport)
+        canvasSearchHighlight->chainAnimation(viewport->getMoveAnimation(viewPos));
 }
 
 void Canvas::removeCanvasSearchHighlight()

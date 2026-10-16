@@ -27,6 +27,7 @@
 #include <juce_audio_plugin_client/juce_audio_plugin_client.h>
 #include <juce_audio_utils/juce_audio_utils.h>
 #include <juce_audio_devices/juce_audio_devices.h>
+#include <juce_audio_plugin_client/detail/juce_CreatePluginFilter.h>
 
 #include "Constants.h"
 #include "Utility/StackShadow.h"
@@ -36,15 +37,6 @@
 #include "../PluginEditor.h"
 #include "../CanvasViewport.h"
 #include "Dialogs/Dialogs.h"
-
-// For each OS, we have a different approach to rendering the window shadow
-// macOS:
-// - Use the native shadow, it works fine
-// Windows:
-//  - We instruct Windows 11 to make the window rounded. On Windows 10, the window will not be rounded, which follows the default OS window style anyway
-// Linux:
-// - Native shadow is inconsistent across window managers and distros (sometimes there is no shadow, even though other windows have it...)
-// - We use a transparent margin around the window to draw the shadow in
 
 static bool drawWindowShadow = true;
 
@@ -60,50 +52,24 @@ public:
         short numIns, numOuts;
     };
 
-    /** Creates an instance of the default plugin.
-
-     The settings object can be a PropertySet that the class should use to store its
-     settings - the takeOwnershipOfSettings indicates whether this object will delete
-     the settings automatically when no longer needed. The settings can also be nullptr.
-
-     A default device name can be passed in.
-
-     Preferably a complete setup options object can be used, which takes precedence over
-     the preferredDefaultDeviceName and allows you to select the input & output device names,
-     sample rate, buffer size etc.
-
-     In all instances, the settingsToUse will take precedence over the "preferred" options if not null.
-     */
-    explicit StandalonePluginHolder(PropertySet* settingsToUse, bool const takeOwnershipOfSettings = true, String const& preferredDefaultDeviceName = String(), AudioDeviceManager::AudioDeviceSetup const* preferredSetupOptions = nullptr, Array<PluginInOuts> const& channels = Array<PluginInOuts>())
-
-        : settings(settingsToUse, takeOwnershipOfSettings)
-        , channelConfiguration(channels)
+    StandalonePluginHolder()
     {
-
         createPlugin();
-
-        auto const inChannels = channelConfiguration.size() > 0 ? channelConfiguration[0].numIns : processor->getMainBusNumInputChannels();
-
-        if (preferredSetupOptions != nullptr)
-            options = std::make_unique<AudioDeviceManager::AudioDeviceSetup>(*preferredSetupOptions);
-
-        auto const audioInputRequired = inChannels > 0;
-
-        if (audioInputRequired && RuntimePermissions::isRequired(RuntimePermissions::recordAudio) && !RuntimePermissions::isGranted(RuntimePermissions::recordAudio))
-            RuntimePermissions::request(RuntimePermissions::recordAudio, [this, preferredDefaultDeviceName](bool const granted) { init(granted, preferredDefaultDeviceName); });
-        else
-            init(audioInputRequired, preferredDefaultDeviceName);
-    }
-
-    void init(bool const enableAudioInput, String const& preferredDefaultDeviceName)
-    {
-        setupAudioDevices(enableAudioInput, preferredDefaultDeviceName, options.get());
-        startPlaying();
+        MessageManager::callAsync([this]() {
+            if (RuntimePermissions::isRequired(RuntimePermissions::recordAudio) && !RuntimePermissions::isGranted(RuntimePermissions::recordAudio))
+                RuntimePermissions::request(RuntimePermissions::recordAudio, [this](bool const granted) {
+                    setupAudioDevices();
+                    startPlaying();
+                });
+            else {
+                setupAudioDevices();
+                startPlaying();
+            }
+        });
     }
 
     ~StandalonePluginHolder() override
     {
-        savePluginState();
         processor->suspendProcessing(true);
         stopPlaying();
         processor = nullptr;
@@ -122,7 +88,7 @@ public:
         if (processor == nullptr)
             return 0;
 
-        return channelConfiguration.size() > 0 ? channelConfiguration[0].numIns : processor->getMainBusNumInputChannels();
+        return processor->getMainBusNumInputChannels();
     }
 
     int getNumOutputChannels() const
@@ -130,7 +96,7 @@ public:
         if (processor == nullptr)
             return 0;
 
-        return channelConfiguration.size() > 0 ? channelConfiguration[0].numOuts : processor->getMainBusNumOutputChannels();
+        return processor->getMainBusNumOutputChannels();
     }
 
     void startPlaying()
@@ -145,19 +111,59 @@ public:
 
     void saveAudioDeviceState()
     {
-        if (settings != nullptr) {
-            auto const xml = deviceManager.createStateXml();
+        auto camelToSnake = [](String const& input) {
+            String result;
+            for (int i = 0; i < input.length(); ++i) {
+                auto c = input[i];
+                if (CharacterFunctions::isUpperCase(c)) {
+                    if (i != 0)
+                        result << '_';
+                    result << CharacterFunctions::toLowerCase(c);
+                } else {
+                    result << c;
+                }
+            }
+            return result;
+        };
 
-            settings->setValue("audioSetup", xml.get());
+        if (auto const xml = deviceManager.createStateXml()) {
+            DynamicObject::Ptr audioSetup = new DynamicObject();
+            for (int i = 0; i < xml->getNumAttributes(); i++) {
+                auto const name = camelToSnake(xml->getAttributeName(i));
+                audioSetup->setProperty(name, xml->getAttributeValue(i));
+            }
+            SettingsFile::getInstance()->setProperty("audio_setup", var(audioSetup.get()));
         }
     }
 
-    void reloadAudioDeviceState(bool const enableAudioInput, String const& preferredDefaultDeviceName, AudioDeviceManager::AudioDeviceSetup const* preferredSetupOptions)
+    void reloadAudioDeviceState()
     {
-        std::unique_ptr<XmlElement> savedState;
+        auto snakeToCamel = [](String const& input) {
+            String result;
+            bool capitalizeNext = false;
+            for (int i = 0; i < input.length(); ++i) {
+                auto c = input[i];
+                if (c == '_') {
+                    capitalizeNext = true;
+                } else {
+                    if (capitalizeNext) {
+                        result << CharacterFunctions::toUpperCase(c);
+                        capitalizeNext = false;
+                    } else {
+                        result << c;
+                    }
+                }
+            }
+            return result;
+        };
 
-        if (settings != nullptr) {
-            savedState = settings->getXmlValue("audioSetup");
+        std::unique_ptr<XmlElement> savedState;
+        auto audioSetup = SettingsFile::getInstance()->getProperty<DynamicObject>("audio_setup");
+        if (audioSetup && audioSetup->getProperties().size()) {
+            savedState = std::make_unique<XmlElement>("DEVICESETUP");
+            for (auto& property : audioSetup->getProperties()) {
+                savedState->setAttribute(snakeToCamel(property.name.toString()), property.value.toString());
+            }
         }
 
         auto const inputChannels = getNumInputChannels();
@@ -168,34 +174,7 @@ public:
             outputChannels = 1;
         }
 
-        deviceManager.initialise(enableAudioInput ? inputChannels : 0, outputChannels, savedState.get(), true, preferredDefaultDeviceName, preferredSetupOptions);
-    }
-
-    void savePluginState()
-    {
-        if (settings != nullptr && processor != nullptr) {
-            MemoryBlock data;
-            processor->getStateInformation(data);
-
-            MemoryOutputStream ostream;
-            Base64::convertToBase64(ostream, data.getData(), data.getSize());
-            settings->setValue("filterState", ostream.toString());
-        }
-    }
-
-    void reloadPluginState()
-    {
-        if (settings != nullptr) {
-            // Async to give the app a chance to start up before loading the patch
-            MessageManager::callAsync([this, _this = SafePointer(this)] {
-                if (_this) {
-                    MemoryOutputStream data;
-                    Base64::convertFromBase64(data, settings->getValue("filterState"));
-                    if (data.getDataSize() > 0)
-                        processor->setStateInformation(data.getData(), static_cast<int>(data.getDataSize()));
-                }
-            });
-        }
+        deviceManager.initialise(inputChannels, outputChannels, savedState.get(), true, "", nullptr);
     }
 
     bool isInterAppAudioConnected()
@@ -215,20 +194,16 @@ public:
             return device->getIcon(size);
 #endif
 
-        return {};
+        return { };
     }
 
     static StandalonePluginHolder* getInstance();
 
-    OptionalScopedPointer<PropertySet> settings;
     std::unique_ptr<AudioProcessor> processor;
     AudioDeviceManager deviceManager;
     AudioProcessorPlayer player;
-    Array<PluginInOuts> channelConfiguration;
 
     std::unique_ptr<AudioDeviceManager::AudioDeviceSetup> options;
-
-    std::unique_ptr<FileChooser> stateFileChooser;
 
 private:
     /*  This class can be used to ensure that audio callbacks use buffers with a
@@ -341,7 +316,7 @@ private:
         player.audioDeviceStopped();
     }
 
-    void setupAudioDevices(bool enableAudioInput, String const& preferredDefaultDeviceName, AudioDeviceManager::AudioDeviceSetup const* preferredSetupOptions);
+    void setupAudioDevices();
 
     void shutDownAudioDevices();
 
@@ -360,11 +335,8 @@ private:
 
 class PlugDataWindow final : public DocumentWindow
     , public SettingsFileListener {
-
-    Image shadowImage;
     AudioProcessorEditor* editor;
     StandalonePluginHolder* pluginHolder;
-    bool wasFullscreen = false;
 
 public:
     typedef StandalonePluginHolder::PluginInOuts PluginInOuts;
@@ -377,10 +349,13 @@ public:
      true, then the settings object will be owned and deleted by this object.
      */
     explicit PlugDataWindow(AudioProcessorEditor* pluginEditor)
-        : DocumentWindow("plugdata", LookAndFeel::getDefaultLookAndFeel().findColour(ResizableWindow::backgroundColourId), DocumentWindow::minimiseButton | DocumentWindow::maximiseButton | DocumentWindow::closeButton)
+        : DocumentWindow("plugdata", LookAndFeel::getDefaultLookAndFeel().findColour(ResizableWindow::backgroundColourId), DocumentWindow::minimiseButton | DocumentWindow::maximiseButton | DocumentWindow::closeButton, false)
         , editor(pluginEditor)
     {
         setTitleBarHeight(0);
+#if JUCE_WINDOWS || JUCE_LINUX || JUCE_BSD
+        setTitleBarButtonsRequired(0, false);
+#endif
         pluginHolder = ProjectInfo::getStandalonePluginHolder();
 
         drawWindowShadow = Desktop::canUseSemiTransparentWindows();
@@ -389,18 +364,26 @@ public:
 
         setContentOwned(mainComponent, true);
 
-#if JUCE_MAC
-        if (auto const peer = getPeer())
-            OSUtils::enableInsetTitlebarButtons(peer->getNativeHandle(), true);
-#endif
-
-        parentHierarchyChanged();
+        updateWindowStyle();
     }
 
     void parentHierarchyChanged() override
     {
-        DocumentWindow::parentHierarchyChanged();
+        activeWindowStatusChanged();
 
+#if JUCE_MAC
+        auto nativeWindow = SettingsFile::getInstance()->getProperty<bool>("native_window");
+        if (auto peer = getPeer()) {
+            OSUtils::enableInsetTitlebarButtons(peer, !nativeWindow);
+        }
+#elif JUCE_WINDOWS
+        if (auto peer = getPeer())
+            OSUtils::useWindowsNativeDecorations(peer, !isFullScreen());
+#endif
+    }
+
+    void updateWindowStyle()
+    {
         auto nativeWindow = SettingsFile::getInstance()->getProperty<bool>("native_window");
 #if JUCE_IOS
         nativeWindow = true;
@@ -411,13 +394,17 @@ public:
         auto* editor = mainComponent->getEditor();
         auto* pdEditor = dynamic_cast<PluginEditor*>(editor);
 
+        if (isOnDesktop()) // Ensures we only recreate the desktop window once
+        {
+            removeFromDesktop();
+        }
+
         if (!nativeWindow) {
 #if JUCE_WINDOWS
             setOpaque(true);
 #else
             setOpaque(false);
 #endif
-
             setResizable(false, false);
             // we also need to set the constrainer of THIS window so it's set for the peer
             setConstrainer(&pdEditor->constrainer);
@@ -430,15 +417,9 @@ public:
             pdEditor->setUseBorderResizer(false);
         }
 
-#if JUCE_WINDOWS
-        if (auto peer = getPeer())
-            OSUtils::useWindowsNativeDecorations(peer->getNativeHandle(), !isFullScreen());
-#endif
-
-#if JUCE_MAC
-        if (auto peer = getPeer())
-            OSUtils::enableInsetTitlebarButtons(peer->getNativeHandle(), !nativeWindow && !isFullScreen());
-#endif
+        setDropShadowEnabled(false);
+        addToDesktop(getDesktopWindowStyleFlags());
+        toFront(true);
 
         editor->resized();
         resized();
@@ -451,7 +432,7 @@ public:
             auto* editor = mainComponent->getEditor();
             auto* pdEditor = dynamic_cast<PluginEditor*>(editor);
             pdEditor->nvgSurface.detachContext();
-            recreateDesktopWindow();
+            updateWindowStyle();
         }
     }
 
@@ -460,7 +441,7 @@ public:
         clearContentComponent();
     }
 
-    BorderSize<int> getBorderThickness() override
+    BorderSize<int> getBorderThickness() const override
     {
         return BorderSize<int>(0);
     }
@@ -498,11 +479,10 @@ public:
         pluginHolder->stopPlaying();
         clearContentComponent();
 
-        if (auto* props = pluginHolder->settings.get())
-            props->removeValue("filterState");
+        SettingsFile::getInstance()->setProperty("audio_setup", var());
 
         pluginHolder->createPlugin();
-        setContentOwned(new MainContentComponent(*this, pluginHolder->processor->createEditorIfNeeded()), true);
+        setContentOwned(new MainContentComponent(*this, pluginHolder->processor->createEditorAndMakeActive()), true);
         pluginHolder->startPlaying();
     }
 
@@ -520,14 +500,41 @@ public:
         closeAllPatches();
     }
 
-    // implemented in PlugDataApp.cpp
-    void closeAllPatches();
+    void closeAllPatches()
+    {
+        // Show an ask-to-save dialog for each dirty patch. Because the save
+        // dialog uses an asynchronous callback, these closes have to be chained.
+        if (auto* editor = dynamic_cast<PluginEditor*>(mainComponent->getEditor())) {
+            auto* processor = ProjectInfo::getStandalonePluginHolder()->processor.get();
+            auto const* mainEditor = dynamic_cast<PluginEditor*>(processor->getActiveEditor());
+            auto& openedEditors = editor->pd->openedEditors;
+
+            if (editor == mainEditor) {
+                processor->editorBeingDeleted(editor);
+            }
+
+            if (openedEditors.size() == 1) {
+                editor->getTabComponent().closeAllTabs(true, nullptr, [this, editor, &openedEditors] {
+                    removeFromDesktop();
+                    openedEditors.removeObject(editor);
+                });
+            } else {
+                editor->getTabComponent().closeAllTabs(false, nullptr, [this, editor, &openedEditors] {
+                    removeFromDesktop();
+                    openedEditors.removeObject(editor);
+                });
+            }
+        }
+    }
 
     bool isMaximised() const
     {
-#if JUCE_LINUX
-        if (auto* b = getMaximiseButton()) {
-            return b->getToggleState();
+#if JUCE_LINUX || JUCE_BSD
+        if (hasPendingLinuxMaximisedState)
+            return pendingLinuxMaximisedState;
+
+        if (auto* peer = getPeer()) {
+            return OSUtils::isLinuxWindowMaximised(peer);
         } else {
             return isFullScreen();
         }
@@ -544,57 +551,73 @@ public:
     void maximiseButtonPressed() override
     {
 #if JUCE_LINUX || JUCE_BSD
-        if (auto* b = getMaximiseButton()) {
-            if (auto* peer = getPeer()) {
-                bool shouldBeMaximised = OSUtils::isX11WindowMaximised(peer->getNativeHandle());
-                b->setToggleState(!shouldBeMaximised, dontSendNotification);
+        if (auto* peer = getPeer()) {
+            bool shouldBeMaximised = !isMaximised();
 
-                if (!useNativeTitlebar()) {
-                    OSUtils::maximiseX11Window(peer->getNativeHandle(), !shouldBeMaximised);
-                }
-            } else {
-                b->setToggleState(false, dontSendNotification);
+            // X11 window managers report the new state separately from the resize, so assume the
+            // requested state for a moment. On Wayland it arrives together with the new size, and
+            // assuming it early would lay the window out for the new state at the old size.
+            if (!OSUtils::isWaylandWindow(peer))
+                setPendingLinuxMaximisedState(shouldBeMaximised);
+
+            if (auto* b = getMaximiseButton())
+                b->setToggleState(shouldBeMaximised, dontSendNotification);
+
+            if (!useNativeTitlebar()) {
+                OSUtils::maximiseLinuxWindow(peer, shouldBeMaximised);
             }
+        } else {
+            if (auto* b = getMaximiseButton())
+                b->setToggleState(false, dontSendNotification);
         }
 #else
         setFullScreen(!isFullScreen());
         parentHierarchyChanged();
 #endif
+        if (auto* pluginEditor = dynamic_cast<PluginEditor*>(editor))
+            pluginEditor->updateStandaloneWindowControls();
+
         resized();
     }
 
 #if JUCE_LINUX || JUCE_BSD
     void paint(Graphics& g) override
     {
-        if (drawWindowShadow && !useNativeTitlebar() && !isFullScreen()) {
-            auto b = getLocalBounds();
-            Path localPath;
-            localPath.addRoundedRectangle(b.toFloat().reduced(22.0f), Corners::windowCornerRadius);
-
-            int radius = isActiveWindow() ? 22 : 17;
-            StackShadow::renderDropShadow(hash("plugdata_window"), g, localPath, Colour(0, 0, 0).withAlpha(0.6f), radius, { 0, 2 });
+        if (drawWindowShadow && !useNativeTitlebar() && !isMaximised()) {
+            StackShadow::drawShadowForRect(g, getLocalBounds().reduced(20, 20), 18, Corners::windowCornerRadius, isActiveWindow() ? 0.42f : 0.2f);
         }
     }
-#elif JUCE_WINDOWS
+#endif
+
+#if JUCE_WINDOWS || JUCE_LINUX || JUCE_BSD
     void paintOverChildren(Graphics& g) override
     {
+        auto const& colours = getThemeColours(*this);
+
+#    if JUCE_WINDOWS
         if (SystemStats::getOperatingSystemType() != SystemStats::Windows11) {
-            g.setColour(findColour(PlugDataColour::outlineColourId));
+            g.setColour(colours.outlineColour);
             g.drawRect(0, 0, getWidth(), getHeight());
         }
+#    else
+        if (drawWindowShadow && !useNativeTitlebar() && !isMaximised()) {
+            g.setColour(colours.outlineColour.withAlpha(isActiveWindow() ? 1.0f : 0.5f));
+            g.drawRoundedRectangle(18, 18, getWidth() - 36, getHeight() - 36, Corners::windowCornerRadius, 1.0f);
+        } else if (drawWindowShadow && !useNativeTitlebar()) {
+            g.setColour(colours.outlineColour.withAlpha(isActiveWindow() ? 1.0f : 0.5f));
+            g.drawRect(0.5f, 0.5f, getWidth() - 1.0f, getHeight() - 1.0f, 1.0f);
+        }
+#    endif
     }
 #endif
 
     void activeWindowStatusChanged() override
     {
-#if JUCE_WINDOWS
-        // Windows looses the opengl buffers when minimised,
-        // regenerate here when restored from minimised
-        if (isActiveWindow()) {
-            if (auto* pluginEditor = dynamic_cast<PluginEditor*>(editor))
-                pluginEditor->nvgSurface.invalidateAll();
+        if (auto* pluginEditor = dynamic_cast<PluginEditor*>(editor)) {
+            pluginEditor->updateStandaloneWindowControls();
+            pluginEditor->nvgSurface.invalidateAll();
         }
-#endif
+
         repaint();
     }
 
@@ -610,20 +633,27 @@ public:
             titleBarArea = Rectangle<int>(0, 7 + margin, getWidth() - (6 + margin), 23);
         }
 #elif JUCE_MAC
-        auto const fullscreen = isFullScreen();
         auto const nativeWindow = SettingsFile::getInstance()->getProperty<bool>("native_window");
-        if (!nativeWindow && wasFullscreen && !fullscreen) {
-            Timer::callAfterDelay(800, [_this = SafePointer(this)] {
+        if (!nativeWindow) {
+            Timer::callAfterDelay(150, [_this = SafePointer(this)] {
                 if (_this) {
                     _this->parentHierarchyChanged();
                 }
             });
         }
-        wasFullscreen = fullscreen;
 #endif
 
 #if !JUCE_IOS
         getLookAndFeel().positionDocumentWindowButtons(*this, titleBarArea.getX(), titleBarArea.getY(), titleBarArea.getWidth(), titleBarArea.getHeight(), getMinimiseButton(), getMaximiseButton(), getCloseButton(), false);
+#endif
+
+#if JUCE_WINDOWS || JUCE_LINUX || JUCE_BSD
+        for (auto* button : { getMinimiseButton(), getMaximiseButton(), getCloseButton() })
+            if (button)
+                button->setVisible(false);
+
+        if (auto* pluginEditor = dynamic_cast<PluginEditor*>(editor))
+            pluginEditor->updateStandaloneWindowControls();
 #endif
 
         if (auto* content = getContentComponent()) {
@@ -637,6 +667,34 @@ public:
     }
 
 private:
+#if JUCE_LINUX || JUCE_BSD
+    void setPendingLinuxMaximisedState(bool shouldBeMaximised)
+    {
+        hasPendingLinuxMaximisedState = true;
+        pendingLinuxMaximisedState = shouldBeMaximised;
+        auto const pendingStateSerial = ++pendingLinuxMaximisedStateSerial;
+
+        Timer::callAfterDelay(250, [_this = SafePointer(this), pendingStateSerial] {
+            if (!_this)
+                return;
+
+            if (_this->pendingLinuxMaximisedStateSerial != pendingStateSerial)
+                return;
+
+            _this->hasPendingLinuxMaximisedState = false;
+
+            if (auto* b = _this->getMaximiseButton())
+                b->setToggleState(_this->isMaximised(), dontSendNotification);
+
+            if (auto* pluginEditor = dynamic_cast<PluginEditor*>(_this->editor))
+                pluginEditor->updateStandaloneWindowControls();
+
+            _this->resized();
+            _this->repaint();
+        });
+    }
+#endif
+
     class MainContentComponent final : public Component
         , private ComponentListener
         , public MenuBarModel {
@@ -680,12 +738,7 @@ private:
 
 #if JUCE_LINUX || JUCE_BSD
             if (drawWindowShadow) {
-                if (auto* maximiseButton = owner.getMaximiseButton()) {
-                    bool maximised = maximiseButton->getToggleState();
-                    return maximised ? 0 : 18;
-                }
-
-                return 18;
+                return owner.isMaximised() ? 0 : 18;
             } else {
                 return 0;
             }
@@ -739,10 +792,12 @@ private:
 #if JUCE_IOS
         void paint(Graphics& g) override
         {
+            auto const& colours = getThemeColours(*this);
+
             if (editor) {
-                g.fillAll(editor->getLookAndFeel().findColour(PlugDataColour::toolbarBackgroundColourId));
+                g.fillAll(colours.toolbarBackgroundColour);
             } else {
-                g.fillAll(findColour(PlugDataColour::toolbarBackgroundColourId));
+                g.fillAll(colours.toolbarBackgroundColour);
             }
         }
 #endif
@@ -751,7 +806,7 @@ private:
         {
             auto r = getLocalBounds().reduced(getMargin());
 #if JUCE_IOS
-            if (auto* peer = getPeer()) {
+            if (getPeer()) {
                 r = OSUtils::getSafeAreaInsets().subtractedFrom(r);
             }
 #endif
@@ -786,7 +841,7 @@ private:
         {
 #if JUCE_IOS
             if (editor != nullptr) {
-                auto totalArea = Desktop::getInstance().getDisplays().getPrimaryDisplay()->totalArea;
+                auto totalArea = Desktop::getInstance().getDisplays().getPrimaryDisplay()->logicalBounds.getSmallestIntegerContainer();
                 totalArea = OSUtils::getSafeAreaInsets().addedTo(totalArea);
                 return totalArea;
             }
@@ -794,7 +849,7 @@ private:
             if (editor != nullptr)
                 return getLocalArea(editor.getComponent(), editor->getLocalBounds()).expanded(getMargin());
 
-            return {};
+            return { };
         }
 
         bool preventResizingEditor = false;
@@ -807,5 +862,13 @@ private:
 public:
     MainContentComponent* mainComponent = nullptr;
 
+private:
+#if JUCE_LINUX || JUCE_BSD
+    bool hasPendingLinuxMaximisedState = false;
+    bool pendingLinuxMaximisedState = false;
+    int pendingLinuxMaximisedStateSerial = 0;
+#endif
+
+public:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PlugDataWindow)
 };

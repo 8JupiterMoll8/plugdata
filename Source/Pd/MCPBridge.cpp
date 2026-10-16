@@ -7,14 +7,14 @@
 #include "MCPBridge.h"
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
-#include "Statusbar.h" // StatusbarSource::getCPUUsage() for /pd/perf
+#include "Toolbar.h" // ToolbarSource::getCPUUsage() for /pd/perf
 #include "Sidebar/Sidebar.h"
 #include "Canvas.h"
 #include "TabComponent.h"
 #include "Object.h"
 #include "Connection.h" // Connection inobj/outobj + inIdx/outIdx (encapsulate_to_file rewire)
 #include "Objects/ObjectBase.h"
-#include "Objects/AllGuis.h" // t_fake_knob raw snd/rcv fields for screenshot labels
+#include "AllGuis.h" // t_fake_knob raw snd/rcv fields for screenshot labels
 #include "Objects/GemCapture.h" // PRD 1.4: native GEM window capture
 #include <g_all_guis.h>       // t_slider live fields (x_min/x_max/x_fval) for obj_get
 #include "Pd/Interface.h"
@@ -2040,7 +2040,7 @@ juce::String MCPBridge::computePerfFacts(PluginProcessor* processor, t_canvas* c
         topArr.add(juce::var(o));
     }
 
-    float cpu = (processor && processor->statusbarSource) ? processor->statusbarSource->getCPUUsage() : 0.0f;
+    float cpu = (processor && processor->toolbarSource) ? processor->toolbarSource->getCPUUsage() : 0.0f;
 
     auto* root = new juce::DynamicObject();
     root->setProperty("dsp", pd_getdspstate() != 0);

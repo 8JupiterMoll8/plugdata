@@ -6,11 +6,14 @@
 #pragma once
 
 // Also used by garray
-class GraphTicks {
+class GraphTicks final : public ObjectLabel {
     int xTicksPerBig = 0, yTicksPerBig = 0;
     float xTickPoint = 0, yTickPoint = 0;
     float xTickInc = 0, yTickInc = 0;
+    float xLabelY = 0, yLabelX = 0;
     float gl_x1 = 0.f, gl_x2 = 1.f, gl_y1 = 100.f, gl_y2 = 0.f;
+    Rectangle<int> graphBounds;
+    StringArray xLabels, yLabels;
 
 public:
     void update(t_glist const* glist)
@@ -25,74 +28,164 @@ public:
         gl_y1 = glist->gl_y1;
         gl_x2 = glist->gl_x2;
         gl_y2 = glist->gl_y2;
+
+        xLabelY = glist->gl_xlabely;
+        yLabelX = glist->gl_ylabelx;
+        xLabels.clear();
+        yLabels.clear();
+
+        for (int i = 0; i < glist->gl_nxlabels; i++)
+            xLabels.add(String::fromUTF8(glist->gl_xlabel[i]->s_name));
+
+        for (int i = 0; i < glist->gl_nylabels; i++)
+            yLabels.add(String::fromUTF8(glist->gl_ylabel[i]->s_name));
+    }
+
+    static Font getLabelFont()
+    {
+        return Fonts::getDefaultFont().withPointHeight(12.0f);
+    }
+
+    int getSizeOfTicksAndLabels() const
+    {
+        int size = (xTicksPerBig || yTicksPerBig) ? 4 : 0;
+
+        if (xLabels.size() > 0)
+            size = std::max(size, 14);
+
+        if (yLabels.size() > 0) {
+            auto const font = getLabelFont();
+            int labelWidth = 0;
+            for (auto const& label : yLabels)
+                labelWidth = std::max(labelWidth, Fonts::getStringWidthInt(label, font));
+
+            size = std::max(size, labelWidth + 4);
+        }
+
+        return size;
+    }
+
+    void updateLabel(Object* object)
+    {
+        graphBounds = object->getBounds().reduced(Object::margin);
+        setBounds(graphBounds.expanded(getSizeOfTicksAndLabels()));
+        setVisible(xLabels.size() > 0 || yLabels.size() > 0);
+        setLabelColour(getThemeColours(*this).canvasTextColour);
+    }
+
+    void renderLabel(NVGGraphicsContext& llgc) override
+    {
+        if (!isVisible())
+            return;
+
+        auto const localGraphBounds = graphBounds.translated(-getX(), -getY());
+        auto const y1 = static_cast<float>(localGraphBounds.getY());
+        auto const y2 = static_cast<float>(localGraphBounds.getBottom());
+        auto const x1 = static_cast<float>(localGraphBounds.getX());
+        auto const x2 = static_cast<float>(localGraphBounds.getRight());
+
+        auto const font = getLabelFont();
+        auto const colour = getThemeColours(*this).canvasTextColour;
+
+        auto anchor = [&font](String const& text, Point<float> const pos, Justification const align) {
+            auto const w = Fonts::getStringWidth(text, font) + 2.0f;
+            auto const h = font.getHeight();
+
+            auto x = pos.x;
+            if (align.testFlags(Justification::horizontallyCentred))
+                x -= w * 0.5f;
+            else if (align.testFlags(Justification::right))
+                x -= w;
+
+            auto y = pos.y;
+            if (align.testFlags(Justification::bottom))
+                y -= h;
+            else if (!align.testFlags(Justification::top))
+                y -= h * 0.5f;
+
+            return Rectangle<float>(x, y, w, h);
+        };
+
+        for (auto const& text : xLabels) {
+            auto const xpos = jmap<float>(text.getFloatValue(), gl_x1, gl_x2, x1, x2);
+            auto const ypos = jmap<float>(xLabelY, gl_y1, gl_y2, y1, y2);
+            auto const align = xLabelY > 0.5f * (gl_y1 + gl_y2) ? Justification::centredBottom : Justification::centredTop;
+            Fonts::drawText(&llgc, text, anchor(text, { xpos, ypos }, align), font, colour, align);
+        }
+
+        for (auto const& text : yLabels) {
+            auto const xpos = jmap<float>(yLabelX, gl_x1, gl_x2, x1, x2);
+            auto const ypos = jmap<float>(text.getFloatValue(), gl_y1, gl_y2, y1, y2);
+            auto const align = yLabelX > 0.5f * (gl_x1 + gl_x2) ? Justification::centredLeft : Justification::centredRight;
+            Fonts::drawText(&llgc, text, anchor(text, { xpos, ypos }, align), font, colour, align);
+        }
     }
 
     void render(NVGcontext* nvg, Rectangle<float> const b) const
     {
-        if (xTicksPerBig) {
-            t_float const y1 = b.getY(), y2 = b.getBottom(), x1 = b.getX(), x2 = b.getRight();
+        t_float const y1 = b.getY(), y2 = b.getBottom(), x1 = b.getX(), x2 = b.getRight();
 
+        if (xTicksPerBig) {
             t_float f = xTickPoint;
             for (int i = 0; f < 0.99f * gl_x2 + 0.01f * gl_x1; i++, f += xTickInc) {
                 auto const xpos = jmap<float>(f, gl_x2, gl_x1, x1, x2);
                 int const tickpix = i % xTicksPerBig ? 2 : 4;
-                nvgBeginPath(nvg);
-                nvgMoveTo(nvg, xpos, y2);
-                nvgLineTo(nvg, xpos, y2 - tickpix);
-                nvgStroke(nvg);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgMoveTo(nvg, xpos, y2);
+                nanovg::nvgLineTo(nvg, xpos, y2 - tickpix);
+                nanovg::nvgStroke(nvg);
 
-                nvgBeginPath(nvg);
-                nvgMoveTo(nvg, xpos, y1);
-                nvgLineTo(nvg, xpos, y1 + tickpix);
-                nvgStroke(nvg);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgMoveTo(nvg, xpos, y1);
+                nanovg::nvgLineTo(nvg, xpos, y1 + tickpix);
+                nanovg::nvgStroke(nvg);
             }
 
             f = xTickPoint - xTickInc;
             for (int i = 1; f > 0.99f * gl_x1 + 0.01f * gl_x2; i++, f -= xTickInc) {
                 auto const xpos = jmap<float>(f, gl_x2, gl_x1, x1, x2);
                 int const tickpix = i % xTicksPerBig ? 2 : 4;
-                nvgBeginPath(nvg);
-                nvgMoveTo(nvg, xpos, y2);
-                nvgLineTo(nvg, xpos, y2 - tickpix);
-                nvgStroke(nvg);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgMoveTo(nvg, xpos, y2);
+                nanovg::nvgLineTo(nvg, xpos, y2 - tickpix);
+                nanovg::nvgStroke(nvg);
 
-                nvgBeginPath(nvg);
-                nvgMoveTo(nvg, xpos, y1);
-                nvgLineTo(nvg, xpos, y1 + tickpix);
-                nvgStroke(nvg);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgMoveTo(nvg, xpos, y1);
+                nanovg::nvgLineTo(nvg, xpos, y1 + tickpix);
+                nanovg::nvgStroke(nvg);
             }
         }
 
         if (yTicksPerBig) {
-            t_float const y1 = b.getY(), y2 = b.getBottom(), x1 = b.getX(), x2 = b.getRight();
             t_float f = yTickPoint;
             for (int i = 0; f < 0.99f * gl_y1 + 0.01f * gl_y2; i++, f += yTickInc) {
                 auto const ypos = jmap<float>(f, gl_y2, gl_y1, y1, y2);
                 int const tickpix = i % yTicksPerBig ? 2 : 4;
-                nvgBeginPath(nvg);
-                nvgMoveTo(nvg, x1, ypos);
-                nvgLineTo(nvg, x1 + tickpix, ypos);
-                nvgStroke(nvg);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgMoveTo(nvg, x1, ypos);
+                nanovg::nvgLineTo(nvg, x1 + tickpix, ypos);
+                nanovg::nvgStroke(nvg);
 
-                nvgBeginPath(nvg);
-                nvgMoveTo(nvg, x2, ypos);
-                nvgLineTo(nvg, x2 - tickpix, ypos);
-                nvgStroke(nvg);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgMoveTo(nvg, x2, ypos);
+                nanovg::nvgLineTo(nvg, x2 - tickpix, ypos);
+                nanovg::nvgStroke(nvg);
             }
 
             f = yTickPoint - yTickInc;
             for (int i = 1; f > 0.99f * gl_y2 + 0.01f * gl_y1; i++, f -= yTickInc) {
                 auto const ypos = jmap<float>(f, gl_y2, gl_y1, y1, y2);
                 int const tickpix = i % yTicksPerBig ? 2 : 4;
-                nvgBeginPath(nvg);
-                nvgMoveTo(nvg, x1, ypos);
-                nvgLineTo(nvg, x1 + tickpix, ypos);
-                nvgStroke(nvg);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgMoveTo(nvg, x1, ypos);
+                nanovg::nvgLineTo(nvg, x1 + tickpix, ypos);
+                nanovg::nvgStroke(nvg);
 
-                nvgBeginPath(nvg);
-                nvgMoveTo(nvg, x2, ypos);
-                nvgLineTo(nvg, x2 - tickpix, ypos);
-                nvgStroke(nvg);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgMoveTo(nvg, x2, ypos);
+                nanovg::nvgLineTo(nvg, x2 - tickpix, ypos);
+                nanovg::nvgStroke(nvg);
             }
         }
     }
@@ -109,15 +202,11 @@ class GraphOnParent final : public ObjectBase {
     pd::Patch::Ptr subpatch;
     std::unique_ptr<Canvas> canvas;
 
-    CachedTextRender textRenderer;
-
     NVGImage openInGopBackground;
     std::unique_ptr<TextEditor> editor;
 
     bool isLocked : 1 = false;
     bool isOpenedInSplitView : 1 = false;
-
-    GraphTicks ticks;
 
 public:
     // Graph On Parent
@@ -136,11 +225,22 @@ public:
         // There is a possibility that a donecanvasdialog message is sent inbetween the initialisation in pd and the initialisation of the plugdata object, making it possible to miss this message. This especially tends to happen if the messagebox is connected to a loadbang.
         // By running another update call asynchrounously, we can still respond to the new state
         MessageManager::callAsync([_this = SafePointer(this)] {
-            if (_this) {
-                _this->update();
-                _this->propertyChanged(_this->isGraphChild);
+            if (!_this)
+                return;
+            if (auto glist = _this->ptr.get<t_canvas>()) {
+                if (!glist->gl_isgraph) {
+                    _this->cnv->setSelected(_this->object, false);
+                    if (auto* s = _this->object->editor->getSidebarForPanel(Sidebar::InspectorPanel))
+                        s->hideParameters();
+                    _this->object->setType(_this->getText().toString(), _this->ptr);
+                }
             }
         });
+    }
+
+    bool showParametersWhenSelected() override
+    {
+        return false;
     }
 
     void update() override
@@ -151,20 +251,37 @@ public:
             xRange = VarArray { var(glist->gl_x1), var(glist->gl_x2) };
             yRange = VarArray { var(glist->gl_y2), var(glist->gl_y1) };
             sizeProperty = VarArray { var(glist->gl_pixwidth), var(glist->gl_pixheight) };
-            ticks.update(glist.get());
+            getTicks()->update(glist.get());
         }
 
+        getTicks()->updateLabel(object);
         updateCanvas();
+    }
+
+    GraphTicks* getTicks()
+    {
+        if (labels.isEmpty()) {
+            auto* ticks = new GraphTicks();
+            labels.add(ticks);
+            object->cnv->addChildComponent(ticks);
+            return ticks;
+        }
+
+        return reinterpret_cast<GraphTicks*>(labels[0]);
     }
 
     void receiveObjectMessage(hash32 const symbol, SmallArray<pd::Atom> const& atoms) override
     {
         switch (symbol) {
+        case hash("redraw"):
         case hash("yticks"):
-        case hash("xticks"): {
+        case hash("xticks"):
+        case hash("ylabel"):
+        case hash("xlabel"): {
             if (auto glist = ptr.get<t_canvas>()) {
-                ticks.update(glist.get());
+                getTicks()->update(glist.get());
             }
+            getTicks()->updateLabel(object);
             repaint();
             break;
         }
@@ -181,9 +298,16 @@ public:
             object->setObjectBounds(bounds);
             break;
         }
+        case hash("goprect"): {
+            object->updateBounds();
+            auto const b = getPatch()->getGraphBounds() + canvas->canvasOrigin;
+            canvas->setBounds(-b.getX(), -b.getY(), b.getWidth() + b.getX(), b.getHeight() + b.getY());
+            break;
+        }
         case hash("donecanvasdialog"): {
             update();
             updateCanvas();
+            object->updateBounds();
             break;
         }
         default:
@@ -196,11 +320,7 @@ public:
         if (editor) {
             editor->setBounds(getLocalBounds().removeFromTop(18));
         }
-        
-        auto text = getText();
-        if(text != "graph" && !text.isNotEmpty()) {
-            textRenderer.prepareLayout(getText(), Fonts::getDefaultFont().withHeight(13), cnv->editor->getLookAndFeel().findColour(PlugDataColour::canvasTextColourId), getWidth(), getWidth(), false);
-        }
+
         updateCanvas();
         updateDrawables();
 
@@ -210,21 +330,15 @@ public:
 
     void lookAndFeelChanged() override
     {
-        auto text = getText();
-        if(text != "graph" && !text.isNotEmpty()) {
-            textRenderer.prepareLayout(getText(), Fonts::getDefaultFont().withHeight(13), cnv->editor->getLookAndFeel().findColour(PlugDataColour::canvasTextColourId), getWidth(), getWidth(), false);
-        }
     }
 
     void showEditor() override
     {
         if (!getValue<bool>(hideNameAndArgs) && editor == nullptr) {
-            editor.reset(TextObjectHelper::createTextEditor(object, 13));
-
-            editor->setLookAndFeel(&object->getLookAndFeel());
+            editor.reset(TextObjectHelper::createTextEditor(object, Fonts::getDefaultFont().withHeight(13)));
             editor->setBorder(BorderSize<int>(2, 5, 2, 1));
             editor->setBounds(getLocalBounds().removeFromTop(18));
-            editor->setText(getText(), false);
+            editor->setText(getText().toString(), false);
             editor->selectAll();
 
             addAndMakeVisible(editor.get());
@@ -234,11 +348,7 @@ public:
                 cnv->grabKeyboardFocus();
             };
             editor->onFocusLost = [this] {
-                if (cnv->suggestor->hasKeyboardFocus(true) || Component::getCurrentlyFocusedComponent() == editor.get()) {
-                    editor->grabKeyboardFocus();
-                    return;
-                }
-                hideEditor();
+                cnv->suggestor->checkEditorFocusLoss(editor.get());
             };
 
             cnv->showSuggestions(object, editor.get());
@@ -301,8 +411,6 @@ public:
             auto* patch = cnv->patch.getRawPointer();
 
             pd::Interface::moveObject(patch, glist.cast<t_gobj>(), b.getX(), b.getY());
-            glist->gl_pixwidth = b.getWidth() - 1;
-            glist->gl_pixheight = b.getHeight() - 1;
         }
     }
 
@@ -316,7 +424,7 @@ public:
             return { x, y, w + 1, h + 1 };
         }
 
-        return {};
+        return { };
     }
 
     void updateSizeProperty() override
@@ -368,15 +476,12 @@ public:
     {
         if (!canvas) {
             canvas = std::make_unique<Canvas>(cnv->editor, subpatch, this);
-
-            // Make sure that the graph doesn't become the current canvas
-            cnv->patch.setCurrent();
             cnv->editor->updateCommandStatus();
         }
 
         auto const b = getPatch()->getGraphBounds() + canvas->canvasOrigin;
         canvas->setBounds(-b.getX(), -b.getY(), b.getWidth() + b.getX(), b.getHeight() + b.getY());
-        canvas->setLookAndFeel(&LookAndFeel::getDefaultLookAndFeel());
+        canvas->setLookAndFeel(&cnv->editor->getLookAndFeel());
         canvas->locked.referTo(cnv->locked);
 
         canvas->performSynchronise();
@@ -392,33 +497,32 @@ public:
 
     void render(NVGcontext* nvg) override
     {
+        auto const& colours = getThemeColours();
+
         // Strangly, the title goes below the graph content in pd
         if (!getValue<bool>(hideNameAndArgs)) {
+            auto& llgc = *cnv->editor->getNanoLLGC();
             if (editor && editor->isVisible()) {
-                imageRenderer.renderJUCEComponent(nvg, *editor, getImageScale());
+                llgc.renderComponent(*editor);
             } else {
-                auto const text = getText();
+                auto const text = getText().toString();
                 if (text != "graph" && text.isNotEmpty()) {
-                    textRenderer.renderText(nvg, Rectangle<float>(5, 0, getWidth() - 5, 16), getImageScale());
+                    Graphics g(llgc);
+                    auto const textBounds = Rectangle<float>(5, 1, getWidth() - 5, 16);
+                    NVGGraphicsContext::ScopedAnchoredDraw anchor(llgc, textBounds);
+                    g.setFont(Fonts::getDefaultFont().withHeight(13));
+                    g.setColour(colours.canvasTextColour);
+                    g.drawText(text, textBounds, Justification::centredLeft);
                 }
             }
         }
 
         auto const b = getLocalBounds().toFloat();
         if (canvas) {
-            auto invalidArea = cnv->currentRenderArea;
-
-            invalidArea = invalidArea.getIntersection(cnv->getLocalArea(this, getLocalBounds()));
-
-            if (invalidArea.isEmpty())
-                return;
-
-            invalidArea = canvas->getLocalArea(cnv, invalidArea).expanded(1);
-
             NVGScopedState scopedState(nvg);
-            nvgIntersectRoundedScissor(nvg, b.getX() + 0.75f, b.getY() + 0.75f, b.getWidth() - 1.5f, b.getHeight() - 1.5f, Corners::objectCornerRadius);
-            nvgTranslate(nvg, canvas->getX(), canvas->getY());
-            canvas->performRender(nvg, invalidArea);
+            nanovg::nvgIntersectRoundedScissor(nvg, b.getX() + 0.75f, b.getY() + 0.75f, b.getWidth() - 1.5f, b.getHeight() - 1.5f, getPlugDataLook(*this).getObjectCornerRadius());
+            nanovg::nvgTranslate(nvg, canvas->getX(), canvas->getY());
+            canvas->performRender(nvg, getLocalBounds().withPosition(-canvas->getPosition()));
         }
 
         if (isOpenedInSplitView) {
@@ -426,7 +530,7 @@ public:
             auto height = getHeight();
 
             if (openInGopBackground.needsUpdate(width, height)) {
-                auto bgColour = cnv->editor->getLookAndFeel().findColour(PlugDataColour::guiObjectBackgroundColourId);
+                auto bgColour = colours.guiObjectBackgroundColour;
 
                 openInGopBackground = NVGImage(nvg, width, height, [width, height, bgColour](Graphics& g) {
                     AffineTransform rotate;
@@ -442,31 +546,59 @@ public:
                     g.addTransform(rotate.inverted());
                 });
             }
-            auto const imagePaint = nvgImagePattern(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), 0.0f, openInGopBackground.getImageId(), 1.0f);
-            nvgBeginPath(nvg);
-            nvgRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), Corners::objectCornerRadius);
-            nvgFillPaint(nvg, imagePaint);
-            nvgFill(nvg);
-
-            Font const fontMetrics = Fonts::getDefaultFont().withHeight(12.0f);
+            auto const imagePaint = nanovg::nvgImagePattern(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), 0.0f, openInGopBackground.getImageId(), 1.0f);
+            nanovg::nvgBeginPath(nvg);
+            nanovg::nvgRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), getPlugDataLook(*this).getObjectCornerRadius());
+            nanovg::nvgFillPaint(nvg, imagePaint);
+            nanovg::nvgFill(nvg);
 
             auto const errorText = String("Graph open in split view");
 
-            auto const stringLength = fontMetrics.getStringWidth(errorText);
+            auto const stringLength = Fonts::getStringWidth(errorText, 12);
             if (stringLength < getWidth() - Object::doubleMargin - 20 /* 20 is a hack for now */ && getHeight() > 12) {
-                nvgBeginPath(nvg);
-                nvgFontFace(nvg, "Inter-Regular");
-                nvgFontSize(nvg, 12.0f);
-                nvgFillColor(nvg, cnv->commentTextCol); // why comment colour?
-                nvgTextAlign(nvg, NVG_ALIGN_MIDDLE | NVG_ALIGN_CENTER);
-                nvgText(nvg, b.getCentreX(), b.getCentreY(), errorText.toRawUTF8(), nullptr);
+                Fonts::drawText(canvas->editor->getNanoLLGC(), errorText, b, Fonts::getDefaultFont().withHeight(12), colours.commentTextColour, Justification::centred);
             }
         }
 
-        nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), nvgRGBA(0, 0, 0, 0), object->isSelected() ? cnv->selectedOutlineCol : cnv->objectOutlineCol, Corners::objectCornerRadius);
+        nanovg::nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), nanovg::nvgRGBA(0, 0, 0, 0), nvgColour(object->isSelected() ? colours.objectSelectedOutlineColour : colours.objectOutlineColour), getPlugDataLook(*this).getObjectCornerRadius());
 
-        nvgStrokeColor(nvg, cnv->guiObjectInternalOutlineCol);
-        ticks.render(nvg, b);
+        nanovg::nvgStrokeColor(nvg, nvgColour(colours.guiObjectInternalOutlineColour));
+        getTicks()->render(nvg, b);
+    }
+
+    std::unique_ptr<ComponentBoundsConstrainer> createConstrainer() override
+    {
+        // Custom constrainer because a regular ComponentBoundsConstrainer will mess up the aspect ratio
+        class GraphBoundsConstrainer : public ComponentBoundsConstrainer {
+
+        public:
+            explicit GraphBoundsConstrainer()
+            {
+            }
+
+            void checkBounds(Rectangle<int>& bounds,
+                Rectangle<int> const& old,
+                Rectangle<int> const& limits,
+                bool const isStretchingTop,
+                bool const isStretchingLeft,
+                bool const isStretchingBottom,
+                bool const isStretchingRight) override
+            {
+                bounds = old; // Don't allow resizing graph from the outside
+            }
+        };
+
+        return std::make_unique<GraphBoundsConstrainer>();
+    }
+
+    ResizeDirection getAllowedResizeDirections() const override
+    {
+        return ResizeDirection::None;
+    }
+
+    void onConstrainerCreate() override
+    {
+        constrainer->setFixedAspectRatio(1);
     }
 
     pd::Patch::Ptr getPatch() override
@@ -476,7 +608,6 @@ public:
 
     void propertyChanged(Value& v) override
     {
-
         if (v.refersToSameSourceAs(sizeProperty)) {
             auto const& arr = *sizeProperty.getValue().getArray();
             auto const* constrainer = getConstrainer();
@@ -496,6 +627,7 @@ public:
             if (auto glist = ptr.get<t_glist>()) {
                 canvas_setgraph(glist.get(), glist->gl_isgraph + 2 * hideText, 0);
             }
+            lookAndFeelChanged();
             repaint();
         } else if (v.refersToSameSourceAs(isGraphChild)) {
             int const isGraph = getValue<bool>(isGraphChild);
@@ -510,9 +642,10 @@ public:
                         return;
 
                     _this->cnv->setSelected(_this->object, false);
-                    _this->object->editor->sidebar->hideParameters();
+                    if (auto* s = _this->object->editor->getSidebarForPanel(Sidebar::InspectorPanel))
+                        s->hideParameters();
 
-                    _this->object->setType(_this->getText(), _this->ptr);
+                    _this->object->setType(_this->getText().toString(), _this->ptr);
                 });
             } else {
                 updateCanvas();
@@ -536,5 +669,10 @@ public:
     void getMenuOptions(PopupMenu& menu) override
     {
         menu.addItem("Open", [_this = SafePointer(this)] { if(_this) _this->openSubpatch(); });
+    }
+
+    bool checkHvccCompatibility() override
+    {
+        return recurseHvccCompatibility(getText(), subpatch.get());
     }
 };

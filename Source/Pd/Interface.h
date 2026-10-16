@@ -29,6 +29,28 @@ extern void clear_class_loadsym();
 
 namespace pd {
 
+// Sometimes, we need to lie to Pd and say a patch has a window to get accurate information
+// This scoped helper sets a canvas as current temporarily
+struct ScopedCurrentCanvas {
+    t_canvas* glist;
+    int hadWindow = 0;
+    int hadEditor = 0;
+    ScopedCurrentCanvas(t_glist* x)
+        : glist(x)
+    {
+        hadWindow = glist->gl_havewindow;
+        hadEditor = glist->gl_editor != nullptr;
+        glist->gl_havewindow = 1;
+    }
+
+    ~ScopedCurrentCanvas()
+    {
+        if (!hadEditor && glist->gl_owner && glist->gl_editor)
+            canvas_destroy_editor(glist);
+        glist->gl_havewindow = hadWindow;
+    }
+};
+
 struct Interface {
 
     static t_canvas* createCanvas(char const* name, char const* path)
@@ -40,7 +62,7 @@ struct Interface {
         return cnv;
     }
 
-    static char const* getObjectClassName(t_pd const* ptr)
+    static SmallString getObjectClassName(t_pd const* ptr)
     {
         return class_getname(pd_class(ptr));
     }
@@ -72,15 +94,24 @@ struct Interface {
         return reinterpret_cast<_instanceeditor*>(libpd_this_instance()->pd_gui->i_editor);
     }
 
-    static void getObjectText(t_object const* ptr, char** text, int* size)
+    static SmallString getObjectText(t_object const* ptr)
     {
-        *text = nullptr;
-        *size = 0;
-        binbuf_gettext(ptr->te_binbuf, text, size);
+        char* text = nullptr;
+        int size = 0;
+        binbuf_gettext(ptr->te_binbuf, &text, &size);
+
+        String result;
+        if (text && size)
+            result = String::fromUTF8(text, size);
+
+        freebytes(text, static_cast<size_t>(size) * sizeof(char));
+        return result;
     }
 
     static void getObjectBounds(t_canvas* cnv, t_gobj* ptr, int* x, int* y, int* w, int* h)
     {
+        ScopedCurrentCanvas scopedCurrent(cnv);
+
         *x = 0;
         *y = 0;
         *w = 0;
@@ -119,6 +150,8 @@ struct Interface {
     /* displace the selection by (dx, dy) pixels */
     static void moveObjects(t_canvas* cnv, int const dx, int const dy, SmallArray<t_gobj*> const& objects)
     {
+        ScopedCurrentCanvas scopedCurrent(cnv);
+
         glist_noselect(cnv);
 
         for (auto* obj : objects) {
@@ -419,7 +452,7 @@ struct Interface {
     static t_symbol* getUnusedArrayName()
     {
         sys_lock();
-        char arraybuf[80] = {};
+        char arraybuf[80] = { };
         for (int gcount = 1; gcount < 1000; gcount++) {
             snprintf(arraybuf, 80, "array%d", gcount);
             if (!pd_findbyclass(gensym(arraybuf), garray_class))
@@ -553,12 +586,17 @@ struct Interface {
 
     static void paste(t_canvas* cnv, char const* buf)
     {
-        size_t const len = strlen(buf);
+        auto atoms = std::vector<t_atom>(strlen(buf));
+        for(int c = 0; c < atoms.size(); c++)
+            SETFLOAT(&atoms[c], static_cast<float>(buf[c]));
 
-        binbuf_text(getInstanceEditor()->copy_binbuf, buf, len);
+        t_atom start = {.a_type = A_FLOAT, .a_w = {-1.0f}};
+        t_atom end = {.a_type = A_FLOAT, .a_w = {-2.0f}};
 
         canvas_setcurrent(cnv);
-        pd_typedmess(reinterpret_cast<t_pd*>(cnv), gensym("paste"), 0, nullptr);
+        pd_typedmess(reinterpret_cast<t_pd*>(cnv), gensym("pastechars"), 1, &start);
+        pd_typedmess(reinterpret_cast<t_pd*>(cnv), gensym("pastechars"), atoms.size(), atoms.data());
+        pd_typedmess(reinterpret_cast<t_pd*>(cnv), gensym("pastechars"), 1, &end);
         canvas_unsetcurrent(cnv);
     }
 
@@ -742,7 +780,7 @@ struct Interface {
             char* text = nullptr;
             int len = 0;
 
-            getObjectText(textObject, &text, &len);
+            binbuf_gettext(textObject->te_binbuf, &text, &len);
             renameObject(cnv, obj, text, len);
         }
     }
@@ -754,15 +792,20 @@ struct Interface {
             int x_bufsize;  /*-- byte length --*/
             int x_selstart; /*-- byte offset --*/
             int x_selend;   /*-- byte offset --*/
-            int x_active;
-            int x_dragfrom;
-            int x_height;
-            int x_drawnwidth;
-            int x_drawnheight;
-            t_text* x_text;
-            t_glist* x_glist;
-            char x_tag[50];
-            _rtext* x_next;
+            int x_active;          /* 1 if 'actively' editing */
+            int x_dragfrom;        /* character onset we're dragging from */
+            t_text* x_text;        /* owner, if a text box */
+            t_scalar* x_scalar;    /* associated scalar, otherwise */
+            t_word* x_words;       /* ... and if so, associated data */
+            t_gobj* x_drawtext;    /* ... and the drawing instruction */
+            t_glist* x_glist;      /* glist owner belongs to */
+            unsigned int x_color;  /* (A)RGB value */
+            char x_tag[50];        /* tag for gui */
+            struct _rtext* x_next; /* next in editor list */
+            int x_xpix;            /* (x,y) origin in pixels */
+            int x_ypix;
+            int x_pixwidth;
+            int x_pixheight;
         };
 
         if (!cnv || !cnv->gl_editor) return;
@@ -773,7 +816,7 @@ struct Interface {
         glist_noselect(cnv);
         glist_select(cnv, obj);
 
-        auto* fuddy = reinterpret_cast<_fake_rtext*>(glist_findrtext(cnv, reinterpret_cast<t_text*>(obj)));
+        auto* fuddy = reinterpret_cast<_fake_rtext*>(glist_getrtext(cnv, reinterpret_cast<t_text*>(obj), 0));
         if (!fuddy) {
             glist_deselect(cnv, obj);
             canvas_editmode(cnv, wasEditMode);
@@ -843,6 +886,8 @@ struct Interface {
 
     static void moveObject(t_canvas* cnv, t_gobj* obj, int const x, int const y)
     {
+        ScopedCurrentCanvas scopedCurrent(cnv);
+
         auto* instanceEditor = getInstanceEditor();
         if (!instanceEditor->canvas_undo_already_set_move) {
             // canvas_undo_add(cnv, UNDO_MOTION, "motion", canvas_undo_set_move(cnv, 0));

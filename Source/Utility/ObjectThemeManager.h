@@ -7,6 +7,7 @@
 #pragma once
 
 #include <juce_gui_basics/juce_gui_basics.h>
+#include "LookAndFeel.h"
 
 /*
  * This is a static class that handles all theming & formatting for UI objects placed onto the canvas
@@ -25,13 +26,28 @@ public:
         return instance;
     }
 
-    void updateTheme()
+    static unsigned int normalise(Colour const& colour)
     {
-        auto const& lnf = LookAndFeel::getDefaultLookAndFeel();
-        bg = lnf.findColour(PlugDataColour::guiObjectBackgroundColourId);
-        fg = lnf.findColour(PlugDataColour::canvasTextColourId);
-        lbl = lnf.findColour(PlugDataColour::commentTextColourId);
-        ln = lnf.findColour(PlugDataColour::guiObjectInternalOutlineColour);
+        auto hex = colour.toString().substring(2);
+        int col = static_cast<int>(strtol(hex.toRawUTF8(), 0, 16));
+        return col & 0xFFFFFF;
+    }
+
+    void updateTheme(pd::Instance* instance, PlugDataColours const& colours)
+    {
+        bg = colours.guiObjectBackgroundColour;
+        fg = colours.canvasTextColour;
+        lbl = colours.commentTextColour;
+        ln = colours.guiObjectInternalOutlineColour;
+
+        instance->setThis();
+        instance->lockAudioThread();
+        auto* gui = libpd_this_instance()->pd_gui;
+        gui->i_foregroundcolor = normalise(fg);
+        gui->i_backgroundcolor = normalise(bg);
+        gui->i_selectcolor = normalise(ln);
+        gui->i_gopcolor = normalise(colours.graphAreaColour);
+        instance->unlockAudioThread();
     }
 
     String getCompleteFormat(String const& name) const
@@ -82,11 +98,10 @@ private:
     // Initialisation parameters for GUI objects
     // Taken from pd save files, this will make sure that it directly initialises objects with the right parameters
     static inline UnorderedMap<String, String> const guiDefaults = {
-        // UI OBJECTS:
-        { "bng", "25 250 50 0 empty empty empty 17 7 0 10 @bgColour @fgColour @lblColour" },
-        { "tgl", "25 0 empty empty empty 17 7 0 10 @bgColour @fgColour @lblColour 0 1" },
-        { "toggle", "25 0 empty empty empty 17 7 0 10 @bgColour @fgColour @lblColour 0 1" },
-        { "button", "25 25 @bgColour_rgb @fgColour_rgb" },
+        { "bng", "25 250 50 0 empty empty empty 0 -10 0 10 @bgColour @fgColour @lblColour" },
+        { "tgl", "25 0 empty empty empty 0 -10 0 10 @bgColour @fgColour @lblColour 0 1" },
+        { "toggle", "25 0 empty empty empty 0 -10 0 10 @bgColour @fgColour @lblColour 0 1" },
+        { "button", "25 25 @bgColour @fgColour" },
         { "knob", "50 0 127 0 0 empty empty @bgColour @lnColour @fgColour 1 0 0 0 1 270 0 0 0 empty empty 0 12 6 -15 0 1 0 0" },
         { "vsl", "17 128 0 127 0 0 empty empty empty 0 -9 0 10 @bgColour @fgColour @lblColour 0 1" },
         { "hsl", "128 17 0 127 0 0 empty empty empty -2 -8 0 10 @bgColour @fgColour @lblColour 0 1" },
@@ -102,7 +117,6 @@ private:
         { "messbox", "180 60 @bgColour_rgb @lblColour_rgb 0 12" },
         { "vu", "20 120 empty empty -1 -8 0 10 #404040 @lblColour 1 0" },
         { "popmenu", "128 26 12 @bgColour @fgColour \\  empty empty empty empty 1 0 -1 1 0 1 0 0 0 0 0" },
-        // ADDITIONAL UI OBJECTS:
         { "floatbox", "5 0 0 0 - - - 12" },
         { "symbolbox", "5 0 0 0 - - - 12" },
         { "listbox", "9 0 0 0 - - - 0" },

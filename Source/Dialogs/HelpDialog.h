@@ -20,6 +20,8 @@ class HelpDialog final : public TopLevelWindow
     public:
         explicit IndexComponent(std::function<void(File const&)> loadFile)
         {
+            auto const& colours = getThemeColours(*this);
+
             for (auto const& file : OSUtils::iterateDirectory(manualPath, false, true)) {
                 if (file.hasFileExtension(".md")) {
                     auto* button = buttons.add(new TextButton(file.getFileNameWithoutExtension()));
@@ -27,8 +29,8 @@ class HelpDialog final : public TopLevelWindow
                         loadFile(file);
                     };
 
-                    button->setColour(TextButton::buttonOnColourId, findColour(PlugDataColour::sidebarActiveBackgroundColourId));
-                    button->setColour(TextButton::buttonColourId, findColour(PlugDataColour::sidebarBackgroundColourId));
+                    button->setColour(TextButton::buttonOnColourId, colours.sidebarActiveBackgroundColour);
+                    button->setColour(TextButton::buttonColourId, colours.sidebarBackgroundColour);
                     button->setColour(ComboBox::outlineColourId, Colours::transparentBlack);
                     contentComponent.addAndMakeVisible(button);
                 }
@@ -114,7 +116,7 @@ public:
         constrainer.setFixedAspectRatio(0.0f);
 
         resizer = std::make_unique<MouseRateReducedComponent<ResizableBorderComponent>>(this, &constrainer);
-        // resizer->setAllowHostManagedResize(false);
+        resizer->setAllowHostManagedResize(false);
         resizer->setAlwaysOnTop(true);
         addAndMakeVisible(resizer.get());
 
@@ -165,6 +167,8 @@ public:
 
     void paint(Graphics& g) override
     {
+        auto const& colours = getThemeColours(*this);
+
         auto constexpr toolbarHeight = 38;
         auto const totalBounds = getLocalBounds().reduced(margin);
         auto b = totalBounds;
@@ -173,37 +177,35 @@ public:
         // auto sidebarBounds = b.removeFromLeft(200);
 
         if (ProjectInfo::canUseSemiTransparentWindows()) {
-            auto shadowPath = Path();
-            shadowPath.addRoundedRectangle(getLocalBounds().reduced(20), Corners::windowCornerRadius);
-            StackShadow::renderDropShadow(hash("help_dialog"), g, shadowPath, Colour(0, 0, 0).withAlpha(0.6f), 13.0f);
+            StackShadow::drawShadowForRect(g, getLocalBounds().reduced(20), 14, Corners::windowCornerRadius, 0.6f);
         }
 
         float const cornerRadius = ProjectInfo::canUseSemiTransparentWindows() ? Corners::windowCornerRadius : 0.0f;
 
         Path toolbarPath;
         toolbarPath.addRoundedRectangle(titlebarBounds.getX(), titlebarBounds.getY(), titlebarBounds.getWidth(), titlebarBounds.getHeight(), cornerRadius, cornerRadius, true, true, false, false);
-        g.setColour(findColour(PlugDataColour::toolbarBackgroundColourId));
+        g.setColour(colours.toolbarBackgroundColour);
         g.fillPath(toolbarPath);
 
         Path backgroundPath;
         backgroundPath.addRoundedRectangle(bgBounds.getX(), bgBounds.getY(), bgBounds.getWidth(), bgBounds.getHeight(), cornerRadius, cornerRadius, false, false, true, true);
-        g.setColour(findColour(PlugDataColour::canvasBackgroundColourId));
+        g.setColour(colours.canvasBackgroundColour);
         g.fillPath(backgroundPath);
 
         /*
         Path sidebarPath;
         backgroundPath.addRoundedRectangle(sidebarBounds.getX(), sidebarBounds.getY(), sidebarBounds.getWidth(), sidebarBounds.getHeight(), cornerRadius, cornerRadius, false, false, true, false);
-        g.setColour(findColour(PlugDataColour::sidebarBackgroundColourId)); */
+        g.setColour(getThemeColours(*this).sidebarBackgroundColour); */
         g.fillPath(backgroundPath);
 
-        g.setColour(findColour(PlugDataColour::toolbarOutlineColourId));
+        g.setColour(colours.toolbarOutlineColour);
         g.drawHorizontalLine(b.getY() + toolbarHeight, b.getX(), b.getWidth());
 
-        g.setColour(findColour(PlugDataColour::outlineColourId));
+        g.setColour(colours.outlineColour);
         g.drawRoundedRectangle(totalBounds.toFloat().reduced(0.5f), cornerRadius, 1.f);
 
         // g.drawVerticalLine(b.getX() + 200, b.getY() + 40, g.getHeight());
 
-        Fonts::drawStyledText(g, "Help", Rectangle<float>(totalBounds.getX(), totalBounds.getY() + 4.0f, b.getWidth(), 32.0f), findColour(PlugDataColour::panelTextColourId), Semibold, 15, Justification::centred);
+        Fonts::drawStyledText(g, "Help", Rectangle<float>(totalBounds.getX(), totalBounds.getY() + 4.0f, b.getWidth(), 32.0f), colours.panelTextColour, Semibold, 15, Justification::centred);
     }
 };

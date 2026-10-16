@@ -4,10 +4,15 @@
 
 #pragma once
 #include <juce_opengl/juce_opengl.h>
-#include "Utility/Containers.h"
 
-using namespace juce::gl;
-#include <nanovg.h>
+using namespace juce;
+using namespace gl;
+
+#include "Utility/Containers.h"
+#include "Utility/NVGUtils.h"
+#include "Utility/Hash.h"
+#include <nanovg_async.h>
+#include <vector>
 /**
     JUCE low level graphics context backed by nanovg.
 
@@ -15,26 +20,28 @@ using namespace juce::gl;
           graphics, but its still quite usable.
 */
 
-class NVGGraphicsContext final : public juce::LowLevelGraphicsContext {
+class NVGGraphicsContext final : public LowLevelGraphicsContext {
 public:
     explicit NVGGraphicsContext(NVGcontext* nativeHandle);
     ~NVGGraphicsContext() override;
 
     bool isVectorDevice() const override;
-    void setOrigin(juce::Point<int>) override;
-    void addTransform(juce::AffineTransform const&) override;
-    float getPhysicalPixelScaleFactor() override;
+    void setOrigin(Point<int>) override;
+    void addTransform(AffineTransform const&) override;
+    float getPhysicalPixelScaleFactor() const override;
     void setPhysicalPixelScaleFactor(float newScale);
 
-    bool clipToRectangle(juce::Rectangle<int> const&) override;
-    bool clipToRectangleList(juce::RectangleList<int> const&) override;
-    void excludeClipRectangle(juce::Rectangle<int> const&) override;
-    void clipToPath(juce::Path const&, juce::AffineTransform const&) override;
-    void clipToImageAlpha(juce::Image const&, juce::AffineTransform const&) override;
+    bool clipToRectangle(Rectangle<int> const&) override;
+    bool clipToRectangleList(RectangleList<int> const&) override;
+    void excludeClipRectangle(Rectangle<int> const&) override;
+    void clipToPath(Path const&, AffineTransform const&) override;
+    void clipToImageAlpha(Image const&, AffineTransform const&) override;
 
-    bool clipRegionIntersects(juce::Rectangle<int> const&) override;
-    juce::Rectangle<int> getClipBounds() const override;
+    bool clipRegionIntersects(Rectangle<int> const&) override;
+    Rectangle<int> getClipBounds() const override;
     bool isClipEmpty() const override;
+
+    void setImageBlendMode(BlendMode newMode) override;
 
     void saveState() override;
     void restoreState() override;
@@ -42,59 +49,109 @@ public:
     void beginTransparencyLayer(float opacity) override;
     void endTransparencyLayer() override;
 
-    void setFill(juce::FillType const&) override;
+    void setFill(FillType const&) override;
     void setOpacity(float) override;
-    void setInterpolationQuality(juce::Graphics::ResamplingQuality) override;
+    void setInterpolationQuality(Graphics::ResamplingQuality) override;
 
-    void fillRect(juce::Rectangle<int> const&, bool) override;
-    void fillRect(juce::Rectangle<float> const&) override;
-    void fillRectList(juce::RectangleList<float> const&) override;
+    void fillRect(Rectangle<int> const&, bool) override;
+    void fillRect(Rectangle<float> const&) override;
+    void fillRectList(RectangleList<float> const&) override;
 
-    void setPath(juce::Path const& path, juce::AffineTransform const& transform);
+    void setPath(Path const& path, AffineTransform const& transform);
 
-    void strokePath(juce::Path const&, juce::PathStrokeType const&, juce::AffineTransform const&);
-    void fillPath(juce::Path const&, juce::AffineTransform const&) override;
-    void drawImage(juce::Image const&, juce::AffineTransform const&) override;
-    void drawLine(juce::Line<float> const&) override;
+    void strokePath(Path const&, PathStrokeType const&, AffineTransform const&) override;
+    void fillPath(Path const&, AffineTransform const&) override;
+    void drawImage(Image const&, AffineTransform const&) override;
+    void drawLine(Line<float> const&) override;
 
-    void setFont(juce::Font const&) override;
-    juce::Font const& getFont() override;
-    void drawGlyph(int glyphNumber, juce::AffineTransform const&) override;
-    bool drawTextLayout(juce::AttributedString const&, juce::Rectangle<float> const&) override;
+    std::unique_ptr<ImageType> getPreferredImageTypeForTemporaryImages() const override
+    {
+        return std::make_unique<NativeImageType>();
+    }
+
+    void setFont(Font const&) override;
+    Font const& getFont() override;
+
+    uint64_t getFrameId() const override { return 0; }
+
+    void drawGlyphs(Span<uint16_t const>, Span<Point<float> const>, AffineTransform const&) override;
+    void drawText(StringRef text, Point<float> baseline, Justification justification = Justification::left, AffineTransform const& transform = {});
+    void drawText(StringRef text, Rectangle<float> area, Justification justification = Justification::centredLeft, bool useEllipsesIfTooBig = false, AffineTransform const& transform = {});
 
     void removeCachedImages();
 
     NVGcontext* getContext() const { return nvg; }
+    void resetClipRegion(AffineTransform initialTransform = {});
 
-    bool loadFont(juce::String const& name, char const* ptr, int size);
+    // Anchors JUCE drawing to nvg's CURRENT transform/scissor, for use inside a raw-nvg render pass
+    // (e.g. object rendering). JUCE positions glyphs relative to nvg's matrix, but TextLayout/Graphics
+    // cull content against getClipBounds(), which reflects this context's own tracked transform/clip.
+    // During a raw-nvg pass that tracked state is stale (set for the top-level paint), so culling wrongly
+    // drops text depending on scroll/zoom. Scoping a draw with this neutralises the tracked transform and
+    // clip (so nothing is culled) and installs a real nvg scissor for `clipBounds` in the current local
+    // space. Construct it, then draw with a Graphics wrapping this context; state is restored on scope exit.
+    struct ScopedAnchoredDraw {
+        ScopedAnchoredDraw(NVGGraphicsContext& context, Rectangle<float> clipBounds);
+        ~ScopedAnchoredDraw();
+        ScopedAnchoredDraw(ScopedAnchoredDraw const&) = delete;
+        ScopedAnchoredDraw& operator=(ScopedAnchoredDraw const&) = delete;
 
-    static juce::String const defaultTypefaceName;
+    private:
+        NVGGraphicsContext& ctx;
+    };
+
+    // Paints a JUCE component through this context, anchored to nvg's current transform (see
+    // ScopedAnchoredDraw). Use this instead of a bare `Graphics g(llgc); c.paintEntireComponent(g)`
+    // during a raw-nvg render pass: component painting culls against getClipBounds(), so without
+    // anchoring the component's text can be dropped depending on scroll/zoom. Draws at nvg's current
+    // origin, clipped to the component's local bounds.
+    void renderComponent(Component& component);
+
+    // Fork hook (MCP overlays): records one line of text at nvg's CURRENT transform, with its
+    // baseline at `baseline`, coloured by the current nvg fill colour (like ::nvgText). Lets raw
+    // nanovg-style overlay code draw text without a Graphics wrapper. See Utility/NVGTextShim.h.
+    static void enqueueBaselineText(NVGcontext* nvg, Font const& font, String text, Point<float> baseline, int horizontalJustificationFlags);
+
+    static String const defaultTypefaceName;
     static int const imageCacheSize;
 
 private:
-    juce::juce_wchar getCharForGlyph(int glyphIndex);
-
-    int getNvgImageId(juce::Image const& image);
+    int getNvgImageId(Image const& image);
     void reduceImageCache();
+    AffineTransform getCurrentTransform() const;
+    Rectangle<int> getTransformedClipBounds(Rectangle<float> const& bounds, AffineTransform const& transform) const;
+    RectangleList<int> getTransformedClipRegion(RectangleList<int> const& region, AffineTransform const& transform) const;
 
     NVGcontext* nvg;
 
     float scale = 1.0f;
-
-    juce::Font font;
-
-    // Mapping glyph number to a character
-    using GlyphToCharMap = UnorderedMap<int, wchar_t>;
-
-    // Mapping font names to glyph-to-character tables
-    static inline auto loadedFonts = UnorderedMap<juce::String, GlyphToCharMap>();
-    GlyphToCharMap* currentGlyphToCharMap;
+    Font font = Font(FontOptions());
 
     // Tracking images mapped tomtextures.
     struct NvgImage {
         int id { -1 };           ///< Image/texture ID.
         int accessCounter { 0 }; ///< Usage counter.
+        uint64_t lastUsedFrame { 0 };
     };
 
-    UnorderedMap<juce::uint64, NvgImage> images;
+    uint64_t currentFrameId = 0;
+
+    struct SavedState {
+        RectangleList<int> clipRegion;
+        AffineTransform transform;
+        float opacity = 1.0f;
+        NVGcolor lastColour {};
+    };
+
+    float opacity = 1.0f;
+    NVGcolor lastColour {};
+    AffineTransform currentTransform;
+    RectangleList<int> clipRegion;
+    std::vector<SavedState> stateStack;
+
+    // Reused scratch for batching a glyph run in drawGlyphs (message-thread only).
+    std::vector<uint64_t> glyphRunHashes;
+    std::vector<float> glyphRunXforms;
+    UnorderedSegmentedMap<uint64, NvgImage> images;
+    UnorderedSegmentedMap<uint64_t, NVGCachedPath> pathCache;
 };

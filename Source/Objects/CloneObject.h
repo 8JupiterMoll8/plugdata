@@ -10,13 +10,13 @@ t_glist* clone_get_instance(t_gobj*, int);
 int clone_get_n(t_gobj*);
 }
 
-class CloneObject final : public TextBase {
+class CloneObject final : public TextObjectBase {
 
     pd::Patch::Ptr subpatch;
 
 public:
     CloneObject(pd::WeakReference obj, Object* object)
-        : TextBase(obj, object)
+        : TextObjectBase(obj, object)
     {
         if (auto gobj = ptr.get<t_gobj>()) {
             if (clone_get_n(gobj.get()) > 0) {
@@ -40,7 +40,7 @@ public:
         return subpatch;
     }
 
-    String getText() override
+    SmallString getText() override
     {
         if (auto clone = ptr.get<t_fake_clone>()) {
             auto const* sym = clone->x_s;
@@ -48,10 +48,10 @@ public:
             if (!sym || !sym->s_name)
                 return "";
 
-            return String::fromUTF8(sym->s_name);
+            return SmallString(sym->s_name);
         }
 
-        return {};
+        return { };
     }
 
     void mouseDown(MouseEvent const& e) override
@@ -63,7 +63,7 @@ public:
         if (isLocked && !e.mods.isRightButtonDown()) {
             openSubpatch();
         } else {
-            TextBase::mouseDown(e);
+            TextObjectBase::mouseDown(e);
         }
     }
 

@@ -22,6 +22,7 @@ extern "C" {
 
 #include <g_undo.h>
 #include <m_imp.h>
+#include <m_class_probe.h>
 #include "z_print_util.h"
 }
 
@@ -114,12 +115,11 @@ public:
                 this->instance->onConsoleMessage(String::fromUTF8(content.data()), isError);
             };
 
-        static int length = 0;
-        printConcatBuffer[length] = '\0';
+        printConcatBuffer[messageLength] = '\0';
 
         int len = static_cast<int>(strlen(message));
-        while (length + len >= 2048) {
-            int const d = 2048 - 1 - length;
+        while (messageLength + len >= 2048) {
+            int const d = 2048 - 1 - messageLength;
             strncat(printConcatBuffer.data(), message, d);
 
             // Send concatenated line to plugdata!
@@ -127,20 +127,20 @@ public:
 
             message += d;
             len -= d;
-            length = 0;
+            messageLength = 0;
             printConcatBuffer[0] = '\0';
         }
 
         strncat(printConcatBuffer.data(), message, len);
-        length += len;
+        messageLength += len;
 
-        if (length > 0 && printConcatBuffer[length - 1] == '\n') {
-            printConcatBuffer[length - 1] = '\0';
+        if (messageLength > 0 && printConcatBuffer[messageLength - 1] == '\n') {
+            printConcatBuffer[messageLength - 1] = '\0';
 
             // Send concatenated line to plugdata!
             forwardMessage(SmallString(printConcatBuffer.data()));
 
-            length = 0;
+            messageLength = 0;
         }
     }
 
@@ -172,6 +172,8 @@ private:
         auto item = std::tuple<void*, SmallString, bool>();
         int numReceived = 0;
         bool newWarning = false;
+        SmallString lastMessage;
+        bool lastIsWarning = false;
 
         while (pendingMessages.try_dequeue(item)) {
             auto& [object, message, type] = item;
@@ -179,17 +181,20 @@ private:
 
             numReceived++;
             newWarning = newWarning || type;
+            lastMessage = message;
+            lastIsWarning = type;
         }
 
         // Check if any item got assigned
         if (numReceived) {
-            instance->updateConsole(numReceived, newWarning);
+            instance->updateConsole(lastMessage, lastIsWarning, numReceived, newWarning);
         }
     }
 
-    StackArray<char, 2048> printConcatBuffer = {};
+    StackArray<char, 2048> printConcatBuffer = { };
 
     moodycamel::ConcurrentQueue<std::tuple<void*, SmallString, bool>> pendingMessages = moodycamel::ConcurrentQueue<std::tuple<void*, SmallString, bool>>(512);
+    int messageLength = 0;
 };
 
 struct Instance::dmessage {
@@ -252,32 +257,32 @@ struct Instance::internal {
 
     static void instance_multi_noteon(pd::Instance* ptr, int const channel, int const pitch, int const velocity)
     {
-        ptr->receiveNoteOn(channel + 1, pitch, velocity);
+        ptr->receiveNoteOn(channel, pitch, velocity);
     }
 
     static void instance_multi_controlchange(pd::Instance* ptr, int const channel, int const controller, int const value)
     {
-        ptr->receiveControlChange(channel + 1, controller, value);
+        ptr->receiveControlChange(channel, controller, value);
     }
 
     static void instance_multi_programchange(pd::Instance* ptr, int const channel, int const value)
     {
-        ptr->receiveProgramChange(channel + 1, value);
+        ptr->receiveProgramChange(channel, value);
     }
 
     static void instance_multi_pitchbend(pd::Instance* ptr, int const channel, int const value)
     {
-        ptr->receivePitchBend(channel + 1, value);
+        ptr->receivePitchBend(channel, value);
     }
 
     static void instance_multi_aftertouch(pd::Instance* ptr, int const channel, int const value)
     {
-        ptr->receiveAftertouch(channel + 1, value);
+        ptr->receiveAftertouch(channel, value);
     }
 
     static void instance_multi_polyaftertouch(pd::Instance* ptr, int const channel, int const pitch, int const value)
     {
-        ptr->receivePolyAftertouch(channel + 1, pitch, value);
+        ptr->receivePolyAftertouch(channel, pitch, value);
     }
 
     static void instance_multi_midibyte(pd::Instance* ptr, int const port, int const byte)
@@ -379,12 +384,19 @@ void Instance::initialisePd(String& pdlua_version)
     // Register callback for special Pd messages
     auto gui_trigger = [](void* instance, char const* name, int const argc, t_atom* argv) {
         switch (hash(name)) {
+        // NOTE: this sometimes gets called when an object does sys_vgui("destroy %s") on something other than a canvas
+        // don't dereference the glist until we're sure it's a canvas
         case hash("canvas_vis"): {
             auto* inst = static_cast<Instance*>(instance);
             if (inst->initialiseIntoPluginmode)
                 return;
 
             t_canvas* glist = reinterpret_cast<struct _glist*>(argv->a_w.w_gpointer);
+
+            // Make sure we're not a toplevel without checking gl_owner
+            for (auto* x = pd_getcanvaslist(); x; x = x->gl_next)
+                if (x == glist)
+                    return;
 
             if (atom_getfloat(argv + 1)) {
                 File patchFile;
@@ -415,7 +427,7 @@ void Instance::initialisePd(String& pdlua_version)
                         if (patchFile.exists()) {
                             subpatch->setCurrentFile(URL(patchFile));
                         }
-                        activeEditor->getTabComponent().openPatch(subpatch);
+                        activeEditor->getTabComponent().openPatch(subpatch, false, false);
                     }
                 });
             } else {
@@ -425,7 +437,7 @@ void Instance::initialisePd(String& pdlua_version)
                             for (auto* canvas : editor->getCanvases()) {
                                 auto canvasPtr = canvas->patch.getPointer();
                                 if (canvasPtr && canvasPtr.get() == glist) {
-                                    canvas->editor->getTabComponent().closeTab(canvas);
+                                    canvas->editor->getTabComponent().closeTab(canvas, false);
                                     break;
                                 }
                             }
@@ -455,15 +467,36 @@ void Instance::initialisePd(String& pdlua_version)
         }
         case hash("canvas_title"): {
             auto* inst = static_cast<Instance*>(instance);
-            auto const* glist = reinterpret_cast<t_canvas*>(argv->a_w.w_gpointer);
-            auto const* title = atom_getsymbol(argv + 1);
+            auto* glist = reinterpret_cast<t_canvas*>(argv->a_w.w_gpointer);
+            auto title = SmallString(atom_getsymbol(argv + 1)->s_name);
             int isDirty = atom_getfloat(argv + 2);
+
+            int argc = 0;
+            t_atom* argv = nullptr;
+
+            canvas_setcurrent(glist);
+            canvas_getargs(&argc, &argv);
+            canvas_unsetcurrent(glist);
+
+            if (argc) {
+                title += " (";
+                for (int i = 0; i < argc; i++) {
+                    char namebuf[MAXPDSTRING];
+                    atom_string(&argv[i], namebuf, MAXPDSTRING);
+                    title += String::fromUTF8(namebuf);
+                    if (i != argc - 1)
+                        title += " ";
+                }
+                title += ")";
+            }
+
+            title = title.isEmpty() ? "Untitled Patcher" : title;
 
             MessageManager::callAsync([instance = juce::WeakReference(inst), glist, title, isDirty] {
                 if (auto* pd = static_cast<PluginProcessor*>(instance.get())) {
                     for (auto const& patch : pd->patches) {
                         if (patch->ptr.getRaw<t_canvas>() == glist) {
-                            patch->updateTitle(SmallString(title->s_name), isDirty);
+                            patch->updateTitle(title, isDirty);
                         }
                     }
                     for (auto* editor : pd->getEditors())
@@ -476,7 +509,7 @@ void Instance::initialisePd(String& pdlua_version)
 #if ENABLE_TESTING
             break; // Don't open files during testing
 #endif
-            const auto openMode = argc >= 4 ? static_cast<int>(atom_getfloat(argv + 3)) : -1;
+            auto const openMode = argc >= 4 ? static_cast<int>(atom_getfloat(argv + 3)) : -1;
             static_cast<Instance*>(instance)->createPanel(atom_getfloat(argv), atom_getsymbol(argv + 1)->s_name, atom_getsymbol(argv + 2)->s_name, "callback", openMode);
 
             break;
@@ -493,7 +526,7 @@ void Instance::initialisePd(String& pdlua_version)
 #if ENABLE_TESTING
             break; // Don't open files during testing
 #endif
-            const auto url = String::fromUTF8(atom_getsymbol(argv)->s_name);
+            auto const url = String::fromUTF8(atom_getsymbol(argv)->s_name);
             if (URL::isProbablyAWebsiteURL(url)) {
                 URL(url).launchInDefaultBrowser();
             } else {
@@ -525,13 +558,15 @@ void Instance::initialisePd(String& pdlua_version)
                 pd_typedmess(reinterpret_cast<t_pd*>(ptr), gensym("clear"), 0, nullptr);
 
                 // remove repeating spaces
-                text = text.replace("\r ", "\r");
-                text = text.replace(";\r", ";");
-                text = text.replace("\r;", ";");
+                text = text.replace("\r\n", "\n");
+                text = text.replace("\r", "\n");
+                text = text.replace("\n ", "\n");
+                text = text.replace(";\n", ";");
+                text = text.replace("\n;", ";");
                 text = text.replace(" ;", ";");
                 text = text.replace("; ", ";");
                 text = text.replace(",", " , ");
-                text = text.replaceCharacters("\r", " ");
+                text = text.replaceCharacters("\n", " ");
 
                 while (text.contains("  ")) {
                     text = text.replace("  ", " ");
@@ -611,13 +646,15 @@ void Instance::initialisePd(String& pdlua_version)
                 pd_typedmess(reinterpret_cast<t_pd*>(ptr), gensym("clear"), 0, nullptr);
 
                 // remove repeating spaces
-                text = text.replace("\r ", "\r");
-                text = text.replace(";\r", ";");
-                text = text.replace("\r;", ";");
+                text = text.replace("\r\n", "\n");
+                text = text.replace("\r", "\n");
+                text = text.replace("\n ", "\n");
+                text = text.replace(";\n", ";");
+                text = text.replace("\n;", ";");
                 text = text.replace(" ;", ";");
                 text = text.replace("; ", ";");
                 text = text.replace(",", " , ");
-                text = text.replaceCharacters("\r", " ");
+                text = text.replaceCharacters("\n", " ");
 
                 while (text.contains("  ")) {
                     text = text.replace("  ", " ");
@@ -742,7 +779,6 @@ void Instance::initialisePd(String& pdlua_version)
         pd::Setup::initialiseIemguts();
         initialised = true;
 
-        clear_class_loadsym();
 
         // We want to initialise pdlua separately for each instance
         auto const extra = ProjectInfo::appDataDir.getChildFile("Extra");
@@ -1004,14 +1040,14 @@ void Instance::enqueueGuiMessage(Message const& message)
     }
 }
 
-void Instance::sendDirectMessage(void* object, SmallString const& msg, SmallArray<Atom>&& list)
+void Instance::sendDirectMessage(void* object, SmallString const& msg, SmallArray<Atom> const&& list)
 {
     lockAudioThread();
     processSend(dmessage(this, object, SmallString(), msg, std::move(list)));
     unlockAudioThread();
 }
 
-void Instance::sendDirectMessage(void* object, SmallArray<Atom>&& list)
+void Instance::sendDirectMessage(void* object, SmallArray<Atom> const&& list)
 {
     lockAudioThread();
     processSend(dmessage(this, object, SmallString(), "list", std::move(list)));
@@ -1057,6 +1093,179 @@ void Instance::handleAsyncUpdate()
             break;
         default:
             break;
+        }
+    }
+}
+
+void Instance::KeyHandler::convertJUCEKeyToPd(int& keynum, t_symbol*& keysym)
+{
+    if (keynum == shiftKey)
+        keynum = 0, keysym = pd->generateSymbol("Shift_L");
+    else if (keynum == commandKey)
+        keynum = 0, keysym = pd->generateSymbol("Meta_L");
+    else if (keynum == altKey)
+        keynum = 0, keysym = pd->generateSymbol("Alt_L");
+    else if (keynum == ctrlKey)
+        keynum = 0, keysym = pd->generateSymbol("Control_L");
+    else if (keynum == KeyPress::backspaceKey)
+        keynum = 8, keysym = pd->generateSymbol("BackSpace");
+    else if (keynum == KeyPress::tabKey)
+        keynum = 9, keysym = pd->generateSymbol("Tab");
+    else if (keynum == KeyPress::returnKey)
+        keynum = 10, keysym = pd->generateSymbol("Return");
+    else if (keynum == KeyPress::escapeKey)
+        keynum = 27, keysym = pd->generateSymbol("Escape");
+    else if (keynum == KeyPress::spaceKey)
+        keynum = 32, keysym = pd->generateSymbol("Space");
+    else if (keynum == KeyPress::deleteKey)
+        keynum = 127, keysym = pd->generateSymbol("Delete");
+    else if (keynum == KeyPress::upKey)
+        keynum = 0, keysym = pd->generateSymbol("Up");
+    else if (keynum == KeyPress::downKey)
+        keynum = 0, keysym = pd->generateSymbol("Down");
+    else if (keynum == KeyPress::leftKey)
+        keynum = 0, keysym = pd->generateSymbol("Left");
+    else if (keynum == KeyPress::rightKey)
+        keynum = 0, keysym = pd->generateSymbol("Right");
+    else if (keynum == KeyPress::homeKey)
+        keynum = 0, keysym = pd->generateSymbol("Home");
+    else if (keynum == KeyPress::endKey)
+        keynum = 0, keysym = pd->generateSymbol("End");
+    else if (keynum == KeyPress::pageUpKey)
+        keynum = 0, keysym = pd->generateSymbol("Prior");
+    else if (keynum == KeyPress::pageDownKey)
+        keynum = 0, keysym = pd->generateSymbol("Next");
+    else if (keynum == KeyPress::F1Key)
+        keynum = 0, keysym = pd->generateSymbol("F1");
+    else if (keynum == KeyPress::F2Key)
+        keynum = 0, keysym = pd->generateSymbol("F2");
+    else if (keynum == KeyPress::F3Key)
+        keynum = 0, keysym = pd->generateSymbol("F3");
+    else if (keynum == KeyPress::F4Key)
+        keynum = 0, keysym = pd->generateSymbol("F4");
+    else if (keynum == KeyPress::F5Key)
+        keynum = 0, keysym = pd->generateSymbol("F5");
+    else if (keynum == KeyPress::F6Key)
+        keynum = 0, keysym = pd->generateSymbol("F6");
+    else if (keynum == KeyPress::F7Key)
+        keynum = 0, keysym = pd->generateSymbol("F7");
+    else if (keynum == KeyPress::F8Key)
+        keynum = 0, keysym = pd->generateSymbol("F8");
+    else if (keynum == KeyPress::F9Key)
+        keynum = 0, keysym = pd->generateSymbol("F9");
+    else if (keynum == KeyPress::F10Key)
+        keynum = 0, keysym = pd->generateSymbol("F10");
+    else if (keynum == KeyPress::F11Key)
+        keynum = 0, keysym = pd->generateSymbol("F11");
+    else if (keynum == KeyPress::F12Key)
+        keynum = 0, keysym = pd->generateSymbol("F12");
+    else if (keynum == KeyPress::numberPad0)
+        keynum = 48, keysym = pd->generateSymbol("0");
+    else if (keynum == KeyPress::numberPad1)
+        keynum = 49, keysym = pd->generateSymbol("1");
+    else if (keynum == KeyPress::numberPad2)
+        keynum = 50, keysym = pd->generateSymbol("2");
+    else if (keynum == KeyPress::numberPad3)
+        keynum = 51, keysym = pd->generateSymbol("3");
+    else if (keynum == KeyPress::numberPad4)
+        keynum = 52, keysym = pd->generateSymbol("4");
+    else if (keynum == KeyPress::numberPad5)
+        keynum = 53, keysym = pd->generateSymbol("5");
+    else if (keynum == KeyPress::numberPad6)
+        keynum = 54, keysym = pd->generateSymbol("6");
+    else if (keynum == KeyPress::numberPad7)
+        keynum = 55, keysym = pd->generateSymbol("7");
+    else if (keynum == KeyPress::numberPad8)
+        keynum = 56, keysym = pd->generateSymbol("8");
+    else if (keynum == KeyPress::numberPad9)
+        keynum = 57, keysym = pd->generateSymbol("9");
+#if JUCE_MAC || JUCE_WINDOWS
+    else if (!ModifierKeys::currentModifiers.isShiftDown() && keynum >= 65 && keynum <= 90) {
+        keynum += 32;
+    }
+#endif
+}
+
+void Instance::KeyHandler::shiftKeyChanged(bool const isHeld)
+{
+    if (isHeld)
+        sendKeyPress(KeyPress(shiftKey));
+}
+void Instance::KeyHandler::commandKeyChanged(bool const isHeld)
+{
+    if (isHeld)
+        sendKeyPress(KeyPress(commandKey));
+}
+void Instance::KeyHandler::altKeyChanged(bool const isHeld)
+{
+    if (isHeld)
+        sendKeyPress(KeyPress(altKey));
+}
+void Instance::KeyHandler::ctrlKeyChanged(bool const isHeld)
+{
+    if (isHeld)
+        sendKeyPress(KeyPress(ctrlKey));
+}
+
+void Instance::KeyHandler::spaceKeyChanged(bool const isHeld)
+{
+    if (isHeld)
+        sendKeyPress(KeyPress(KeyPress::spaceKey));
+}
+
+void Instance::KeyHandler::sendKeyPress(KeyPress const& key)
+{
+    auto keycode = key.getKeyCode();
+
+#if JUCE_LINUX || JUCE_BSD
+    if (keycode == 65505 || keycode == 65506     // Shift
+        || keycode == 65507 || keycode == 65508  // Control
+        || keycode == 65513 || keycode == 65514  // Alt
+        || keycode == 65511 || keycode == 65512) // Meta/Super
+    {
+        return;
+    }
+#endif
+
+    String keystring = key.getTextDescription().fromLastOccurrenceOf(" ", false, false);
+    if (keystring.startsWith("#"))
+        keystring = String::charToString(key.getTextCharacter());
+    if (!key.getModifiers().isShiftDown())
+        keystring = keystring.toLowerCase();
+
+    pd->enqueueFunctionAsync([this, keycode, keystring]() mutable {
+        auto* keysym = pd->generateSymbol(keystring);
+        convertJUCEKeyToPd(keycode, keysym);
+        pd->sendMessage("#key", "float", { static_cast<float>(keycode) });
+        pd->sendMessage("#keyname", "list", { 1.0f, keysym });
+    });
+    heldKeys.add(key);
+}
+
+void Instance::KeyHandler::sendKeyUpMessages()
+{
+    for (auto key : heldKeys) {
+        auto keycode = key.getKeyCode();
+        bool keydown = KeyPress::isKeyCurrentlyDown(keycode);
+        if (keycode == shiftKey)
+            keydown = ModifierKeys::currentModifiers.isShiftDown();
+        if (keycode == commandKey)
+            keydown = ModifierKeys::currentModifiers.isCommandDown();
+        if (keycode == altKey)
+            keydown = ModifierKeys::currentModifiers.isAltDown();
+        if (keycode == ctrlKey)
+            keydown = ModifierKeys::currentModifiers.isCtrlDown();
+
+        if (!keydown) {
+            auto keychar = String::charToString(key.getTextCharacter());
+
+            pd->enqueueFunctionAsync([this, keycode, keychar]() mutable {
+                auto* keysym = pd->generateSymbol(keychar);
+                convertJUCEKeyToPd(keycode, keysym);
+                pd->sendMessage("#keyup", "float", { static_cast<float>(keycode) });
+                pd->sendMessage("#keyname", "list", { 0.0f, keysym });
+            });
+            heldKeys.remove_one(key);
         }
     }
 }
@@ -1142,7 +1351,7 @@ void Instance::createPanel(int const type, char const* snd, char const* location
 
     auto defaultFile = File(location);
     if (!defaultFile.exists()) {
-        defaultFile = SettingsFile::getInstance()->getLastBrowserPathForId("openpanel");
+        defaultFile = SettingsFile::getInstance()->getLastBrowserPathForId("OpenPanel");
         if (!defaultFile.exists())
             defaultFile = ProjectInfo::appDataDir;
     }
@@ -1162,13 +1371,21 @@ void Instance::createPanel(int const type, char const* snd, char const* location
 
                 static std::unique_ptr<FileChooser> openChooser;
                 openChooser = std::make_unique<FileChooser>("Open...", defaultFile, "", SettingsFile::getInstance()->wantsNativeDialog());
+
                 openChooser->launchAsync(folderChooserFlags, [this, obj, callback](FileChooser const& fileChooser) {
                     auto const files = fileChooser.getResults();
                     if (files.isEmpty())
                         return;
 
+#if JUCE_IOS
+                    // Create input streams to access the security scoped resource
+                    SmallArray<std::unique_ptr<InputStream>> scopedAccessStreams;
+                    for (auto& url : fileChooser.getURLResults()) {
+                        scopedAccessStreams.emplace_back(url.createInputStream(URL::InputStreamOptions(URL::ParameterHandling::inAddress)));
+                    }
+#endif
                     auto const parentDirectory = files.getFirst().getParentDirectory();
-                    SettingsFile::getInstance()->setLastBrowserPathForId("openpanel", parentDirectory);
+                    SettingsFile::getInstance()->setLastBrowserPathForId("OpenPanel", parentDirectory);
 
                     lockAudioThread();
 
@@ -1198,7 +1415,7 @@ void Instance::createPanel(int const type, char const* snd, char const* location
                 Component* dialogParent = nullptr;
 #endif
                 if (defaultFile.exists()) {
-                    SettingsFile::getInstance()->setLastBrowserPathForId("savepanel", defaultFile);
+                    SettingsFile::getInstance()->setLastBrowserPathForId("SavePanel", defaultFile);
                 }
 
                 Dialogs::showSaveDialog([this, obj, callback](URL const& result) {
@@ -1216,7 +1433,7 @@ void Instance::createPanel(int const type, char const* snd, char const* location
                     pd_typedmess(obj, generateSymbol(callback), 1, &argv);
                     unlockAudioThread();
                 },
-                    "", "savepanel", dialogParent);
+                    "", "SavePanel", dialogParent);
             });
     }
 }
@@ -1228,12 +1445,13 @@ bool Instance::loadLibrary(String const& libraryToLoad)
 
 void Instance::lockAudioThread()
 {
-    audioLock.enter();
+    setThis();
+    sys_lock();
 }
 
 void Instance::unlockAudioThread()
 {
-    audioLock.exit();
+    sys_unlock();
 }
 
 void Instance::updateObjectImplementations()

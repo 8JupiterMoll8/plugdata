@@ -7,9 +7,9 @@
 
 struct TextObjectHelper {
 
-    static int getWidthInChars(void* ptr)
+    static int getWidthInChars(t_text* ptr)
     {
-        return static_cast<t_text*>(ptr)->te_width;
+        return ptr->te_width;
     }
 
     static int setWidthInChars(void* ptr, int const newWidth)
@@ -96,13 +96,28 @@ struct TextObjectHelper {
         return text;
     }
 
-    static TextEditor* createTextEditor(Object const* object, int const fontHeight)
+    static String fixMissingSpace(String text)
+    {
+        static String const operatorChars = "+-*/% <=>!|&~";
+        auto toCheck = text.upToFirstOccurrenceOf(" ", false, false);
+
+        int opEnd = 0;
+        while (opEnd < toCheck.length() && operatorChars.containsChar(toCheck[opEnd]))
+            opEnd++;
+
+        if (opEnd > 0 && opEnd < toCheck.length() && toCheck.substring(opEnd).containsOnly("0123456789"))
+            return toCheck.substring(0, opEnd) + " " + text.substring(opEnd);
+
+        return text;
+    }
+
+    static TextEditor* createTextEditor(Object const* object, Font const& f)
     {
         auto* editor = new TextEditor;
-        editor->applyFontToAllText(Font(fontHeight));
+        editor->applyFontToAllText(f);
 
         object->copyAllExplicitColoursTo(*editor);
-        editor->setColour(TextEditor::textColourId, object->cnv->editor->getLookAndFeel().findColour(PlugDataColour::canvasTextColourId));
+        editor->setColour(TextEditor::textColourId, getThemeColours(*object).canvasTextColour);
         editor->setColour(TextEditor::backgroundColourId, Colours::transparentBlack);
         editor->setColour(TextEditor::focusedOutlineColourId, Colours::transparentBlack);
 
@@ -113,13 +128,14 @@ struct TextObjectHelper {
         editor->setIndents(0, 0);
         editor->setScrollToShowCursor(false);
         editor->setJustification(Justification::centredLeft);
+        editor->getProperties().set("NoOutline", true);
 
         return editor;
     }
 };
 
 // Text base class that text objects with special implementation details can derive from
-class TextBase : public ObjectBase
+class TextObjectBase : public ObjectBase
     , public TextEditor::Listener
     , public KeyListener {
 
@@ -127,7 +143,7 @@ protected:
     std::unique_ptr<TextEditor> editor;
     BorderSize<int> border = BorderSize<int>(1, 6, 1, 1);
 
-    CachedTextRender cachedTextRender;
+    TextLayout layout;
 
     Value sizeProperty = SynchronousValue();
     String objectText;
@@ -135,26 +151,22 @@ protected:
     bool isValid = true;
     bool isLocked;
 
-    Colour backgroundColour;
-    NVGcolor selectedOutlineColour;
-    NVGcolor outlineColour;
-    NVGcolor ioletAreaColour;
-
 public:
-    TextBase(pd::WeakReference obj, Object* parent, bool const valid = true)
+    TextObjectBase(pd::WeakReference obj, Object* parent, bool const valid = true)
         : ObjectBase(obj, parent)
         , isValid(valid)
     {
-        objectText = getText();
+        objectText = getText().toString();
 
         isLocked = getValue<bool>(cnv->locked);
 
         objectParameters.addParamInt("Width (chars)", cDimensions, &sizeProperty, var(), true, 0);
 
+        setViewportIgnoreDragFlag(false);
         lookAndFeelChanged();
     }
 
-    ~TextBase() override = default;
+    ~TextObjectBase() override = default;
 
     // Pull the live pd text into the cached display string (e.g. after an MCP
     // relabel rewrote te_binbuf in place — no recreate, no rebind).
@@ -189,15 +201,11 @@ public:
             sizeProperty = TextObjectHelper::getWidthInChars(obj.get());
             canBeClicked = zgetfn(&obj->te_g.g_pd, gensym("click")) != nullptr;
         }
+        setRepaintsOnMouseActivity(canBeClicked);
     }
 
     void lookAndFeelChanged() override
     {
-        backgroundColour = cnv->editor->getLookAndFeel().findColour(PlugDataColour::textObjectBackgroundColourId);
-        selectedOutlineColour = convertColour(cnv->editor->getLookAndFeel().findColour(PlugDataColour::objectSelectedOutlineColourId));
-        outlineColour = convertColour(cnv->editor->getLookAndFeel().findColour(PlugDataColour::objectOutlineColourId));
-        ioletAreaColour = convertColour(object->findColour(PlugDataColour::ioletAreaColourId));
-
         updateTextLayout();
     }
 
@@ -210,21 +218,24 @@ public:
         if (syncTextFromPd())
             updateTextLayout();
 
-        auto const b = getLocalBounds();
+        auto const& colours = getThemeColours();
 
-        auto finalOutlineColour = object->isSelected() ? selectedOutlineColour : outlineColour;
-        auto finalBackgroundColour = convertColour(backgroundColour);
-        auto const outlineCol = object->isSelected() ? selectedOutlineColour : finalOutlineColour;
+        auto const b = getLocalBounds();
+        auto const bg = colours.textObjectBackgroundColour;
+
+        auto finalOutlineColour = nvgColour(object->isSelected() ? colours.objectSelectedOutlineColour : colours.objectOutlineColour);
+        auto finalBackgroundColour = nvgColour(colours.textObjectBackgroundColour);
+        auto const outlineCol = object->isSelected() ? nvgColour(colours.objectSelectedOutlineColour) : finalOutlineColour;
 
         // render invalid text objects with red outline & semi-transparent background
         if (!isValid) {
-            finalOutlineColour = convertColour(object->isSelected() ? Colours::red.brighter(1.5f) : Colours::red);
-            finalBackgroundColour = nvgRGBA(outlineColour.r, outlineColour.g, outlineColour.b, 0.2f * 255);
+            finalOutlineColour = nvgColour(object->isSelected() ? Colours::red.brighter(1.5f) : Colours::red);
+            finalBackgroundColour = nvgColour(colours.objectOutlineColour.withMultipliedAlpha(0.2f));
         } else if ((canBeClicked || getPatch()) && isMouseOver() && getValue<bool>(cnv->locked)) {
-            finalBackgroundColour = convertColour(backgroundColour.contrasting(backgroundColour.getBrightness() > 0.5f ? 0.03f : 0.05f));
+            finalBackgroundColour = nvgColour(bg.contrasting(bg.getBrightness() > 0.5f ? 0.03f : 0.05f));
         }
 
-        nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), finalBackgroundColour, finalOutlineColour, Corners::objectCornerRadius);
+        nanovg::nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), finalBackgroundColour, finalOutlineColour, getPlugDataLook(*this).getObjectCornerRadius());
 
         // if the object is valid & iolet area colour is differnet from background colour
         // draw two non-rounded rectangles at top / bottom
@@ -239,22 +250,28 @@ public:
         //   │┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼┼│
         //   └──────────────────┘
 
-        bool const hasIoletArea = ioletAreaColour.r != backgroundColour.getRed() || ioletAreaColour.g != backgroundColour.getGreen() || ioletAreaColour.b != backgroundColour.getBlue() || ioletAreaColour.a != backgroundColour.getAlpha();
+        auto ioletAreaColour = nvgColour(colours.ioletAreaColour);
+        bool const hasIoletArea = ioletAreaColour.r != bg.getRed() || ioletAreaColour.g != bg.getGreen() || ioletAreaColour.b != bg.getBlue() || ioletAreaColour.a != bg.getAlpha();
 
         if (isValid && hasIoletArea) {
-            nvgFillColor(nvg, ioletAreaColour);
-            nvgBeginPath(nvg);
-            nvgRoundedRectVarying(nvg, 0, 0, getWidth(), 3.5f, Corners::defaultCornerRadius, Corners::defaultCornerRadius, 0.0f, 0.0f);
-            nvgRoundedRectVarying(nvg, 0, getHeight() - 3.5f, getWidth(), 3.5f, 0.0f, 0.0f, Corners::defaultCornerRadius, Corners::defaultCornerRadius);
-            nvgFill(nvg);
+            nanovg::nvgFillColor(nvg, ioletAreaColour);
+            nanovg::nvgBeginPath(nvg);
+            nanovg::nvgRoundedRectVarying(nvg, 0, 0, getWidth(), 3.5f, Corners::defaultCornerRadius, Corners::defaultCornerRadius, 0.0f, 0.0f);
+            nanovg::nvgRoundedRectVarying(nvg, 0, getHeight() - 3.5f, getWidth(), 3.5f, 0.0f, 0.0f, Corners::defaultCornerRadius, Corners::defaultCornerRadius);
+            nanovg::nvgFill(nvg);
 
-            nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), nvgRGBA(0, 0, 0, 0), outlineCol, Corners::objectCornerRadius);
+            nanovg::nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), nanovg::nvgRGBA(0, 0, 0, 0), outlineCol, getPlugDataLook(*this).getObjectCornerRadius());
         }
 
+        auto& llgc = *cnv->editor->getNanoLLGC();
+
         if (editor && editor->isVisible()) {
-            imageRenderer.renderJUCEComponent(nvg, *editor, getImageScale());
+            llgc.renderComponent(*editor);
         } else {
-            cachedTextRender.renderText(nvg, border.subtractedFrom(b).toFloat(), getImageScale());
+            Graphics g(llgc);
+            auto const textBounds = getLocalBounds().reduced(6, 0).toFloat();
+            NVGGraphicsContext::ScopedAnchoredDraw anchor(llgc, textBounds);
+            layout.draw(g, textBounds);
         }
     }
 
@@ -307,15 +324,13 @@ public:
 
         int fontWidth = 7;
         int charWidth = 0;
-        if (auto obj = ptr.get<void>()) {
+        if (auto obj = ptr.get<t_text>()) {
             charWidth = TextObjectHelper::getWidthInChars(obj.get());
             fontWidth = glist_fontwidth(cnv->patch.getRawPointer());
         }
 
-        auto const textSize = cachedTextRender.getTextBounds();
-
         // Calculating string width is expensive, so we cache all the strings that we already calculated the width for
-        int const idealWidth = CachedStringWidth<15>::calculateStringWidth(objText) + 11;
+        int const idealWidth = CachedStringWidth<15>::calculateStringWidth(objText) + 13;
 
         int textWidth;
         if (objText.isEmpty()) { // If text is empty, set to minimum width
@@ -331,11 +346,58 @@ public:
         auto const maxIolets = std::max(object->numInputs, object->numOutputs);
         textWidth = std::max(textWidth, maxIolets * 18);
 
-        return { textWidth, textSize.getHeight() };
+        return { textWidth, static_cast<int>(layout.getHeight()) };
+    }
+
+    // Builds an AttributedString that colours the tokens of a Pd object's text like the editor does
+    // (object name, flags, math-expression arguments). Shared by text-based objects so they can build
+    // their TextLayout directly.
+    static AttributedString getSyntaxHighlightedString(Component const& context, String const& text, Font const& font, Colour const& colour, Colour const& nameColour)
+    {
+        auto attributedText = AttributedString();
+        auto lines = StringArray::fromLines(text);
+
+        auto const flagColour = colour.interpolatedWith(::getThemeColours(context).signalColour, 0.7f);
+        auto const mathColour = colour.interpolatedWith(Colours::purple, 0.5f);
+
+        bool firstToken = true;
+        bool hadFlag = false;
+        bool mathExpression = false;
+        for (int i = 0; i < lines.size(); i++) {
+            auto& line = lines[i];
+            auto tokens = StringArray::fromTokens(line, true);
+            for (int j = 0; j < tokens.size(); j++) {
+                auto token = tokens[j];
+                if (j != tokens.size() - 1)
+                    token += " ";
+                if (firstToken) {
+                    attributedText.append(token, font, nameColour);
+                    if (token == "expr " || token == "expr~ " || token == "fexpr~ " || token == "op " || token == "op~ ") {
+                        mathExpression = true;
+                    }
+                    firstToken = false;
+                } else if (mathExpression) {
+                    attributedText.append(token, font, mathColour);
+                } else if (token.startsWith("-") && !token.containsOnly("e.-0123456789 ")) {
+                    attributedText.append(token, font, flagColour);
+                    hadFlag = true;
+                } else if (hadFlag) {
+                    attributedText.append(token, font, nameColour);
+                } else {
+                    attributedText.append(token, font, colour);
+                }
+            }
+            if (i != lines.size() - 1)
+                attributedText.append("\n", font, colour);
+        }
+
+        return attributedText;
     }
 
     virtual void updateTextLayout()
     {
+        auto const& colours = getThemeColours();
+
         if (cnv->isGraph)
             return; // Text layouting is expensive, so skip if it's not necessary
 
@@ -348,11 +410,22 @@ public:
             objText = cnv->suggestor->getText();
         }
 
-        auto const colour = cnv->editor->getLookAndFeel().findColour(PlugDataColour::canvasTextColourId);
-        int const textWidth = getTextSize().getWidth() - 11;
-        if (cachedTextRender.prepareLayout(objText, Fonts::getCurrentFont().withHeight(15), colour, textWidth, getValue<int>(sizeProperty), static_cast<PlugDataLook&>(cnv->getLookAndFeel()).getUseSyntaxHighlighting() && isValid)) {
-            repaint();
+        auto const colour = colours.canvasTextColour;
+        auto const font = Fonts::getDefaultFont().withHeight(15);
+        bool const highlightObjectSyntax = getPlugDataLook(*this).getUseSyntaxHighlighting() && isValid;
+
+        AttributedString attributedText;
+        if (highlightObjectSyntax) {
+            auto const nameColour = colour.interpolatedWith(colours.dataColour, 0.7f);
+            attributedText = getSyntaxHighlightedString(*this, objText, font, colour, nameColour);
+        } else {
+            attributedText = AttributedString(objText);
+            attributedText.setColour(colour);
+            attributedText.setFont(font);
         }
+        attributedText.setJustification(Justification::centredLeft);
+        attributedText.setWordWrap(AttributedString::byChar);
+        layout.createLayout(attributedText, getTextSize().getWidth() - 12);
     }
 
     void setPdBounds(Rectangle<int> const b) override
@@ -362,11 +435,11 @@ public:
 
             pd::Interface::moveObject(patch, gobj.get(), b.getX(), b.getY());
 
-            if (TextObjectHelper::getWidthInChars(gobj.get())) {
+            if (TextObjectHelper::getWidthInChars(gobj.cast<t_text>())) {
                 TextObjectHelper::setWidthInChars(gobj.get(), (b.getWidth() - 5) / glist_fontwidth(patch));
             }
 
-            auto const type = hash(getText().upToFirstOccurrenceOf(" ", false, false));
+            auto const type = hash(getText().toString().upToFirstOccurrenceOf(" ", false, false));
 
             if (type == hash("inlet") || type == hash("inlet~")) {
                 canvas_resortinlets(patch);
@@ -404,6 +477,7 @@ public:
             auto newText = outgoingEditor->getText();
 
             newText = TextObjectHelper::fixNewlines(newText);
+            newText = TextObjectHelper::fixMissingSpace(newText);
 
             bool changed;
             if (objectText != newText) {
@@ -434,10 +508,8 @@ public:
     void showEditor() override
     {
         if (editor == nullptr) {
-            editor.reset(TextObjectHelper::createTextEditor(object, 15));
-
-            editor->setLookAndFeel(&object->getLookAndFeel());
-            editor->setBorder(border.addedTo(BorderSize<int>(0, 0, 1, 0)));
+            editor.reset(TextObjectHelper::createTextEditor(object, Fonts::getDefaultFont().withHeight(15)));
+            editor->setBorder(border);
             editor->setBounds(getLocalBounds());
             editor->setText(objectText, false);
             editor->addListener(this);
@@ -448,13 +520,7 @@ public:
             editor->grabKeyboardFocus();
 
             editor->onFocusLost = [this] {
-                if (cnv->suggestor.get()->hasKeyboardFocus(true) || Component::getCurrentlyFocusedComponent() == editor.get()) {
-                    editor->grabKeyboardFocus();
-                    return;
-                }
-
-                // Be careful, if anything grabs keyboard focus when clicking an object, this will close the editor!
-                hideEditor();
+                cnv->suggestor->checkEditorFocusLoss(editor.get());
             };
 
             cnv->showSuggestions(object, editor.get());
@@ -537,14 +603,19 @@ public:
     {
         return TextObjectHelper::createConstrainer(object);
     }
+
+    ResizeDirection getAllowedResizeDirections() const override
+    {
+        return HorizontalOnly;
+    }
 };
 
 // Actual text object, marked final for optimisation
-class TextObject final : public TextBase {
+class TextObject final : public TextObjectBase {
 
 public:
     TextObject(pd::WeakReference obj, Object* parent, bool const isValid = true)
-        : TextBase(obj, parent, isValid)
+        : TextObjectBase(obj, parent, isValid)
     {
     }
 };

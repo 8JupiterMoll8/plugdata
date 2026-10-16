@@ -253,34 +253,36 @@ public:
 
     void render(NVGcontext* nvg) override
     {
+        auto const& colours = getThemeColours(*this);
+
         auto const b = getLocalBounds();
-        auto const backgroundColour = convertColour(object->cnv->editor->getLookAndFeel().findColour(PlugDataColour::guiObjectBackgroundColourId));
-        auto const selectedOutlineColour = convertColour(object->cnv->editor->getLookAndFeel().findColour(PlugDataColour::objectSelectedOutlineColourId));
-        auto const outlineColour = convertColour(object->cnv->editor->getLookAndFeel().findColour(PlugDataColour::objectOutlineColourId));
+        auto const backgroundColour = nvgColour(colours.guiObjectBackgroundColour);
+        auto const selectedOutlineColour = nvgColour(colours.objectSelectedOutlineColour);
+        auto const outlineColour = nvgColour(colours.objectOutlineColour);
 
-        nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), backgroundColour, object->isSelected() ? selectedOutlineColour : outlineColour, Corners::objectCornerRadius);
+        nanovg::nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), backgroundColour, object->isSelected() ? selectedOutlineColour : outlineColour, getPlugDataLook(*this).getObjectCornerRadius());
 
-        nvgStrokeColor(nvg, convertColour(object->cnv->editor->getLookAndFeel().findColour(PlugDataColour::guiObjectInternalOutlineColour)));
-        nvgBeginPath(nvg);
-        nvgMoveTo(nvg, filterX1 * getWidth(), 0.0f);
-        nvgLineTo(nvg, filterX1 * getWidth(), getHeight());
-        nvgStroke(nvg);
+        nanovg::nvgStrokeColor(nvg, nvgColour(colours.guiObjectInternalOutlineColour));
+        nanovg::nvgBeginPath(nvg);
+        nanovg::nvgMoveTo(nvg, filterX1 * getWidth(), 0.0f);
+        nanovg::nvgLineTo(nvg, filterX1 * getWidth(), getHeight());
+        nanovg::nvgStroke(nvg);
 
-        nvgBeginPath(nvg);
-        nvgMoveTo(nvg, filterX2 * getWidth(), 0.0f);
-        nvgLineTo(nvg, filterX2 * getWidth(), getHeight());
-        nvgStroke(nvg);
+        nanovg::nvgBeginPath(nvg);
+        nanovg::nvgMoveTo(nvg, filterX2 * getWidth(), 0.0f);
+        nanovg::nvgLineTo(nvg, filterX2 * getWidth(), getHeight());
+        nanovg::nvgStroke(nvg);
 
-        nvgBeginPath(nvg);
-        nvgMoveTo(nvg, 0.0f, getHeight() / 2.0f);
-        nvgLineTo(nvg, getWidth(), getHeight() / 2.0f);
-        nvgStroke(nvg);
+        nanovg::nvgBeginPath(nvg);
+        nanovg::nvgMoveTo(nvg, 0.0f, getHeight() / 2.0f);
+        nanovg::nvgLineTo(nvg, getWidth(), getHeight() / 2.0f);
+        nanovg::nvgStroke(nvg);
 
-        nvgStrokeWidth(nvg, 1.0f);
-        nvgLineStyle(nvg, NVG_BUTT);
+        nanovg::nvgStrokeWidth(nvg, 1.0f);
+        nanovg::nvgLineStyle(nvg, NVG_BUTT);
         setJUCEPath(nvg, magnitudePath);
-        nvgStrokeColor(nvg, convertColour(object->cnv->editor->getLookAndFeel().findColour(PlugDataColour::canvasTextColourId)));
-        nvgStroke(nvg);
+        nanovg::nvgStrokeColor(nvg, nvgColour(colours.canvasTextColour));
+        nanovg::nvgStroke(nvg);
     }
 
     void changeBandWidth(float const x, float const y, float const previousX, float const previousY)
@@ -532,8 +534,7 @@ public:
         addAndMakeVisible(graph);
 
         graph.graphChangeCallback = [this](float a1, float a2, float b0, float b1, float b2) {
-            if (auto obj = ptr.get<void>())
-                pd->sendDirectMessage(obj.get(), "biquad", { a1, a2, b0, b1, b2 });
+            sendMessage("biquad", { a1, a2, b0, b1, b2 });
         };
 
         objectParameters.addParamSize(&sizeProperty);
@@ -585,10 +586,7 @@ public:
             auto const height = std::max(static_cast<int>(arr[1]), constrainer->getMinimumHeight());
 
             setParameterExcludingListener(sizeProperty, VarArray { var(width), var(height) });
-
-            if (auto gobj = ptr.get<t_gobj>()) {
-                pd->sendDirectMessage(gobj.get(), "dim", { static_cast<float>(width), static_cast<float>(height) });
-            }
+            sendMessage("dim", { static_cast<float>(width), static_cast<float>(height) });
 
             object->updateBounds();
         }
@@ -604,7 +602,7 @@ public:
             return { x, y, w + 1, h + 1 };
         }
 
-        return {};
+        return { };
     }
 
     void setPdBounds(Rectangle<int> const b) override
@@ -612,7 +610,7 @@ public:
         if (auto gobj = ptr.get<t_gobj>()) {
             auto* patch = object->cnv->patch.getRawPointer();
             pd::Interface::moveObject(patch, gobj.get(), b.getX(), b.getY());
-            pd->sendDirectMessage(gobj.get(), "dim", { static_cast<float>(b.getWidth()) - 1, static_cast<float>(b.getHeight()) - 1 });
+            sendMessage("dim", { static_cast<float>(b.getWidth()) - 1, static_cast<float>(b.getHeight()) - 1 });
         }
 
         graph.saveProperties();

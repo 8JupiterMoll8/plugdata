@@ -1,4 +1,4 @@
-From a51577641b1dfcc52c98073a4677cf336030838f Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Alphi <alphi@starchaser.local>
 Date: Mon, 21 Sep 2026 11:20:35 +0200
 Subject: [PATCH] fix(x11): add nullptr check for xGetImage in
@@ -10,10 +10,10 @@ Prevents hard crash on Linux X11 when taking window snapshots during window stat
  1 file changed, 12 insertions(+), 8 deletions(-)
 
 diff --git a/modules/juce_gui_basics/native/juce_XWindowSystem_linux.cpp b/modules/juce_gui_basics/native/juce_XWindowSystem_linux.cpp
-index ca6cd5870fc..db4b0250a81 100644
+index 93cff29..c29a4e6 100644
 --- a/modules/juce_gui_basics/native/juce_XWindowSystem_linux.cpp
 +++ b/modules/juce_gui_basics/native/juce_XWindowSystem_linux.cpp
-@@ -4157,14 +4157,18 @@ Image createSnapshotOfNativeWindow (void* window)
+@@ -4427,14 +4427,18 @@ Image createSnapshotOfNativeWindow (void* window)
          return 1.0;
      }();
  

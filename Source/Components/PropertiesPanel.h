@@ -62,7 +62,7 @@ public:
 
 private:
     class SectionComponent final : public Component {
-        public:
+    public:
         SectionComponent(PropertiesPanel& propertiesPanel, String const& sectionTitle,
             PropertiesArray const& newProperties, int extraPadding);
 
@@ -86,7 +86,6 @@ private:
         OwnedArray<PropertiesPanelProperty> propertyComponents;
         StringArray extraHeaderNames;
         int padding;
-        std::unique_ptr<melatonin::DropShadow> dropShadow;
         JUCE_DECLARE_NON_COPYABLE(SectionComponent)
     };
 
@@ -109,7 +108,7 @@ private:
 
 public:
     class ComboComponent : public PropertiesPanelProperty {
-        public:
+    public:
         ComboComponent(String const& propertyName, Value const& value, StringArray const& options);
 
         ComboComponent(String const& propertyName, StringArray const& options);
@@ -122,13 +121,15 @@ public:
         ComboBox comboBox;
     };
 
-    class FontComponent final : public PropertiesPanelProperty {
-        public:
+    class FontComponent final : public PropertiesPanelProperty
+        , private Value::Listener {
+    public:
         Value fontValue;
         StringArray options = Font::findAllTypefaceNames();
         bool isFontMissing = false;
 
         FontComponent(String const& propertyName, Value const& value, File const& extraFontsDir = File());
+        ~FontComponent() override;
 
         PropertiesPanelProperty* createCopy() override;
 
@@ -139,12 +140,14 @@ public:
         void resized() override;
 
     private:
+        void valueChanged(Value& value) override;
+
         ComboBox comboBox;
     };
 
     class BoolComponent : public PropertiesPanelProperty
         , public Value::Listener {
-        public:
+    public:
         BoolComponent(String const& propertyName, Value const& value, StringArray options);
 
         // Also allow creating it without passing in a Value, makes it easier to derive from this class for custom bool components
@@ -180,7 +183,7 @@ public:
     class InspectorColourComponent final : public PropertiesPanelProperty
         , public Value::Listener {
     public:
-        InspectorColourComponent(String const& propertyName, Value const& value);
+        InspectorColourComponent(String const& propertyName, Value const& value, bool allowAlpha = false);
 
         ~InspectorColourComponent() override;
 
@@ -203,6 +206,7 @@ public:
         Value colour;
         Label hexValueEditor;
         bool isMouseOver = false;
+        bool allowAlpha;
     };
 
     class ColourComponent final : public PropertiesPanelProperty
@@ -236,6 +240,7 @@ public:
         DraggableNumber minLabel, maxLabel;
 
         float min, max;
+
     public:
         RangeComponent(String const& propertyName, Value const& value, bool integerMode);
 
@@ -258,12 +263,11 @@ public:
         Label label;
         SmallIconButton browseButton = SmallIconButton(Icons::File);
         Value property;
+
     public:
         FilePathComponent(String const& propertyName, Value const& value);
 
         PropertiesPanelProperty* createCopy() override;
-
-        void paint(Graphics& g) override;
 
         void resized() override;
     };
@@ -273,6 +277,7 @@ public:
         String label;
         SmallIconButton browseButton = SmallIconButton(Icons::Folder);
         Value property;
+
     public:
         DirectoryPathComponent(String const& propertyName, Value const& value);
 
@@ -317,7 +322,7 @@ public:
     public:
         std::unique_ptr<Component> label;
 
-            EditableComponent(String const& propertyName, Value const& value, bool clip = false, double minimum = 0.0, double maximum = 1<<30, std::function<void(bool)> onInteractionFn = nullptr)
+        EditableComponent(String const& propertyName, Value const& value, bool clip = false, double minimum = 0.0, double maximum = 1 << 30, std::function<void(bool)> onInteractionFn = nullptr)
             : PropertiesPanelProperty(propertyName)
             , property(value)
             , min(minimum)
@@ -329,24 +334,26 @@ public:
                 label = std::unique_ptr<DraggableNumber>(draggableNumber);
 
                 // By setting the text before attaching the value, we can prevent an unnesssary/harmful call to ValueChanged
-                draggableNumber->setText(property.toString(), dontSendNotification);
+                if constexpr (std::is_floating_point_v<T>)
+                    draggableNumber->setText(formatFloat(getValue<T>(property)), dontSendNotification);
+                else
+                    draggableNumber->setText(property.toString(), dontSendNotification);
                 draggableNumber->setFont(draggableNumber->getFont().withHeight(14.5f));
                 draggableNumber->setEditableOnClick(true);
 
-                if(clip)
-                {
+                if (clip) {
                     draggableNumber->setMinimum(minimum);
                     draggableNumber->setMaximum(maximum);
                 }
 
                 if (onInteractionFn)
                     draggableNumber->onInteraction = onInteractionFn;
-                
+
                 draggableNumber->setPrecision(3);
 
                 draggableNumber->onValueChange = [this](double const newValue) {
                     if (limit) {
-                        property = std::clamp<T>(newValue, min, max);
+                        property = clampValue(newValue);
                     } else {
                         property = static_cast<T>(newValue);
                     }
@@ -354,7 +361,7 @@ public:
 
                 draggableNumber->onReturnKey = [this](double const newValue) {
                     if (limit) {
-                        property = std::clamp<T>(newValue, min, max);
+                        property = clampValue(newValue);
                     } else {
                         property = static_cast<T>(newValue);
                     }
@@ -371,7 +378,7 @@ public:
                 label = std::unique_ptr<Label>(labelComp);
                 labelComp->setEditable(true, false);
                 labelComp->getTextValue().referTo(property);
-                labelComp->setFont(Font(14.5f));
+                labelComp->setFont(Font(FontOptions(14.5f)));
 
                 labelComp->onEditorShow = [this, labelComp] {
                     auto* editor = labelComp->getCurrentTextEditor();
@@ -382,19 +389,46 @@ public:
                         editor->setInputRestrictions(0, allowedCharacters);
                     }
                 };
-
-                labelComp->onEditorHide = [this] {
-                    // synchronise the value to the canvas when updated
-                    if (auto* pluginEditor = findParentComponentOfClass<PluginEditor>()) {
-                        if (auto const cnv = pluginEditor->getCurrentCanvas())
-                            cnv->synchronise();
-                    }
-                };
             }
 
             addAndMakeVisible(label.get());
 
             label->addMouseListener(this, true);
+        }
+
+        // A float stored in a var becomes a double, which prints as e.g. 0.6000000238.
+        // Use the shortest text that reads back as the same float instead.
+        static String formatFloat(float const value)
+        {
+            std::ostringstream stream;
+            stream.imbue(std::locale::classic());
+
+            for (int digits = 6; digits <= std::numeric_limits<float>::max_digits10; digits++) {
+                stream.str({});
+                stream.precision(digits);
+                stream << value;
+                if (String(stream.str()).getFloatValue() == value)
+                    break;
+            }
+
+            return stream.str();
+        }
+
+        T clampValue(T value)
+        {
+            if constexpr (std::is_arithmetic_v<T>) {
+                if (!limit)
+                    return value;
+
+                if (min == max)
+                    return value;
+                else if (min > max)
+                    return std::clamp<T>(value, max, min);
+                else
+                    return std::clamp<T>(value, min, max);
+            }
+
+            return value;
         }
 
         void valueChanged(Value& v) override
@@ -435,6 +469,7 @@ public:
         OwnedArray<T> properties;
         SmallArray<Value*> propertyValues;
         StringArray propertyOptions;
+
     public:
         MultiPropertyComponent(String const& propertyName, SmallArray<Value*> values)
             : PropertiesPanelProperty(propertyName)
@@ -446,7 +481,7 @@ public:
                 addAndMakeVisible(property);
             }
 
-            setLookAndFeel(&LookAndFeel::getDefaultLookAndFeel());
+            setLookAndFeel(nullptr);
         }
 
         MultiPropertyComponent(String const& propertyName, SmallArray<Value*> values, StringArray options)
@@ -473,7 +508,7 @@ public:
         void lookAndFeelChanged() override
         {
             for (auto& property : properties) {
-                property->setColour(ComboBox::textColourId, findColour(PlugDataColour::panelTextColourId));
+                property->setColour(ComboBox::textColourId, getThemeColours(*this).panelTextColour);
             }
         }
 
@@ -499,7 +534,7 @@ public:
 
             for (int i = 0; i < propertyValues.size(); i++) {
                 auto propertyBounds = b.removeFromLeft(itemWidth);
-                g.setColour(findColour(PlugDataColour::toolbarOutlineColourId).withAlpha(0.5f));
+                g.setColour(getThemeColours(*this).toolbarOutlineColour.withAlpha(0.5f));
                 g.drawVerticalLine(propertyBounds.getX(), 0, getHeight());
             }
         }

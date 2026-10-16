@@ -36,10 +36,10 @@ public:
         iemHelper.iemColourChangedCallback = [this] {
             // We use this callback to be informed when the IEM colour has changed.
             // As getBackgroundColour() will lock audio thread!
-            backgroundCol = convertColour(iemHelper.getBackgroundColour());
+            backgroundCol = nvgColour(iemHelper.getBackgroundColour());
 
-            foregroundCol = convertColour(iemHelper.getForegroundColour());
-            flagCol = convertColour(iemHelper.getForegroundColour());
+            foregroundCol = nvgColour(iemHelper.getForegroundColour());
+            flagCol = nvgColour(iemHelper.getForegroundColour());
 
             input.setColour(Label::textColourId, iemHelper.getForegroundColour());
             input.setColour(Label::textWhenEditingColourId, iemHelper.getBackgroundColour().contrasting());
@@ -55,9 +55,9 @@ public:
 
         input.onInteraction = [this](bool const isFocused) {
             if (isFocused)
-                input.setColour(Label::textColourId, convertColour(backgroundCol).contrasting());
+                input.setColour(Label::textColourId, iemHelper.getBackgroundColour().contrasting());
             else
-                input.setColour(Label::textColourId, convertColour(foregroundCol));
+                input.setColour(Label::textColourId, iemHelper.getForegroundColour());
         };
 
         input.setEditableOnClick(false, false, true);
@@ -65,7 +65,7 @@ public:
             stopEdition();
         };
 
-        input.setBorderSize({ 1, 12, 2, 2 });
+        input.setBorderSize({ 1, 12, 1, 0 });
 
         addAndMakeVisible(input);
 
@@ -108,37 +108,35 @@ public:
 
     void update() override
     {
-        if (input.isShowing())
-            return;
-
-        value = getValue();
-        input.setValue(value, dontSendNotification);
-
-        min = getMinimum();
-        max = getMaximum();
-
-        input.setMinimum(::getValue<float>(min));
-        input.setMaximum(::getValue<float>(max));
-
         if (auto nbx = ptr.get<t_my_numbox>()) {
             widthProperty = var(nbx->x_numwidth);
             heightProperty = var(nbx->x_gui.x_h);
             logMode = nbx->x_lin0_log1;
             logHeight = nbx->x_log_height;
+            min = nbx->x_min;
+            max = nbx->x_max;
+            value = nbx->x_val;
         }
+
+        input.setValue(value, dontSendNotification, false);
+        input.setMinimum(getValue<float>(min));
+        input.setMaximum(getValue<float>(max));
+        input.setLogarithmicHeight(getValue<float>(logHeight));
+        input.setDragMode(getValue<bool>(logMode) ? DraggableNumber::Logarithmic : DraggableNumber::Regular);
 
         iemHelper.update();
 
-        auto const fontHeight = ::getValue<int>(iemHelper.labelHeight) + 3.0f;
-        input.setFont(Fonts::getTabularNumbersFont().withHeight(fontHeight));
+        auto const fontHeight = getValue<int>(iemHelper.labelHeight);
+        input.setFont(Fonts::getTabularNumbersFont().withHeight(fontHeight + 3.0f));
+        updateLabel();
     }
 
-    bool inletIsSymbol() override
+    bool hideInlet() override
     {
         return iemHelper.hasReceiveSymbol();
     }
 
-    bool outletIsSymbol() override
+    bool hideOutlet() override
     {
         return iemHelper.hasSendSymbol();
     }
@@ -159,7 +157,7 @@ public:
             return { x, y, calcFontWidth(std::max(nbx->x_numwidth, 1)) + 1, h + 1 };
         }
 
-        return {};
+        return { };
     }
 
     int getFontWidth() const
@@ -232,7 +230,7 @@ public:
 
     void lock(bool const isLocked) override
     {
-        input.setResetEnabled(::getValue<bool>(cnv->locked));
+        input.setResetEnabled(getValue<bool>(cnv->locked));
         setInterceptsMouseClicks(isLocked, isLocked);
         repaint();
     }
@@ -250,9 +248,11 @@ public:
             break;
         }
         case hash("range"): {
-            if (atoms.size() >= 2 && atoms[0].isFloat() && atoms[1].isFloat()) {
-                min = getMinimum();
-                max = getMaximum();
+            if (atoms.size() >= 2) {
+                if (auto nbx = ptr.get<t_my_numbox>()) {
+                    min = nbx->x_min;
+                    max = nbx->x_max;
+                }
             }
             break;
         }
@@ -311,10 +311,8 @@ public:
 
     void propertyChanged(Value& value) override
     {
-
         if (value.refersToSameSourceAs(widthProperty)) {
-            auto const numWidth = std::max(::getValue<int>(widthProperty), 1);
-
+            auto const numWidth = std::max(getValue<int>(widthProperty), 1);
             auto const width = calcFontWidth(numWidth) + 1;
 
             setParameterExcludingListener(widthProperty, var(numWidth));
@@ -326,35 +324,41 @@ public:
 
             object->updateBounds();
         } else if (value.refersToSameSourceAs(heightProperty)) {
-            auto const height = std::max(::getValue<int>(heightProperty), constrainer->getMinimumHeight());
+            auto const height = std::max(getValue<int>(heightProperty), constrainer->getMinimumHeight());
             setParameterExcludingListener(heightProperty, var(height));
             if (auto nbx = ptr.get<t_my_numbox>()) {
                 nbx->x_gui.x_h = height;
             }
             object->updateBounds();
         } else if (value.refersToSameSourceAs(min)) {
-            setMinimum(::getValue<float>(min));
+            input.setMinimum(getValue<float>(min));
+            if (auto numbox = ptr.get<t_my_numbox>()) {
+                numbox->x_min = getValue<float>(min);
+            }
         } else if (value.refersToSameSourceAs(max)) {
-            setMaximum(::getValue<float>(max));
+            input.setMaximum(getValue<float>(max));
+            if (auto numbox = ptr.get<t_my_numbox>()) {
+                numbox->x_max = getValue<float>(max);
+            }
         } else if (value.refersToSameSourceAs(logHeight)) {
-            auto const height = ::getValue<int>(logHeight);
+            auto const height = getValue<int>(logHeight);
             if (auto nbx = ptr.get<t_my_numbox>()) {
                 nbx->x_log_height = height;
             }
 
             input.setLogarithmicHeight(height);
         } else if (value.refersToSameSourceAs(logMode)) {
-            auto const logarithmicDrag = ::getValue<bool>(logMode);
+            auto const logarithmicDrag = getValue<bool>(logMode);
             if (auto nbx = ptr.get<t_my_numbox>()) {
                 nbx->x_lin0_log1 = logarithmicDrag;
             }
             input.setDragMode(logarithmicDrag ? DraggableNumber::Logarithmic : DraggableNumber::Regular);
         } else if (value.refersToSameSourceAs(iemHelper.labelHeight)) {
-            iemHelper.setFontHeight(::getValue<int>(iemHelper.labelHeight));
+            auto const fontHeight = getValue<int>(iemHelper.labelHeight);
+            iemHelper.setFontHeight(fontHeight);
             updateLabel();
 
-            auto const fontHeight = ::getValue<int>(iemHelper.labelHeight) + 3.0f;
-            input.setFont(Fonts::getTabularNumbersFont().withHeight(fontHeight));
+            input.setFont(Fonts::getTabularNumbersFont().withHeight(fontHeight + 3.0f));
             object->updateBounds();
         } else {
             iemHelper.valueChanged(value);
@@ -363,70 +367,32 @@ public:
 
     void render(NVGcontext* nvg) override
     {
+        auto const& colours = getThemeColours();
+
         auto const b = getLocalBounds().toFloat();
 
         bool const selected = object->isSelected() && !cnv->isGraph;
 
-        nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), backgroundCol, selected ? cnv->selectedOutlineCol : cnv->objectOutlineCol, Corners::objectCornerRadius);
+        nanovg::nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), backgroundCol, nvgColour(selected ? colours.objectSelectedOutlineColour : colours.objectOutlineColour), getPlugDataLook(*this).getObjectCornerRadius());
 
         constexpr float indent = 9.0f;
         Rectangle<float> const iconBounds = { (b.getX() + 4.0f), (b.getY() + 4.0f), (indent - 4.0f), (b.getHeight() - 8.0f) };
 
         auto const centreY = iconBounds.getCentreY();
         auto const leftX = iconBounds.getX();
-        nvgBeginPath(nvg);
-        nvgMoveTo(nvg, leftX, centreY + 5.0f);
-        nvgLineTo(nvg, iconBounds.getRight(), centreY);
-        nvgLineTo(nvg, leftX, centreY - 5.0f);
-        nvgClosePath(nvg);
+        nanovg::nvgBeginPath(nvg);
+        nanovg::nvgMoveTo(nvg, leftX, centreY + 5.0f);
+        nanovg::nvgLineTo(nvg, iconBounds.getRight(), centreY);
+        nanovg::nvgLineTo(nvg, leftX, centreY - 5.0f);
+        nanovg::nvgClosePath(nvg);
 
-        bool const highlighted = hasKeyboardFocus(true) && ::getValue<bool>(object->locked);
-        auto const flagCol = highlighted ? cnv->selectedOutlineCol : cnv->guiObjectInternalOutlineCol;
+        bool const highlighted = hasKeyboardFocus(true) && getValue<bool>(object->locked);
+        auto const flagCol = highlighted ? nvgColour(colours.objectSelectedOutlineColour) : nvgColour(colours.guiObjectInternalOutlineColour);
 
-        nvgFillColor(nvg, flagCol);
-        nvgFill(nvg);
+        nanovg::nvgFillColor(nvg, flagCol);
+        nanovg::nvgFill(nvg);
 
-        input.render(nvg);
-    }
-
-    float getValue() const
-    {
-        if (auto numbox = ptr.get<t_my_numbox>()) {
-            return numbox->x_val;
-        }
-        return 0.0f;
-    }
-
-    float getMinimum() const
-    {
-        if (auto numbox = ptr.get<t_my_numbox>()) {
-            return numbox->x_min;
-        }
-        return -std::numeric_limits<float>::infinity();
-    }
-
-    float getMaximum() const
-    {
-        if (auto numbox = ptr.get<t_my_numbox>()) {
-            return numbox->x_max;
-        }
-        return std::numeric_limits<float>::infinity();
-    }
-
-    void setMinimum(float const value)
-    {
-        input.setMinimum(value);
-        if (auto numbox = ptr.get<t_my_numbox>()) {
-            numbox->x_min = value;
-        }
-    }
-
-    void setMaximum(float const value)
-    {
-        input.setMaximum(value);
-        if (auto numbox = ptr.get<t_my_numbox>()) {
-            numbox->x_max = value;
-        }
+        input.render(nvg, cnv->editor->getNanoLLGC());
     }
 
     std::unique_ptr<ComponentBoundsConstrainer> createConstrainer() override

@@ -20,8 +20,11 @@ public:
 
     ~Dialog() override
     {
-        if (auto* editor = dynamic_cast<PluginEditor*>(parentComponent)) {
-            editor->nvgSurface.setRenderThroughImage(false);
+        if (!ownsViewedComponent) {
+            // We don't own it, so it outlives us: make sure we don't leave a dangling
+            // mouse listener behind on it
+            if (auto* viewed = viewedComponent.release())
+                viewed->removeMouseListener(this);
         }
 
         if (auto const* window = dynamic_cast<DocumentWindow*>(getTopLevelComponent())) {
@@ -36,8 +39,9 @@ public:
         }
     }
 
-    void setViewedComponent(Component* child)
+    void setViewedComponent(Component* child, bool takeOwnership = true)
     {
+        ownsViewedComponent = takeOwnership;
         viewedComponent.reset(child);
         viewedComponent->addMouseListener(this, false);
         addAndMakeVisible(child);
@@ -48,6 +52,8 @@ public:
 
     void paint(Graphics& g) override
     {
+        auto const& colours = getThemeColours(*this);
+
         g.setColour(Colours::black.withAlpha(0.5f));
 
         auto const bounds = getLocalBounds().toFloat().reduced(backgroundMargin);
@@ -59,11 +65,11 @@ public:
         }
 
         if (viewedComponent) {
-            g.setColour(findColour(PlugDataColour::dialogBackgroundColourId));
+            g.setColour(colours.dialogBackgroundColour);
             g.fillRoundedRectangle(viewedComponent->getBounds().toFloat(), isIphone() ? 0 : Corners::windowCornerRadius);
 
-            g.setColour(findColour(PlugDataColour::outlineColourId));
-            g.drawRoundedRectangle(viewedComponent->getBounds().toFloat(), isIphone() ? 0 : Corners::windowCornerRadius, 1.0f);
+            g.setColour(colours.outlineColour);
+            g.drawRoundedRectangle(viewedComponent->getBounds().toFloat().reduced(0.5f), isIphone() ? 0 : Corners::windowCornerRadius, 1.0f);
         }
     }
 
@@ -90,7 +96,6 @@ public:
                 // Only on iPhone, fullscreen every dialog becauwe we don't have much space
                 viewedComponent->setBounds(0, 0, getWidth(), getHeight());
             } else {
-
                 viewedComponent->setSize(std::min(width, getWidth()), std::min(height, getHeight()));
                 viewedComponent->setCentrePosition({ getLocalBounds().getCentreX(), getLocalBounds().getCentreY() });
             }
@@ -108,7 +113,12 @@ public:
         if (isPositiveAndBelow(e.getEventRelativeTo(viewedComponent.get()).getMouseDownY(), 40) && ProjectInfo::isStandalone) {
             dragger.startDraggingWindow(parentComponent->getTopLevelComponent(), e);
             dragging = true;
-        } else if (!viewedComponent->getBounds().contains(e.getPosition())) {
+        } else if (!Process::isForegroundProcess()) {
+            Process::makeForegroundProcess();
+            if (auto* topLevel = getTopLevelComponent()) {
+                topLevel->toFront(true);
+            }
+        } else if (!viewedComponent->getBounds().contains(e.getPosition()) && !blockCloseAction) {
             closeDialog();
         }
     }
@@ -133,7 +143,7 @@ public:
 
     bool keyPressed(KeyPress const& key) override
     {
-        if (key == KeyPress::escapeKey) {
+        if (key == KeyPress::escapeKey && !blockCloseAction) {
             closeDialog();
             return true;
         }
@@ -155,25 +165,30 @@ public:
     std::unique_ptr<Button> closeButton = nullptr;
     std::unique_ptr<Dialog>* owner;
 
+    bool ownsViewedComponent = true;
     bool blockCloseAction = false;
     bool dragging = false;
     int backgroundMargin = 0;
 };
 
 struct Dialogs {
-    static Component* showTextEditorDialog(String const& text, String filename, std::function<void(String, bool)> closeCallback, std::function<void(String)> saveCallback, float desktopScale = 1.0f, bool enableSyntaxHighlighting = false);
+    static Component* showTextEditorDialog(String const& text, String filename, std::function<void(String, bool)> closeCallback, std::function<void(String)> saveCallback, float desktopScale = 1.0f, bool enableSyntaxHighlighting = false, File const& associatedFile = File());
     static void appendTextToTextEditorDialog(Component* dialog, String const& text);
     static void clearTextEditorDialog(Component* dialog);
 
     static void showAskToSaveDialog(std::unique_ptr<Dialog>* target, Component* centre, String const& filename, std::function<void(int)> callback, int margin = 0, bool withLogo = true);
 
-    static void showSettingsDialog(PluginEditor* editor);
+    static void showSettingsDialog(PluginEditor* editor, int initialPanel = -1);
 
     static void showMainMenu(PluginEditor* editor, Component* centre);
 
     static void showMultiChoiceDialog(std::unique_ptr<Dialog>* target, Component* parent, String const& title, std::function<void(int)> const& callback, StringArray const& options = { "Okay", "Cancel " }, String const& icon = Icons::Warning);
 
     static void showHeavyExportDialog(std::unique_ptr<Dialog>* target, Component* parent);
+
+    static void showOnboardingDialog(std::unique_ptr<Dialog>* target, Component* parent);
+
+    static void showAudioExportDialog(std::unique_ptr<Dialog>* target, Component* parent, File const& recording);
 
     static void showObjectBrowserDialog(std::unique_ptr<Dialog>* target, Component* parent);
     static void showObjectReferenceDialog(std::unique_ptr<Dialog>* target, Component* parent, String const& objectName);
@@ -189,7 +204,7 @@ struct Dialogs {
 
     static void showOpenDialog(std::function<void(URL)> const& callback, bool canSelectFiles, bool canSelectDirectories, String const& lastFileId, String const& extension, Component* parentComponent);
 
-    static void showSaveDialog(std::function<void(URL)> const& callback, String const& extension, String const& lastFileId, Component* parentComponent = nullptr, bool directoryMode = false);
+    static void showSaveDialog(std::function<void(URL)> const& callback, String const& extension, String const& lastFileId, Component* parentComponent = nullptr, bool directoryMode = false, String const& defaultFileName = "Untitled");
 
     static inline std::unique_ptr<FileChooser> fileChooser = nullptr;
 };

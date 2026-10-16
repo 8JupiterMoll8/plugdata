@@ -25,11 +25,11 @@ public:
         String groupName;
         String settingName;
         String toolTip;
-        ValueTree overlayState;
+        DynamicObject::Ptr overlayState;
         Overlay group;
 
     public:
-        OverlaySelector(ValueTree const& settings, Overlay const groupType, String nameOfSetting, String nameOfGroup, String toolTipString)
+        OverlaySelector(DynamicObject::Ptr settings, Overlay const groupType, String nameOfSetting, String nameOfGroup, String toolTipString)
             : groupName(std::move(nameOfGroup))
             , settingName(std::move(nameOfSetting))
             , toolTip(std::move(toolTipString))
@@ -62,12 +62,12 @@ public:
 
             textLabel.setText(groupName, dontSendNotification);
             textLabel.setTooltip(toolTip);
-            textLabel.setFont(Font(14));
+            textLabel.setFont(Font(FontOptions(14)));
             addAndMakeVisible(textLabel);
 
-            auto const editState = static_cast<int>(settings.getProperty("edit"));
-            auto const lockState = static_cast<int>(settings.getProperty("lock"));
-            auto const altState = static_cast<int>(settings.getProperty("alt"));
+            auto const editState = static_cast<int>(settings->getProperty("edit"));
+            auto const lockState = static_cast<int>(settings->getProperty("lock"));
+            auto const altState = static_cast<int>(settings->getProperty("alt"));
 
             buttons[Edit]->setToggleState(static_cast<bool>(editState & group), dontSendNotification);
             buttons[Lock]->setToggleState(static_cast<bool>(lockState & group), dontSendNotification);
@@ -80,7 +80,7 @@ public:
         {
             auto const name = button->getName();
 
-            int buttonBit = overlayState.getProperty(name);
+            int buttonBit = overlayState->getProperty(name);
 
             button->setToggleState(!button->getToggleState(), dontSendNotification);
 
@@ -90,7 +90,8 @@ public:
                 buttonBit = buttonBit & ~group;
             }
 
-            overlayState.setProperty(name, buttonBit, nullptr);
+            overlayState->setProperty(name, buttonBit);
+            SettingsFile::getInstance()->triggerSettingsChange("overlays");
         }
 
         void resized() override
@@ -109,12 +110,9 @@ public:
         }
     };
 
-    explicit OverlayDisplaySettings(pd::Instance* pd)
-        : pd(pd)
+    explicit OverlayDisplaySettings()
     {
-        auto const settingsTree = SettingsFile::getInstance()->getValueTree();
-
-        auto const overlayTree = settingsTree.getChildWithName("Overlays");
+        auto overlayTree = SettingsFile::getInstance()->getProperty<DynamicObject>("overlays");
 
         canvasLabel.setText("Canvas", dontSendNotification);
         canvasLabel.setFont(Fonts::getSemiBoldFont().withHeight(14));
@@ -173,9 +171,7 @@ public:
     void valueChanged(Value& v) override
     {
         if (v.refersToSameSourceAs(debugModeValue)) {
-            pd->lockAudioThread();
             set_plugdata_debugging_enabled(getValue<bool>(debugModeValue));
-            pd->unlockAudioThread();
         }
     }
 
@@ -217,11 +213,13 @@ public:
 
     void paint(Graphics& g) override
     {
-        g.setColour(findColour(PlugDataColour::popupMenuTextColourId));
+        auto const& colours = getThemeColours(*this);
+
+        g.setColour(colours.popupMenuTextColour);
         g.setFont(Fonts::getBoldFont().withHeight(15));
         g.drawText("Overlays", 0, 0, getWidth(), 24, Justification::centred);
 
-        g.setColour(findColour(PlugDataColour::toolbarOutlineColourId));
+        g.setColour(colours.toolbarOutlineColour);
         g.drawLine(4, 24, getWidth() - 8, 24);
 
         for (auto const& group : groups) {
@@ -234,11 +232,11 @@ public:
             }
 
             // draw background rectangle
-            g.setColour(findColour(PlugDataColour::popupMenuBackgroundColourId).contrasting(0.035f));
+            g.setColour(colours.popupMenuBackgroundColour.contrasting(0.035f));
             g.fillRoundedRectangle(groupBounds.toFloat(), Corners::largeCornerRadius);
 
             // draw outline rectangle
-            g.setColour(findColour(PlugDataColour::toolbarOutlineColourId));
+            g.setColour(colours.toolbarOutlineColour);
             g.drawRoundedRectangle(groupBounds.toFloat(), Corners::largeCornerRadius, 1.0f);
 
             // draw lines between items
@@ -256,7 +254,7 @@ public:
 
         isShowing = true;
 
-        auto overlayDisplaySettings = std::make_unique<OverlayDisplaySettings>(editor->pd);
+        auto overlayDisplaySettings = std::make_unique<OverlayDisplaySettings>();
         editor->showCalloutBox(std::move(overlayDisplaySettings), bounds);
     }
 
@@ -279,7 +277,6 @@ private:
 
     Value debugModeValue;
     std::unique_ptr<PropertiesPanel::BoolComponent> connectionDebugToggle;
-    pd::Instance* pd;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(OverlayDisplaySettings)
 };

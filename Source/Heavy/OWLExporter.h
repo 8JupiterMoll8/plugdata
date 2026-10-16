@@ -8,19 +8,18 @@
 class OWLExporter final : public ExporterBase {
 public:
     Value targetBoardValue = Value(var(2));
-    Value exportTypeValue = SynchronousValue(var(3));
     Value storeSlotValue = SynchronousValue(var(1));
-
-    TextButton flashButton = TextButton("Flash");
 
     PropertiesPanelProperty* storeSlotProperty;
 
     OWLExporter(PluginEditor* editor, ExportingProgressView* exportingView)
         : ExporterBase(editor, exportingView)
     {
+        exportTypeValue = var(3);
+
         Array<PropertiesPanelProperty*> properties;
         properties.add(new PropertiesPanel::ComboComponent("Target board", targetBoardValue, { "OWL1", "OWL2", "OWL3" }));
-        properties.add(new PropertiesPanel::ComboComponent("Export type", exportTypeValue, { "Source code", "Binary", "Load", "Store" }));
+        properties.add(new PropertiesPanel::ComboComponent("Export type", exportTypeValue, getExportTypes()));
         storeSlotProperty = new PropertiesPanel::ComboComponent(
             "Store slot", storeSlotValue, { "1", "2", "3", "4", "5", "6", "7", "8", "9", "A", "B", "C", "D", "E", "F" });
         properties.add(storeSlotProperty);
@@ -31,81 +30,63 @@ public:
 
         panel.addSection("OWL", properties);
 
-        exportButton.setVisible(false);
-        addAndMakeVisible(flashButton);
-
-        auto const backgroundColour = findColour(PlugDataColour::panelBackgroundColourId);
-        flashButton.setColour(TextButton::buttonColourId, backgroundColour.contrasting(0.05f));
-        flashButton.setColour(TextButton::buttonOnColourId, backgroundColour.contrasting(0.1f));
-        flashButton.setColour(ComboBox::outlineColourId, Colours::transparentBlack);
-
         targetBoardValue.addListener(this);
         exportTypeValue.addListener(this);
         storeSlotValue.addListener(this);
-
-        flashButton.onClick = [this] {
-            auto const tempFolder = File::getSpecialLocation(File::tempDirectory).getChildFile("Heavy-" + Uuid().toString().substring(10));
-            Toolchain::deleteTempFileLater(tempFolder);
-            startExport(tempFolder);
-        };
     }
 
-    ValueTree getState() override
+    StringArray getExportTypes() const override
     {
-        ValueTree stateTree("OWL");
-        stateTree.setProperty("inputPatchValue", getValue<String>(inputPatchValue), nullptr);
-        stateTree.setProperty("projectNameValue", getValue<String>(projectNameValue), nullptr);
-        stateTree.setProperty("projectCopyrightValue", getValue<String>(projectCopyrightValue), nullptr);
-        stateTree.setProperty("targetBoardValue", getValue<int>(targetBoardValue), nullptr);
-        stateTree.setProperty("exportTypeValue", getValue<int>(exportTypeValue), nullptr);
-        stateTree.setProperty("storeSlotValue", getValue<int>(storeSlotValue), nullptr);
-        return stateTree;
+        return { "Source code", "Binary", "Load", "Store" };
     }
 
-    void setState(ValueTree& stateTree) override
+    ExportAction getExportAction() const override
     {
-        auto const tree = stateTree.getChildWithName("OWL");
-        inputPatchValue = tree.getProperty("inputPatchValue");
-        projectNameValue = tree.getProperty("projectNameValue");
-        projectCopyrightValue = tree.getProperty("projectCopyrightValue");
-        targetBoardValue = tree.getProperty("targetBoardValue");
-        exportTypeValue = tree.getProperty("exportTypeValue");
-        storeSlotValue = tree.getProperty("storeSlotValue");
+        int const exportType = getExportType();
+        return exportType == 3 || exportType == 4 ? Flash : Export;
     }
 
-    void resized() override
+    void getState(DynamicObject::Ptr globalState) override
     {
-        ExporterBase::resized();
-        flashButton.setBounds(exportButton.getBounds());
+        auto* state = new DynamicObject();
+        state->setProperty("input_patch_value", getValue<String>(inputPatchValue));
+        state->setProperty("project_name_value", getValue<String>(projectNameValue));
+        state->setProperty("project_copyright_value", getValue<String>(projectCopyrightValue));
+        state->setProperty("export_type_value", getValue<int>(exportTypeValue));
+        state->setProperty("target_board_value", getValue<int>(targetBoardValue));
+        state->setProperty("store_slot_value", getValue<int>(storeSlotValue));
+        globalState->setProperty("owl", state);
+    }
+
+    void setState(DynamicObject::Ptr globalState) override
+    {
+        auto const state = globalState->getProperty("owl").getDynamicObject();
+        if (!state)
+            return;
+        inputPatchValue = state->getProperty("input_patch_value");
+        projectNameValue = state->getProperty("project_name_value");
+        projectCopyrightValue = state->getProperty("project_copyright_value");
+        exportTypeValue = state->getProperty("export_type_value");
+        targetBoardValue = state->getProperty("target_board_value");
+        storeSlotValue = state->getProperty("store_slot_value");
     }
 
     void valueChanged(Value& v) override
     {
         ExporterBase::valueChanged(v);
 
-        flashButton.setEnabled(validPatchSelected);
-
-        int const exportType = getValue<int>(exportTypeValue);
-        bool const flash = exportType == 3 || exportType == 4;
-        exportButton.setVisible(!flash);
-        flashButton.setVisible(flash);
-
-        storeSlotProperty->setEnabled(exportType == 4);
+        storeSlotProperty->setEnabled(getValue<int>(exportTypeValue) == 4);
     }
 
     bool performExport(String const& pdPatch, String const& outdir, String const& name, String const& copyright, StringArray const& searchPaths) override
     {
         auto const target = getValue<int>(targetBoardValue);
-        bool const compile = getValue<int>(exportTypeValue) - 1;
-        bool const load = getValue<int>(exportTypeValue) == 3;
-        bool const store = getValue<int>(exportTypeValue) == 4;
+        bool const compile = getExportType() - 1;
+        bool const load = getExportType() == 3;
+        bool const store = getExportType() == 4;
         int const slot = getValue<int>(storeSlotValue);
 
-#if JUCE_WINDOWS
-        auto const heavyPath = heavyExecutable.getFullPathName().replaceCharacter('\\', '/');
-#else
-        auto const heavyPath = heavyExecutable.getFullPathName();
-#endif
+        auto const heavyPath = pathToString(heavyExecutable);
         StringArray args = { heavyPath.quoted(), pdPatch.quoted(), "-o", outdir.quoted() };
 
         args.add("-n" + name);
@@ -124,12 +105,12 @@ public:
         }
 
         auto const command = args.joinIntoString(" ");
-        exportingView->logToConsole("Command: " + command + "\n");
-        Toolchain::startShellScript(command, this);
+        startShellScript(command);
 
         waitForProcessToFinish(-1);
         exportingView->flushConsole();
 
+        exportingView->reportStatus("Compiling");
         exportingView->logToConsole("Compiling...\n");
 
         if (shouldQuit)
@@ -146,10 +127,9 @@ public:
         if (compile) {
             auto const workingDir = File::getCurrentWorkingDirectory();
 
-            auto const bin = Toolchain::dir.getChildFile("bin");
-            auto const OWL = Toolchain::dir.getChildFile("lib").getChildFile("OwlProgram");
+            auto const bin = toolchainDir.getChildFile("bin");
+            auto const OWL = toolchainDir.getChildFile("lib").getChildFile("OwlProgram");
             auto make = bin.getChildFile("make" + exeSuffix);
-            auto compiler = bin.getChildFile("arm-none-eabi-gcc" + exeSuffix);
 
             OWL.copyDirectoryTo(outputFile.getChildFile("OwlProgram"));
 
@@ -166,24 +146,16 @@ public:
 
             String buildScript;
 
+            buildScript += pathToString(make)
+                + " -j4"
 #if JUCE_WINDOWS
-            buildScript += make.getFullPathName().replaceCharacter('\\', '/')
-                + " -j4"
-                + " TOOLROOT=" + gccPath.replaceCharacter('\\', '/') + "/"
-                + " BUILD=../"
-                + " PATCHNAME=" + name
-                + " PATCHCLASS=HeavyPatch"
-                + " PATCHFILE=HeavyOWL_" + name + ".hpp"
-                + " SHELL=" + Toolchain::dir.getChildFile("bin").getChildFile("bash.exe").getFullPathName().replaceCharacter('\\', '/').quoted();
-#else
-            buildScript += make.getFullPathName()
-                + " -j4"
-                + " TOOLROOT=" + gccPath + "/"
+                + " SHELL=" + pathToString(toolchainDir.getChildFile("bin").getChildFile("bash.exe")).quoted()
+#endif
+                + " TOOLROOT=" + pathToString(gccPath) + "/"
                 + " BUILD=../"
                 + " PATCHNAME=" + name
                 + " PATCHCLASS=HeavyPatch"
                 + " PATCHFILE=HeavyOWL_" + name + ".hpp";
-#endif
 
             buildScript += " PLATFORM=OWL" + String(target);
 
@@ -199,7 +171,7 @@ public:
                 buildScript += " patch";
             }
 
-            Toolchain::startShellScript(buildScript, this);
+            startShellScript(buildScript);
 
             waitForProcessToFinish(-1);
             exportingView->flushConsole();
@@ -226,13 +198,17 @@ public:
             }
 
             // rename binary
-            outputFile.getChildFile("patch.bin").moveFileTo(outputFile.getChildFile(name + ".bin"));
+            OSUtils::moveFileTo(outputFile.getChildFile("patch.bin"), outputFile.getChildFile(name + ".bin"));
+
+            if (!compileExitCode) {
+                exportingView->logToConsole("Compilation finished");
+            }
 
             return heavyExitCode && compileExitCode;
         } else {
             auto const outputFile = File(outdir);
 
-            auto const OWL = Toolchain::dir.getChildFile("lib").getChildFile("OwlProgram");
+            auto const OWL = toolchainDir.getChildFile("lib").getChildFile("OwlProgram");
             OWL.copyDirectoryTo(outputFile.getChildFile("OwlProgram"));
 
             outputFile.getChildFile("ir").deleteRecursively();

@@ -54,12 +54,12 @@ public:
         updateAspectRatio();
     }
 
-    bool inletIsSymbol() override
+    bool hideInlet() override
     {
         return iemHelper.hasReceiveSymbol();
     }
 
-    bool outletIsSymbol() override
+    bool hideOutlet() override
     {
         return iemHelper.hasSendSymbol();
     }
@@ -81,7 +81,7 @@ public:
         if (auto radio = ptr.get<t_radio>()) {
             auto* patch = cnv->patch.getRawPointer();
             if (!patch)
-                return {};
+                return { };
 
             int x = 0, y = 0, w = 0, h = 0;
             pd::Interface::getObjectBounds(patch, radio.cast<t_gobj>(), &x, &y, &w, &h);
@@ -91,7 +91,7 @@ public:
             return { x, y, width, height };
         }
 
-        return {};
+        return { };
     }
 
     void toggleObject(Point<int> const position) override
@@ -197,38 +197,40 @@ public:
 
     void render(NVGcontext* nvg) override
     {
+        auto const& colours = getThemeColours();
+
         auto const b = getLocalBounds().toFloat();
         bool const isSelected = object->isSelected() && !cnv->isGraph;
-        auto const selectedOutlineColour = convertColour(cnv->editor->getLookAndFeel().findColour(PlugDataColour::objectSelectedOutlineColourId));
-        auto const outlineColour = convertColour(cnv->editor->getLookAndFeel().findColour(PlugDataColour::objectOutlineColourId));
+        auto const selectedOutlineColour = nvgColour(colours.objectSelectedOutlineColour);
+        auto const outlineColour = nvgColour(colours.objectOutlineColour);
 
-        nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), convertColour(iemHelper.getBackgroundColour()), isSelected ? selectedOutlineColour : outlineColour, Corners::objectCornerRadius);
+        nanovg::nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), nvgColour(iemHelper.getBackgroundColour()), isSelected ? selectedOutlineColour : outlineColour, getPlugDataLook(*this).getObjectCornerRadius());
 
         float const size = isVertical ? static_cast<float>(getHeight()) / numItems : static_cast<float>(getWidth()) / numItems;
-        nvgStrokeColor(nvg, convertColour(cnv->editor->getLookAndFeel().findColour(PlugDataColour::guiObjectInternalOutlineColour)));
-        nvgStrokeWidth(nvg, 1.0f);
+        nanovg::nvgStrokeColor(nvg, nvgColour(colours.guiObjectInternalOutlineColour));
+        nanovg::nvgStrokeWidth(nvg, 1.0f);
 
-        nvgBeginPath(nvg);
+        nanovg::nvgBeginPath(nvg);
         for (int i = 1; i < numItems; i++) {
             if (isVertical) {
-                nvgMoveTo(nvg, 1, i * size);
-                nvgLineTo(nvg, size - 0.5, i * size);
+                nanovg::nvgMoveTo(nvg, 1, i * size);
+                nanovg::nvgLineTo(nvg, size - 0.5, i * size);
             } else {
-                nvgMoveTo(nvg, i * size, 1);
-                nvgLineTo(nvg, i * size, size - 0.5);
+                nanovg::nvgMoveTo(nvg, i * size, 1);
+                nanovg::nvgLineTo(nvg, i * size, size - 0.5);
             }
         }
-        nvgStroke(nvg);
+        nanovg::nvgStroke(nvg);
 
         auto const bgColour = ::getValue<Colour>(iemHelper.secondaryColour);
 
         if (mouseHover) {
-            auto const hoverColour = bgColour.contrasting(bgColour.getBrightness() > 0.5f ? 0.03f : 0.05f);
+            auto const hoverColour = bgColour.contrasting(bgColour.getBrightness() > 0.5f ? 0.05f : 0.08f);
             float const hoverX = isVertical ? 0 : hoverIdx * size;
             float const hoverY = isVertical ? hoverIdx * size : 0;
             auto const hoverBounds = Rectangle<float>(hoverX, hoverY, size, size).reduced(jmin<int>(size * 0.25f, 5));
-            nvgFillColor(nvg, convertColour(hoverColour));
-            nvgFillRoundedRect(nvg, hoverBounds.getX(), hoverBounds.getY(), hoverBounds.getWidth(), hoverBounds.getHeight(), Corners::objectCornerRadius / 2.0f);
+            nanovg::nvgFillColor(nvg, nvgColour(hoverColour));
+            nanovg::nvgFillRoundedRect(nvg, hoverBounds.getX(), hoverBounds.getY(), hoverBounds.getWidth(), hoverBounds.getHeight(), getPlugDataLook(*this).getObjectCornerRadius() / 2.0f);
         }
 
         float const selectionX = isVertical ? 0 : selected * size;
@@ -237,25 +239,21 @@ public:
         float const sizeH = isVertical ? getWidth() : getHeight();
         auto const selectionBounds = Rectangle<float>(selectionX, selectionY, sizeW, sizeH).reduced(jmin<float>(size * 0.25f, 5));
 
-        nvgFillColor(nvg, convertColour(::getValue<Colour>(iemHelper.primaryColour)));
-        nvgFillRoundedRect(nvg, selectionBounds.getX(), selectionBounds.getY(), selectionBounds.getWidth(), selectionBounds.getHeight(), Corners::objectCornerRadius / 2.0f);
+        nanovg::nvgFillColor(nvg, nvgColour(::getValue<Colour>(iemHelper.primaryColour)));
+        nanovg::nvgFillRoundedRect(nvg, selectionBounds.getX(), selectionBounds.getY(), selectionBounds.getWidth(), selectionBounds.getHeight(), getPlugDataLook(*this).getObjectCornerRadius() / 2.0f);
     }
 
     void updateAspectRatio()
     {
-        auto const b = getPdBounds();
         auto const minLongSide = object->minimumSize * numItems;
         constexpr auto minShortSide = Object::minimumSize;
         if (isVertical) {
-            float const verticalLength = b.getWidth() * numItems + Object::doubleMargin;
-            object->setSize(b.getWidth() + Object::doubleMargin, verticalLength);
             constrainer->setMinimumSize(minShortSide, minLongSide);
         } else {
-            float const horizontalLength = b.getHeight() * numItems + Object::doubleMargin;
-            object->setSize(horizontalLength, b.getHeight() + Object::doubleMargin);
             constrainer->setMinimumSize(minLongSide, minShortSide);
         }
         constrainer->setFixedAspectRatio(isVertical ? 1.0f / numItems : static_cast<float>(numItems) / 1.0f);
+        object->updateBounds();
     }
 
     void propertyChanged(Value& value) override
@@ -393,5 +391,10 @@ public:
         };
 
         return std::make_unique<RadioObjectBoundsConstrainer>();
+    }
+
+    ResizeDirection getAllowedResizeDirections() const override
+    {
+        return DiagonalOnly;
     }
 };

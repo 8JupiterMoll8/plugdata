@@ -5,12 +5,12 @@
  */
 #pragma once
 
-class PdTildeObject final : public TextBase {
+class PdTildeObject final : public TextObjectBase {
 public:
     static inline auto pdLocation = File();
 
     PdTildeObject(pd::WeakReference ptr, Object* object)
-        : TextBase(ptr, object)
+        : TextObjectBase(ptr, object)
     {
     }
 
@@ -56,7 +56,7 @@ public:
 
                     pdTilde->x_pddir = gensym(pdPath.toRawUTF8());
                     pdTilde->x_schedlibdir = gensym(schedPath.toRawUTF8());
-                    pd->sendDirectMessage(pdTilde.get(), "pd~", { pd->generateSymbol("start") });
+                    sendMessage("pd~", { pd->generateSymbol("start") });
                 }
             },
                 true, true, "", "LastPdLocation", cnv->editor);
@@ -67,7 +67,7 @@ public:
 
                 pdTilde->x_pddir = gensym(pdPath.toRawUTF8());
                 pdTilde->x_schedlibdir = gensym(schedPath.toRawUTF8());
-                pd->sendDirectMessage(pdTilde.get(), "pd~", { pd->generateSymbol("start") });
+                sendMessage("pd~", { pd->generateSymbol("start") });
             }
         }
     }

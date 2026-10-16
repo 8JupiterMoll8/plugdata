@@ -12,7 +12,7 @@ public:
 
         addAndMakeVisible(propertiesPanel);
         propertiesPanel.setTitle("Key Mappings");
-        propertiesPanel.setColour(TreeView::backgroundColourId, findColour(PlugDataColour::panelBackgroundColourId));
+        propertiesPanel.setColour(TreeView::backgroundColourId, getThemeColours(*this).panelBackgroundColour);
 
         updateMappings();
     }
@@ -67,11 +67,7 @@ public:
 
     void changeListenerCallback(ChangeBroadcaster* source) override
     {
-        auto keyMapTree = SettingsFile::getInstance()->getKeyMapTree();
-
-        auto const newTree = mappings->createXml(true)->toString();
-        keyMapTree.setProperty("keyxml", newTree, nullptr);
-
+        SettingsFile::getInstance()->setKeyMap(mappings->createXml(true)->toString());
         updateMappings();
     }
 
@@ -197,7 +193,7 @@ private:
             if (keyNum < 0)
                 setSize(h, h);
             else
-                setSize(jlimit(h * 4, h * 8, 6 + Font(static_cast<float>(h) * 0.6f).getStringWidth(getName())), h);
+                setSize(jlimit(h * 4, h * 8, 6 + Fonts::getStringWidthInt(getName(), static_cast<float>(h) * 0.6f)), h);
         }
 
         class KeyEntryWindow final : public AlertWindow {
@@ -217,7 +213,7 @@ private:
 
                 for (int i = 0; i < getNumButtons(); i++) {
                     auto& button = *getButton(i);
-                    auto backgroundColour = findColour(PlugDataColour::dialogBackgroundColourId);
+                    auto backgroundColour = getThemeColours(*this).dialogBackgroundColour;
                     button.setColour(TextButton::buttonColourId, backgroundColour.contrasting(0.05f));
                     button.setColour(TextButton::buttonOnColourId, backgroundColour.contrasting(0.1f));
                     button.setColour(ComboBox::outlineColourId, Colours::transparentBlack);

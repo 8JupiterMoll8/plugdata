@@ -73,15 +73,13 @@ Canvas* ImplementationBase::getMainCanvas(t_canvas const* patchPtr, bool const a
     return nullptr;
 }
 
-bool ImplementationBase::hasImplementation(char const* type)
+bool ImplementationBase::hasImplementation(SmallString const& type)
 {
     switch (hash(type)) {
     case hash("canvas.mouse"):
     case hash("canvas.vis"):
+    case hash("canvas.edit"):
     case hash("canvas.zoom"):
-    case hash("key"):
-    case hash("keyname"):
-    case hash("keyup"):
     case hash("keycode"):
     case hash("mouse"):
     case hash("mousestate"):
@@ -101,12 +99,8 @@ ImplementationBase* ImplementationBase::createImplementation(String const& type,
         return new CanvasVisibleObject(ptr, cnv, pd);
     case hash("canvas.zoom"):
         return new CanvasZoomObject(ptr, cnv, pd);
-    case hash("key"):
-        return new KeyObject(ptr, cnv, pd, KeyObject::Key);
-    case hash("keyname"):
-        return new KeyObject(ptr, cnv, pd, KeyObject::KeyName);
-    case hash("keyup"):
-        return new KeyObject(ptr, cnv, pd, KeyObject::KeyUp);
+    case hash("canvas.edit"):
+        return new CanvasEditObject(ptr, cnv, pd);
     case hash("keycode"):
         return new KeycodeObject(ptr, cnv, pd);
     case hash("mouse"):
@@ -141,7 +135,7 @@ void ObjectImplementationManager::handleAsyncUpdate()
 
     for (auto& [top, glist] : allCanvases) {
         for (t_gobj* y = glist->gl_list; y; y = y->g_next) {
-            auto const* name = pd::Interface::getObjectClassName(&y->g_pd);
+            auto const name = pd::Interface::getObjectClassName(&y->g_pd);
             if (ImplementationBase::hasImplementation(name)) {
                 allImplementations.add({ top, y });
                 allObjects.insert(y);
@@ -162,8 +156,8 @@ void ObjectImplementationManager::handleAsyncUpdate()
 
     for (auto& [cnv, obj] : allImplementations) {
         if (!objectImplementations.count(obj)) {
-            auto const name = String::fromUTF8(pd::Interface::getObjectClassName(&obj->g_pd));
-            objectImplementations[obj] = std::unique_ptr<ImplementationBase>(ImplementationBase::createImplementation(name, obj, cnv, pd));
+            auto const name = pd::Interface::getObjectClassName(&obj->g_pd);
+            objectImplementations[obj] = std::unique_ptr<ImplementationBase>(ImplementationBase::createImplementation(name.toString(), obj, cnv, pd));
         }
 
         objectImplementations[obj]->update();

@@ -1,7 +1,7 @@
-From c670484c5e8bf08990ca085144b116b21944d84c Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: plugdata-fork <fork@localhost>
 Date: Fri, 16 Oct 2026 18:26:14 +0200
-Subject: [PATCH] feat(control): add particlepad external
+Subject: [PATCH 3/3] feat(control): add particlepad external
 
 Interactive 2D particle pad. Source/Pd/Setup.cpp calls particlepad_setup()
 and ParticlePadObject.h is the GUI, so the build needs this file.
@@ -12,7 +12,7 @@ and ParticlePadObject.h is the GUI, so the build needs this file.
 
 diff --git a/Source/Control/particlepad.c b/Source/Control/particlepad.c
 new file mode 100644
-index 00000000..5b94f0b8
+index 000000000..5b94f0b8b
 --- /dev/null
 +++ b/Source/Control/particlepad.c
 @@ -0,0 +1,213 @@

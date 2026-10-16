@@ -13,39 +13,52 @@
 
 #include "Utility/ModifierKeyListener.h"
 #include "Components/CheckedTooltip.h"
-#include "Utility/ZoomableDragAndDropContainer.h"
 #include "Utility/OfflineObjectRenderer.h"
 #include "Utility/WindowDragger.h"
 #include "Canvas.h"
 #include "Components/Buttons.h"
 #include "Components/SearchEditor.h"
+#include "Sidebar/Sidebar.h"
 #include "TabComponent.h"
 
 #include "Utility/ObjectThemeManager.h"
 #include "NVGSurface.h"
+#include "LookAndFeel.h"
 
 class ConnectionMessageDisplay;
 class Sidebar;
 class Statusbar;
+class AudioToolbar;
 class Dialog;
 class Canvas;
 class TabComponent;
 class PluginProcessor;
-class Palettes;
 class Autosave;
 class PluginMode;
-class TouchSelectionHelper;
 class WelcomePanel;
 class CalloutArea;
+class NVGGraphicsContext;
+class Console;
+class DocumentationBrowser;
+class AutomationPanel;
+class SearchPanel;
+class ReferencePanel;
+class CopilotPanel;
+class Palettes;
+class Inspector;
+class CommandInput;
+
 class PluginEditor final : public AudioProcessorEditor
-    , public Value::Listener
     , public ApplicationCommandTarget
     , public FileDragAndDropTarget
     , public ModifierKeyBroadcaster
     , public ModifierKeyListener
-    , public ZoomableDragAndDropContainer
+    , public DragAndDropContainer
     , public AsyncUpdater
-    , public Timer {
+    , public Timer
+    , public SettingsFileListener {
+    PlugDataLook editorLookAndFeel;
+
 public:
     explicit PluginEditor(PluginProcessor&);
 
@@ -53,8 +66,6 @@ public:
 
     void paint(Graphics& g) override;
     void paintOverChildren(Graphics& g) override;
-
-    void renderArea(NVGcontext* nvg, Rectangle<int> area);
 
     bool isActiveWindow() override;
 
@@ -67,9 +78,18 @@ public:
 
     void lookAndFeelChanged() override;
 
+    PlugDataLook& getPlugDataLook() noexcept { return ::getPlugDataLook(*this); }
+    PlugDataLook const& getPlugDataLook() const noexcept { return ::getPlugDataLook(*this); }
+    PlugDataLook& getEditorLookAndFeel() noexcept { return editorLookAndFeel; }
+    PlugDataLook const& getEditorLookAndFeel() const noexcept { return editorLookAndFeel; }
+    void setTheme(DynamicObject::Ptr themeTree);
+    void updateDefaultFont();
+
     // For dragging parent window
     void mouseDrag(MouseEvent const& e) override;
     void mouseDown(MouseEvent const& e) override;
+
+    void handleTouchGesture();
 
     void showWelcomePanel(bool shouldShow);
 
@@ -82,7 +102,7 @@ public:
 
     void modifierKeysChanged(ModifierKeys const& modifiers) override;
 
-    void valueChanged(Value& v) override;
+    void settingsChanged(String const& name, var const& value) override;
 
     void updateCommandStatus();
     void handleAsyncUpdate() override;
@@ -92,15 +112,16 @@ public:
 
     void installPackage(File const& file);
 
+    void updateConsole(SmallString const& message, bool isWarning, int numMessages, bool newWarning);
+
     bool isInterestedInFileDrag(StringArray const& files) override;
     void filesDropped(StringArray const& files, int x, int y) override;
     void fileDragEnter(StringArray const&, int, int) override;
     void fileDragMove(StringArray const& files, int x, int y) override;
     void fileDragExit(StringArray const&) override;
+    void dragOperationEnded(DragAndDropTarget::SourceDetails const& details) override;
 
-    TabComponent& getTabComponent() override;
-
-    DragAndDropTarget* findNextDragAndDropTarget(Point<int> screenPos) override;
+    TabComponent& getTabComponent();
 
     ApplicationCommandTarget* getNextCommandTarget() override;
     void getAllCommands(Array<CommandID>& commands) override;
@@ -117,6 +138,15 @@ public:
 
     void commandKeyChanged(bool isHeld) override;
     void setUseBorderResizer(bool shouldUse);
+    void updateStandaloneWindowControls();
+
+    Sidebar* getLeftSidebar() const { return leftSidebar.get(); }
+    Sidebar* getRightSidebar() const { return rightSidebar.get(); }
+
+    Sidebar* getSidebarForPanel(Sidebar::SidePanel panel) const;
+    CopilotPanel* getCopilotPanel() const { return copilotPanel.get(); }
+
+    void movePanelToSide(Sidebar::SidePanel panel, Sidebar::Side targetSide);
 
     void showCalloutArea(bool shouldBeVisible);
     Component* getCalloutAreaComponent();
@@ -129,20 +159,28 @@ public:
 
     std::unique_ptr<ConnectionMessageDisplay> connectionMessageDisplay;
 
-    std::unique_ptr<Sidebar> sidebar;
+    // Sidebar panels
+    std::unique_ptr<Console> consolePanel;
+    std::unique_ptr<DocumentationBrowser> browserPanel;
+    std::unique_ptr<AutomationPanel> automationPanel;
+    std::unique_ptr<SearchPanel> searchPanel;
+    std::unique_ptr<Palettes> palettePanel;
+    std::unique_ptr<ReferencePanel> referencePanel;
+    std::unique_ptr<CopilotPanel> copilotPanel;
+    std::unique_ptr<Inspector> inspectorPanel;
+    std::unique_ptr<CommandInput> commandInput;
+
+    std::unique_ptr<Sidebar> leftSidebar;
+    std::unique_ptr<Sidebar> rightSidebar;
+
     std::unique_ptr<Statusbar> statusbar;
+    std::unique_ptr<AudioToolbar> audioToolbar;
 
-    Value theme;
     Value autoconnect;
-
-    std::unique_ptr<Palettes> palettes;
 
     NVGSurface nvgSurface;
 
     std::unique_ptr<Dialog> openedDialog;
-
-    // used to display callOutBoxes only in a safe area between top & bottom toolbars
-    Component callOutSafeArea;
 
     ComponentBoundsConstrainer constrainer;
     ComponentBoundsConstrainer& pluginConstrainer;
@@ -160,6 +198,13 @@ public:
     // Return the canvas currently in plugin mode, otherwise return nullptr
     Canvas* getPluginModeCanvas() const;
 
+    NVGGraphicsContext* getNanoLLGC()
+    {
+        return nvgCtx.get();
+    }
+
+    NVGGraphicsContext& getOrCreateNanoLLGC(NVGcontext* nvg, float renderScale);
+
 private:
     TabComponent tabComponent;
 
@@ -167,16 +212,13 @@ public:
     std::unique_ptr<PluginMode> pluginMode;
 
 private:
-    std::unique_ptr<TouchSelectionHelper> touchSelectionHelper;
-
     // Used by standalone to handle dragging the window
     WindowDragger windowDragger;
 
-    int const toolbarHeight = 34;
+    int const toolbarHeight = 32;
 
-    MainToolbarButton mainMenuButton, undoButton, redoButton, addObjectMenuButton, pluginModeButton, welcomePanelSearchButton;
+    MainToolbarButton mainMenuButton, undoButton, redoButton, addObjectMenuButton, welcomePanelSearchButton, sidebarToggleButton;
     SettingsToolbarButton recentlyOpenedPanelSelector, libraryPanelSelector;
-    ToolbarRadioButton editButton, runButton, presentButton;
 
     SearchEditor welcomePanelSearchInput;
 
@@ -189,8 +231,6 @@ private:
 
     static inline int numEditors = 0;
 
-    Rectangle<int> workArea;
-
     std::unique_ptr<CalloutArea> calloutArea;
 
     // Used in plugin
@@ -198,6 +238,12 @@ private:
 
     // Used in standalone
     std::unique_ptr<MouseRateReducedComponent<ResizableBorderComponent>> borderResizer;
+
+    std::unique_ptr<Button> standaloneWindowMinimiseButton;
+    std::unique_ptr<Button> standaloneWindowMaximiseButton;
+    std::unique_ptr<Button> standaloneWindowCloseButton;
+
+    std::unique_ptr<NVGGraphicsContext> nvgCtx;
 
     OSUtils::KeyboardLayout keyboardLayout;
 

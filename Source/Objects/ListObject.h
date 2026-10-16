@@ -77,6 +77,10 @@ public:
 
         min = atomHelper.getMinimum();
         max = atomHelper.getMaximum();
+
+        listLabel.setMinimum(getValue<float>(min));
+        listLabel.setMaximum(getValue<float>(max));
+
         updateValue();
 
         atomHelper.update();
@@ -128,7 +132,7 @@ public:
 
     Rectangle<int> getPdBounds() override
     {
-        return atomHelper.getPdBounds(listLabel.getFont().getStringWidth(listLabel.getText()));
+        return atomHelper.getPdBounds(Fonts::getStringWidth(listLabel.getText(), listLabel.getFont()));
     }
 
     void setPdBounds(Rectangle<int> const b) override
@@ -146,44 +150,48 @@ public:
         atomHelper.updateLabel(labels);
     }
 
-    bool inletIsSymbol() override
+    bool hideInlet() override
     {
         return atomHelper.hasReceiveSymbol();
     }
 
-    bool outletIsSymbol() override
+    bool hideOutlet() override
     {
         return atomHelper.hasSendSymbol();
     }
 
     void render(NVGcontext* nvg) override
     {
+        auto const& colours = getThemeColours();
+
         auto const b = getLocalBounds().toFloat();
         auto const sb = b.reduced(0.5f);
 
         // Draw background
-        nvgDrawObjectWithFlag(nvg, sb.getX(), sb.getY(), sb.getWidth(), sb.getHeight(),
-            cnv->guiObjectBackgroundCol, cnv->guiObjectBackgroundCol, cnv->guiObjectBackgroundCol,
-            Corners::objectCornerRadius, ObjectFlagType::FlagTopBottom, static_cast<PlugDataLook&>(cnv->getLookAndFeel()).getUseFlagOutline());
+        nanovg::nvgDrawObjectWithFlag(nvg, sb.getX(), sb.getY(), sb.getWidth(), sb.getHeight(),
+            nvgColour(colours.guiObjectBackgroundColour), nvgColour(colours.guiObjectBackgroundColour), nvgColour(colours.guiObjectBackgroundColour),
+            getPlugDataLook(*this).getObjectCornerRadius(), ObjectFlagType::FlagTopBottom, getPlugDataLook(*this).getUseFlagOutline());
 
-        listLabel.render(nvg);
+        listLabel.render(nvg, cnv->editor->getNanoLLGC());
 
         // Draw outline & flag
         bool const highlighted = editorActive && getValue<bool>(object->locked);
-        auto const flagCol = highlighted ? cnv->selectedOutlineCol : cnv->guiObjectInternalOutlineCol;
-        auto const outlineCol = object->isSelected() || editorActive ? cnv->selectedOutlineCol : cnv->objectOutlineCol;
+        auto const flagCol = highlighted ? nvgColour(colours.objectSelectedOutlineColour) : nvgColour(colours.guiObjectInternalOutlineColour);
+        auto const outlineCol = nvgColour(object->isSelected() || editorActive ? colours.objectSelectedOutlineColour : colours.objectOutlineColour);
 
         // Fill the internal of the shape with transparent colour, draw outline & flag with shader
-        nvgDrawObjectWithFlag(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(),
-            nvgRGBA(0, 0, 0, 0), outlineCol, flagCol,
-            Corners::objectCornerRadius, ObjectFlagType::FlagTopBottom, static_cast<PlugDataLook&>(cnv->getLookAndFeel()).getUseFlagOutline());
+        nanovg::nvgDrawObjectWithFlag(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(),
+            nanovg::nvgRGBA(0, 0, 0, 0), outlineCol, flagCol,
+            getPlugDataLook(*this).getObjectCornerRadius(), ObjectFlagType::FlagTopBottom, getPlugDataLook(*this).getUseFlagOutline());
     }
 
     void lookAndFeelChanged() override
     {
-        listLabel.setColour(Label::textWhenEditingColourId, cnv->editor->getLookAndFeel().findColour(PlugDataColour::canvasTextColourId));
-        listLabel.setColour(Label::textColourId, cnv->editor->getLookAndFeel().findColour(PlugDataColour::canvasTextColourId));
-        listLabel.setColour(TextEditor::textColourId, cnv->editor->getLookAndFeel().findColour(PlugDataColour::canvasTextColourId));
+        auto const& colours = getThemeColours();
+
+        listLabel.setColour(Label::textWhenEditingColourId, colours.canvasTextColour);
+        listLabel.setColour(Label::textColourId, colours.canvasTextColour);
+        listLabel.setColour(TextEditor::textColourId, colours.canvasTextColour);
 
         repaint();
     }
@@ -228,20 +236,18 @@ public:
             char* text;
             int size;
             binbuf_gettext(gatom->a_text.te_binbuf, &text, &size);
-
             auto result = String::fromUTF8(text, size);
             freebytes(text, size);
 
             return result;
         }
 
-        return {};
+        return { };
     }
 
     void setList(SmallArray<pd::Atom> const& value)
     {
-        if (auto gatom = ptr.get<t_fake_gatom>())
-            cnv->pd->sendDirectMessage(gatom.get(), SmallArray<pd::Atom>(value.begin(), value.end()));
+        sendMessage("list", value);
     }
 
     void mouseUp(MouseEvent const& e) override

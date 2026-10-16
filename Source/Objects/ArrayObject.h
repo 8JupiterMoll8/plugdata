@@ -14,7 +14,8 @@ void garray_arraydialog(t_fake_garray* x, t_symbol* name, t_floatarg fsize, t_fl
 class GraphicalArray final : public Component
     , public Value::Listener
     , public pd::MessageListener
-    , public NVGComponent {
+    , public NVGComponent
+    , public FileDragAndDropTarget {
 public:
     Object* object;
 
@@ -58,6 +59,8 @@ public:
 
         setInterceptsMouseClicks(true, false);
         setOpaque(false);
+
+        updateArrayPath();
     }
 
     ~GraphicalArray() override
@@ -68,11 +71,11 @@ public:
     static HeapArray<float> rescale(HeapArray<float> const& v, unsigned const newSize)
     {
         if (v.empty()) {
-            return {};
+            return { };
         }
 
         HeapArray<float> result(newSize);
-        const std::size_t oldSize = v.size();
+        std::size_t const oldSize = v.size();
         for (unsigned i = 0; i < newSize; i++) {
             auto const idx = i * (oldSize - 1) / newSize;
             auto const mod = i * (oldSize - 1) % newSize;
@@ -95,22 +98,21 @@ public:
         
         // For curve or polyon style, resample the array to the width in pixels
         // Especially for curve style, that can save a lot of curve calculations
-        if((style == Curve || style == Polygon) && points.size() > width)
-        {
+        if ((style == Curve || style == Polygon) && points.size() > width) {
             points = rescale(points, width);
         }
 
         float const pointOffset = style == Points;
         float const dh = (height - 2) / (scale[0] - scale[1]);
         
-        auto yToCoords = [scale, dh, pointOffset](float const y){
+        auto yToCoords = [scale, dh, pointOffset](float const y) {
             return (y - scale[1]) * dh + 1 - pointOffset;
         };
         
         auto const* pointPtr = points.data();
         auto const numPoints = points.size();
         
-        StackArray<float, 6> control = {0};
+        StackArray<float, 6> control = { 0 };
         Path result;
         if (std::isfinite(pointPtr[0])) {
             result.startNewSubPath(0, yToCoords(pointPtr[0]));
@@ -118,8 +120,7 @@ public:
         
         int onset = 0;
         float lastX = 0;
-        if(style == Curve)
-        {
+        if (style == Curve) {
             onset = 2;
             control[4] = 0;
             control[5] = yToCoords(pointPtr[0]);
@@ -136,8 +137,7 @@ public:
                 minY = std::min(y, minY);
                 maxY = std::max(y, maxY);
                 
-                if (i == 0 || i == numPoints-1 || std::abs(nextX - lastX) >= 1.0f)
-                {
+                if (i == 0 || i == numPoints - 1 || std::abs(nextX - lastX) >= 1.0f) {
                     result.addRectangle(lastX - 0.33f, minY, (nextX - lastX) + 0.33f, (maxY - minY) + lineWidth);
                     lastX = nextX;
                     minY = 1e20;
@@ -147,7 +147,7 @@ public:
             }
             case Polygon: {
                 float nextX = static_cast<float>(i) / (numPoints - 1) * width;
-                if (i != 0 || i == numPoints-1 || std::abs(nextX - lastX) >= 1.0f) {
+                if (i != 0 || i == numPoints - 1 || std::abs(nextX - lastX) >= 1.0f) {
                     float y1 = yToCoords(pointPtr[0]);
                     if (std::isfinite(y1)) {
                         result.lineTo(nextX, y1);
@@ -158,7 +158,7 @@ public:
             }
             case Curve: {
                 float const nextX = static_cast<float>(i) / (numPoints - 1) * width;
-                if(std::abs(nextX - lastX) < 1.0f && i != 0 && i != numPoints-1)
+                if (std::abs(nextX - lastX) < 1.0f && i != 0 && i != numPoints - 1)
                     continue;
                 
                 float const y1 = yToCoords(pointPtr[0]);
@@ -171,7 +171,7 @@ public:
 
                 // Set up the last two control points. This is done differently for
                 // the last spline of an open curve than for other cases.
-                if (i == numPoints-1) {
+                if (i == numPoints - 1) {
                     control[4] = nextX;
                     control[5] = y2;
                 } else {
@@ -206,9 +206,8 @@ public:
 
     void paintGraph(Graphics& g)
     {
-        if(arrayNeedsUpdate)
-        {
-            if(vec.not_empty()) {
+        if (arrayNeedsUpdate) {
+            if (vec.not_empty()) {
                 arrayPath = createArrayPath(vec, static_cast<DrawType>(getValue<int>(drawMode) - 1), getScale(), getWidth(), getHeight(), getLineWidth());
             }
             arrayNeedsUpdate = false;
@@ -223,9 +222,8 @@ public:
     void paintGraph(NVGcontext* nvg)
     {
         auto const arrDrawMode = static_cast<DrawType>(getValue<int>(drawMode) - 1);
-        if(arrayNeedsUpdate)
-        {
-            if(vec.not_empty()) {
+        if (arrayNeedsUpdate) {
+            if (vec.not_empty()) {
                 arrayPath = createArrayPath(vec, arrDrawMode, getScale(), getWidth(), getHeight(), getLineWidth());
             }
             cachedPath.clear();
@@ -233,18 +231,16 @@ public:
         }
         NVGScopedState scopedState(nvg);
         auto const arrB = getLocalBounds().reduced(1);
-        nvgIntersectRoundedScissor(nvg, arrB.getX(), arrB.getY(), arrB.getWidth(), arrB.getHeight(), Corners::objectCornerRadius);
+        nanovg::nvgIntersectRoundedScissor(nvg, arrB.getX(), arrB.getY(), arrB.getWidth(), arrB.getHeight(), getPlugDataLook(*this).getObjectCornerRadius());
 
-        if(cachedPath.isValid())
-        {
+        if (cachedPath.isValid()) {
             auto const contentColour = getContentColour();
-            if(arrDrawMode == Points) {
-                nvgFillColor(nvg, nvgRGBA(contentColour.getRed(), contentColour.getGreen(), contentColour.getBlue(), contentColour.getAlpha()));
+            if (arrDrawMode == Points) {
+                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(contentColour.getRed(), contentColour.getGreen(), contentColour.getBlue(), contentColour.getAlpha()));
                 cachedPath.fill();
-            }
-            else {
-                nvgStrokeColor(nvg, nvgRGBA(contentColour.getRed(), contentColour.getGreen(), contentColour.getBlue(), contentColour.getAlpha()));
-                nvgStrokeWidth(nvg, getLineWidth());
+            } else {
+                nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(contentColour.getRed(), contentColour.getGreen(), contentColour.getBlue(), contentColour.getAlpha()));
+                nanovg::nvgStrokeWidth(nvg, getLineWidth());
                 cachedPath.stroke();
             }
             return;
@@ -254,15 +250,14 @@ public:
             setJUCEPath(nvg, arrayPath);
             
             auto const contentColour = getContentColour();
-            if(arrDrawMode == Points) {
-                nvgFillColor(nvg, nvgRGBA(contentColour.getRed(), contentColour.getGreen(), contentColour.getBlue(), contentColour.getAlpha()));
-                nvgFill(nvg);
+            if (arrDrawMode == Points) {
+                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(contentColour.getRed(), contentColour.getGreen(), contentColour.getBlue(), contentColour.getAlpha()));
+                nanovg::nvgFill(nvg);
                 cachedPath.save(nvg);
-            }
-            else {
-                nvgStrokeColor(nvg, nvgRGBA(contentColour.getRed(), contentColour.getGreen(), contentColour.getBlue(), contentColour.getAlpha()));
-                nvgStrokeWidth(nvg, getLineWidth());
-                nvgStroke(nvg);
+            } else {
+                nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(contentColour.getRed(), contentColour.getGreen(), contentColour.getBlue(), contentColour.getAlpha()));
+                nanovg::nvgStrokeWidth(nvg, getLineWidth());
+                nanovg::nvgStroke(nvg);
                 cachedPath.save(nvg);
             }
         }
@@ -274,83 +269,56 @@ public:
         case hash("edit"): {
             if (atoms.size() <= 0)
                 break;
-            MessageManager::callAsync([_this = SafePointer(this), shouldBeEditable = static_cast<bool>(atoms[0].getFloat())] {
-                if (_this) {
-                    _this->editable = shouldBeEditable;
-                    _this->setInterceptsMouseClicks(shouldBeEditable, false);
-                }
-            });
+            auto shouldBeEditable = static_cast<bool>(atoms[0].getFloat());
+            editable = shouldBeEditable;
+            setInterceptsMouseClicks(shouldBeEditable, false);
             break;
         }
         case hash("rename"): {
             if (atoms.size() <= 0)
                 break;
-            MessageManager::callAsync([_this = SafePointer(this), newName = atoms[0].toString()] {
-                if (_this) {
-                    _this->object->cnv->setSelected(_this->object, false);
-                    _this->object->editor->sidebar->hideParameters();
-                    _this->name = newName;
-                }
-            });
 
+            auto newName = atoms[0].toString();
+            object->cnv->setSelected(object, false);
+            if (auto* s = object->editor->getSidebarForPanel(Sidebar::InspectorPanel))
+                s->hideParameters();
+            name = newName;
             break;
         }
         case hash("color"): {
-            MessageManager::callAsync([_this = SafePointer(this)] {
-                if (_this)
-                    _this->repaint();
-            });
+            repaint();
             break;
         }
         case hash("width"): {
-            MessageManager::callAsync([_this = SafePointer(this)] {
-                if (_this) {
-                    _this->updateArrayPath();
-                }
-            });
+            updateArrayPath();
             break;
         }
         case hash("style"): {
-            MessageManager::callAsync([_this = SafePointer(this), newDrawMode = static_cast<int>(atoms[0].getFloat())] {
-                if (_this) {
-                    setValueExcludingListener(_this->drawMode, newDrawMode + 1, _this.getComponent());
-                    _this->updateArrayPath();
-                }
-            });
+            auto newDrawMode = static_cast<int>(atoms[0].getFloat());
+            setValueExcludingListener(drawMode, newDrawMode + 1, this);
+            updateArrayPath();
             break;
         }
-        case hash("xticks"): {
-            MessageManager::callAsync([_this = SafePointer(this)] {
-                if (_this)
-                    _this->repaint();
-            });
+        case hash("xticks"):
+        case hash("yticks"):
+        case hash("xlabel"):
+        case hash("ylabel"): {
+            repaint();
             break;
         }
-        case hash("yticks"): {
-            MessageManager::callAsync([_this = SafePointer(this)] {
-                if (_this)
-                    _this->repaint();
-            });
+        case hash("visname"): {
+            updateSettings();
             break;
         }
         case hash("vis"): {
-            MessageManager::callAsync([_this = SafePointer(this), visible = atoms[0].getFloat()] {
-                if (_this) {
-                    _this->visible = static_cast<bool>(visible);
-                    _this->repaint();
-                }
-            });
-
+            visible = atoms[0].getFloat();
+            repaint();
             break;
         }
         case hash("resize"): {
-            MessageManager::callAsync([_this = SafePointer(this), newSize = atoms[0].getFloat()] {
-                if (_this) {
-                    _this->size = static_cast<int>(newSize);
-                    _this->updateSettings();
-                    _this->repaint();
-                }
-            });
+            size = static_cast<int>(atoms[0].getFloat());
+            updateSettings();
+            repaint();
             break;
         }
         case hash("redraw"): {
@@ -362,23 +330,27 @@ public:
             });
             break;
         }
-        default: break;
+        default:
+            break;
         }
     }
 
     void render(NVGcontext* nvg) override
     {
+        auto const& colours = getThemeColours(*this);
+
         if (error) {
             auto const position = getLocalBounds().getCentre();
             auto const errorText = "array " + getUnexpandedName() + " is invalid";
-            nvgFontSize(nvg, 11);
-            nvgFontFace(nvg, "Inter-Regular");
-            nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-            nvgFillColor(nvg, convertColour(object->getLookAndFeel().findColour(PlugDataColour::canvasTextColourId)));
-            nvgText(nvg, position.x, position.y, errorText.toRawUTF8(), nullptr);
+
+            Fonts::drawText(object->cnv->editor->getNanoLLGC(), errorText, position.toFloat(), Fonts::getDefaultFont().withHeight(11), colours.canvasTextColour, Justification::centred);
             error = false;
         } else if (visible) {
             paintGraph(nvg);
+        }
+
+        if (isDraggingFile) {
+            nanovg::nvgDrawRoundedRect(nvg, 0, 0, getWidth(), getHeight(), nanovg::nvgRGBA(0, 0, 0, 0), nvgColour(colours.dataColour), getPlugDataLook(*this).getObjectCornerRadius());
         }
     }
 
@@ -390,6 +362,11 @@ public:
         } else if (visible) {
             paintGraph(g);
         }
+
+        if (isDraggingFile) {
+            g.setColour(getThemeColours(*this).dataColour);
+            g.drawRoundedRectangle(getLocalBounds().toFloat(), getPlugDataLook(*this).getObjectCornerRadius(), 1.0f);
+        }
     }
         
     void resized() override
@@ -399,7 +376,7 @@ public:
 
     void mouseDown(MouseEvent const& e) override
     {
-        if (error || !getEditMode() || !e.mods.isLeftButtonDown())
+        if (error || !editable || !e.mods.isLeftButtonDown())
             return;
         edited = true;
 
@@ -414,7 +391,7 @@ public:
 
     void mouseDrag(MouseEvent const& e) override
     {
-        if (error || !getEditMode() || !e.mods.isLeftButtonDown())
+        if (error || !editable || !e.mods.isLeftButtonDown())
             return;
 
         auto const s = static_cast<float>(vec.size() - 1);
@@ -458,11 +435,11 @@ public:
 
     void mouseUp(MouseEvent const& e) override
     {
-        if (error || !getEditMode() || !e.mods.isLeftButtonDown())
+        if (error || !editable || !e.mods.isLeftButtonDown())
             return;
 
         if (auto ptr = arr.get<t_fake_garray>()) {
-            plugdata_forward_message(ptr->x_glist, gensym("redraw"), 0, nullptr);
+            plugdata_forward_message(0, ptr->x_glist, gensym("redraw"), 0, nullptr);
         }
 
         edited = false;
@@ -476,6 +453,10 @@ public:
             if (read(vec)) {
                 updateArrayPath();
             }
+        }
+
+        if (auto ptr = arr.get<t_fake_garray>()) {
+            editable = ptr->x_edit;
         }
     }
 
@@ -495,7 +476,16 @@ public:
             return String::fromUTF8(ptr->x_name->s_name);
         }
 
-        return {};
+        return { };
+    }
+
+    bool getNameIsVisible() const
+    {
+        if (auto ptr = arr.get<t_fake_garray>()) {
+            return !ptr->x_hidename;
+        }
+
+        return true;
     }
 
     int getLineWidth() const
@@ -546,15 +536,6 @@ public:
         return { -1.0f, 1.0f };
     }
 
-    bool getEditMode() const
-    {
-        if (auto ptr = arr.get<t_fake_garray>()) {
-            return ptr->x_edit;
-        }
-
-        return true;
-    }
-
     // Gets the scale of the array.
     int getArraySize() const
     {
@@ -567,6 +548,8 @@ public:
 
     Colour getContentColour() const
     {
+        auto const& colours = getThemeColours(*this);
+
         if (auto garray = arr.get<t_fake_garray>()) {
             auto* scalar = garray->x_scalar;
             auto* templ = template_findbyname(scalar->sc_template);
@@ -574,7 +557,7 @@ public:
             int const colour = template_getfloat(templ, gensym("color"), scalar->sc_vec, 1);
 
             if (colour <= 0) {
-                return object->cnv->editor->getLookAndFeel().findColour(PlugDataColour::canvasTextColourId);
+                return colours.canvasTextColour;
             }
 
             auto rangecolor = [](int const n) /* 0 to 9 in 5 steps */
@@ -593,7 +576,7 @@ public:
             return Colour(red, green, blue);
         }
 
-        return object->cnv->editor->getLookAndFeel().findColour(PlugDataColour::guiObjectInternalOutlineColour);
+        return colours.guiObjectInternalOutlineColour;
     }
 
     void valueChanged(Value& value) override
@@ -698,6 +681,86 @@ public:
         }
     }
 
+    // Accept audiofile drag-and-drop
+    bool isInterestedInFileDrag(StringArray const& files) override
+    {
+        if (!editable || files.size() != 1)
+            return false;
+
+        AudioFormatManager formatManager;
+        formatManager.registerBasicFormats();
+        return formatManager.findFormatForFileExtension(File(files[0]).getFileExtension().trimCharactersAtStart(".")) != nullptr;
+    }
+
+    void fileDragEnter(StringArray const& files, int x, int y) override
+    {
+        isDraggingFile = true;
+        repaint();
+    }
+
+    void fileDragExit(StringArray const& files) override
+    {
+        isDraggingFile = false;
+        repaint();
+    }
+
+    void filesDropped(StringArray const& files, int x, int y) override
+    {
+        isDraggingFile = false;
+        repaint();
+
+        if (files.size() != 1)
+            return;
+
+        File const audioFile(files[0]);
+        if (!audioFile.existsAsFile())
+            return;
+
+        AudioFormatManager formatManager;
+        formatManager.registerBasicFormats();
+
+        std::unique_ptr<AudioFormatReader> reader(formatManager.createReaderFor(audioFile));
+
+        if (!reader)
+            return;
+
+        // Limit to a sane maximum so we never allocate gigabytes
+        constexpr int maxSamples = 1 << 24; // ~16 M samples
+        auto const numSamples = static_cast<int>(std::min<int64>(reader->lengthInSamples, maxSamples));
+
+        if (numSamples == 0)
+            return;
+
+        AudioBuffer<float> audioBuffer(static_cast<int>(reader->numChannels), numSamples);
+        reader->read(&audioBuffer, 0, numSamples, 0, true, false);
+
+        HeapArray<float> leftChannel(numSamples);
+        if (audioBuffer.getNumChannels() >= 1) {
+            auto const* src = audioBuffer.getReadPointer(0);
+            for (int i = 0; i < numSamples; ++i)
+                leftChannel[i] = src[i];
+        }
+
+        if (auto garray = arr.get<t_garray>()) {
+            garray_resize_long(garray.get(), static_cast<long>(numSamples));
+        }
+
+        vec.resize(static_cast<size_t>(numSamples));
+        setValueExcludingListener(size, var(numSamples), this);
+
+        if (auto ptr = arr.get<t_garray>()) {
+            for (int i = 0; i < numSamples; ++i) {
+                float const s = leftChannel[i];
+                write(ptr.get(), static_cast<size_t>(i), s);
+                vec[i] = s;
+            }
+            pd->sendDirectMessage(ptr.get(), "array");
+        }
+
+        updateArrayPath();
+        repaint();
+    }
+
     pd::WeakReference arr;
 
     HeapArray<float> vec;
@@ -707,6 +770,7 @@ public:
 
     PluginProcessor* pd;
     bool editable = true;
+    bool isDraggingFile = false;
 };
 
 struct ArrayPropertiesPanel final : public PropertiesPanelProperty
@@ -720,13 +784,15 @@ struct ArrayPropertiesPanel final : public PropertiesPanelProperty
 
         void paint(Graphics& g) override
         {
+            auto const& colours = getThemeColours(*this);
+
             auto const bounds = getLocalBounds();
             auto textBounds = bounds;
             auto const iconBounds = textBounds.removeFromLeft(textBounds.getHeight());
 
-            auto const colour = findColour(PlugDataColour::sidebarTextColourId);
+            auto const colour = colours.sidebarTextColour;
             if (mouseIsOver) {
-                g.setColour(findColour(PlugDataColour::sidebarActiveBackgroundColourId));
+                g.setColour(colours.sidebarActiveBackgroundColour);
                 g.fillRoundedRectangle(bounds.toFloat(), Corners::defaultCornerRadius);
             }
 
@@ -756,6 +822,9 @@ struct ArrayPropertiesPanel final : public PropertiesPanelProperty
 
         void mouseUp(MouseEvent const& e) override
         {
+            if (!e.mods.isLeftButtonDown())
+                return;
+
             onClick();
         }
     };
@@ -826,7 +895,9 @@ struct ArrayPropertiesPanel final : public PropertiesPanelProperty
 
     void paint(Graphics& g) override
     {
-        g.fillAll(findColour(PlugDataColour::sidebarBackgroundColourId));
+        auto const& colours = getThemeColours(*this);
+
+        g.fillAll(colours.sidebarBackgroundColour);
 
         auto const numGraphs = properties.size() / 5;
         for (int i = 0; i < numGraphs; i++) {
@@ -834,13 +905,13 @@ struct ArrayPropertiesPanel final : public PropertiesPanelProperty
                 continue;
 
             auto const start = i * 184 - 8;
-            g.setColour(findColour(PlugDataColour::sidebarActiveBackgroundColourId));
+            g.setColour(colours.sidebarActiveBackgroundColour);
             g.fillRoundedRectangle(0.0f, start + 32, getWidth(), 154, Corners::largeCornerRadius);
 
-            Fonts::drawStyledText(g, graphs[i]->name.toString(), 8, start + 2, getWidth() - 16, 32, findColour(PlugDataColour::sidebarTextColourId), Semibold, 14.5f);
+            Fonts::drawStyledText(g, graphs[i]->name.toString(), 8, start + 2, getWidth() - 16, 32, colours.sidebarTextColour, Semibold, 14.5f);
         }
 
-        g.setColour(findColour(PlugDataColour::toolbarOutlineColourId));
+        g.setColour(colours.toolbarOutlineColour);
 
         for (int i = 0; i < properties.size(); i++) {
             if (i % 5 == 4)
@@ -890,7 +961,7 @@ public:
             auto const* arr = garray_getarray(ptr.cast<t_garray>());
             auto const* vec = reinterpret_cast<t_word*>(garray_vec(ptr.cast<t_garray>()));
 
-            auto const numProperties = std::min(arr->a_n, 1<<14); // Limit it to something reasonable to make sure it doesn't take forever to load
+            auto const numProperties = std::min(arr->a_n, 1 << 14); // Limit it to something reasonable to make sure it doesn't take forever to load
             properties.resize(numProperties);
 
             for (int i = 0; i < numProperties; i++) {
@@ -902,7 +973,7 @@ public:
                 // Only send this after drag end so it doesn't interrupt the drag action
                 label->dragEnd = [this] {
                     if (auto p = array.get<t_fake_garray>()) {
-                        plugdata_forward_message(p->x_glist, gensym("redraw"), 0, nullptr);
+                        plugdata_forward_message(0, p->x_glist, gensym("redraw"), 0, nullptr);
                     }
                 };
                 properties.set(i, property);
@@ -968,7 +1039,7 @@ public:
         }
         selectedArrayCombo.setSelectedItemIndex(0);
         selectedArrayCombo.setColour(ComboBox::outlineColourId, Colours::transparentBlack);
-        selectedArrayCombo.setColour(ComboBox::backgroundColourId, findColour(PlugDataColour::toolbarHoverColourId).withAlpha(0.8f));
+        selectedArrayCombo.setColour(ComboBox::backgroundColourId, getThemeColours(*this).toolbarHoverColour.withAlpha(0.8f));
 
         addAndMakeVisible(selectedArrayCombo);
 
@@ -1010,7 +1081,7 @@ public:
         resizer.setAllowHostManagedResize(false);
 
         // Position in centre of screen
-        setBounds(Desktop::getInstance().getDisplays().getPrimaryDisplay()->userArea.withSizeKeepingCentre(600, 400));
+        setBounds(Desktop::getInstance().getDisplays().getPrimaryDisplay()->userBounds.getSmallestIntegerContainer().withSizeKeepingCentre(600, 400));
 
         addAndMakeVisible(resizer);
         updateGraphs();
@@ -1077,12 +1148,14 @@ public:
 
     void paintOverChildren(Graphics& g) override
     {
-        g.setColour(findColour(PlugDataColour::guiObjectBackgroundColourId));
+        g.setColour(getThemeColours(*this).guiObjectBackgroundColour);
         g.drawRoundedRectangle(getLocalBounds().toFloat(), Corners::windowCornerRadius, 1.0f);
     }
 
     void paint(Graphics& g) override
     {
+        auto const& colours = getThemeColours(*this);
+
         auto constexpr toolbarHeight = 38;
         auto b = getLocalBounds();
         auto const titlebarBounds = b.removeFromTop(toolbarHeight).toFloat();
@@ -1090,15 +1163,15 @@ public:
 
         Path toolbarPath;
         toolbarPath.addRoundedRectangle(titlebarBounds.getX(), titlebarBounds.getY(), titlebarBounds.getWidth(), titlebarBounds.getHeight(), Corners::windowCornerRadius, Corners::windowCornerRadius, true, true, false, false);
-        g.setColour(findColour(PlugDataColour::toolbarBackgroundColourId));
+        g.setColour(colours.toolbarBackgroundColour);
         g.fillPath(toolbarPath);
 
         Path arrayPath;
         arrayPath.addRoundedRectangle(arrayBounds.getX(), arrayBounds.getY(), arrayBounds.getWidth(), arrayBounds.getHeight(), Corners::windowCornerRadius, Corners::windowCornerRadius, false, false, true, true);
-        g.setColour(findColour(PlugDataColour::panelBackgroundColourId));
+        g.setColour(colours.panelBackgroundColour);
         g.fillPath(arrayPath);
 
-        g.setColour(findColour(PlugDataColour::toolbarOutlineColourId));
+        g.setColour(colours.toolbarOutlineColour);
         g.drawHorizontalLine(toolbarHeight, 0, getWidth());
     }
 };
@@ -1108,8 +1181,6 @@ public:
     SafePointer<ArrayPropertiesPanel> propertiesPanel = nullptr;
     Value sizeProperty = SynchronousValue();
     
-    GraphTicks ticks;
-
     // Array component
     ArrayObject(pd::WeakReference obj, Object* object)
         : ObjectBase(obj, object)
@@ -1139,6 +1210,21 @@ public:
         });
 
         updateLabel();
+    }
+
+    bool canReceiveMouseEvent(int const x, int const y) override
+    {
+        if (!getValue<bool>(cnv->locked)) {
+            return true;
+        }
+
+        for (auto* graph : graphs) {
+            if (graph->editable) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     void onConstrainerCreate() override
@@ -1190,19 +1276,21 @@ public:
 
     void render(NVGcontext* nvg) override
     {
-        auto const b = getLocalBounds().toFloat();
-        auto const backgroundColour = nvgRGBA(0, 0, 0, 0);
-        auto const selectedOutlineColour = convertColour(cnv->editor->getLookAndFeel().findColour(PlugDataColour::objectSelectedOutlineColourId));
-        auto const outlineColour = convertColour(cnv->editor->getLookAndFeel().findColour(PlugDataColour::objectOutlineColourId));
+        auto const& colours = getThemeColours();
 
-        nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), backgroundColour, object->isSelected() ? selectedOutlineColour : outlineColour, Corners::objectCornerRadius);
+        auto const b = getLocalBounds().toFloat();
+        auto const backgroundColour = nanovg::nvgRGBA(0, 0, 0, 0);
+        auto const selectedOutlineColour = nvgColour(colours.objectSelectedOutlineColour);
+        auto const outlineColour = nvgColour(colours.objectOutlineColour);
+
+        nanovg::nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), backgroundColour, object->isSelected() ? selectedOutlineColour : outlineColour, getPlugDataLook(*this).getObjectCornerRadius());
 
         for (auto* graph : graphs) {
             graph->render(nvg);
         }
 
-        nvgStrokeColor(nvg, cnv->guiObjectInternalOutlineCol);
-        ticks.render(nvg, b);
+        nanovg::nvgStrokeColor(nvg, nvgColour(colours.guiObjectInternalOutlineColour));
+        getTicks()->render(nvg, b);
     }
 
     bool isTransparent() override { return true; }
@@ -1221,34 +1309,40 @@ public:
 
     void updateLabel() override
     {
-
         auto title = String();
         for (auto const* graph : graphs) {
+            if(graph->getNameIsVisible()) {
             title += graph->getUnexpandedName() + (graph != graphs.getLast() ? "," : "");
         }
+        }
 
-        if (title.isNotEmpty()) {
-            int constexpr fontHeight = 14.0f;
             ObjectLabel* label;
             if (labels.isEmpty()) {
                 label = labels.add(new ObjectLabel());
+            object->cnv->addChildComponent(label);
             } else {
                 label = labels[0];
             }
 
-            auto bounds = object->getBounds().reduced(Object::margin).removeFromTop(fontHeight + 2).withWidth(Font(fontHeight).getStringWidth(title));
+        if (title.isNotEmpty()) {
+            int constexpr fontHeight = 14.0f;
+            auto font = Font(FontOptions(fontHeight));
+            auto bounds = object->getBounds().reduced(Object::margin).removeFromTop(fontHeight + 2).withWidth(Fonts::getStringWidthInt(title, font));
 
             bounds.translate(2, -(fontHeight + 2));
 
-            label->setFont(Font(fontHeight));
+            label->setFont(font);
             label->setBounds(bounds);
             label->setText(title, dontSendNotification);
-            label->setColour(Label::textColourId, cnv->editor->getLookAndFeel().findColour(PlugDataColour::canvasTextColourId));
+            label->setLabelColour(getThemeColours().canvasTextColour);
+            label->setVisible(true);
 
             object->cnv->addAndMakeVisible(label);
         } else {
-            labels.clear();
+            label->setVisible(false);
         }
+
+        getTicks()->updateLabel(object);
     }
 
     Rectangle<int> getPdBounds() override
@@ -1260,7 +1354,7 @@ public:
             return { x, y, glist->gl_pixwidth, glist->gl_pixheight };
         }
 
-        return {};
+        return { };
     }
 
     void setPdBounds(Rectangle<int> const b) override
@@ -1289,8 +1383,9 @@ public:
         }
         if (auto glist = ptr.get<t_glist>()) {
             sizeProperty = VarArray { var(glist->gl_pixwidth), var(glist->gl_pixheight) };
-            ticks.update(glist.get());
+            getTicks()->update(glist.get());
         }
+        updateLabel();
     }
 
     void updateSizeProperty() override
@@ -1328,11 +1423,11 @@ public:
 
             if (auto* x = c->gl_list) {
                 // We can't compare symbols here, that breaks multi-instance support
-                if(String::fromUTF8(x->g_pd->c_name->s_name) == "array") {
+                if (String::fromUTF8(x->g_pd->c_name->s_name) == "array") {
                     arrays.add(x);
                 }
                 while ((x = x->g_next)) {
-                    if(String::fromUTF8(x->g_pd->c_name->s_name) == "array") {
+                    if (String::fromUTF8(x->g_pd->c_name->s_name) == "array") {
                         arrays.add(x);
                     }
                 }
@@ -1341,7 +1436,7 @@ public:
             return arrays;
         }
 
-        return {};
+        return { };
     }
 
     void getMenuOptions(PopupMenu& menu) override
@@ -1371,6 +1466,10 @@ public:
     {
         switch (symbol) {
         case hash("redraw"): {
+            if (auto glist = ptr.get<t_canvas>()) {
+                getTicks()->update(glist.get());
+            }
+            updateLabel();
             updateGraphs();
             if (dialog) {
                 dialog->updateGraphs();
@@ -1378,28 +1477,50 @@ public:
             break;
         }
         case hash("yticks"):
-        case hash("xticks"): {
+        case hash("xticks"):
+        case hash("ylabel"):
+        case hash("xlabel"): {
             if (auto glist = ptr.get<t_canvas>()) {
-                ticks.update(glist.get());
+                getTicks()->update(glist.get());
             }
+            updateLabel();
             repaint();
             break;
         }
-        default: break;
+        default:
+            break;
         }
     }
 
 private:
     OwnedArray<GraphicalArray> graphs;
     std::unique_ptr<ArrayEditorDialog> dialog = nullptr;
+
+    GraphTicks* getTicks()
+    {
+        while (labels.size() < 1) {
+            auto* label = labels.add(new ObjectLabel());
+            object->cnv->addChildComponent(label);
+            label->setVisible(false);
+        }
+
+        if (labels.size() < 2) {
+            auto* ticks = new GraphTicks();
+            labels.add(ticks);
+            object->cnv->addChildComponent(ticks);
+            return ticks;
+        }
+
+        return reinterpret_cast<GraphTicks*>(labels[1]);
+    }
 };
 
-class ArrayDefineObject final : public TextBase {
+class ArrayDefineObject final : public TextObjectBase {
     std::unique_ptr<ArrayEditorDialog> editor = nullptr;
 
 public:
     ArrayDefineObject(pd::WeakReference obj, Object* parent)
-        : TextBase(obj, parent, true)
+        : TextObjectBase(obj, parent, true)
     {
     }
 

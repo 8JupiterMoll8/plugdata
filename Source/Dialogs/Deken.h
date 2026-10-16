@@ -28,7 +28,7 @@ struct Spinner final : public Component
 
     void paint(Graphics& g) override
     {
-        getLookAndFeel().drawSpinningWaitAnimation(g, findColour(PlugDataColour::panelTextColourId), 3, 3, getWidth() - 6, getHeight() - 6);
+        getLookAndFeel().drawSpinningWaitAnimation(g, getThemeColours(*this).panelTextColour, 3, 3, getWidth() - 6, getHeight() - 6);
     }
 };
 
@@ -96,7 +96,13 @@ public:
                     .withConnectionTimeoutMs(10000)
                     .withStatusCode(&statusCode));
 
-            if (instream != nullptr && statusCode == 200) {
+            bool downloadOk = instream != nullptr && statusCode == 200;
+#if ENABLE_TESTING
+            // Local file:// archives used by the test suite don't report an
+            // HTTP status, so accept any readable stream while testing
+            downloadOk = instream != nullptr;
+#endif
+            if (downloadOk) {
                 startThread();
             } else {
                 finish(Result::fail("Failed to start download"));
@@ -228,24 +234,37 @@ public:
 
     PackageList getAvailablePackages()
     {
-
-        // plugdata's deken servers, hosted on GitHub
-        // This will pre-parse the deken repo information to a faster and smaller format
-        // This saves a lot of work that plugdata would have to do on startup!
-
-        auto const triplet = os + "-" + machine + "-" + floatsize;
-        auto const repoForArchitecture = "https://raw.githubusercontent.com/plugdata-team/plugdata-deken/main/bin/" + triplet + ".bin";
-
-        webstream = std::make_unique<WebInputStream>(URL(repoForArchitecture), false);
-        webstream->connect(nullptr);
-
-        if (webstream->isError()) {
-            sendActionMessage("Failed to connect to server");
-            return {};
-        }
-
         MemoryBlock block;
-        webstream->readIntoMemoryBlock(block);
+
+#if ENABLE_TESTING
+        // The test suite injects a serialised package tree (or forces a failure)
+        // here, so no network request is made during testing
+        if (mockShouldFail) {
+            sendActionMessage("Failed to connect to server");
+            return { };
+        }
+        if (mockPackageData.getSize() > 0) {
+            block = mockPackageData;
+        } else
+#endif
+        {
+            // plugdata's deken servers, hosted on GitHub
+            // This will pre-parse the deken repo information to a faster and smaller format
+            // This saves a lot of work that plugdata would have to do on startup!
+
+            auto const triplet = os + "-" + machine + "-" + floatsize;
+            auto const repoForArchitecture = "https://raw.githubusercontent.com/plugdata-team/plugdata-deken/main/bin/" + triplet + ".bin";
+
+            webstream = std::make_unique<WebInputStream>(URL(repoForArchitecture), false);
+            webstream->connect(nullptr);
+
+            if (webstream->isError()) {
+                sendActionMessage("Failed to connect to server");
+                return { };
+            }
+
+            webstream->readIntoMemoryBlock(block);
+        }
 
         // Parse tree that was downloaded
         auto const tree = ValueTree::readFromData(block.getData(), block.getSize());
@@ -345,7 +364,15 @@ public:
 
     PackageList allPackages;
 
+#if ENABLE_TESTING
+    // The test suite installs into a temp dir and injects mock catalog data,
+    // so neither the network nor the user's real Externals folder is touched
+    static inline File filesystem = ProjectInfo::appDataDir.getChildFile("Externals");
+    static inline MemoryBlock mockPackageData;
+    static inline bool mockShouldFail = false;
+#else
     static inline File const filesystem = ProjectInfo::appDataDir.getChildFile("Externals");
+#endif
 
     // Package info file
     File pkgInfo = filesystem.getChildFile(".pkg_info");
@@ -409,7 +436,9 @@ public:
     JUCE_DECLARE_SINGLETON(PackageManager, false)
 };
 
+#ifndef PLUGDATA_TEST_TRANSLATION_UNIT // implemented in Dialogs.cpp's TU
 JUCE_IMPLEMENT_SINGLETON(PackageManager)
+#endif
 
 class Deken final : public Component
     , public ListBoxModel
@@ -418,13 +447,15 @@ class Deken final : public Component
 public:
     Deken()
     {
+        auto const& colours = getThemeColours(*this);
+
         setInterceptsMouseClicks(false, true);
 
         listBox.setModel(this);
 
-        input.setTextToShowWhenEmpty("Type to search for objects or libraries", findColour(PlugDataColour::panelTextColourId).withAlpha(0.5f));
+        input.setTextToShowWhenEmpty("Type to search for objects or libraries", colours.panelTextColour.withAlpha(0.5f));
         input.setColour(TextEditor::backgroundColourId, Colours::transparentBlack);
-        input.setColour(TextEditor::textColourId, findColour(PlugDataColour::panelTextColourId));
+        input.setColour(TextEditor::textColourId, colours.panelTextColour);
         input.setJustification(Justification::centredLeft);
         input.setBorder({ 0, 3, 5, 1 });
         input.setEnabled(false);
@@ -529,7 +560,9 @@ public:
 
     void paint(Graphics& g) override
     {
-        g.setColour(findColour(PlugDataColour::panelBackgroundColourId));
+        auto const& colours = getThemeColours(*this);
+
+        g.setColour(colours.panelBackgroundColour);
         g.fillRoundedRectangle(getLocalBounds().toFloat(), Corners::windowCornerRadius);
 
         auto const titlebarBounds = getLocalBounds().removeFromTop(40).toFloat();
@@ -537,12 +570,12 @@ public:
         Path p;
         p.addRoundedRectangle(titlebarBounds.getX(), titlebarBounds.getY(), titlebarBounds.getWidth(), titlebarBounds.getHeight(), Corners::windowCornerRadius, Corners::windowCornerRadius, true, true, false, false);
 
-        g.setColour(findColour(PlugDataColour::toolbarBackgroundColourId));
+        g.setColour(colours.toolbarBackgroundColour);
         g.fillPath(p);
 
         if (searchResult.empty()) {
             auto const message = installedButton.getToggleState() ? "No externals installed" : "Couldn't find any externals";
-            Fonts::drawText(g, message, getLocalBounds(), findColour(PlugDataColour::panelTextColourId), 14, Justification::centred);
+            Fonts::drawText(g, message, getLocalBounds(), colours.panelTextColour, 14, Justification::centred);
         }
     }
 
@@ -552,7 +585,7 @@ public:
             Fonts::drawText(g, errorMessage, getLocalBounds().removeFromTop(100).withTrimmedLeft(28).translated(0, 2), Colours::red);
         }
 
-        g.setColour(findColour(PlugDataColour::toolbarOutlineColourId));
+        g.setColour(getThemeColours(*this).toolbarOutlineColour);
         g.drawLine(0, 40, getWidth(), 40);
     }
 
@@ -723,10 +756,7 @@ private:
             void paint(Graphics& g) override
             {
                 auto const bounds = warningButton.getBounds().reduced(2);
-
-                Path shadowPath;
-                shadowPath.addRoundedRectangle(bounds.getX(), bounds.getY(), bounds.getWidth(), bounds.getHeight(), Corners::largeCornerRadius);
-                StackShadow::renderDropShadow(hash("plugin_external_warning"), g, shadowPath, Colour(0, 0, 0).withAlpha(0.4f), 7, { 0, 1 });
+                StackShadow::drawShadowForRect(g, bounds, 8, Corners::largeCornerRadius, 0.4f, 1);
             }
 
             void resized() override
@@ -802,9 +832,7 @@ private:
             auto const shadowWidth = bounds.getWidth() - margin * 2;
             auto const shadowHeight = model->getNumRows() * listBox.getRowHeight() - 5;
 
-            Path shadowPath;
-            shadowPath.addRoundedRectangle(shadowX, shadowY, shadowWidth, shadowHeight, Corners::largeCornerRadius);
-            StackShadow::renderDropShadow(hash("deken_dialog"), g, shadowPath, Colour(0, 0, 0).withAlpha(0.4f), 7, { 0, 1 });
+            StackShadow::drawShadowForRect(g, Rectangle<int>(shadowX, shadowY, shadowWidth, shadowHeight), 8, Corners::largeCornerRadius, 0.4f, 1);
         }
 
         ListBox listBox;
@@ -822,11 +850,11 @@ private:
     // Current search result
     PackageList searchResult;
 
-    MainToolbarButton searchButton = MainToolbarButton(Icons::Search);
+    MainToolbarButton searchButton = MainToolbarButton(Icons::SearchFilled);
     MainToolbarButton refreshButton = MainToolbarButton(Icons::Refresh);
 
     SettingsToolbarButton installedButton = SettingsToolbarButton(Icons::Checkmark, "Installed");
-    SettingsToolbarButton exploreButton = SettingsToolbarButton(Icons::Sparkle, "Explore");
+    SettingsToolbarButton exploreButton = SettingsToolbarButton(Icons::SparkleFilled, "Explore");
 
     PackageManager* packageManager = PackageManager::getInstance();
 
@@ -862,7 +890,7 @@ private:
             addChildComponent(uninstallButton);
             addChildComponent(addToPathButton);
 
-            auto const backgroundColour = findColour(PlugDataColour::panelForegroundColourId);
+            auto const backgroundColour = getThemeColours(*this).panelForegroundColour;
             installButton.setColour(TextButton::buttonColourId, backgroundColour.contrasting(0.05f));
             installButton.setColour(TextButton::buttonOnColourId, backgroundColour.contrasting(0.1f));
             installButton.setColour(ComboBox::outlineColourId, Colours::transparentBlack);
@@ -950,21 +978,23 @@ private:
 
         void paint(Graphics& g) override
         {
+            auto const& colours = getThemeColours(*this);
+
             auto const b = getLocalBounds().toFloat().reduced(8.0f, 0.0f).withTrimmedBottom(-1.0f);
 
             Path p;
             p.addRoundedRectangle(b.getX(), b.getY(), b.getWidth(), isLast ? b.getHeight() - 2.0f : b.getHeight(), Corners::largeCornerRadius, Corners::largeCornerRadius, isFirst, isFirst, isLast, isLast);
 
-            g.setColour(findColour(PlugDataColour::panelForegroundColourId));
+            g.setColour(colours.panelForegroundColour);
             g.fillPath(p);
 
-            g.setColour(findColour(PlugDataColour::toolbarOutlineColourId));
+            g.setColour(colours.toolbarOutlineColour);
             g.strokePath(p, PathStrokeType(1.0f));
 
             Fonts::drawStyledText(g, packageInfo.name, 64, 8, 200, 25, findColour(ComboBox::textColourId), Semibold, 15);
-            Fonts::drawIcon(g, Icons::Externals, Rectangle<int>(16, 14, 38, 38), findColour(ComboBox::textColourId));
+            Fonts::drawIcon(g, Icons::ExternalsFilled, Rectangle<int>(16, 14, 38, 38), findColour(ComboBox::textColourId));
 
-            Fonts::drawFittedText(g, "Uploaded " + getRelativeTimeDescription(packageInfo.timestamp) + " by " + packageInfo.author, getWidth() - 418, 6, 400, 25, findColour(PlugDataColour::panelTextColourId), 1, 0.8f, 13.5f, Justification::centredRight);
+            Fonts::drawFittedText(g, "Uploaded " + getRelativeTimeDescription(packageInfo.timestamp) + " by " + packageInfo.author, getWidth() - 418, 6, 400, 25, colours.panelTextColour, 1, 0.8f, 13.5f, Justification::centredRight);
 
             // draw progressbar
             if (deken.packageManager->getDownloadForPackage(packageInfo)) {
@@ -977,14 +1007,14 @@ private:
                 Path fullPath;
                 fullPath.addLineSegment({ 70, 42, width, 42 }, 1.0f);
 
-                g.setColour(findColour(PlugDataColour::panelTextColourId));
+                g.setColour(colours.panelTextColour);
                 g.strokePath(fullPath, PathStrokeType(11.0f, PathStrokeType::JointStyle::curved, PathStrokeType::EndCapStyle::rounded));
 
-                g.setColour(findColour(PlugDataColour::panelActiveBackgroundColourId));
+                g.setColour(colours.panelActiveBackgroundColour);
                 g.strokePath(downloadPath, PathStrokeType(8.0f, PathStrokeType::JointStyle::curved, PathStrokeType::EndCapStyle::rounded));
             } else {
-                Fonts::drawFittedText(g, packageInfo.version, 64, 31, 400, 25, findColour(PlugDataColour::panelTextColourId), 1, 0.8f, 15);
-                // Fonts::drawFittedText(g, packageInfo.timestamp, 435, 0, 200, getHeight(), findColour(PlugDataColour::panelTextColourId));
+                Fonts::drawFittedText(g, packageInfo.version, 64, 31, 400, 25, colours.panelTextColour, 1, 0.8f, 15);
+                // Fonts::drawFittedText(g, packageInfo.timestamp, 435, 0, 200, getHeight(), getThemeColours(*this).panelTextColour);
             }
         }
 

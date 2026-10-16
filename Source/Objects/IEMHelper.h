@@ -28,30 +28,16 @@ public:
     void update()
     {
         bool colourHasChanged = false;
-        if (auto const col = getForegroundColour().toString(); col != primaryColour) {
-            primaryColour = col;
+        if (auto const col = getForegroundColour(); col != getValue<Colour>(primaryColour)) {
+            primaryColour = colourToVar(col);
             colourHasChanged = true;
         }
-        if (auto const col = getBackgroundColour().toString(); col != secondaryColour) {
-            secondaryColour = col;
+        if (auto const col = getBackgroundColour(); col != getValue<Colour>(secondaryColour)) {
+            secondaryColour = colourToVar(col);
             colourHasChanged = true;
         }
         // we only need the callback that colourHasChanged will trigger for the object ATM.
-        labelColour = getLabelColour().toString();
-
-        gui->getLookAndFeel().setColour(Label::textWhenEditingColourId, object->cnv->editor->getLookAndFeel().findColour(Label::textWhenEditingColourId));
-        gui->getLookAndFeel().setColour(Label::textColourId, Colour::fromString(primaryColour.toString()));
-
-        gui->getLookAndFeel().setColour(TextButton::buttonOnColourId, Colour::fromString(primaryColour.toString()));
-        gui->getLookAndFeel().setColour(Slider::thumbColourId, Colour::fromString(primaryColour.toString()));
-
-        gui->getLookAndFeel().setColour(TextEditor::backgroundColourId, Colour::fromString(secondaryColour.toString()));
-        gui->getLookAndFeel().setColour(TextButton::buttonColourId, Colour::fromString(secondaryColour.toString()));
-
-        auto sliderBackground = Colour::fromString(secondaryColour.toString());
-        sliderBackground = sliderBackground.getBrightness() > 0.5f ? sliderBackground.darker(0.6f) : sliderBackground.brighter(0.6f);
-
-        gui->getLookAndFeel().setColour(Slider::backgroundColourId, sliderBackground);
+        labelColour = colourToVar(getLabelColour());
 
         if (auto iemgui = ptr.get<t_iemgui>()) {
             labelPosition = VarArray { var(iemgui->x_ldx), var(iemgui->x_ldy) };
@@ -72,43 +58,24 @@ public:
         gui->repaint();
     }
 
-    ObjectParameters makeIemParameters(bool const withAppearance = true, bool const withSymbols = true, int labelPosX = 0, int labelPosY = -8, int const labelHeightY = 10)
+    void addIemParameters(ObjectParameters& objectParams, bool const withAppearance = true, bool const withSymbols = true, bool withInit = true, int const labelPosX = 0, int const labelPosY = -8, int const labelHeightY = 10)
     {
-        ObjectParameters params;
-
         if (withAppearance) {
-            params.addParamColourFG(&primaryColour);
-            params.addParamColourBG(&secondaryColour);
+            objectParams.addParamColourFG(&primaryColour);
+            objectParams.addParamColourBG(&secondaryColour);
         }
         if (withSymbols) {
-            params.addParamReceiveSymbol(&receiveSymbol);
-            params.addParamSendSymbol(&sendSymbol);
+            objectParams.addParamReceiveSymbol(&receiveSymbol);
+            objectParams.addParamSendSymbol(&sendSymbol);
         }
-        params.addParamString("Text", cLabel, &labelText, "");
-        params.addParamColourLabel(&labelColour);
-        params.addParamRange("Position", cLabel, &labelPosition, { labelPosX, labelPosY });
-        params.addParamInt("Height", cLabel, &labelHeight, labelHeightY, true, 4);
-        params.addParamBool("Initialise", cGeneral, &initialise, { "No", "Yes" }, 0);
+        if (withInit) {
+            objectParams.addParamBool("Initialise", cGeneral, &initialise, { "No", "Yes" }, 0);
+        }
 
-        return params;
-    }
-
-    /**
-     * @brief Add IEM parameters to the object parameters
-     * @attention Allows customization for different default settings (PD's default positions are not consistent)
-     *
-     * @param objectParams the object parameter to add items to
-     * @param withAppearance customize the added IEM's to show appearance category
-     * @param withSymbols customize the added IEM's to show symbols category
-     * @param labelPosX customize the default labels x position
-     * @param labelPosY customize the default labels y position
-     * @param labelHeightY customize the default labels text height
-     */
-    void addIemParameters(ObjectParameters& objectParams, bool const withAppearance = true, bool const withSymbols = true, int const labelPosX = 0, int const labelPosY = -8, int const labelHeightY = 10)
-    {
-        auto IemParams = makeIemParameters(withAppearance, withSymbols, labelPosX, labelPosY, labelHeightY);
-        for (auto const& param : IemParams.getParameters())
-            objectParams.addParam(param);
+        objectParams.addParamString("Text", cLabel, &labelText, "");
+        objectParams.addParamColourLabel(&labelColour);
+        objectParams.addParamRange("Position", cLabel, &labelPosition, { labelPosX, labelPosY });
+        objectParams.addParamInt("Height", cLabel, &labelHeight, labelHeightY, true, 4);
     }
 
     bool receiveObjectMessage(hash32 const symbol, SmallArray<pd::Atom> const& atoms)
@@ -116,7 +83,7 @@ public:
         auto setColour = [this](Value& targetValue, pd::Atom const& atom) {
             if (atom.isSymbol()) {
                 auto const colour = "#FF" + atom.toString().fromFirstOccurrenceOf("#", false, false);
-                gui->setParameterExcludingListener(targetValue, colour);
+                gui->setParameterExcludingListener(targetValue, colourToVar(Colour::fromString(colour)));
             } else {
                 int iemcolor = atom.getFloat();
 
@@ -131,7 +98,7 @@ public:
                     iemcolor = (-1 - iemcolor) & 0xffffff;
 
                 auto const colour = convertFromIEMColour(iemcolor);
-                gui->setParameterExcludingListener(targetValue, colour.toString());
+                gui->setParameterExcludingListener(targetValue, colourToVar(colour));
             }
         };
         switch (symbol) {
@@ -156,7 +123,7 @@ public:
                 setColour(labelColour, atoms[2]);
 
             if (auto* label = gui->getLabel()) {
-                label->setColour(Label::textColourId, getLabelColour());
+                label->setLabelColour(getLabelColour());
             }
 
             iemColourChangedCallback();
@@ -213,24 +180,17 @@ public:
             setReceiveSymbol(receiveSymbol.toString());
             object->updateIolets();
         } else if (v.refersToSameSourceAs(primaryColour)) {
-            auto const colour = Colour::fromString(primaryColour.toString());
+            auto const colour = getValue<Colour>(primaryColour);
             setForegroundColour(colour);
             iemColourChangedCallback();
             gui->repaint();
         } else if (v.refersToSameSourceAs(secondaryColour)) {
-            auto const colour = Colour::fromString(secondaryColour.toString());
+            auto const colour = getValue<Colour>(secondaryColour);
             setBackgroundColour(colour);
-
-            gui->getLookAndFeel().setColour(TextEditor::backgroundColourId, colour);
-            gui->getLookAndFeel().setColour(TextButton::buttonColourId, colour);
-
-            gui->getLookAndFeel().setColour(Slider::backgroundColourId, colour);
-
             iemColourChangedCallback();
-
             gui->repaint();
         } else if (v.refersToSameSourceAs(labelColour)) {
-            setLabelColour(Colour::fromString(labelColour.toString()));
+            setLabelColour(getValue<Colour>(labelColour));
             gui->updateLabel();
         } else if (v.refersToSameSourceAs(labelPosition)) {
             setLabelPosition({ labelPosition.getValue().getArray()->getReference(0), labelPosition.getValue().getArray()->getReference(1) });
@@ -268,7 +228,7 @@ public:
             return { iemgui->x_obj.te_xpix, iemgui->x_obj.te_ypix, iemgui->x_w + 1, iemgui->x_h + 1 };
         }
 
-        return {};
+        return { };
     }
 
     void setPdBounds(Rectangle<int> const b)
@@ -299,11 +259,11 @@ public:
 
                 bounds.translate(0, bounds.getHeight() / -2.0f);
 
-                label->setFont(Font(bounds.getHeight()));
+                label->setFont(Font(FontOptions(bounds.getHeight())));
                 label->setBounds(bounds + offset);
                 label->setText(text, dontSendNotification);
                 label->setVisible(true);
-                label->setColour(Label::textColourId, getLabelColour());
+                label->setLabelColour(getLabelColour());
             }
         } else {
             labels.clear();
@@ -321,7 +281,7 @@ public:
                 int const fontWidth = sys_fontwidth(fontHeight);
                 int const posx = objectBounds.getX() + iemgui->x_ldx;
                 int const posy = objectBounds.getY() + iemgui->x_ldy;
-                int const textWidth = fontHeight > 55 ? Font(fontHeight).getStringWidth(labelText) : fontWidth * (labelText.length() + 1);
+                int const textWidth = fontHeight > 55 ? Fonts::getStringWidthInt(labelText, fontHeight) : fontWidth * (labelText.length() + 1);
                 return { posx, posy, textWidth, fontHeight + 2 };
             }
         }
@@ -519,7 +479,7 @@ public:
     Value secondaryColour = SynchronousValue();
     Value labelColour = SynchronousValue();
 
-    Value labelPosition;
+    Value labelPosition = SynchronousValue();
     Value labelHeight = SynchronousValue();
     Value labelText = SynchronousValue();
 

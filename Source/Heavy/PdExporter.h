@@ -7,7 +7,6 @@
 
 class PdExporter final : public ExporterBase {
 public:
-    Value exportTypeValue = Value(var(2));
     Value copyToPath = Value(var(0));
 
     PropertiesPanel::BoolComponent* copyToPathProperty;
@@ -15,8 +14,10 @@ public:
     PdExporter(PluginEditor* editor, ExportingProgressView* exportingView)
         : ExporterBase(editor, exportingView)
     {
+        exportTypeValue = var(2);
+
         PropertiesArray properties;
-        properties.add(new PropertiesPanel::ComboComponent("Export type", exportTypeValue, { "Source code", "Binary" }));
+        properties.add(new PropertiesPanel::ComboComponent("Export type", exportTypeValue, getExportTypes()));
 
         copyToPathProperty = new PropertiesPanel::BoolComponent("Copy to externals path", copyToPath, { "No", "Yes" });
         properties.add(copyToPathProperty);
@@ -26,50 +27,49 @@ public:
         exportTypeValue.addListener(this);
     }
 
-    ValueTree getState() override
+    StringArray getExportTypes() const override
     {
-        ValueTree stateTree("PdExt");
-        stateTree.setProperty("inputPatchValue", getValue<String>(inputPatchValue), nullptr);
-        stateTree.setProperty("projectNameValue", getValue<String>(projectNameValue), nullptr);
-        stateTree.setProperty("projectCopyrightValue", getValue<String>(projectCopyrightValue), nullptr);
-
-        stateTree.setProperty("exportTypeValue", getValue<int>(exportTypeValue), nullptr);
-        stateTree.setProperty("copyToPath", getValue<int>(copyToPath), nullptr);
-
-        return stateTree;
+        return { "Source code", "Binary" };
     }
 
-    void setState(ValueTree& stateTree) override
+    void getState(DynamicObject::Ptr globalState) override
     {
-        auto const tree = stateTree.getChildWithName("PdExt");
-        inputPatchValue = tree.getProperty("inputPatchValue");
-        projectNameValue = tree.getProperty("projectNameValue");
-        projectCopyrightValue = tree.getProperty("projectCopyrightValue");
-        exportTypeValue = tree.getProperty("exportTypeValue");
-        copyToPath = tree.getProperty("copyToPath");
+        auto* state = new DynamicObject();
+        state->setProperty("input_patch_value", getValue<String>(inputPatchValue));
+        state->setProperty("project_name_value", getValue<String>(projectNameValue));
+        state->setProperty("project_copyright_value", getValue<String>(projectCopyrightValue));
+        state->setProperty("export_type_value", getValue<int>(exportTypeValue));
+        state->setProperty("copy_to_path", getValue<int>(copyToPath));
+        globalState->setProperty("pdext", state);
+    }
+
+    void setState(DynamicObject::Ptr globalState) override
+    {
+        auto const state = globalState->getProperty("pdext").getDynamicObject();
+        if (!state)
+            return;
+        inputPatchValue = state->getProperty("input_patch_value");
+        projectNameValue = state->getProperty("project_name_value");
+        projectCopyrightValue = state->getProperty("project_copyright_value");
+        exportTypeValue = state->getProperty("export_type_value");
+        copyToPath = state->getProperty("copy_to_path");
     }
 
     void valueChanged(Value& v) override
     {
+        ExporterBase::valueChanged(v);
+
         if (v.refersToSameSourceAs(exportTypeValue)) {
             copyToPathProperty->setEnabled(exportTypeValue == 2);
             if (exportTypeValue == 1) {
                 copyToPath = 0;
             }
-        } else {
-            ExporterBase::valueChanged(v);
         }
     }
 
     bool performExport(String const& pdPatch, String const& outdir, String const& name, String const& copyright, StringArray const& searchPaths) override
     {
-        exportingView->showState(ExportingProgressView::Exporting);
-
-#if JUCE_WINDOWS
-        auto const heavyPath = heavyExecutable.getFullPathName().replaceCharacter('\\', '/');
-#else
-        auto const heavyPath = heavyExecutable.getFullPathName();
-#endif
+        auto const heavyPath = pathToString(heavyExecutable);
         StringArray args = { heavyPath.quoted(), pdPatch.quoted(), "-o", outdir.quoted() };
 
         args.add("-n" + name);
@@ -91,8 +91,7 @@ public:
             return true;
 
         auto const command = args.joinIntoString(" ");
-        exportingView->logToConsole("Command: " + command + "\n");
-        Toolchain::startShellScript(command, this);
+        startShellScript(command);
 
         waitForProcessToFinish(-1);
         exportingView->flushConsole();
@@ -109,17 +108,19 @@ public:
 
         bool const generationExitCode = getExitCode();
         // Check if we need to compile
-        if (!generationExitCode && getValue<int>(exportTypeValue) == 2) {
+        if (!generationExitCode && getExportType() == 2) {
+            exportingView->reportStatus("Compiling");
+
             auto const workingDir = File::getCurrentWorkingDirectory();
 
             outputFile.setAsCurrentWorkingDirectory();
 
-            auto const bin = Toolchain::dir.getChildFile("bin");
+            auto const bin = toolchainDir.getChildFile("bin");
             auto make = bin.getChildFile("make" + exeSuffix);
             auto makefile = outputFile.getChildFile("Makefile");
 
 #if JUCE_MAC
-            Toolchain::startShellScript("make -j4", this);
+            startShellScript("make -j4 suppress-wunused=1");
 #elif JUCE_WINDOWS
             File pdDll;
             if (ProjectInfo::isStandalone) {
@@ -128,31 +129,35 @@ public:
                 pdDll = File::getSpecialLocation(File::globalApplicationsDirectory).getChildFile("plugdata");
             }
 
-            auto path = "export PATH=\"$PATH:" + Toolchain::dir.getChildFile("bin").getFullPathName().replaceCharacter('\\', '/') + "\"\n";
-            auto cc = "CC=" + Toolchain::dir.getChildFile("bin").getChildFile("gcc.exe").getFullPathName().replaceCharacter('\\', '/') + " ";
-            auto cxx = "CXX=" + Toolchain::dir.getChildFile("bin").getChildFile("g++.exe").getFullPathName().replaceCharacter('\\', '/') + " ";
-            auto pdbindir = "PDBINDIR=\"" + pdDll.getFullPathName().replaceCharacter('\\', '/') + "\" ";
-            auto shell = " SHELL=" + Toolchain::dir.getChildFile("bin").getChildFile("bash.exe").getFullPathName().replaceCharacter('\\', '/').quoted();
+            auto path = "export PATH=\"$PATH:" + pathToString(toolchainDir.getChildFile("bin")) + "\"\n";
+            auto cc = "CC=" + pathToString(toolchainDir.getChildFile("bin").getChildFile("gcc.exe")) + " ";
+            auto cxx = "CXX=" + pathToString(toolchainDir.getChildFile("bin").getChildFile("g++.exe")) + " ";
+            auto pdbindir = "PDBINDIR=\"" + pathToString(pdDll) + "\" ";
+            auto shell = " SHELL=" + pathToString(toolchainDir.getChildFile("bin").getChildFile("bash.exe")).quoted();
 
-            Toolchain::startShellScript(path + cc + cxx + pdbindir + make.getFullPathName().replaceCharacter('\\', '/') + " -j4" + shell, this);
+            startShellScript(path + cc + cxx + pdbindir + pathToString(make) + " -j4 suppress-wunused=1" + shell);
 
 #else // Linux or BSD
-            auto prepareEnvironmentScript = Toolchain::dir.getChildFile("scripts").getChildFile("anywhere-setup.sh").getFullPathName() + "\n";
+            auto prepareEnvironmentScript = toolchainDir.getChildFile("scripts").getChildFile("anywhere-setup.sh").getFullPathName() + "\n";
 
             auto buildScript = prepareEnvironmentScript
                 + make.getFullPathName()
-                + " -j4";
+                + " -j4 suppress-wunused=1";
 
-            Toolchain::startShellScript(buildScript, this);
+            startShellScript(buildScript);
 #endif
 
             waitForProcessToFinish(-1);
             exportingView->flushConsole();
 
+            workingDir.setAsCurrentWorkingDirectory();
+
+            // A cancelled build doesn't get copied to the externals folder
+            if (shouldQuit)
+                return true;
+
             // Delay to get correct exit code
             Time::waitForMillisecondCounter(Time::getMillisecondCounter() + 300);
-
-            workingDir.setAsCurrentWorkingDirectory();
 
 #if JUCE_MAC
             auto external = outputFile.getChildFile(name + "~.pd_darwin");
@@ -163,6 +168,7 @@ public:
 #endif
 
             if (getValue<bool>(copyToPath)) {
+                exportingView->reportStatus("Copying");
                 exportingView->logToConsole("Copying to Externals folder...\n");
                 auto const copy_location = ProjectInfo::appDataDir.getChildFile("Externals").getChildFile(external.getFileName());
                 external.copyFileTo(copy_location.getFullPathName());

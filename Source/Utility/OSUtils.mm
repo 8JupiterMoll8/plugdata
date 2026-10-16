@@ -9,6 +9,7 @@
 #if JUCE_MAC
 #import <Foundation/Foundation.h>
 #import <Cocoa/Cocoa.h>
+#import <QuartzCore/QuartzCore.h>
 #include <Carbon/Carbon.h>
 #import <string>
 #include <raw_keyboard_input/raw_keyboard_input.mm>
@@ -28,7 +29,7 @@
     auto isInset = win.titleVisibility == NSWindowTitleVisible;
     if(isPopup || isFullscreen || isInset)
         return [self FrameView__closeButtonOrigin];
-    return {15, self.bounds.size.height - 28};
+    return {15, self.bounds.size.height - 26};
 }
 - (CGFloat)FrameView__titlebarHeight {
     auto* win = static_cast<NSWindow*>(self.window);
@@ -56,8 +57,8 @@ int getStyleMask(bool nativeTitlebar) {
     return style;
 }
 
-void OSUtils::setWindowMovable(void* nativeHandle, bool canMove) {
-    auto* view = static_cast<NSView*>(nativeHandle);
+void OSUtils::setWindowMovable(juce::ComponentPeer* peer, bool canMove) {
+    auto* view = static_cast<NSView*>(peer->getNativeHandle());
     
     if(!view) return;
     
@@ -68,13 +69,29 @@ void OSUtils::setWindowMovable(void* nativeHandle, bool canMove) {
     }
 }
 
-void OSUtils::enableInsetTitlebarButtons(void* nativeHandle, bool enable) {
-    auto* view = static_cast<NSView*>(nativeHandle);
+@interface NSWindow (Private)
+- (void)_tileTitlebarAndRedisplay:(BOOL)redisplay;
+@end
+
+void OSUtils::enableInsetTitlebarButtons(juce::ComponentPeer* peer, bool enable) {
+    auto* view = static_cast<NSView*>(peer->getNativeHandle());
     if(!view) return;
     
     NSWindow* window = view.window;
     if(!window) return;
-    
+
+    if (window.styleMask & NSWindowStyleMaskFullScreen) {
+        __block id token = [[NSNotificationCenter defaultCenter]
+            addObserverForName:NSWindowDidExitFullScreenNotification
+                        object:window
+                         queue:[NSOperationQueue mainQueue]
+                    usingBlock:^(NSNotification*) {
+                        [[NSNotificationCenter defaultCenter] removeObserver:token];
+                        OSUtils::enableInsetTitlebarButtons(peer, enable);
+                    }];
+        return;
+    }
+
     // Swaps out the implementation of one Obj-c instance method with another
     auto swizzleMethods = [](Class aClass, SEL orgMethod, SEL posedMethod) {
         @try {
@@ -129,19 +146,24 @@ void OSUtils::enableInsetTitlebarButtons(void* nativeHandle, bool enable) {
     
     // Non-opaque window with a dropshadow has a negative impact on rendering performance
     window.opaque = TRUE;
+
+    // Fixes shadow rendering bug by ensuring there is always something visible to draw a shadow behind
+    window.backgroundColor = [NSColor windowBackgroundColor];
     
     NSView* frameView = window.contentView.superview;
     if ([frameView respondsToSelector:@selector(_tileTitlebarAndRedisplay:)]) {
-      [frameView _tileTitlebarAndRedisplay:NO];
+      [(id)frameView _tileTitlebarAndRedisplay:NO];
     }
     
     [window update];
 }
 
-void OSUtils::hideTitlebarButtons(void* view, bool hideMinimiseButton, bool hideMaximiseButton, bool hideCloseButton)
+void OSUtils::hideTitlebarButtons(juce::ComponentPeer* peer, bool hideMinimiseButton, bool hideMaximiseButton, bool hideCloseButton)
 {
-    auto* nsView = (NSView*)view;
-    NSWindow* nsWindow = [nsView window];
+    auto* view = static_cast<NSView*>(peer->getNativeHandle());
+    if(!view) return;
+    
+    NSWindow* nsWindow = [view window];
     NSButton *minimizeButton = [nsWindow standardWindowButton:NSWindowMiniaturizeButton];
     NSButton *maximizeButton = [nsWindow standardWindowButton:NSWindowZoomButton];
     NSButton *closeButton = [nsWindow standardWindowButton:NSWindowCloseButton];
@@ -172,13 +194,13 @@ OSUtils::KeyboardLayout OSUtils::getKeyboardLayout()
 @end
 
 @implementation ScrollEventObserver {
-    bool* isScrollingFlag;
+    bool* isGesturingFlag;
 }
 
-- (instancetype)initWithScrollingFlag:(bool*)scrollingFlag {
+- (instancetype)initWithScrollingFlag:(bool*)gesturingFlag {
     self = [super init];
     if (self) {
-        isScrollingFlag = scrollingFlag;
+        isGesturingFlag = gesturingFlag;
     }
     return self;
 }
@@ -186,9 +208,9 @@ OSUtils::KeyboardLayout OSUtils::getKeyboardLayout()
 
 - (void)scrollEventOccurred:(NSEvent*)event {
     if (event.phase == NSEventPhaseBegan) {
-        *isScrollingFlag = true;
+        *isGesturingFlag = true;
     } else if (event.phase == NSEventPhaseEnded || event.phase == NSEventPhaseCancelled) {
-        *isScrollingFlag = false;
+        *isGesturingFlag = false;
     }
 }
 
@@ -198,13 +220,17 @@ OSUtils::KeyboardLayout OSUtils::getKeyboardLayout()
 OSUtils::ScrollTracker::ScrollTracker()
 {
     // Create the ScrollEventObserver instance
-    observer = [[ScrollEventObserver alloc] initWithScrollingFlag:&scrolling];
+    observer = [[ScrollEventObserver alloc] initWithScrollingFlag:&gesturing];
     
-    NSEventMask scrollEventMask = NSEventMaskScrollWheel;
-            [NSEvent addLocalMonitorForEventsMatchingMask:scrollEventMask handler:^NSEvent* (NSEvent* event) {
-                [(ScrollEventObserver*)observer scrollEventOccurred:event];
-                return event;
-            }];
+    [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskScrollWheel handler:^NSEvent* (NSEvent* event) {
+        [(ScrollEventObserver*)observer scrollEventOccurred:event];
+        return event;
+    }];
+    
+    [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskMagnify handler:^NSEvent* (NSEvent* event) {
+        [(ScrollEventObserver*)observer scrollEventOccurred:event];
+        return event;
+    }];
 }
 
 OSUtils::ScrollTracker::~ScrollTracker()
@@ -232,16 +258,43 @@ float OSUtils::MTLGetPixelScale(void* view) {
         return scale;
 }
 
+@interface MTLCustomView : NSView
+@end
+
+@implementation MTLCustomView
+- (NSView *)hitTest:(NSPoint)point {
+    return nil;
+}
+@end
+
 void* OSUtils::MTLCreateView(void* parent, int x, int y, int width, int height)
 {
-    // Create child view
-    NSView *childView = [[NSView alloc] initWithFrame:NSMakeRect(x, y, width, height)];
+    NSView *childView = [[MTLCustomView alloc] initWithFrame:NSMakeRect(x, y, width, height)];
+
+    CAMetalLayer* metalLayer = [CAMetalLayer new];
+    metalLayer.device = MTLCreateSystemDefaultDevice();
+    metalLayer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+    metalLayer.framebufferOnly = NO;
+    metalLayer.presentsWithTransaction = NO;
+    metalLayer.displaySyncEnabled = YES;
+    childView.layer = metalLayer;
+    childView.wantsLayer = YES;
+
     auto* parentView = reinterpret_cast<NSView*>(parent);
-    
-    // Add child view as a subview of parent view
     [parentView addSubview:childView];
-    
+
+    // Now that the view is in a window, match the layer's point<->pixel scale to
+    // the backing scale so the drawable is presented at the correct on-screen size.
+    CGFloat const scale = childView.window ? childView.window.backingScaleFactor : 2.0;
+    metalLayer.contentsScale = scale;
+    metalLayer.drawableSize = CGSizeMake(width * scale, height * scale);
+
     return childView;
+}
+
+void* OSUtils::MTLGetLayer(void* view)
+{
+    return reinterpret_cast<NSView*>(view).layer;
 }
 
 void OSUtils::MTLDeleteView(void* view)
@@ -254,7 +307,11 @@ void OSUtils::MTLDeleteView(void* view)
 void OSUtils::MTLSetVisible(void* view, bool shouldBeVisible)
 {
     auto* viewToShow = reinterpret_cast<NSView*>(view);
+    
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
     [viewToShow setHidden:!shouldBeVisible];
+    [CATransaction commit];
 }
 
 
@@ -276,139 +333,19 @@ OSUtils::KeyboardLayout OSUtils::getKeyboardLayout()
     return QWERTY;
 }
 
-@interface ScrollEventObserver : NSObject
-- (instancetype)initWithComponentPeer:(juce::ComponentPeer*)peer scrollState:(bool*)scrollState;
-@end
-
-@implementation ScrollEventObserver {
-    juce::ComponentPeer* peer;
-    UIView<CALayerDelegate>* view;
-    juce::Point<float> lastPosition;
-    double lastScale;
-    bool* isScrolling;
-}
-
-- (instancetype)initWithComponentPeer:(juce::ComponentPeer*)componentPeer scrollState:(bool*)scrollState {
-    self = [super init];
-    
-    peer = componentPeer;
-    view = (UIView<CALayerDelegate>*)peer->getNativeHandle();
-    isScrolling = scrollState;
-    lastScale = 1.0;
-
-    UIPinchGestureRecognizer* pinchGesture = [[UIPinchGestureRecognizer alloc] initWithTarget:self action:@selector(pinchEventOccurred:)];
-    [view addGestureRecognizer:pinchGesture];
-    
-    UILongPressGestureRecognizer* longPressGesture = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(longPressEventOccurred:)];
-    [view addGestureRecognizer:longPressGesture];
-    
-    UIPanGestureRecognizer* panGesture = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(scrollEventOccurred:)];
-    [panGesture setMaximumNumberOfTouches: 2];
-    [panGesture setMinimumNumberOfTouches: 2];
-    [view addGestureRecognizer:panGesture];
-    
-    return self;
-}
-
 extern "C"
 {
     void pd_error(const void *object, const char *fmt, ...);
 }
-
-- (void)longPressEventOccurred:(UILongPressGestureRecognizer*)gesture {
-    
-    juce::ModifierKeys::currentModifiers = juce::ModifierKeys::currentModifiers.withoutMouseButtons().withFlags (juce::ModifierKeys::rightButtonModifier);
-
-    const auto eventPosition = [gesture locationOfTouch:0 inView:view];
-    auto pos = juce::Point<float>(eventPosition.x, eventPosition.y);
-    const auto time = (juce::Time::currentTimeMillis() - juce::Time::getMillisecondCounter()) + (juce::int64) ([[NSProcessInfo processInfo] systemUptime] * 1000.0);
-    
-    peer->handleMouseEvent(juce::MouseInputSource::InputSourceType::touch, pos, juce::ModifierKeys::currentModifiers,
-                           juce::MouseInputSource::defaultPressure, juce::MouseInputSource::defaultOrientation, time, {}, 0);
-}
-
-- (void)pinchEventOccurred:(UIPinchGestureRecognizer*)gesture {
-    
-    if(gesture.numberOfTouches != 2) return;
-    
-    const auto time = (juce::Time::currentTimeMillis() - juce::Time::getMillisecondCounter())
-    + (juce::int64) ([[NSProcessInfo processInfo] systemUptime] * 1000.0);
-    
-    if(gesture.state == UIGestureRecognizerStateBegan || gesture.state == UIGestureRecognizerStateEnded)
-    {
-        lastScale = 1.0;
-        return;
-    }
-    
-    const auto point1 = [gesture locationOfTouch:0 inView:nil];
-    const auto point2 = [gesture locationOfTouch:1 inView:nil];
-    const auto pinchCenter = juce::Point<float>((point1.x + point2.x) / 2.0f, (point1.y + point2.y) / 2.0f);
-    
-    peer->handleMagnifyGesture (juce::MouseInputSource::InputSourceType::touch, pinchCenter, time, (gesture.scale - lastScale) + 1.0, 0);
-    lastScale = gesture.scale;
-}
-
-- (void)scrollEventOccurred:(UIPanGestureRecognizer*)gesture {
-    
-    const auto offset = [gesture translationInView: view];
-    const auto scale = 1.0f / 256.0f;
-    
-    if(gesture.state == UIGestureRecognizerStateBegan)
-    {
-        *isScrolling = true;
-        lastPosition = {0.0f, 0.0f};
-        [gesture setCancelsTouchesInView: true];
-        return;
-    }
-    if(gesture.state == UIGestureRecognizerStateEnded)
-    {
-        *isScrolling = false;
-        lastPosition = {0.0f, 0.0f};
-        [gesture setCancelsTouchesInView: false];
-        return;
-    }
-
-    juce::MouseWheelDetails details;
-    details.deltaX = scale * (float) (offset.x - lastPosition.x);
-    details.deltaY = scale * (float) (offset.y - lastPosition.y);
-    details.isReversed = false;
-    details.isSmooth = true;
-    details.isInertial = false;
-    
-    lastPosition = juce::Point<float>(offset.x, offset.y);
-
-    const auto eventMousePosition = [gesture locationInView: view];
-    const auto reconstructedMousePosition =  juce::Point<float>(eventMousePosition.x, eventMousePosition.y) -  juce::Point<float>(offset.x, offset.y);
-    const auto time = (juce::Time::currentTimeMillis() - juce::Time::getMillisecondCounter())
-    + (juce::int64) ([[NSProcessInfo processInfo] systemUptime] * 1000.0);
-        
-    peer->handleMouseWheel (juce::MouseInputSource::InputSourceType::touch, reconstructedMousePosition, time, details);
-}
-
-@end
-
-OSUtils::ScrollTracker::ScrollTracker(juce::ComponentPeer* peer)
-{
-    // Create the ScrollEventObserver instance
-    observer = [[ScrollEventObserver alloc] initWithComponentPeer:peer scrollState: &scrolling];
-}
-
-OSUtils::ScrollTracker::~ScrollTracker()
-{
-    auto* ob = static_cast<ScrollEventObserver*>(observer);
-    [[NSNotificationCenter defaultCenter] removeObserver:ob];
-    [ob dealloc];
-}
-
 
 juce::BorderSize<int> OSUtils::getSafeAreaInsets()
 {    
     UIWindow* window = [[UIApplication sharedApplication] keyWindow];
     if (@available(iOS 11.0, *)) {
         UIEdgeInsets insets = window.safeAreaInsets;
-        return juce::BorderSize<int>(insets.top + (isIPad() ? 26 : 0), insets.left, insets.bottom  + (isIPad() ? -20 : 0), insets.right);
+        return juce::BorderSize<int>(insets.top + (isIPad() ? 18 : 0), insets.left, insets.bottom  - std::max<int>(0, insets.bottom - (isIPad() ? 20 : 0)), insets.right);
     }
-
+    
     // Fallback for older iOS versions or devices without safeAreaInsets
     return juce::BorderSize<int>();
 }
@@ -418,235 +355,81 @@ bool OSUtils::isIPad()
     return [UIDevice currentDevice].userInterfaceIdiom == UIUserInterfaceIdiomPad;
 }
 
-void OSUtils::showMobileMainMenu(juce::ComponentPeer* peer, std::function<void(int)> callback)
+void OSUtils::showiOSNativeMenu(juce::ComponentPeer* peer, juce::String const& title, SmallArray<TouchPopupMenuItem> const& items, SmallArray<SmallArray<TouchPopupMenuItem>> const& sub, juce::Point<int> screenPosition)
 {
-    auto* view = (UIView<CALayerDelegate>*)peer->getNativeHandle();
+    static std::function<void(UIViewController*, UIView*, juce::ComponentPeer*, NSString*, SmallArray<TouchPopupMenuItem>, SmallArray<SmallArray<TouchPopupMenuItem>>, juce::Point<int>)> presentMenu;
     
-    // Find the parent view controller
-    UIViewController *viewController = nil;
-    UIResponder *responder = view;
+    presentMenu = [](UIViewController* viewController, UIView* view, juce::ComponentPeer* peer,
+                                                 NSString* title,
+                                                 SmallArray<TouchPopupMenuItem> items,
+                                                 SmallArray<SmallArray<TouchPopupMenuItem>> subMenus, juce::Point<int> pos)
+     {
+         UIAlertController* alertController = [UIAlertController alertControllerWithTitle:title
+                                                                                  message:nil
+                                                                           preferredStyle:UIAlertControllerStyleActionSheet];
+         for (auto item : items)
+         {
+             auto* nsTitle = (NSString* _Nonnull)[NSString stringWithUTF8String:item.title.toUTF8()];
+
+             if (item.subMenuIndex >= 0)
+             {
+                 auto subItems = subMenus[item.subMenuIndex];
+                 UIAlertAction* action = [UIAlertAction actionWithTitle:nsTitle
+                                                                  style:UIAlertActionStyleDefault
+                                                                handler:^(UIAlertAction*) {
+                     presentMenu(viewController, view, peer, nsTitle, subItems, subMenus, pos);
+                 }];
+                 action.enabled = item.active;
+                 [action setValue:[nsTitle stringByAppendingString:@"  ›"] forKey:@"title"];
+                 [alertController addAction:action];
+             }
+             else
+             {
+                 UIAlertAction* action = [UIAlertAction actionWithTitle:nsTitle
+                                                                  style:UIAlertActionStyleDefault
+                                                                handler:^(UIAlertAction*) {
+                     if (item.callback)
+                         item.callback();
+                 }];
+                 action.enabled = item.active;
+                 [alertController addAction:action];
+             }
+         }
+         UIAlertAction* cancelAction = [UIAlertAction actionWithTitle:@"Cancel"
+                                                                style:UIAlertActionStyleCancel
+                                                              handler:nil];
+         [alertController addAction:cancelAction];
+
+         if (OSUtils::isIPad())
+         {
+             alertController.preferredContentSize = view.frame.size;
+             if (auto* popoverController = alertController.popoverPresentationController)
+             {
+                 popoverController.sourceView = view;
+                 popoverController.sourceRect = CGRectMake(pos.x, pos.y + 5.f, 20.0f, 5.0f);
+                 popoverController.canOverlapSourceViewRect = YES;
+             }
+         }
+
+         [viewController presentViewController:alertController animated:YES completion:nil];
+     };
+    
+    auto* view = (UIView<CALayerDelegate>*)peer->getNativeHandle();
+    UIViewController* viewController = nil;
+    UIResponder* responder = view;
     while (responder) {
         if ([responder isKindOfClass:[UIViewController class]]) {
-            viewController = (UIViewController *)responder;
+            viewController = (UIViewController*)responder;
             break;
         }
         responder = [responder nextResponder];
     }
 
-    if (viewController) {
-        // Create an alert controller
-        UIAlertController *alertController = [UIAlertController alertControllerWithTitle:@"Main Menu"
-                                                                             message:nil
-                                                                      preferredStyle:UIAlertControllerStyleActionSheet];
-        
-        UIAlertAction *themeAction = [UIAlertAction actionWithTitle:@"Select Theme..."
-                                                              style:UIAlertActionStyleDefault
-                                                            handler:^(UIAlertAction * _Nonnull action) {
-            // Create a second UIAlertController for the submenu
-            UIAlertController *submenu = [UIAlertController alertControllerWithTitle:@"Themes"
-                                                                             message:nil
-                                                                      preferredStyle:UIAlertControllerStyleActionSheet];
-            
-            // Add actions for the submenu
-            UIAlertAction *subAction1 = [UIAlertAction actionWithTitle:@"First Theme (Light)"
-                                                                 style:UIAlertActionStyleDefault
-                                                               handler:^(UIAlertAction * _Nonnull action) {
-                callback(7);
-            }];
-            
-            UIAlertAction *subAction2 = [UIAlertAction actionWithTitle:@"Second Theme (dark)"
-                                                                 style:UIAlertActionStyleDefault
-                                                               handler:^(UIAlertAction * _Nonnull action) {
-                callback(8);
-            }];
-            
-            UIAlertAction *cancelAction = [UIAlertAction actionWithTitle:@"Cancel"
-                                                                   style:UIAlertActionStyleCancel
-                                                                 handler:^(UIAlertAction * _Nonnull action) {
-                callback(-1);
-            }];
-            
-            if (isIPad())
-            {
-                
-                submenu.preferredContentSize = view.frame.size;
-                
-                if (auto* popoverController = submenu.popoverPresentationController)
-                {
-                    popoverController.sourceView = view;
-                    popoverController.sourceRect = CGRectMake (35.0f, 1.0f, 50.0f, 50.0f);
-                    popoverController.canOverlapSourceViewRect = YES;
-                }
-            }
-            
-            [submenu addAction:subAction1];
-            [submenu addAction:subAction2];
-            [submenu addAction:cancelAction];
-            
-            
-            // Present the submenu
-            [viewController presentViewController:submenu animated:YES completion:nil];
-        }];
-
-        
-        UIAlertAction *newPatchAction = [UIAlertAction actionWithTitle:@"New Patch"
-                                                              style:UIAlertActionStyleDefault
-                                                            handler:^(UIAlertAction * _Nonnull action) {
-            callback(1);
-                                                            }];
-        UIAlertAction *openPatchAction = [UIAlertAction actionWithTitle:@"Open Patch"
-                                              style:UIAlertActionStyleDefault
-                                            handler:^(UIAlertAction * _Nonnull action) {
-            callback(2);
-                                            }];
-        
-        UIAlertAction *savePatchAction = [UIAlertAction actionWithTitle:@"Save Patch"
-                                                              style:UIAlertActionStyleDefault
-                                                            handler:^(UIAlertAction * _Nonnull action) {
-            callback(3);
-                                                            }];
-        
-        UIAlertAction *savePatchAsAction = [UIAlertAction actionWithTitle:@"Save Patch As"
-                                                              style:UIAlertActionStyleDefault
-                                                            handler:^(UIAlertAction * _Nonnull action) {
-            callback(4);
-                                                            }];
-        UIAlertAction *settingsAction = [UIAlertAction actionWithTitle:@"Settings"
-                                                              style:UIAlertActionStyleDefault
-                                                            handler:^(UIAlertAction * _Nonnull action) {
-            callback(5);
-                                                            }];
-        UIAlertAction *aboutAction = [UIAlertAction actionWithTitle:@"About"
-                                                              style:UIAlertActionStyleDefault
-                                                            handler:^(UIAlertAction * _Nonnull action) {
-            callback(6);
-                                                            }];
-        
-        UIAlertAction *cancelAction = [UIAlertAction actionWithTitle:@"Cancel"
-                                                               style:UIAlertActionStyleCancel
-                                                             handler:^(UIAlertAction * _Nonnull action) {
-            callback(-1);
-                                                             }];
-
-        [alertController addAction:newPatchAction];
-        [alertController addAction:openPatchAction];
-        [alertController addAction:savePatchAction];
-        [alertController addAction:savePatchAsAction];
-        [alertController addAction:themeAction];
-        [alertController addAction:settingsAction];
-        [alertController addAction:aboutAction];
-        [alertController addAction:cancelAction];
-        
-        if (isIPad())
-        {
-            alertController.preferredContentSize = view.frame.size;
-
-            if (auto* popoverController = alertController.popoverPresentationController)
-            {
-                popoverController.sourceView = view;
-                popoverController.sourceRect = CGRectMake (35.0f, 1.0f, 50.0f, 50.0f);
-                popoverController.canOverlapSourceViewRect = YES;
-            }
-        }
-
+    auto* nsTitle = (NSString* _Nonnull)[NSString stringWithUTF8String:title.toUTF8()];
     
-        // Present the alert controller using the found view controller
-        [viewController presentViewController:alertController animated:YES completion:nil];
-    }
-    else {
-        NSLog(@"Failed to find a UIViewController to present the UIAlertController.");
-    }
-}
-
-void OSUtils::showMobileCanvasMenu(juce::ComponentPeer* peer, std::function<void(int)> callback)
-{
-    auto* view = (UIView<CALayerDelegate>*)peer->getNativeHandle();
-    
-    // Find the parent view controller
-    UIViewController *viewController = nil;
-    UIResponder *responder = view;
-    while (responder) {
-        if ([responder isKindOfClass:[UIViewController class]]) {
-            viewController = (UIViewController *)responder;
-            break;
-        }
-        responder = [responder nextResponder];
-    }
-
-    if (viewController) {
-        // Create an alert controller
-        UIAlertController *alertController = [UIAlertController alertControllerWithTitle:@"Select an Option"
-                                                                             message:nil
-                                                                      preferredStyle:UIAlertControllerStyleActionSheet];
-    
-
-        UIAlertAction *cutAction = [UIAlertAction actionWithTitle:@"Cut"
-                                                              style:UIAlertActionStyleDefault
-                                                            handler:^(UIAlertAction * _Nonnull action) {
-            callback(1);
-                                                            }];
-        UIAlertAction *copyAction = [UIAlertAction actionWithTitle:@"Copy"
-                                              style:UIAlertActionStyleDefault
-                                            handler:^(UIAlertAction * _Nonnull action) {
-            callback(2);
-                                            }];
-        
-        UIAlertAction *pasteAction = [UIAlertAction actionWithTitle:@"Paste"
-                                                              style:UIAlertActionStyleDefault
-                                                            handler:^(UIAlertAction * _Nonnull action) {
-            callback(3);
-                                                            }];
-        
-        UIAlertAction *duplicateAction = [UIAlertAction actionWithTitle:@"Duplicate"
-                                              style:UIAlertActionStyleDefault
-                                            handler:^(UIAlertAction * _Nonnull action) {
-            callback(4);
-                                            }];
-        UIAlertAction *encapsulateAction = [UIAlertAction actionWithTitle:@"Encapsulate"
-                                              style:UIAlertActionStyleDefault
-                                            handler:^(UIAlertAction * _Nonnull action) {
-            callback(5);
-                                            }];
-        UIAlertAction *tidyConnectionAction = [UIAlertAction actionWithTitle:@"Tidy Connection"
-                                              style:UIAlertActionStyleDefault
-                                            handler:^(UIAlertAction * _Nonnull action) {
-            callback(6);
-                                            }];
-        
-        UIAlertAction *cancelAction = [UIAlertAction actionWithTitle:@"Cancel"
-                                                              style:UIAlertActionStyleCancel
-                                                            handler:^(UIAlertAction * _Nonnull action) {
-            callback(-1);
-                                                            }];
-
-        
-        if (isIPad())
-        {
-            alertController.preferredContentSize = view.frame.size;
-
-            if (auto* popoverController = alertController.popoverPresentationController)
-            {
-                auto peerBounds = peer->getBounds().toFloat();
-                
-                popoverController.sourceView = view;
-                popoverController.sourceRect = CGRectMake (peerBounds.getCentreX() - 10.0f, peerBounds.getBottom() - 120.0f, 20.0f, 5.0f);
-                popoverController.canOverlapSourceViewRect = YES;
-            }
-        }
-        
-        [alertController addAction:cutAction];
-        [alertController addAction:copyAction];
-        [alertController addAction:pasteAction];
-        [alertController addAction:duplicateAction];
-        [alertController addAction:encapsulateAction];
-        [alertController addAction:tidyConnectionAction];
-        [alertController addAction:cancelAction];
-        // Present the alert controller using the found view controller
-        [viewController presentViewController:alertController animated:YES completion:nil];
-    }
-    else {
-        NSLog(@"Failed to find a UIViewController to present the UIAlertController.");
-    }
+    auto globalScale = juce::Desktop::getInstance().getGlobalScaleFactor();
+    if (viewController)
+        presentMenu(viewController, view, peer, nsTitle, items, sub, screenPosition * globalScale);
 }
 
 // The method implementation that will be added to JuceAppStartupDelegate
@@ -658,7 +441,7 @@ BOOL openURLImplementation(id self, SEL _cmd, UIApplication* app, NSURL* url, NS
         juce::String juceFilePath = juce::String::fromUTF8([filePath UTF8String]);
         [url startAccessingSecurityScopedResource];
         
-        if (auto* juceApp = juce::JUCEApplicationBase::getInstance())
+        if (juce::JUCEApplicationBase::getInstance())
         {
             juce::MessageManager::callAsync([juceFilePath]()
             {
@@ -727,7 +510,7 @@ bool OSUtils::addOpenURLMethodToDelegate()
 
 - (void)commonInit {
     self.metalLayer = (CAMetalLayer *)self.layer;
-    [self.metalLayer setPresentsWithTransaction:TRUE];
+    [self.metalLayer setPresentsWithTransaction:FALSE];
     [self.metalLayer setFramebufferOnly:FALSE];
 }
 
@@ -747,6 +530,11 @@ void* OSUtils::MTLCreateView(void* parent, int x, int y, int width, int height)
     [parentView addSubview:childView];
 
     return childView;
+}
+
+void* OSUtils::MTLGetLayer(void* view)
+{
+    return reinterpret_cast<UIView*>(view).layer;
 }
 
 void OSUtils::MTLDeleteView(void* view)

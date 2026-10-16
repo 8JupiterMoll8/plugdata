@@ -23,7 +23,7 @@ public:
         objectParameters.addParamFloat("Non-zero value", cGeneral, &nonZero, 1.0f);
         objectParameters.addParamSize(&sizeProperty, true);
 
-        iemHelper.addIemParameters(objectParameters, true, true, 17, 7);
+        iemHelper.addIemParameters(objectParameters, true, true, true, 0, -10);
     }
 
     void onConstrainerCreate() override
@@ -31,12 +31,17 @@ public:
         constrainer->setFixedAspectRatio(1);
     }
 
-    bool inletIsSymbol() override
+    ResizeDirection getAllowedResizeDirections() const override
+    {
+        return DiagonalOnly;
+    }
+
+    bool hideInlet() override
     {
         return iemHelper.hasReceiveSymbol();
     }
 
-    bool outletIsSymbol() override
+    bool hideOutlet() override
     {
         return iemHelper.hasSendSymbol();
     }
@@ -71,17 +76,19 @@ public:
 
     void render(NVGcontext* nvg) override
     {
+        auto const& colours = getThemeColours();
+
         auto const b = getLocalBounds().toFloat();
 
         auto const bgColour = ::getValue<Colour>(iemHelper.secondaryColour);
 
-        auto const backgroundColour = convertColour(bgColour);
-        auto const toggledColour = convertColour(::getValue<Colour>(iemHelper.primaryColour));
-        auto const untoggledColour = convertColour(::getValue<Colour>(iemHelper.primaryColour).interpolatedWith(::getValue<Colour>(iemHelper.secondaryColour), 0.8f));
-        auto const selectedOutlineColour = convertColour(cnv->editor->getLookAndFeel().findColour(PlugDataColour::objectSelectedOutlineColourId));
-        auto const outlineColour = convertColour(cnv->editor->getLookAndFeel().findColour(PlugDataColour::objectOutlineColourId));
+        auto const backgroundColour = nvgColour(bgColour);
+        auto const toggledColour = nvgColour(::getValue<Colour>(iemHelper.primaryColour));
+        auto const untoggledColour = nvgColour(::getValue<Colour>(iemHelper.primaryColour).interpolatedWith(::getValue<Colour>(iemHelper.secondaryColour), 0.8f));
+        auto const selectedOutlineColour = nvgColour(colours.objectSelectedOutlineColour);
+        auto const outlineColour = nvgColour(colours.objectOutlineColour);
 
-        nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), backgroundColour, object->isSelected() ? selectedOutlineColour : outlineColour, Corners::objectCornerRadius);
+        nanovg::nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), backgroundColour, object->isSelected() ? selectedOutlineColour : outlineColour, getPlugDataLook(*this).getObjectCornerRadius());
 
         auto const sizeReduction = std::min(1.0f, getWidth() / 20.0f);
         float const margin = (getWidth() * 0.08f + 4.5f) * sizeReduction;
@@ -90,14 +97,14 @@ public:
         auto const max = std::max(crossBounds.getWidth(), crossBounds.getHeight());
         auto const strokeWidth = std::max(max * 0.15f, 2.0f) * sizeReduction;
 
-        nvgBeginPath(nvg);
-        nvgMoveTo(nvg, crossBounds.getX(), crossBounds.getY());
-        nvgLineTo(nvg, crossBounds.getRight(), crossBounds.getBottom());
-        nvgMoveTo(nvg, crossBounds.getRight(), crossBounds.getY());
-        nvgLineTo(nvg, crossBounds.getX(), crossBounds.getBottom());
-        nvgStrokeColor(nvg, toggleState ? toggledColour : untoggledColour);
-        nvgStrokeWidth(nvg, strokeWidth);
-        nvgStroke(nvg);
+        nanovg::nvgBeginPath(nvg);
+        nanovg::nvgMoveTo(nvg, crossBounds.getX(), crossBounds.getY());
+        nanovg::nvgLineTo(nvg, crossBounds.getRight(), crossBounds.getBottom());
+        nanovg::nvgMoveTo(nvg, crossBounds.getRight(), crossBounds.getY());
+        nanovg::nvgLineTo(nvg, crossBounds.getX(), crossBounds.getBottom());
+        nanovg::nvgStrokeColor(nvg, toggleState ? toggledColour : untoggledColour);
+        nanovg::nvgStrokeWidth(nvg, strokeWidth);
+        nanovg::nvgStroke(nvg);
     }
 
     void toggleObject(Point<int> position) override

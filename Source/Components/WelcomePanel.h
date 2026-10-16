@@ -5,15 +5,19 @@
 */
 
 #pragma once
+#include "NVGSurface.h"
 #include "Utility/Autosave.h"
-#include "Utility/CachedTextRender.h"
+#include "Utility/Fonts.h"
 #include "Utility/NVGGraphicsContext.h"
+#include "Utility/NVGUtils.h"
 #include "Components/BouncingViewport.h"
 #include "Utility/PatchInfo.h"
 
 class WelcomePanel final : public Component
     , public NVGComponent
     , public AsyncUpdater {
+    using PatchSilhouette = SmallArray<Rectangle<int>>;
+
     class ContentComponent final : public Component {
         WelcomePanel& panel;
         Rectangle<int> clearButtonBounds;
@@ -27,26 +31,21 @@ class WelcomePanel final : public Component
 
         void paint(Graphics& g) override
         {
-            auto* nvg = dynamic_cast<NVGGraphicsContext&>(g.getInternalContext()).getContext();
+            auto const& colours = getThemeColours(*this);
 
             if (panel.currentTab == Home && panel.searchQuery.isEmpty()) {
                 if (panel.recentlyOpenedTiles.isEmpty()) {
-                    nvgFontFace(nvg, "Inter-Bold");
-                    nvgFontSize(nvg, 34);
-                    nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-                    nvgFillColor(nvg, NVGComponent::convertColour(findColour(PlugDataColour::panelTextColourId)));
-                    nvgText(nvg, getWidth() / 2, getHeight() / 2 - 80, "Welcome to plugdata", nullptr);
+                    g.setFont(Fonts::getBoldFont().withPointHeight(34.0f));
+                    g.setColour(colours.panelTextColour);
+                    g.drawText("Welcome to plugdata", Rectangle<float>(0.0f, getHeight() * 0.5f - 104.0f, static_cast<float>(getWidth()), 48.0f), Justification::centred, false);
                 } else {
-                    nvgFontFace(nvg, "Inter-Bold");
-                    nvgFontSize(nvg, 14);
-                    nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-                    nvgFillColor(nvg, NVGComponent::convertColour(findColour(PlugDataColour::panelTextColourId)));
-                    nvgText(nvg, 96, 138, "Recently Opened", nullptr);
+                    g.setFont(Fonts::getBoldFont().withPointHeight(14.0f));
+                    g.setColour(colours.panelTextColour);
+                    g.drawText("Recently Opened", Rectangle<float>(0.0f, 128.0f, 192.0f, 20.0f), Justification::centred, false);
 
-                    nvgFontFace(nvg, "icon_font-Regular");
-                    nvgFontSize(nvg, 14);
-                    nvgFillColor(nvg, NVGComponent::convertColour(findColour(PlugDataColour::panelTextColourId).withAlpha(isHoveringClearButton ? 0.6f : 1.0f)));
-                    nvgText(nvg, clearButtonBounds.getCentreX(), clearButtonBounds.getCentreY(), Icons::Clear.toRawUTF8(), nullptr);
+                    g.setFont(Fonts::getIconFont().withPointHeight(14.0f));
+                    g.setColour(colours.panelTextColour.withAlpha(isHoveringClearButton ? 0.6f : 1.0f));
+                    g.drawText(Icons::Clear, clearButtonBounds, Justification::centred, false);
                 }
             }
         }
@@ -66,7 +65,7 @@ class WelcomePanel final : public Component
 
         void mouseExit(MouseEvent const& e) override
         {
-            if(isHoveringClearButton) {
+            if (isHoveringClearButton) {
                 isHoveringClearButton = false;
                 repaint();
             }
@@ -74,16 +73,17 @@ class WelcomePanel final : public Component
 
         void mouseUp(MouseEvent const& e) override
         {
+            if (!isRealClickEvent(e))
+                return;
+
             if (clearButtonBounds.contains(e.getPosition())) {
-                auto const settingsTree = SettingsFile::getInstance()->getValueTree();
-                settingsTree.getChildWithName("RecentlyOpened").removeAllChildren(nullptr);
+                SettingsFile::getInstance()->getProperty<VarArray>("recently_opened").clear();
                 panel.triggerAsyncUpdate();
             }
         }
     };
 
     class MainActionTile final : public Component {
-        NVGImage shadowImage;
         bool isHovered = false;
 
     public:
@@ -102,96 +102,82 @@ class WelcomePanel final : public Component
 
         void paint(Graphics& g) override
         {
+            auto const& colours = getThemeColours(*this);
+
             auto const bounds = getLocalBounds().reduced(12);
-            auto* nvg = dynamic_cast<NVGGraphicsContext&>(g.getInternalContext()).getContext();
 
             auto const width = getWidth();
             auto const height = getHeight();
-            // We only need one shadow image, because all tiles have the same size
-            auto const scale = nvgCurrentPixelScale(nvg);
-            if (shadowImage.needsUpdate(width * scale, height * scale)) {
-                shadowImage = NVGImage(nvg, width * scale, height * scale, [width, height, scale](Graphics& g) {
-                    g.addTransform(AffineTransform::scale(scale, scale));
-                    Path tilePath;
-                    tilePath.addRoundedRectangle(12.5f, 12.5f, width - 25.0f, height - 25.0f, Corners::largeCornerRadius);
-                    StackShadow::renderDropShadow(0, g, tilePath, Colours::white.withAlpha(0.12f), 6, { 0, 1 }); }, NVGImage::AlphaImage);
-                repaint();
-            }
 
-            shadowImage.renderAlphaImage(nvg, Rectangle<int>(0, 0, width, height), nvgRGB(0, 0, 0));
+            auto shadowBounds = Rectangle<int>(12, 12, width - 24, height - 24);
+
+            StackShadow::drawShadowForRect(g, shadowBounds, 7, Corners::largeCornerRadius, 0.12f, 1);
 
             auto const lB = bounds.toFloat().expanded(0.5f);
             {
-                auto const bgCol = !isHovered ? convertColour(findColour(PlugDataColour::panelForegroundColourId)) : convertColour(findColour(PlugDataColour::toolbarBackgroundColourId));
+                auto const bgColour = !isHovered ? colours.panelForegroundColour : colours.toolbarBackgroundColour;
 
                 // Draw border around
-                nvgDrawRoundedRect(nvg, lB.getX(), lB.getY(), lB.getWidth(), lB.getHeight(), bgCol, convertColour(findColour(PlugDataColour::toolbarOutlineColourId)), Corners::largeCornerRadius);
+                g.setColour(bgColour);
+                g.fillRoundedRectangle(lB, Corners::largeCornerRadius);
+                g.setColour(colours.toolbarOutlineColour);
+                g.drawRoundedRectangle(lB, Corners::largeCornerRadius, 1.0f);
             }
 
-            auto const bgColour = findColour(PlugDataColour::panelForegroundColourId);
-            auto const bgCol = convertColour(bgColour);
-            auto const newOpenIconCol = convertColour(bgColour.contrasting().withAlpha(0.32f));
+            auto const bgColour = colours.panelForegroundColour;
+            auto const newOpenIconColour = bgColour.contrasting().withAlpha(0.32f);
             constexpr auto iconSize = 48;
             constexpr auto iconHalf = iconSize * 0.5f;
-            auto const circleBounds = Rectangle<int>(lB.getX() + 40 - iconHalf, lB.getCentreY() - iconHalf, iconSize, iconSize);
+            auto const circleBounds = Rectangle<float>(lB.getX() + 40.0f - iconHalf, lB.getCentreY() - iconHalf, iconSize, iconSize);
 
             // Background circle
-            nvgDrawRoundedRect(nvg, circleBounds.getX(), circleBounds.getY(), iconSize, iconSize, newOpenIconCol, newOpenIconCol, iconHalf);
+            g.setColour(newOpenIconColour);
+            g.fillRoundedRectangle(circleBounds, iconHalf);
             switch (type) {
             case New: {
                 // Draw a cross icon manually
-                constexpr auto lineThickness = 4;
+                constexpr auto lineThickness = 4.0f;
                 constexpr auto lineRad = lineThickness * 0.5f;
-                constexpr auto crossSize = 26;
+                constexpr auto crossSize = 26.0f;
                 constexpr auto halfSize = crossSize * 0.5f;
+                g.setColour(bgColour);
                 // Horizontal line
-                nvgDrawRoundedRect(nvg, circleBounds.getCentreX() - halfSize, circleBounds.getCentreY() - lineRad, crossSize, lineThickness, bgCol, bgCol, lineRad);
+                g.fillRoundedRectangle(circleBounds.getCentreX() - halfSize, circleBounds.getCentreY() - lineRad, crossSize, lineThickness, lineRad);
                 // Vertical line
-                nvgDrawRoundedRect(nvg, circleBounds.getCentreX() - lineRad, circleBounds.getCentreY() - halfSize, lineThickness, crossSize, bgCol, bgCol, lineRad);
+                g.fillRoundedRectangle(circleBounds.getCentreX() - lineRad, circleBounds.getCentreY() - halfSize, lineThickness, crossSize, lineRad);
 
-                nvgFontFace(nvg, "Inter-Bold");
-                nvgFontSize(nvg, 12);
-                nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_LEFT);
-                nvgFillColor(nvg, NVGComponent::convertColour(findColour(PlugDataColour::panelTextColourId)));
-                nvgText(nvg, 92, 45, "New Patch", nullptr);
+                g.setColour(colours.panelTextColour);
+                g.setFont(Fonts::getBoldFont().withPointHeight(12.0f));
+                g.drawText("New Patch", Rectangle<int>(92, 30, width - 104, 20), Justification::centredLeft, false);
 
-                nvgFontFace(nvg, "Inter-Regular");
-                nvgText(nvg, 92, 63, "Create a new empty patch", nullptr);
+                g.setFont(Fonts::getDefaultFont().withPointHeight(12.0f));
+                g.drawText("Create a new empty patch", Rectangle<int>(92, 48, width - 104, 20), Justification::centredLeft, false);
                 break;
             }
-
             case Open: {
-                nvgFontFace(nvg, "icon_font-Regular");
-                nvgFillColor(nvg, bgCol);
-                nvgFontSize(nvg, 34);
-                nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-                nvgText(nvg, circleBounds.getCentreX(), circleBounds.getCentreY() - 4, Icons::Folder.toRawUTF8(), nullptr);
+                g.setFont(Fonts::getIconFont().withPointHeight(34.0f));
+                g.setColour(bgColour);
+                g.drawText(Icons::FolderFilled, circleBounds.toNearestInt(), Justification::centred, false);
 
-                nvgFontFace(nvg, "Inter-Bold");
-                nvgFontSize(nvg, 12);
-                nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_LEFT);
-                nvgFillColor(nvg, NVGComponent::convertColour(findColour(PlugDataColour::panelTextColourId)));
-                nvgText(nvg, 92, 45, "Open Patch...", nullptr);
+                g.setColour(colours.panelTextColour);
+                g.setFont(Fonts::getBoldFont().withPointHeight(12.0f));
+                g.drawText("Open Patch...", Rectangle<int>(92, 30, width - 104, 20), Justification::centredLeft, false);
 
-                nvgFontFace(nvg, "Inter-Regular");
-                nvgText(nvg, 92, 63, "Browse for a patch to open", nullptr);
+                g.setFont(Fonts::getDefaultFont().withPointHeight(12.0f));
+                g.drawText("Browse for a patch to open", Rectangle<int>(92, 48, width - 104, 20), Justification::centredLeft, false);
                 break;
             }
             case Store: {
-                nvgFontFace(nvg, "icon_font-Regular");
-                nvgFillColor(nvg, bgCol);
-                nvgFontSize(nvg, 30);
-                nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-                nvgText(nvg, circleBounds.getCentreX(), circleBounds.getCentreY() - 4, Icons::Sparkle.toRawUTF8(), nullptr);
+                g.setFont(Fonts::getIconFont().withPointHeight(30.0f));
+                g.setColour(bgColour);
+                g.drawText(Icons::SparkleFilled, circleBounds.toNearestInt(), Justification::centred, false);
 
-                nvgFontFace(nvg, "Inter-Bold");
-                nvgFontSize(nvg, 12);
-                nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_LEFT);
-                nvgFillColor(nvg, NVGComponent::convertColour(findColour(PlugDataColour::panelTextColourId)));
-                nvgText(nvg, 92, 45, "Discover...", nullptr);
+                g.setColour(colours.panelTextColour);
+                g.setFont(Fonts::getBoldFont().withPointHeight(12.0f));
+                g.drawText("Discover...", Rectangle<int>(92, 30, width - 104, 20), Justification::centredLeft, false);
 
-                nvgFontFace(nvg, "Inter-Regular");
-                nvgText(nvg, 92, 63, "Browse online patch store", nullptr);
+                g.setFont(Fonts::getDefaultFont().withPointHeight(12.0f));
+                g.drawText("Browse online patch store", Rectangle<int>(92, 48, width - 104, 20), Justification::centredLeft, false);
             }
             default:
                 break;
@@ -220,12 +206,93 @@ class WelcomePanel final : public Component
             if (!getScreenBounds().reduced(12).contains(e.getScreenPosition()))
                 return;
 
-            if (!e.mods.isLeftButtonDown())
+            if (!isRealClickEvent(e))
                 return;
 
             onClick();
         }
     };
+
+    static void paintTileBacking(Graphics& g, Rectangle<int> const tileBounds, PlugDataColours const& colours, bool const isHovered)
+    {
+        auto const bounds = tileBounds.reduced(12);
+
+        StackShadow::drawShadowForRect(g, bounds, 7, Corners::largeCornerRadius, 0.12f, 1);
+
+        auto const backgroundBounds = bounds.toFloat().expanded(0.5f);
+        g.setColour(colours.panelForegroundColour);
+        g.fillRoundedRectangle(backgroundBounds, Corners::largeCornerRadius);
+        g.setColour(colours.toolbarOutlineColour);
+        g.drawRoundedRectangle(backgroundBounds, Corners::largeCornerRadius, 1.0f);
+
+        g.setColour(colours.toolbarOutlineColour);
+        g.drawRoundedRectangle(backgroundBounds, Corners::largeCornerRadius, 1.0f);
+
+        auto const hoverColour = colours.toolbarHoverColour.interpolatedWith(colours.toolbarBackgroundColour, 0.5f);
+
+        Path footerPath;
+        footerPath.addRoundedRectangle(bounds.getX(), bounds.getHeight() - 32, bounds.getWidth(), 44, Corners::largeCornerRadius, Corners::largeCornerRadius, false, false, true, true);
+        g.setColour(isHovered ? hoverColour : colours.toolbarBackgroundColour);
+        g.fillPath(footerPath);
+        g.setColour(colours.toolbarOutlineColour);
+        g.strokePath(footerPath, PathStrokeType(1.0f));
+    }
+
+    void updateTileBackgroundCache(NVGGraphicsContext& graphicsContext, Rectangle<int> const tileBounds)
+    {
+        auto* nvg = graphicsContext.getContext();
+        auto const scale = graphicsContext.getPhysicalPixelScaleFactor();
+        auto const logicalWidth = tileBounds.getWidth();
+        auto const logicalHeight = tileBounds.getHeight();
+        auto const logicalSize = Point<int>(logicalWidth, logicalHeight);
+        auto const imageWidth = jmax(1, roundToInt(logicalWidth * scale));
+        auto const imageHeight = jmax(1, roundToInt(logicalHeight * scale));
+
+        auto const cacheNeedsUpdate = tileBackgroundContext != nvg
+            || tileBackgroundSize != logicalSize
+            || !approximatelyEqual(tileBackgroundScale, scale)
+            || tileBackingImage.needsUpdate(imageWidth, imageHeight)
+            || hoveredTileBackingImage.needsUpdate(imageWidth, imageHeight);
+
+        if (!cacheNeedsUpdate)
+            return;
+
+        auto const colours = getThemeColours(*this);
+        auto const imageBounds = Rectangle<int>(logicalWidth, logicalHeight);
+
+        tileBackingImage = NVGImage(nvg, imageWidth, imageHeight, [imageBounds, scale, colours](Graphics& imageGraphics) {
+            imageGraphics.addTransform(AffineTransform::scale(scale));
+            paintTileBacking(imageGraphics, imageBounds, colours, false);
+        });
+
+        hoveredTileBackingImage = NVGImage(nvg, imageWidth, imageHeight, [imageBounds, scale, colours](Graphics& imageGraphics) {
+            imageGraphics.addTransform(AffineTransform::scale(scale));
+            paintTileBacking(imageGraphics, imageBounds, colours, true);
+        });
+
+        tileBackgroundContext = nvg;
+        tileBackgroundSize = logicalSize;
+        tileBackgroundScale = scale;
+    }
+
+    void drawTileBacking(Graphics& g, Rectangle<int> const tileBounds, bool const isHovered)
+    {
+        if (auto* graphicsContext = dynamic_cast<NVGGraphicsContext*>(&g.getInternalContext())) {
+            updateTileBackgroundCache(*graphicsContext, tileBounds);
+            auto& image = isHovered ? hoveredTileBackingImage : tileBackingImage;
+            image.render(graphicsContext->getContext(), tileBounds);
+            return;
+        }
+
+        paintTileBacking(g, tileBounds, getThemeColours(*this), isHovered);
+    }
+
+    void invalidateTileBackgroundCache()
+    {
+        tileBackgroundScale = 0.0f;
+        tileBackingImage.setDirty();
+        hoveredTileBackingImage.setDirty();
+    }
 
     class WelcomePanelTile final : public Component {
     public:
@@ -236,13 +303,13 @@ class WelcomePanel final : public Component
 
     private:
         WelcomePanel& parent;
-        float snapshotScale;
         bool isHovered = false;
-        String tileName, tileSubtitle;
-        std::unique_ptr<Drawable> snapshot = nullptr;
-        NVGImage titleImage, subtitleImage, snapshotImage;
 
-        Image thumbnailImageData;
+        String tileName, tileSubtitle;
+        WelcomePanel::PatchSilhouette patchSilhouette;
+        Image snapshotImage;
+        File thumbnailFile;
+
         int lastWidth = -1;
         int lastHeight = -1;
 
@@ -259,30 +326,32 @@ class WelcomePanel final : public Component
             Patch,
             LibraryPatch
         };
-
         TileType tileType = Patch;
 
     public:
-        WelcomePanelTile(WelcomePanel& welcomePanel, File const& patchFile, String const& patchAuthor, float const scale, bool const favourited, Image const& thumbImage = Image())
+        WelcomePanelTile(WelcomePanel& welcomePanel, File const& patchFile, String const& patchAuthor, bool const favourited, File const& thumbnail)
             : isFavourited(favourited)
             , parent(welcomePanel)
-            , snapshotScale(scale)
-            , thumbnailImageData(thumbImage)
+            , thumbnailFile(thumbnail)
             , patchFile(patchFile)
         {
+            setCachedComponentImage(new NVGSurface::CommandBufferCache(*this));
+
             tileName = patchFile.getFileNameWithoutExtension();
             tileSubtitle = patchAuthor;
             tileType = LibraryPatch;
             resized();
         }
 
-        WelcomePanelTile(WelcomePanel& welcomePanel, ValueTree subTree, String const& svgImage, float const scale, bool const favourited, Image const& thumbImage = Image())
+        WelcomePanelTile(WelcomePanel& welcomePanel, File const& patchFile, int64 lastOpenTime, WelcomePanel::PatchSilhouette const& silhouette, bool const favourited, File const& thumbnail)
             : isFavourited(favourited)
             , parent(welcomePanel)
-            , snapshotScale(scale)
-            , thumbnailImageData(thumbImage)
+            , patchSilhouette(silhouette)
+            , thumbnailFile(thumbnail)
+            , patchFile(patchFile)
         {
-            patchFile = File(subTree.getProperty("Path").toString());
+            setCachedComponentImage(new NVGSurface::CommandBufferCache(*this));
+
             tileName = patchFile.getFileNameWithoutExtension();
 
             auto is24Hour = OSUtils::is24HourTimeFormat();
@@ -310,8 +379,7 @@ class WelcomePanel final : public Component
                 return (dateOrDay.isNotEmpty() ? dateOrDay : openTime.toString(true, false)) + ", " + time;
             };
 
-            auto const accessedInPlugdata = Time(subTree.getProperty("Time"));
-
+            auto const accessedInPlugdata = Time(lastOpenTime);
             tileSubtitle = formatTimeDescription(accessedInPlugdata);
 
             auto const fileSize = patchFile.getSize();
@@ -331,55 +399,19 @@ class WelcomePanel final : public Component
             // We want to show this again as well as in the subtile, but format it differently (with both Today/Yesterday and date)
             // because the popup menu may occlude the tile + subtitle
             accessedTimeDescription = formatTimeDescription(accessedInPlugdata, true);
-
-            updateGeneratedThumbnailIfNeeded(thumbImage, svgImage);
         }
 
-        WelcomePanelTile(WelcomePanel& welcomePanel, String const& name, String const& subtitle, String const& svgImage, float const scale, bool const favourited, Image const& thumbImage = Image())
-            : isFavourited(favourited)
-            , parent(welcomePanel)
-            , snapshotScale(scale)
-            , tileName(name)
-            , tileSubtitle(subtitle)
-            , thumbnailImageData(thumbImage)
-        {
-            updateGeneratedThumbnailIfNeeded(thumbImage, svgImage);
-        }
-
-        void updateGeneratedThumbnailIfNeeded(Image const& thumbnailImage, String const& svgImage)
-        {
-            if (!thumbnailImage.isValid()) {
-                snapshot = Drawable::createFromImageData(svgImage.toRawUTF8(), svgImage.getNumBytesAsUTF8());
-                if (snapshot) {
-                    auto const snapshotColour = LookAndFeel::getDefaultLookAndFeel().findColour(PlugDataColour::objectSelectedOutlineColourId).withAlpha(0.3f);
-                    snapshot->replaceColour(Colours::black, snapshotColour);
-                }
-            }
-
-            resized();
-        }
-
-        void setPreviousVersions(Array<std::pair<int64, File>> versions)
+        void setPreviousVersions(HeapArray<std::pair<File, var>> const& versions)
         {
             previousVersions.clear();
 
-            for (auto& [time, file] : versions) {
-                auto metaFile = file.getSiblingFile("meta.json");
-                if (metaFile.existsAsFile()) {
-                    auto const json = JSON::fromString(metaFile.loadFileAsString());
-                    if (json.hasProperty("Version")) {
-                        previousVersions[json["Version"].toString()] = file;
-                    } else {
-                        previousVersions["Added " + Time(time).toString(true, false)] = file;
-                    }
+            for (auto& [file, json] : versions) {
+                if (json.hasProperty("Version")) {
+                    previousVersions[json["Version"].toString()] = file;
+                } else {
+                    previousVersions["Added " + file.getCreationTime().toString(true, false)] = file;
                 }
             }
-        }
-
-        void setHovered()
-        {
-            isHovered = true;
-            repaint();
         }
 
         void mouseDown(MouseEvent const& e) override
@@ -398,10 +430,11 @@ class WelcomePanel final : public Component
                 tileMenu.addSeparator();
 
                 auto metaFile = patchFile.getParentDirectory().getChildFile("meta.json");
+                auto currentVersion = String("Latest");
                 if (metaFile.existsAsFile()) {
-
                     auto const json = JSON::fromString(metaFile.loadFileAsString());
                     auto const patchInfo = PatchInfo(json);
+                    currentVersion = patchInfo.version;
 
                     PopupMenu patchInfoSubMenu;
                     patchInfoSubMenu.addItem("Title: " + patchInfo.title, false, false, nullptr);
@@ -429,14 +462,50 @@ class WelcomePanel final : public Component
 
                 tileMenu.addSeparator();
 
-                // Put this at the bottom, so it's not accidentally clicked on
-                tileMenu.addItem("Delete from library...", [this] {
-                    Dialogs::showMultiChoiceDialog(&parent.confirmationDialog, parent.getParentComponent(), "Are you sure you want to delete: " + patchFile.getFileNameWithoutExtension(), [this](int const choice) {
+                auto allVersions = previousVersions;
+                allVersions[currentVersion] = patchFile;
+
+                PopupMenu versionsToDeleteSubMenu;
+                versionsToDeleteSubMenu.addItem("Delete All", [this, allVersions]() {
+                    Dialogs::showMultiChoiceDialog(&parent.editor->openedDialog, parent.editor, "Are you sure you want to delete all versions?", [this, allVersions](int const choice) {
                         if (choice == 0) {
-                            patchFile.getParentDirectory().deleteRecursively(true);
+                            for (auto& [name, patchFile] : allVersions) {
+                                auto patchesDir = ProjectInfo::appDataDir.getChildFile("Patches");
+                                auto trashDir = ProjectInfo::appDataDir.getChildFile("Patches").getChildFile(".trash");
+                                trashDir.createDirectory();
+                                auto patchDir = patchFile.getParentDirectory() == patchesDir ? patchFile : patchFile.getParentDirectory();
+                                auto targetLocation = trashDir.getChildFile(patchDir.getFileName());
+                                if(targetLocation.exists())
+                                {
+                                    targetLocation.deleteRecursively();
+                                }
+                                OSUtils::moveFileTo(patchDir, trashDir.getChildFile(patchDir.getFileName()));
+                            }
                             parent.triggerAsyncUpdate();
                         } }, { "Yes", "No" }, Icons::Warning);
                 });
+
+                versionsToDeleteSubMenu.addSeparator();
+
+                for (auto& [name, file] : allVersions) {
+                    versionsToDeleteSubMenu.addItem("Version " + name, [this, patchFile = file] {
+                        Dialogs::showMultiChoiceDialog(&parent.editor->openedDialog, parent.editor, "Are you sure you want to delete: " + patchFile.getFileNameWithoutExtension(), [this, patchFile](int const choice) {
+                            if (choice == 0) {
+                                auto patchesDir = ProjectInfo::appDataDir.getChildFile("Patches");
+                                auto trashDir = ProjectInfo::appDataDir.getChildFile("Patches").getChildFile(".trash");
+                                trashDir.createDirectory();
+                                auto patchDir = patchFile.getParentDirectory() == patchesDir ? patchFile : patchFile.getParentDirectory();
+                                auto targetLocation = trashDir.getChildFile(patchDir.getFileName());
+                                if(targetLocation.exists())
+                                {
+                                    targetLocation.deleteRecursively();
+                                }
+                                OSUtils::moveFileTo(patchDir, trashDir.getChildFile(patchDir.getFileName()));
+                                parent.triggerAsyncUpdate();
+                            } }, { "Yes", "No" }, Icons::Warning);
+                    });
+                }
+                tileMenu.addSubMenu("Delete from library", versionsToDeleteSubMenu, true);
             } else {
                 if (tileType == Patch) {
                     tileMenu.addItem(PlatformStrings::getBrowserTip(), [this] {
@@ -475,20 +544,28 @@ class WelcomePanel final : public Component
 
         void paint(Graphics& g) override
         {
-            auto bounds = getLocalBounds().reduced(12);
+            auto const& colours = getThemeColours(*this);
 
-            auto* nvg = dynamic_cast<NVGGraphicsContext&>(g.getInternalContext()).getContext();
-            auto const scale = nvgCurrentPixelScale(nvg);
-            
-            parent.drawShadow(nvg, getWidth(), getHeight(), scale);
+            auto const tileBounds = getLocalBounds();
+            auto bounds = tileBounds.reduced(12);
 
-            if (thumbnailImageData.isValid()) {
+            parent.drawTileBacking(g, tileBounds, isHovered);
+
+            if (thumbnailFile != File()) {
                 if (!snapshotImage.isValid() || lastWidth != bounds.getWidth() || lastHeight != bounds.getHeight()) {
                     lastWidth = bounds.getWidth();
                     lastHeight = bounds.getHeight();
+                    auto const imageBounds = bounds.withTrimmedBottom(32);
 
-                    snapshotImage = NVGImage(nvg, bounds.getWidth() * scale, (bounds.getHeight() - 32) * scale, [this, bounds, scale](Graphics& g) {
-                        g.addTransform(AffineTransform::scale(scale));
+                    if (imageBounds.getWidth() > 0 && imageBounds.getHeight() > 0) {
+                        snapshotImage = Image(Image::ARGB, imageBounds.getWidth(), imageBounds.getHeight(), true);
+                        Graphics imageGraphics(snapshotImage);
+
+                        Path thumbnailClip;
+                        thumbnailClip.addRoundedRectangle(0.0f, 0.0f, static_cast<float>(imageBounds.getWidth()), static_cast<float>(bounds.getHeight() - 44), Corners::largeCornerRadius, Corners::largeCornerRadius, true, true, false, false);
+                        imageGraphics.reduceClipRegion(thumbnailClip);
+
+                        auto thumbnailImageData = ImageFileFormat::loadFrom(thumbnailFile).convertedToFormat(Image::ARGB);
                         if (thumbnailImageData.isValid()) {
                             auto const imageWidth = thumbnailImageData.getWidth();
                             auto const imageHeight = thumbnailImageData.getHeight();
@@ -500,13 +577,11 @@ class WelcomePanel final : public Component
 
                             int drawWidth, drawHeight;
                             int offsetX = 0, offsetY = 0;
-                            
-                            if(approximatelyEqual(componentAspect, imageAspect))
-                            {
+
+                            if (approximatelyEqual(componentAspect, imageAspect)) {
                                 drawWidth = componentWidth;
                                 drawHeight = componentHeight;
-                            }
-                            else {
+                            } else {
                                 if (componentAspect < imageAspect) {
                                     // Component is wider than the image aspect ratio, scale based on height
                                     drawHeight = componentHeight;
@@ -516,95 +591,77 @@ class WelcomePanel final : public Component
                                     drawWidth = componentWidth;
                                     drawHeight = static_cast<int>(drawWidth / imageAspect);
                                 }
-                                
+
                                 // Calculate offsets to center the image
                                 offsetX = (componentWidth - drawWidth) / 2;
                                 offsetY = (componentHeight - drawHeight) / 2;
                             }
 
-                            g.drawImage(thumbnailImageData, offsetX, offsetY, drawWidth, drawHeight, 0, 0, imageWidth, imageHeight);
+                            imageGraphics.drawImage(thumbnailImageData, offsetX, offsetY, drawWidth, drawHeight, 0, 0, imageWidth, imageHeight);
                         }
-                    });
-                }
-            } else {
-                if (tileType != LibraryPatch && snapshot && !snapshotImage.isValid()) {
-                    auto const scale = nvgCurrentPixelScale(nvg);
-                    snapshotImage = NVGImage(nvg, bounds.getWidth() * scale, (bounds.getHeight() - 32) * scale, [this, scale](Graphics& g) {
-                        g.addTransform(AffineTransform::scale(scale));
-                        snapshot->drawAt(g, 0, 0, 1.0f);
-                    });
+                    } else {
+                        snapshotImage = {};
+                    }
                 }
             }
 
-            nvgSave(nvg);
-            auto const lB = bounds.toFloat().expanded(0.5f);
-            // Draw background even for images incase there is a transparent PNG
-            nvgDrawRoundedRect(nvg, lB.getX(), lB.getY(), lB.getWidth(), lB.getHeight(), convertColour(findColour(PlugDataColour::panelForegroundColourId)), convertColour(findColour(PlugDataColour::toolbarOutlineColourId)), Corners::largeCornerRadius);
-            
-            nvgRoundedScissor(nvg,lB.getX(), lB.getY(), lB.getWidth(), lB.getHeight(), Corners::largeCornerRadius);
-            if (thumbnailImageData.isValid() || tileType == Patch) {
-                nvgTranslate(nvg, 0.5f, 0.0f);  // account for outline
-                snapshotImage.render(nvg, bounds.withTrimmedBottom(32));
+            auto const imageBounds = bounds.withTrimmedBottom(32);
+            if (thumbnailFile != File()) {
+                if (snapshotImage.isValid())
+                    g.drawImageAt(snapshotImage, imageBounds.getX(), imageBounds.getY());
+            } else if (tileType == Patch) {
+                Rectangle<int> silhouetteBounds;
+                for (auto const& rect : patchSilhouette)
+                    silhouetteBounds = silhouetteBounds.getUnion(rect);
+
+                if (!silhouetteBounds.isEmpty()) {
+                    auto const silhouetteArea = bounds.withTrimmedBottom(44).toFloat();
+                    auto const transform = RectanglePlacement(RectanglePlacement::centred).getTransformToFit(silhouetteBounds.toFloat(), silhouetteArea);
+
+                    g.saveState();
+                    g.addTransform(transform);
+                    g.setColour(colours.objectSelectedOutlineColour.withAlpha(0.3f));
+                    auto const cornerRadius = getPlugDataLook(*this).getObjectCornerRadius();
+
+                    if (auto* graphicsContext = dynamic_cast<NVGGraphicsContext*>(&g.getInternalContext())) {
+                        auto* nvg = graphicsContext->getContext();
+                        for (auto const& rect : patchSilhouette)
+                            nanovg::nvgFillRoundedRect(nvg, rect.getX(), rect.getY(), rect.getWidth(), rect.getHeight(), cornerRadius);
+                    } else {
+                        for (auto const& rect : patchSilhouette)
+                            g.fillRoundedRectangle(rect.toFloat(), cornerRadius);
+                    }
+                    g.restoreState();
+                }
             } else {
-                auto const placeholderIconColour = LookAndFeel::getDefaultLookAndFeel().findColour(PlugDataColour::objectSelectedOutlineColourId).withAlpha(0.22f);
+                auto const placeholderIconColour = colours.objectSelectedOutlineColour.withAlpha(0.22f);
+                auto const placeholderIconBounds = Rectangle<float>(bounds.getX(), (bounds.getHeight() - 30.0f) * 0.5f - 34.0f, bounds.getWidth(), 68.0f);
 
                 // We draw the plugdata logo if library tiles don't have a thumbnail (patch snapshot is too busy)
-                nvgFillColor(nvg, NVGComponent::convertColour(placeholderIconColour));
-                nvgFontFace(nvg, "icon_font-Regular");
-                nvgFontSize(nvg, 68.0f);
-                nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-                nvgText(nvg, bounds.getCentreX(), (bounds.getHeight() - 30) * 0.5f, tileType == LibraryPatch ? Icons::PlugdataIconStandard.toRawUTF8() : Icons::Error.toRawUTF8(), nullptr);
+                g.setFont(Fonts::getIconFont().withPointHeight(68.0f));
+                g.setColour(placeholderIconColour);
+                g.drawText(Icons::PlugdataIconStandard, placeholderIconBounds, Justification::centred, false);
             }
-
-            nvgRestore(nvg);
-
-            // Draw border around
-            nvgDrawRoundedRect(nvg, lB.getX(), lB.getY(), lB.getWidth(), lB.getHeight(), nvgRGBA(0, 0, 0, 0), convertColour(findColour(PlugDataColour::toolbarOutlineColourId)), Corners::largeCornerRadius);
-
-            auto const hoverColour = findColour(PlugDataColour::toolbarHoverColourId).interpolatedWith(findColour(PlugDataColour::toolbarBackgroundColourId), 0.5f);
-
-            nvgBeginPath(nvg);
-            nvgRoundedRectVarying(nvg, bounds.getX(), bounds.getHeight() - 32, bounds.getWidth(), 44, 0.0f, 0.0f, Corners::largeCornerRadius, Corners::largeCornerRadius);
-            nvgFillColor(nvg, convertColour(isHovered ? hoverColour : findColour(PlugDataColour::toolbarBackgroundColourId)));
-            nvgFill(nvg);
-            nvgStrokeColor(nvg, convertColour(findColour(PlugDataColour::toolbarOutlineColourId)));
-            nvgStroke(nvg);
 
             auto textWidth = bounds.getWidth() - 8;
-            if (titleImage.needsUpdate(textWidth * scale, 24 * scale) || subtitleImage.needsUpdate(textWidth * scale, 16 * scale)) {
-                titleImage = NVGImage(nvg, textWidth * scale, 24 * scale, [this, textWidth, scale](Graphics& g) {
-                    g.addTransform(AffineTransform::scale(scale, scale));
-                    g.setColour(Colours::white);
-                    g.setFont(Fonts::getBoldFont().withHeight(14));
-                    g.drawText(tileName, Rectangle<int>(0, 0, textWidth, 24), Justification::centredLeft, true); }, NVGImage::AlphaImage);
+            g.setColour(colours.panelTextColour);
+            g.setFont(Fonts::getBoldFont().withHeight(14));
+            g.drawText(tileName, Rectangle<int>(22, bounds.getHeight() - 30, textWidth, 24), Justification::centredLeft, true);
 
-                subtitleImage = NVGImage(nvg, textWidth * scale, 16 * scale, [this, textWidth, scale](Graphics& g) {
-                    g.addTransform(AffineTransform::scale(scale, scale));
-                    g.setColour(Colours::white);
-                    g.setFont(Fonts::getDefaultFont().withHeight(13.5f));
-                    g.drawText(tileSubtitle, Rectangle<int>(0, 0, textWidth, 16), Justification::centredLeft, true); }, NVGImage::AlphaImage);
-            }
-
-            {
-                auto const textColour = findColour(PlugDataColour::panelTextColourId);
-
-                NVGScopedState scopedState(nvg);
-                nvgTranslate(nvg, 22, bounds.getHeight() - 30);
-                titleImage.renderAlphaImage(nvg, Rectangle<int>(0, 0, bounds.getWidth() - 8, 24), convertColour(textColour));
-                nvgTranslate(nvg, 0, 20);
-                subtitleImage.renderAlphaImage(nvg, Rectangle<int>(0, 0, bounds.getWidth() - 8, 16), convertColour(textColour.withAlpha(0.75f)));
-            }
+            g.setFont(Fonts::getDefaultFont().withHeight(13.5f));
+            g.drawText(tileSubtitle, Rectangle<int>(22, bounds.getHeight() - 10, textWidth, 16), Justification::centredLeft, true);
 
             if (onFavourite) {
                 auto const favouriteIconBounds = getHeartIconBounds();
-                nvgFontFace(nvg, "icon_font-Regular");
 
                 if (isFavourited) {
-                    nvgFillColor(nvg, nvgRGBA(250, 50, 40, 200));
-                    nvgText(nvg, favouriteIconBounds.getX(), favouriteIconBounds.getY() + 14, Icons::HeartFilled.toRawUTF8(), nullptr);
+                    g.setFont(Fonts::getIconFont().withPointHeight(16.0f));
+                    g.setColour(Colour::fromRGBA(250, 50, 40, 200));
+                    g.drawText(Icons::HeartFilled, favouriteIconBounds, Justification::centred, false);
                 } else if (isMouseOver()) {
-                    nvgFillColor(nvg, NVGComponent::convertColour(findColour(PlugDataColour::panelTextColourId)));
-                    nvgText(nvg, favouriteIconBounds.getX(), favouriteIconBounds.getY() + 14, Icons::HeartStroked.toRawUTF8(), nullptr);
+                    g.setFont(Fonts::getIconFont().withPointHeight(16.0f));
+                    g.setColour(colours.panelTextColour);
+                    g.drawText(Icons::HeartStroked, favouriteIconBounds, Justification::centred, false);
                 }
             }
         }
@@ -633,7 +690,7 @@ class WelcomePanel final : public Component
 
         void mouseUp(MouseEvent const& e) override
         {
-            if (!e.mods.isLeftButtonDown())
+            if (!isRealClickEvent(e))
                 return;
 
             // If the cursor is no longer over the tile, don't trigger the tile
@@ -652,10 +709,9 @@ class WelcomePanel final : public Component
 
         void resized() override
         {
-            if (snapshot) {
-                auto const bounds = getLocalBounds().reduced(12).withTrimmedBottom(44);
-                snapshot->setTransformToFit(bounds.withSizeKeepingCentre(bounds.getWidth() * snapshotScale, bounds.getHeight() * snapshotScale).toFloat(), RectanglePlacement::centred);
-            }
+            snapshotImage = {};
+            lastWidth = -1;
+            lastHeight = -1;
         }
     };
 
@@ -675,9 +731,7 @@ public:
         viewport.setVisible(true);
 
         addChildComponent(viewport);
-
-        setCachedComponentImage(new NVGSurface::InvalidationListener(editor->nvgSurface, this));
-
+        
         newPatchTile = std::make_unique<MainActionTile>(MainActionTile::New);
         openPatchTile = std::make_unique<MainActionTile>(MainActionTile::Open);
         storeTile = std::make_unique<MainActionTile>(MainActionTile::Store);
@@ -686,34 +740,18 @@ public:
         openPatchTile->onClick = [this] { editor->getTabComponent().openPatch(); };
         storeTile->onClick = [this] { Dialogs::showStore(editor); };
     }
-        
+
     void visibilityChanged() override
     {
-        if(isVisible())
-        {
+        if (isVisible()) {
             triggerAsyncUpdate();
         }
-    }
-
-    void drawShadow(NVGcontext* nvg, int width, int height, float scale)
-    {
-        // We only need one shadow image, because all tiles have the same size
-        if (shadowImage.needsUpdate(width * scale, height * scale)) {
-            shadowImage = NVGImage(nvg, width * scale, height * scale, [width, height, scale](Graphics& g) {
-                g.addTransform(AffineTransform::scale(scale, scale));
-                Path tilePath;
-                tilePath.addRoundedRectangle(12.5f, 12.5f, width - 25.0f, height - 25.0f, Corners::largeCornerRadius);
-                StackShadow::renderDropShadow(0, g, tilePath, Colours::white.withAlpha(0.12f), 6, { 0, 1 }); }, NVGImage::AlphaImage);
-            repaint();
-        }
-
-        shadowImage.renderAlphaImage(nvg, Rectangle<int>(0, 0, width, height), nvgRGB(0, 0, 0));
     }
 
     void setSearchQuery(String const& newSearchQuery)
     {
         viewport.setViewPositionProportionately(0.0, 0.0);
-        
+
         searchQuery = newSearchQuery;
         if (newPatchTile)
             newPatchTile->setVisible(searchQuery.isEmpty());
@@ -813,7 +851,7 @@ public:
     void setShownTab(WelcomePanel::Tab const tab)
     {
         currentTab = tab;
-        if(isVisible()) {
+        if (isVisible()) {
             triggerAsyncUpdate();
         }
     }
@@ -824,8 +862,7 @@ public:
 
         recentlyOpenedTiles.clear();
 
-        auto const settingsTree = SettingsFile::getInstance()->getValueTree();
-        auto recentlyOpenedTree = settingsTree.getChildWithName("RecentlyOpened");
+        auto& recentlyOpenedTree = SettingsFile::getInstance()->getProperty<VarArray>("recently_opened");
 
         if (currentTab == Home) {
             contentComponent.addAndMakeVisible(*newPatchTile);
@@ -834,91 +871,97 @@ public:
             contentComponent.addAndMakeVisible(*storeTile);
         }
 
-        if (recentlyOpenedTree.isValid()) {
-            for (int i = recentlyOpenedTree.getNumChildren() - 1; i >= 0; i--) {
-                auto subTree = recentlyOpenedTree.getChild(i);
-                auto patchFile = File(subTree.getProperty("Path").toString());
-                if (!File(patchFile).existsAsFile() && !subTree.hasProperty("Removable")) {
-                    recentlyOpenedTree.removeChild(i, nullptr);
+        for (int i = recentlyOpenedTree.size() - 1; i >= 0; i--) {
+            auto& subTree = recentlyOpenedTree.getReference(i);
+            auto patchFile = File(subTree.getProperty("path", "").toString());
+            if (!File(patchFile).existsAsFile() && !subTree.hasProperty("removable")) {
+                recentlyOpenedTree.remove(i);
+            }
+        }
+
+        // Place favourited patches at the top
+        for (int i = 0; i < recentlyOpenedTree.size(); i++) {
+            auto& subTree = recentlyOpenedTree.getReference(i);
+            auto patchFile = File(subTree.getProperty("path", "").toString());
+
+            auto patchThumbnailBase = File(patchFile.getSiblingFile(patchFile.getFileNameWithoutExtension()).getFullPathName() + "_thumb");
+            auto const favourited = static_cast<bool>(subTree.getProperty("pinned", false));
+
+            auto thumbnailImage = File();
+            for (auto const& ext : StringArray { ".png", ".jpg", ".jpeg", ".gif" }) {
+                auto patchThumbnail = patchThumbnailBase.withFileExtension(ext);
+                if (patchThumbnail.existsAsFile()) {
+                    thumbnailImage = patchThumbnail;
                 }
             }
 
-            // Place favourited patches at the top
-            for (int i = 0; i < recentlyOpenedTree.getNumChildren(); i++) {
-
-                auto subTree = recentlyOpenedTree.getChild(i);
-                auto patchFile = File(subTree.getProperty("Path").toString());
-
-                auto patchThumbnailBase = File(patchFile.getParentDirectory().getChildFile(patchFile.getFileNameWithoutExtension()).getFullPathName() + "_thumb");
-
-                auto const favourited = subTree.hasProperty("Pinned") && static_cast<bool>(subTree.getProperty("Pinned"));
-
-                String silhoutteSvg;
-                Image thumbImage;
-
-                StringArray possibleExtensions { ".png", ".jpg", ".jpeg", ".gif" };
-
-                for (auto& ext : possibleExtensions) {
-                    auto patchThumbnail = patchThumbnailBase.withFileExtension(ext);
-                    if (patchThumbnail.existsAsFile()) {
-                        FileInputStream fileStream(patchThumbnail);
-                        if (fileStream.openedOk()) {
-                            thumbImage = ImageFileFormat::loadFrom(fileStream).convertedToFormat(Image::ARGB);
-                            break;
-                        }
+            PatchSilhouette silhouette;
+            if (patchFile.existsAsFile() && thumbnailImage == File()) {
+                auto cachedSilhouette = patchSilhouetteCache.find(patchFile.getFullPathName());
+                if (cachedSilhouette != patchSilhouetteCache.end()) {
+                    silhouette = cachedSilhouette->second;
+                } else {
+#if JUCE_IOS
+                    // Recover file permission bookmark from valuetree if possible
+                    auto url = URL(patchFile);
+                    auto bookmarkData = subTree.getProperty("bookmark", "").toString();
+                    std::unique_ptr<InputStream> scopedStream;
+                    if (bookmarkData.isNotEmpty()) {
+                        url.setBookmarkData(bookmarkData);
+                        scopedStream = url.createInputStream(URL::InputStreamOptions(URL::ParameterHandling::inAddress));
                     }
+#endif
+                    silhouette = OfflineObjectRenderer::getObjectBoundsForPatch(patchFile.loadFileAsString());
+                    patchSilhouetteCache[patchFile.getFullPathName()] = silhouette;
                 }
-                if (thumbImage.isNull()) {
-                    if (patchFile.existsAsFile()) {
-                        auto cachedSilhouette = patchSvgCache.find(patchFile.getFullPathName());
-                        if (cachedSilhouette != patchSvgCache.end()) {
-                            silhoutteSvg = cachedSilhouette->second;
-                        } else {
-                            silhoutteSvg = OfflineObjectRenderer::patchToSVG(patchFile.loadFileAsString());
-                            patchSvgCache[patchFile.getFullPathName()] = silhoutteSvg;
-                        }
-                    }
-                }
-
-                auto* tile = recentlyOpenedTiles.add(new WelcomePanelTile(*this, subTree, silhoutteSvg, 1.0f, favourited, thumbImage));
-
-                tile->onClick = [this, patchFile]() mutable {
-                    if (patchFile.existsAsFile()) {
-                        editor->getTabComponent().openPatch(URL(patchFile));
-                    } else {
-                        editor->pd->logError("Patch not found");
-                    }
-                };
-                tile->onFavourite = [this, path = subTree.getProperty("Path")](bool const shouldBeFavourite) mutable {
-                    auto const settingsTree = SettingsFile::getInstance()->getValueTree();
-                    auto const recentlyOpenedTree = settingsTree.getChildWithName("RecentlyOpened");
-
-                    // Settings file could be reloaded, we can't assume the old recently opened tree is still valid!
-                    // So look up the entry by file path
-                    auto subTree = recentlyOpenedTree.getChildWithProperty("Path", path);
-                    subTree.setProperty("Pinned", shouldBeFavourite, nullptr);
-                    resized();
-                };
-                tile->onRemove = [this, path = subTree.getProperty("Path")] {
-                    auto const settingsTree = SettingsFile::getInstance()->getValueTree();
-                    auto recentlyOpenedTree = settingsTree.getChildWithName("RecentlyOpened");
-                    auto const subTree = recentlyOpenedTree.getChildWithProperty("Path", path);
-                    recentlyOpenedTree.removeChild(subTree, nullptr);
-                    // Make sure to clear the recent items in the current welcome panel
-                    if (editor->welcomePanel)
-                        editor->welcomePanel->triggerAsyncUpdate();
-                };
-
-                contentComponent.addAndMakeVisible(tile);
             }
+            auto patch = File(subTree.getProperty("path", ""));
+            auto time = static_cast<int64>(subTree.getProperty("time", ""));
+            auto* tile = recentlyOpenedTiles.add(new WelcomePanelTile(*this, patch, time, silhouette, favourited, thumbnailImage));
+
+            tile->onClick = [this, patchFile, subTree]() mutable {
+                auto patchURL = URL(patchFile);
+#if JUCE_IOS
+                // Load bookmark to keep file access permissions from last open
+                patchURL.setBookmarkData(subTree.getProperty("bookmark", "").toString());
+#endif
+                if (patchFile.existsAsFile()) {
+                    editor->getTabComponent().openPatch(patchURL);
+                } else {
+                    editor->pd->logError("Patch not found");
+                }
+            };
+            tile->onFavourite = [this, path = subTree.getProperty("path", "")](bool const shouldBeFavourite) mutable {
+                auto& recentlyOpenedTree = SettingsFile::getInstance()->getProperty<VarArray>("recently_opened");
+                for (auto& recentPatch : recentlyOpenedTree) {
+                    if (recentPatch.getProperty("path", "") == path) {
+                        recentPatch.getDynamicObject()->setProperty("pinned", shouldBeFavourite);
+                        break;
+                    }
+                }
+                resized();
+            };
+            tile->onRemove = [this, path = subTree.getProperty("path", "")] {
+                auto& recentlyOpenedTree = SettingsFile::getInstance()->getProperty<VarArray>("recently_opened");
+                for (auto& recentPatch : recentlyOpenedTree) {
+                    if (recentPatch.getProperty("path", "") == path) {
+                        recentlyOpenedTree.remove(&recentPatch);
+                        break;
+                    }
+                }
+
+                if (editor->welcomePanel)
+                    editor->welcomePanel->triggerAsyncUpdate();
+            };
+
+            contentComponent.addAndMakeVisible(tile);
         }
 
         contentComponent.repaint();
         findLibraryPatches();
-        
+
         // Perform search again if we update content while we have search text
-        if(searchQuery.isNotEmpty())
-        {
+        if (searchQuery.isNotEmpty()) {
             setSearchQuery(searchQuery);
         }
         resized();
@@ -928,35 +971,43 @@ public:
     {
         libraryTiles.clear();
 
-        auto addTile = [this](Array<std::pair<int64, File>> patches) {
-            
-            std::ranges::sort(patches, [](std::pair<int64, File> const& first, std::pair<int64, File> const& second) {
-                return first.first > second.first;
+        auto addTile = [this](HeapArray<std::pair<File, var>> patches) {
+            patches.sort([](auto const& versionA, auto const& versionB) -> int {
+                auto& jsonA = versionA.second;
+                auto& jsonB = versionB.second;
+                auto versionTokensA = StringArray::fromTokens(jsonA["Version"].toString(), ".", "");
+                auto versionTokensB = StringArray::fromTokens(jsonB["Version"].toString(), ".", "");
+
+                for (int i = 0; i < std::max(versionTokensA.size(), versionTokensB.size()); i++) {
+                    int v1 = i < versionTokensA.size() && versionTokensA[i].containsOnly("0123456789") ? versionTokensA[i].getIntValue() : 0;
+                    int v2 = i < versionTokensB.size() && versionTokensB[i].containsOnly("0123456789") ? versionTokensB[i].getIntValue() : 0;
+
+                    if (v1 != v2)
+                        return v1 > v2;
+                }
+
+                return false;
             });
-            
-            auto patchFile = patches[0].second;
-            auto const pName = patchFile.getFileNameWithoutExtension();
-            auto foundThumbs = patchFile.getParentDirectory().findChildFiles(File::findFiles, true, pName + "_thumb.png;" + pName + "_thumb.jpg;" + pName + "_thumb.jpeg;" + pName + "_thumb.gif");
 
-            patches.remove(0);
+            auto patchFile = patches[0].first;
+            auto patchThumbnailBase = File(patchFile.getSiblingFile(patchFile.getFileNameWithoutExtension()).getFullPathName() + "_thumb");
+            patches.remove_at(0);
 
-            constexpr float scale = 1.0f;
-            Image thumbImage;
-            for (auto& thumb : foundThumbs) {
-                FileInputStream fileStream(thumb);
-                if (fileStream.openedOk()) {
-                    thumbImage = ImageFileFormat::loadFrom(fileStream).convertedToFormat(Image::ARGB);
-                    if (thumbImage.isValid())
-                        break;
+            auto thumbnailImage = File();
+            for (auto const& ext : StringArray { ".png", ".jpg", ".jpeg", ".gif" }) {
+                auto patchThumbnail = patchThumbnailBase.withFileExtension(ext);
+                if (patchThumbnail.existsAsFile()) {
+                    thumbnailImage = patchThumbnail;
                 }
             }
+
             auto const metaFile = patchFile.getParentDirectory().getChildFile("meta.json");
             String author;
             if (metaFile.existsAsFile()) {
                 auto const json = JSON::fromString(metaFile.loadFileAsString());
                 author = json["Author"].toString();
             }
-            auto* tile = libraryTiles.add(new WelcomePanelTile(*this, patchFile, author, scale, false, thumbImage));
+            auto* tile = libraryTiles.add(new WelcomePanelTile(*this, patchFile, author, false, thumbnailImage));
             tile->onClick = [this, patchFile]() mutable {
                 if (patchFile.existsAsFile()) {
                     editor->getTabComponent().openPatch(URL(patchFile));
@@ -968,36 +1019,32 @@ public:
             contentComponent.addAndMakeVisible(tile);
         };
 
-        Array<std::tuple<File, hash32, int64>> allPatches;
+        HeapArray<std::tuple<File, hash32, var>> allPatches;
 
         auto const patchesFolder = ProjectInfo::appDataDir.getChildFile("Patches");
         for (auto& file : OSUtils::iterateDirectory(patchesFolder, false, false)) {
+            if (file.getFileName() == ".trash")
+                continue;
+
             if (OSUtils::isDirectoryFast(file.getFullPathName())) {
                 auto const metaFile = file.getChildFile("meta.json");
                 auto metaFileExists = metaFile.existsAsFile();
                 String author;
                 String title;
-                int64 installTime = 0;
-                if(metaFile.existsAsFile()) {
+                if (metaFile.existsAsFile()) {
                     auto const json = JSON::fromString(metaFile.loadFileAsString());
-                    if(!json.isVoid()) {
+                    if (!json.isVoid()) {
                         author = json["Author"].toString();
                         title = json["Title"].toString();
-                        if (json.hasProperty("InstallTime")) {
-                            installTime = static_cast<int64>(json["InstallTime"]);
-                        } else {
-                            installTime = metaFile.getCreationTime().toMilliseconds();
-                        }
                         if (json.hasProperty("Patch")) {
                             auto patchName = json["Patch"].toString();
                             auto patchFile = file.getChildFile(patchName);
-                            if(patchFile.existsAsFile()) {
-                                allPatches.add({ patchFile, hash(title + author), installTime });
+                            if (patchFile.existsAsFile()) {
+                                allPatches.add({ patchFile, hash(title + author), json });
                                 continue;
                             }
                         }
-                    }
-                    else {
+                    } else {
                         metaFileExists = false;
                     }
                 }
@@ -1005,27 +1052,31 @@ public:
                     if (subfile.hasFileExtension("pd")) {
                         if (!metaFileExists) {
                             title = subfile.getFileNameWithoutExtension();
-                            installTime = 0;
                         }
-                        allPatches.add({ subfile, hash(title + author), installTime });
+                        allPatches.add({ subfile, hash(title + author), var() });
                         break;
                     }
                 }
             } else {
                 if (file.hasFileExtension("pd")) {
-                    allPatches.add({ file, 0, 0 });
+                    allPatches.add({ file, 0, var() });
                 }
             }
         }
 
         // Combine different versions of the same patch into one tile
-        UnorderedMap<hash32, Array<std::pair<int64, File>>> versions;
-        for (auto& [file, hash, time] : allPatches) {
-            versions[hash].add({ time, file });
+        UnorderedMap<hash32, HeapArray<std::pair<File, var>>> versions;
+        for (auto& [file, hash, json] : allPatches) {
+            versions[hash].add({ file, json });
         }
         for (auto& [hash, patches] : versions) {
             addTile(patches);
         }
+    }
+
+    void paint(Graphics& g) override
+    {
+        g.fillAll(getThemeColours(*this).panelBackgroundColour);
     }
 
     void show()
@@ -1039,27 +1090,10 @@ public:
         setVisible(false);
     }
 
-    void render(NVGcontext* nvg) override
-    {
-        if (!nvgContext || nvgContext->getContext() != nvg)
-            nvgContext = std::make_unique<NVGGraphicsContext>(nvg);
-
-        nvgFillColor(nvg, convertColour(findColour(PlugDataColour::panelBackgroundColourId)));
-        nvgFillRect(nvg, 0, 0, getWidth(), getHeight());
-
-        Graphics g(*nvgContext);
-        g.reduceClipRegion(editor->nvgSurface.getInvalidArea());
-        paintEntireComponent(g, false);
-
-        auto const gradient = nvgLinearGradient(nvg, 0, viewport.getY(), 0, viewport.getY() + 20, convertColour(findColour(PlugDataColour::panelBackgroundColourId)), nvgRGBA(255, 255, 255, 0));
-
-        nvgFillPaint(nvg, gradient);
-        nvgFillRect(nvg, viewport.getX() + 8, viewport.getY(), viewport.getWidth() - 16, 20);
-    }
-
     void lookAndFeelChanged() override
     {
-        if(isVisible()) {
+        invalidateTileBackgroundCache();
+        if (isVisible()) {
             triggerAsyncUpdate();
         }
     }
@@ -1068,18 +1102,20 @@ public:
     ContentComponent contentComponent = ContentComponent(*this);
     BouncingViewport viewport;
 
-    std::unique_ptr<NVGGraphicsContext> nvgContext = nullptr;
-
-    NVGImage shadowImage;
     OwnedArray<WelcomePanelTile> recentlyOpenedTiles;
     OwnedArray<WelcomePanelTile> libraryTiles;
     PluginEditor* editor;
 
     String searchQuery;
     Tab currentTab = Home;
-    UnorderedMap<String, String> patchSvgCache;
 
-    std::unique_ptr<Dialog> confirmationDialog;
+    UnorderedMap<String, PatchSilhouette> patchSilhouetteCache;
+
+    NVGImage tileBackingImage;
+    NVGImage hoveredTileBackingImage;
+    NVGcontext* tileBackgroundContext = nullptr;
+    Point<int> tileBackgroundSize;
+    float tileBackgroundScale = 0.0f;
 
     // To make the library panel update automatically
     class LibraryFSListener final : public FileSystemWatcher::Listener {

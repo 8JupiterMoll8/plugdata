@@ -24,8 +24,11 @@ private:
             }
         }
 
+        // If you want to test a single helpfile:
+        //allHelpfiles.clear();
+        //allHelpfiles.emplace_back("/Users/timothy/Documents/plugdata/Documentation/...");
+
         allHelpfiles.sort();
-        //allHelpfiles.remove_range(220, allHelpfiles.size()-1);
 
         openHelpfilesRecursively(editor->getTabComponent(), allHelpfiles);
     }
@@ -43,7 +46,8 @@ private:
 
         beginTest(String(helpFiles.size()) + " -> " + helpFile.getFullPathName());
 
-        auto* cnv = tabbar.openPatch(URL(helpFile));
+        tabbar.openPatch(URL(helpFile));
+        auto* cnv = tabbar.getCurrentCanvas();
         auto* editor = cnv->editor;
 
         // Click everything
@@ -84,14 +88,13 @@ private:
 
         if(objects.empty())
         {
-            Timer::callAfterDelay(10, [done](){
+            Timer::callAfterDelay(3, [done](){
                 done();
             });
             return;
         }
 
-        if(sys_trylock())
-        Timer::callAfterDelay(2, [cnv, objects, done]() mutable {
+        Timer::callAfterDelay(1, [cnv, objects, done]() mutable {
             if(cnv) {
                 clickNextObject(cnv, objects, done);
             }
@@ -112,7 +115,6 @@ private:
                          0.0f, 0.0f, 0.0f, 0.0f, 0.0f, c, c,
                          Time::getCurrentTime(), c->getLocalBounds().getCentre().toFloat(), Time::getCurrentTime(), 1, false);
             c->mouseDown(e);
-            const_cast<ModifierKeys&>(e.mods) = ModifierKeys::noModifiers;
             c->mouseUp(e);
         }
         if(allowsMouseClicks || allowsMouseClicksOnChildren) {

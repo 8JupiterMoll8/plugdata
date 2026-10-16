@@ -8,26 +8,23 @@
 
 #include <utility>
 
+#include "Components/TouchPopupMenu.h"
 #include "Buttons.h"
 #include "PluginEditor.h"
 #include "Objects/ObjectBase.h"
 
-class TouchSelectionHelper final : public Component
-    , public NVGComponent {
-
-    PluginEditor* editor;
+class TouchSelectionHelper final : public Component {
 
 public:
-    explicit TouchSelectionHelper(PluginEditor* e)
-        : NVGComponent(this)
-        , editor(e)
-    {
-        addAndMakeVisible(actionButtons.add(new MainToolbarButton(Icons::ExportState))); // This icon doubles as a "open" icon in the mobile app
-        addAndMakeVisible(actionButtons.add(new MainToolbarButton(Icons::Help)));
-        addAndMakeVisible(actionButtons.add(new MainToolbarButton(Icons::Trash)));
-        addAndMakeVisible(actionButtons.add(new MainToolbarButton(Icons::More)));
+    static constexpr int buttonWidth = 48;
 
-        setCachedComponentImage(new NVGSurface::InvalidationListener(e->nvgSurface, this));
+    explicit TouchSelectionHelper(PluginEditor* e)
+        : editor(e)
+    {
+        addAndMakeVisible(actionButtons.add(new SmallIconButton(Icons::ExportState))); // This icon doubles as a "open" icon in the mobile app
+        addAndMakeVisible(actionButtons.add(new SmallIconButton(Icons::Help)));
+        addAndMakeVisible(actionButtons.add(new SmallIconButton(Icons::Trash)));
+        addAndMakeVisible(actionButtons.add(new SmallIconButton(Icons::More)));
 
         actionButtons[0]->onClick = [this] {
             auto* cnv = editor->getCurrentCanvas();
@@ -47,52 +44,194 @@ public:
             editor->invoke(info, true);
         };
 
-#if JUCE_IOS
         actionButtons[3]->onClick = [this]() {
-            OSUtils::showMobileCanvasMenu(editor->getPeer(), [this](int result) {
-                if (result < 1)
-                    return;
-                switch (result) {
-                case 1: {
-                    ApplicationCommandTarget::InvocationInfo info(CommandIDs::Cut);
-                    info.invocationMethod = ApplicationCommandTarget::InvocationInfo::fromMenu;
-                    editor->commandManager.invoke(info, true);
-                    break;
+            auto* cnv = editor->getCurrentCanvas();
+            // Info about selection status
+            auto selectedObjects = cnv->getSelectionOfType<Object>();
+            auto selectedConnections = cnv->getSelectionOfType<Connection>();
+            bool const hasSelection = selectedObjects.not_empty();
+            bool const multiple = selectedObjects.size() > 1;
+            bool const locked = getValue<bool>(cnv->locked);
+
+            auto object = Component::SafePointer<Object>(hasSelection ? selectedObjects.front() : nullptr);
+
+            // Find top-level object, so we never trigger it on an object inside a graph
+            if (object && object->findParentComponentOfClass<Object>()) {
+                while (auto* nextObject = object->findParentComponentOfClass<Object>()) {
+                    object = nextObject;
                 }
-                case 2: {
-                    ApplicationCommandTarget::InvocationInfo info(CommandIDs::Copy);
-                    info.invocationMethod = ApplicationCommandTarget::InvocationInfo::fromMenu;
-                    editor->commandManager.invoke(info, true);
-                    break;
-                }
-                case 3: {
-                    ApplicationCommandTarget::InvocationInfo info(CommandIDs::Paste);
-                    info.invocationMethod = ApplicationCommandTarget::InvocationInfo::fromMenu;
-                    editor->commandManager.invoke(info, true);
-                    break;
-                }
-                case 4: {
-                    ApplicationCommandTarget::InvocationInfo info(CommandIDs::Duplicate);
-                    info.invocationMethod = ApplicationCommandTarget::InvocationInfo::fromMenu;
-                    editor->commandManager.invoke(info, true);
-                    break;
-                }
-                case 5: {
-                    ApplicationCommandTarget::InvocationInfo info(CommandIDs::Encapsulate);
-                    info.invocationMethod = ApplicationCommandTarget::InvocationInfo::fromMenu;
-                    editor->commandManager.invoke(info, true);
-                    break;
-                }
-                case 6: {
-                    ApplicationCommandTarget::InvocationInfo info(CommandIDs::ConnectionPathfind);
-                    info.invocationMethod = ApplicationCommandTarget::InvocationInfo::fromMenu;
-                    editor->commandManager.invoke(info, true);
-                    break;
-                }
-                }
+            }
+
+            bool objectSelectedInEdit = object && !locked;
+            bool connectionSelectedInEdit = selectedConnections.size() && !locked;
+
+            TouchPopupMenu touchMenu;
+            touchMenu.addItem("Cut", [this]() {
+                editor->grabKeyboardFocus();
+                ApplicationCommandTarget::InvocationInfo info(CommandIDs::Cut);
+                info.invocationMethod = ApplicationCommandTarget::InvocationInfo::fromMenu;
+                editor->commandManager.invoke(info, true); }, objectSelectedInEdit);
+
+            touchMenu.addItem("Copy", [this]() {
+                editor->grabKeyboardFocus();
+                ApplicationCommandTarget::InvocationInfo info(CommandIDs::Copy);
+                info.invocationMethod = ApplicationCommandTarget::InvocationInfo::fromMenu;
+                editor->commandManager.invoke(info, true); }, objectSelectedInEdit);
+
+            touchMenu.addItem("Paste", [this]() {
+                editor->grabKeyboardFocus();
+                ApplicationCommandTarget::InvocationInfo info(CommandIDs::Paste);
+                info.invocationMethod = ApplicationCommandTarget::InvocationInfo::fromMenu;
+                editor->commandManager.invoke(info, true); }, !locked);
+
+            touchMenu.addItem("Duplicate", [this]() {
+                editor->grabKeyboardFocus();
+                ApplicationCommandTarget::InvocationInfo info(CommandIDs::Duplicate);
+                info.invocationMethod = ApplicationCommandTarget::InvocationInfo::fromMenu;
+                editor->commandManager.invoke(info, true); }, objectSelectedInEdit);
+
+            touchMenu.addItem("Encapsulate", [this]() {
+                editor->grabKeyboardFocus();
+                ApplicationCommandTarget::InvocationInfo info(CommandIDs::Encapsulate);
+                info.invocationMethod = ApplicationCommandTarget::InvocationInfo::fromMenu;
+                editor->commandManager.invoke(info, true); }, objectSelectedInEdit);
+
+            touchMenu.addItem("Tidy Connection", [this]() {
+                editor->grabKeyboardFocus();
+                ApplicationCommandTarget::InvocationInfo info(CommandIDs::ConnectionPathfind);
+                info.invocationMethod = ApplicationCommandTarget::InvocationInfo::fromMenu;
+                editor->commandManager.invoke(info, true); }, connectionSelectedInEdit);
+
+            TouchPopupMenu alignMenu;
+            alignMenu.addItem("Align left", [cnv]() {
+                cnv->alignObjects(Align::Left);
             });
+            alignMenu.addItem("Align centre", [cnv]() {
+                cnv->alignObjects(Align::HCentre);
+            });
+            alignMenu.addItem("Align right", [cnv]() {
+                cnv->alignObjects(Align::Right);
+            });
+            alignMenu.addItem("Space horizonally", [cnv]() {
+                cnv->alignObjects(Align::HDistribute);
+            });
+            alignMenu.addItem("Align top", [cnv]() {
+                cnv->alignObjects(Align::Top);
+            });
+            alignMenu.addItem("Align middle", [cnv]() {
+                cnv->alignObjects(Align::VCentre);
+            });
+            alignMenu.addItem("Align bottom", [cnv]() {
+                cnv->alignObjects(Align::Bottom);
+            });
+            alignMenu.addItem("Space vertically", [cnv]() {
+                cnv->alignObjects(Align::VDistribute);
+            });
+
+            TouchPopupMenu orderMenu;
+            orderMenu.addItem("To Front", [cnv, selectedObjects] {
+                auto objects = cnv->patch.getObjects();
+                cnv->patch.startUndoSequence("ToFront");
+                for (auto& o : objects) {
+                    for (auto* selectedObject : selectedObjects) {
+                        if (o == selectedObject->getPointer()) {
+                            selectedObject->toFront(false);
+                            if (selectedObject->gui)
+                                selectedObject->gui->moveToFront();
+                        }
+                    }
+                }
+                cnv->patch.endUndoSequence("ToFront");
+                cnv->synchronise();
+            });
+            orderMenu.addItem("Move forward", [cnv, selectedObjects] {
+                auto objects = cnv->patch.getObjects();
+                cnv->patch.startUndoSequence("MoveForward");
+                for (auto& o : objects) {
+                    for (auto* selectedObject : selectedObjects) {
+                        if (o == selectedObject->getPointer()) {
+                            selectedObject->toFront(false);
+                            if (selectedObject->gui)
+                                selectedObject->gui->moveForward();
+                        }
+                    }
+                }
+                cnv->patch.endUndoSequence("MoveForward");
+                cnv->synchronise();
+            });
+            orderMenu.addItem("Move backward", [cnv, selectedObjects] {
+                auto objects = cnv->patch.getObjects();
+
+                cnv->patch.startUndoSequence("MoveBackward");
+                for (int i = objects.size() - 1; i >= 0; i--) {
+                    for (auto* selectedObject : selectedObjects) {
+                        if (objects[i] == selectedObject->getPointer()) {
+                            selectedObject->toBack();
+                            if (selectedObject->gui)
+                                selectedObject->gui->moveBackward();
+                        }
+                    }
+                }
+                cnv->patch.endUndoSequence("MoveBackward");
+                cnv->synchronise();
+            });
+
+            orderMenu.addItem("To Back", [cnv, selectedObjects] {
+                auto objects = cnv->patch.getObjects();
+
+                cnv->patch.startUndoSequence("ToBack");
+                for (int i = objects.size() - 1; i >= 0; i--) {
+                    for (auto* selectedObject : selectedObjects) {
+                        if (objects[i] == selectedObject->getPointer()) {
+                            selectedObject->toBack();
+                            if (selectedObject->gui)
+                                selectedObject->gui->moveToBack();
+                        }
+                    }
+                }
+                cnv->patch.endUndoSequence("ToBack");
+                cnv->synchronise();
+            });
+
+            touchMenu.addSubMenu("Align", alignMenu, objectSelectedInEdit && multiple);
+            touchMenu.addSubMenu("Order", orderMenu, objectSelectedInEdit);
+
+            touchMenu.addItem("Properties", [this]() {
+                showObjectProperties();
+            });
+
+            touchMenu.showMenu(editor, actionButtons[3], "Canvas menu");
         };
-#endif
+    }
+
+    void showObjectProperties()
+    {
+        auto* cnv = editor->getCurrentCanvas();
+        auto objects = cnv->getSelectionOfType<Object>();
+        auto toShow = SmallArray<Component*>();
+
+        if (objects.empty()) {
+            SmallArray<ObjectParameters, 6> parameters = { cnv->getInspectorParameters() };
+            toShow.add(cnv);
+            if (auto* s = editor->getSidebarForPanel(Sidebar::InspectorPanel))
+                s->forceShowParameters(toShow, parameters);
+        } else if (objects.size() == 1) {
+            auto* object = objects[0];
+            if (object && object->gui) {
+                // this makes sure that objects can handle the "properties" message as well if they like, for example for [else/properties]
+                if (auto gobj = object->gui->ptr.get<t_gobj>()) {
+                    auto const* pdClass = pd_class(&object->getPointer()->g_pd);
+                    if (auto const propertiesFn = class_getpropertiesfn(pdClass)) {
+                        propertiesFn(gobj.get(), cnv->patch.getRawPointer());
+                    }
+                }
+
+                SmallArray<ObjectParameters, 6> parameters = { object->gui->getParameters() };
+                toShow.add(object);
+                if (auto* s = editor->getSidebarForPanel(Sidebar::InspectorPanel))
+                    s->forceShowParameters(toShow, parameters);
+            }
+        }
     }
 
     void show()
@@ -103,36 +242,29 @@ public:
         toFront(false);
     }
 
+    int getIdealWidth() const { return actionButtons.size() * buttonWidth; }
+
     void resized() override
     {
-        auto b = getLocalBounds().reduced(5);
+        auto b = getLocalBounds();
 
         for (auto* button : actionButtons) {
-            button->setBounds(b.removeFromLeft(48));
+            // Trim the bottom to shift the icons up by a pixel: these glyphs sit lower in the icon font's
+            // em box than the other statusbar icons, so centring on the full height makes them look low
+            button->setBounds(b.removeFromLeft(buttonWidth).withTrimmedBottom(2));
         }
-    }
-
-    void render(NVGcontext* nvg) override
-    {
-        componentImage.renderJUCEComponent(nvg, *this, 2.0f);
     }
 
 private:
     void paint(Graphics& g) override
     {
-        auto const b = getLocalBounds().reduced(5);
+        auto const b = getLocalBounds();
 
-        Path p;
-        p.addRoundedRectangle(b.reduced(3.0f), Corners::largeCornerRadius);
-        StackShadow::renderDropShadow(hash("touch_selection_helper"), g, p, Colour(0, 0, 0).withAlpha(0.4f), 9, { 0, 1 });
-
-        g.setColour(findColour(PlugDataColour::toolbarBackgroundColourId));
-        g.fillRoundedRectangle(b.toFloat(), Corners::largeCornerRadius);
-
-        g.setColour(findColour(PlugDataColour::toolbarOutlineColourId));
-        g.drawRoundedRectangle(b.toFloat(), Corners::largeCornerRadius, 1.0f);
+        g.setColour(getThemeColours(*this).toolbarBackgroundColour);
+        // Leave the top pixel alone, that's where the statusbar draws its outline
+        g.fillRect(b.withTrimmedTop(1));
     }
 
-    NVGImage componentImage;
-    OwnedArray<MainToolbarButton> actionButtons;
+    PluginEditor* editor;
+    OwnedArray<SmallIconButton> actionButtons;
 };

@@ -15,10 +15,12 @@ public:
 private:
     void paint(Graphics& g) override
     {
+        auto const& colours = getThemeColours(*this);
+
         auto const bounds = getLocalBounds().toFloat().reduced(1.0f);
 
-        auto backgroundColour = findColour(PlugDataColour::dialogBackgroundColourId);
-        auto const activeColour = findColour(PlugDataColour::toolbarActiveColourId);
+        auto backgroundColour = colours.dialogBackgroundColour;
+        auto const activeColour = colours.toolbarActiveColour;
 
         if (isMouseOver() || isMouseButtonDown()) {
             backgroundColour = backgroundColour.contrasting(0.1f);
@@ -30,7 +32,7 @@ private:
         g.fillRoundedRectangle(bounds, Corners::defaultCornerRadius);
 
         g.setFont(Fonts::getDefaultFont().withHeight(15));
-        g.setColour(findColour(PlugDataColour::panelTextColourId));
+        g.setColour(colours.panelTextColour);
 
         g.drawText(getButtonText(), getLocalBounds().reduced(3), Justification::centred);
 
@@ -135,7 +137,7 @@ private:
     bool hasLogo;
     Label savelabel;
 
-    Image logo = ImageFileFormat::loadFrom(BinaryData::plugdata_large_logo_png, BinaryData::plugdata_large_logo_pngSize);
+    Image logo = BinaryData::loadImage(BinaryData::plugdata_large_logo_png);
 
     SaveDialogButton cancel = SaveDialogButton("Cancel");
     SaveDialogButton dontsave = SaveDialogButton("Don't Save");

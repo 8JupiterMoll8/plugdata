@@ -1,4 +1,4 @@
-From 55be3fd473bdff5da6622c1f1df4e1fd8493eefa Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Alphi <alphi@starchaser.local>
 Date: Mon, 21 Sep 2026 11:20:37 +0200
 Subject: [PATCH] fix(lua): use sequential array indexing for atom tables and
@@ -11,12 +11,12 @@ Subject: [PATCH] fix(lua): use sequential array indexing for atom tables and
  1 file changed, 7 insertions(+), 11 deletions(-)
 
 diff --git a/pdlua.c b/pdlua.c
-index 182b142..410b78d 100644
+index c752393..ff173f0 100644
 --- a/pdlua.c
 +++ b/pdlua.c
-@@ -2061,16 +2061,9 @@ static t_atom *pdlua_popatomtable
+@@ -2248,16 +2248,9 @@ static t_atom *pdlua_popatomtable
          *count = lua_rawlen(L, -1);
- #endif // LUA_VERSION_NUM	< 502
+ #endif // LUA_VERSION_NUM < 502
          if (*count > 0) atoms = malloc(*count * sizeof(t_atom));
 -        i = 0;
 -        lua_pushnil(L);
@@ -33,7 +33,7 @@ index 182b142..410b78d 100644
              switch (lua_type(L, -1))
              {
                  case (LUA_TNUMBER):
-@@ -2100,7 +2093,7 @@ static t_atom *pdlua_popatomtable
+@@ -2287,7 +2280,7 @@ static t_atom *pdlua_popatomtable
                      break;
              }
              lua_pop(L, 1);
@@ -42,7 +42,7 @@ index 182b142..410b78d 100644
          }
          if (i != *count)
          {
-@@ -2229,7 +2222,10 @@ static int pdlua_send(lua_State *L)
+@@ -2416,7 +2409,10 @@ static int pdlua_send(lua_State *L)
                      if (strlen(selname) != selnamel) pd_error(NULL, "%s: warning: selector symbol munged (contains \\0 in body) [send %s]", src_info(L, msg), receivename);
                      lua_pushvalue(L, 3);
                      atoms = pdlua_popatomtable(L, &count, NULL);
@@ -52,5 +52,5 @@ index 182b142..410b78d 100644
 +                        if (receivesym->s_thing) typedmess(receivesym->s_thing, selsym, count, atoms);
 +                    }
                      else pd_error(NULL, "%s: error: %s atoms table [send %s]", src_info(L, msg), lua_isnoneornil(L, 3)?"missing":"invalid", receivename);
-                     if (atoms) 
+                     if (atoms)
                      {

@@ -21,8 +21,6 @@ class PopMenu final : public ObjectBase {
     Value savestate = SynchronousValue();
     Value loadbang = SynchronousValue();
 
-    CachedTextRender textRenderer;
-
     NVGcolor fgCol;
     NVGcolor bgCol;
 
@@ -59,8 +57,8 @@ public:
 
     void updateColours()
     {
-        bgCol = convertColour(Colour::fromString(secondaryColour.toString()));
-        fgCol = convertColour(Colour::fromString(primaryColour.toString()));
+        bgCol = nvgColour(getValue<Colour>(secondaryColour));
+        fgCol = nvgColour(getValue<Colour>(primaryColour));
         repaint();
     }
 
@@ -78,7 +76,6 @@ public:
             menu.addItem(1, "(No options)", false, false);
         }
 
-        menu.setLookAndFeel(&object->getLookAndFeel());
         menu.showMenuAsync(PopupMenu::Options().withTargetComponent(this), [_this = SafePointer(this)](int const item) {
             if (item && _this) {
                 _this->currentItem = item - 1;
@@ -124,20 +121,6 @@ public:
         return "";
     }
 
-    void setSendSymbol(String const& symbol) const
-    {
-        if (auto menu = ptr.get<void>()) {
-            pd->sendDirectMessage(menu.get(), "send", { pd::Atom(pd->generateSymbol(symbol)) });
-        }
-    }
-
-    void setReceiveSymbol(String const& symbol) const
-    {
-        if (auto menu = ptr.get<void>()) {
-            pd->sendDirectMessage(menu.get(), "receive", { pd::Atom(pd->generateSymbol(symbol)) });
-        }
-    }
-
     void update() override
     {
         items.clear();
@@ -145,8 +128,8 @@ public:
             for (int i = 0; i < menu->x_n_items; i++) // Loop for menu items
                 items.add(String::fromUTF8(menu->x_items[i]->s_name));
 
-            primaryColour = convertTclColour(String::fromUTF8(menu->x_fg->s_name)).toString();
-            secondaryColour = convertTclColour(String::fromUTF8(menu->x_bg->s_name)).toString();
+            primaryColour = colourToVar(convertTclColour(String::fromUTF8(menu->x_fg->s_name)));
+            secondaryColour = colourToVar(convertTclColour(String::fromUTF8(menu->x_bg->s_name)));
             sizeProperty = VarArray(menu->x_width, menu->x_height);
             savestate = menu->x_savestate;
             loadbang = menu->x_lb;
@@ -155,7 +138,8 @@ public:
             if (menu->x_idx >= 0 && menu->x_idx < items.size()) {
                 currentText = items[currentItem];
             }
-            labelNoSelection = (menu->x_label == gensym("empty") || !menu->x_label) ? String("") : String::fromUTF8(menu->x_label->s_name);
+            auto const label = menu->x_label ? String::fromUTF8(menu->x_label->s_name) : String();
+            labelNoSelection = (label == "empty" || label.trim().isEmpty()) ? String("") : label;
 
             sendSymbol = getSendSymbol();
             receiveSymbol = getReceiveSymbol();
@@ -184,7 +168,7 @@ public:
             return Rectangle<int>(x, y, w + 1, h + 1);
         }
 
-        return {};
+        return { };
     }
 
     void setPdBounds(Rectangle<int> const b) override
@@ -213,40 +197,46 @@ public:
 
     void updateTextLayout()
     {
-        auto const text = currentItem >= 0 ? currentText : getValue<String>(labelNoSelection);
-        auto const colour = Colour(fgCol.r, fgCol.g, fgCol.b, fgCol.a);
-        auto const font = Fonts::getCurrentFont().withHeight(getValue<int>(fontSize) * 1.5f);
-
-        if (textRenderer.prepareLayout(text, font, colour, font.getStringWidth(text) + 12, getValue<int>(sizeProperty), false)) {
-            repaint();
-        }
+        // The label is drawn directly in render() from the current state, so just trigger a repaint.
+        repaint();
     }
 
     void render(NVGcontext* nvg) override
     {
+        auto const& colours = getThemeColours();
+
         auto b = getLocalBounds().toFloat();
 
-        nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), bgCol, object->isSelected() ? cnv->selectedOutlineCol : cnv->objectOutlineCol, Corners::objectCornerRadius);
+        nanovg::nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), bgCol, nvgColour(object->isSelected() ? colours.objectSelectedOutlineColour : colours.objectOutlineColour), getPlugDataLook(*this).getObjectCornerRadius());
 
         auto textBounds = getLocalBounds().reduced(2).translated(2, 0);
         if (!textBounds.isEmpty()) {
-            textRenderer.renderText(nvg, textBounds.toFloat(), getImageScale());
+            auto const text = currentItem >= 0 ? currentText : getValue<String>(labelNoSelection);
+            auto const colour = Colour(fgCol.r, fgCol.g, fgCol.b, fgCol.a);
+            auto const font = Fonts::getDefaultFont().withHeight(getValue<int>(fontSize) * 1.5f);
+
+            auto& llgc = *cnv->editor->getNanoLLGC();
+            Graphics g(llgc);
+            NVGGraphicsContext::ScopedAnchoredDraw anchor(llgc, textBounds.toFloat());
+            g.setFont(font);
+            g.setColour(colour);
+            g.drawText(text, textBounds.toFloat(), Justification::centredLeft);
         }
 
         auto const triangleBounds = b.removeFromRight(20).withSizeKeepingCentre(20, std::min(getHeight(), 12));
 
-        nvgStrokeColor(nvg, fgCol);
-        nvgBeginPath(nvg);
-        nvgMoveTo(nvg, triangleBounds.getCentreX() - 3, triangleBounds.getY() + 3);
-        nvgLineTo(nvg, triangleBounds.getCentreX(), triangleBounds.getY());
-        nvgLineTo(nvg, triangleBounds.getCentreX() + 3, triangleBounds.getY() + 3);
-        nvgStroke(nvg);
+        nanovg::nvgStrokeColor(nvg, fgCol);
+        nanovg::nvgBeginPath(nvg);
+        nanovg::nvgMoveTo(nvg, triangleBounds.getCentreX() - 3, triangleBounds.getY() + 3);
+        nanovg::nvgLineTo(nvg, triangleBounds.getCentreX(), triangleBounds.getY());
+        nanovg::nvgLineTo(nvg, triangleBounds.getCentreX() + 3, triangleBounds.getY() + 3);
+        nanovg::nvgStroke(nvg);
 
-        nvgBeginPath(nvg);
-        nvgMoveTo(nvg, triangleBounds.getCentreX() - 3, triangleBounds.getBottom() - 3);
-        nvgLineTo(nvg, triangleBounds.getCentreX(), triangleBounds.getBottom());
-        nvgLineTo(nvg, triangleBounds.getCentreX() + 3, triangleBounds.getBottom() - 3);
-        nvgStroke(nvg);
+        nanovg::nvgBeginPath(nvg);
+        nanovg::nvgMoveTo(nvg, triangleBounds.getCentreX() - 3, triangleBounds.getBottom() - 3);
+        nanovg::nvgLineTo(nvg, triangleBounds.getCentreX(), triangleBounds.getBottom());
+        nanovg::nvgLineTo(nvg, triangleBounds.getCentreX() + 3, triangleBounds.getBottom() - 3);
+        nanovg::nvgStroke(nvg);
     }
 
     void propertyChanged(Value& value) override
@@ -267,24 +257,26 @@ public:
             }
             object->updateBounds();
         } else if (value.refersToSameSourceAs(sendSymbol)) {
-            setSendSymbol(sendSymbol.toString());
+            sendMessage("send", { pd->generateSymbol(sendSymbol.toString()) });
             object->updateIolets();
         } else if (value.refersToSameSourceAs(receiveSymbol)) {
-            setReceiveSymbol(receiveSymbol.toString());
+            sendMessage("receive", { pd->generateSymbol(receiveSymbol.toString()) });
             object->updateIolets();
         } else if (value.refersToSameSourceAs(primaryColour)) {
-            auto const colour = "#" + primaryColour.toString().substring(2);
+            auto const colour = "#" + getValue<Colour>(primaryColour).toString().substring(2);
             if (auto menu = ptr.get<t_fake_menu>())
                 menu->x_fg = pd->generateSymbol(colour);
             updateColours();
         } else if (value.refersToSameSourceAs(secondaryColour)) {
-            auto const colour = "#" + secondaryColour.toString().substring(2);
+            auto const colour = "#" + getValue<Colour>(secondaryColour).toString().substring(2);
             if (auto menu = ptr.get<t_fake_menu>())
                 menu->x_bg = pd->generateSymbol(colour);
             updateColours();
         } else if (value.refersToSameSourceAs(parameterName)) {
-            if (auto knb = ptr.get<t_fake_menu>())
-                knb->x_param = pd->generateSymbol(parameterName.toString());
+            if (auto menu = ptr.get<t_fake_menu>()) {
+                auto const param = parameterName.toString();
+                menu->x_param = pd->generateSymbol(param.isEmpty() ? String("empty") : param);
+            }
         } else if (value.refersToSameSourceAs(variableName)) {
             if (auto knb = ptr.get<t_fake_menu>()) {
                 auto* s = pd->generateSymbol(variableName.toString());
@@ -305,8 +297,10 @@ public:
             if (auto menu = ptr.get<t_fake_menu>())
                 menu->x_lb = getValue<bool>(loadbang);
         } else if (value.refersToSameSourceAs(labelNoSelection)) {
-            if (auto menu = ptr.get<t_fake_menu>())
-                menu->x_label = pd->generateSymbol(getValue<String>(labelNoSelection));
+            if (auto menu = ptr.get<t_fake_menu>()) {
+                auto const label = getValue<String>(labelNoSelection);
+                menu->x_label = pd->generateSymbol(label.isEmpty() ? String(" ") : label);
+            }
             updateTextLayout();
             repaint();
         } else if (value.refersToSameSourceAs(fontSize)) {
@@ -363,13 +357,13 @@ public:
         }
         case hash("fg"): {
             if (atoms.size() >= 1 && atoms[0].isSymbol()) {
-                primaryColour = convertTclColour(atoms[0].toString()).toString();
+                primaryColour = colourToVar(convertTclColour(atoms[0].toString()));
             }
             break;
         }
         case hash("bg"): {
             if (atoms.size() >= 1 && atoms[0].isSymbol()) {
-                secondaryColour = convertTclColour(atoms[0].toString()).toString();
+                secondaryColour = colourToVar(convertTclColour(atoms[0].toString()));
             }
             break;
         }
@@ -391,13 +385,13 @@ public:
         }
     }
 
-    bool inletIsSymbol() override
+    bool hideInlet() override
     {
         auto const rSymbol = receiveSymbol.toString();
         return rSymbol.isNotEmpty() && rSymbol != "empty";
     }
 
-    bool outletIsSymbol() override
+    bool hideOutlet() override
     {
         auto const sSymbol = sendSymbol.toString();
         return sSymbol.isNotEmpty() && sSymbol != "empty";

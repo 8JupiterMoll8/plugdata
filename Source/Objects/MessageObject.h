@@ -11,10 +11,10 @@ class MessageObject final : public ObjectBase
 
     Value sizeProperty = SynchronousValue();
     std::unique_ptr<TextEditor> editor;
-    BorderSize<int> border = BorderSize<int>(1, 6, 1, 1);
+    BorderSize<int> border = BorderSize<int>(1, 4, 1, 1);
 
     String objectText;
-    CachedTextRender textRenderer;
+    TextLayout layout;
 
     bool isDown = false;
     bool isLocked = false;
@@ -67,15 +67,13 @@ public:
 
         int fontWidth = 7;
         int charWidth = 0;
-        if (auto obj = ptr.get<void>()) {
+        if (auto obj = ptr.get<t_text>()) {
             charWidth = TextObjectHelper::getWidthInChars(obj.get());
             fontWidth = glist_fontwidth(cnv->patch.getRawPointer());
         }
 
-        auto const textSize = textRenderer.getTextBounds();
-
         // Calculating string width is expensive, so we cache all the strings that we already calculated the width for
-        int const idealWidth = CachedStringWidth<15>::calculateStringWidth(objText) + 14;
+        int const idealWidth = CachedStringWidth<15>::calculateStringWidth(objText) + 13;
 
         // We want to adjust the width so ideal text with aligns with fontWidth
         int const offset = idealWidth % fontWidth;
@@ -89,7 +87,7 @@ public:
             textWidth = std::max(charWidth, 2) * fontWidth + offset;
         }
 
-        return { textWidth, textSize.getHeight() };
+        return { textWidth, static_cast<int>(layout.getHeight()) };
     }
 
     void updateTextLayout()
@@ -102,11 +100,16 @@ public:
             objText = cnv->suggestor->getText();
         }
 
-        auto const colour = cnv->editor->getLookAndFeel().findColour(PlugDataColour::canvasTextColourId);
-        int const textWidth = getTextSize().getWidth() - 14;
-        if (textRenderer.prepareLayout(objText, Fonts::getCurrentFont().withHeight(15), colour, textWidth, getValue<int>(sizeProperty), false)) {
-            repaint();
-        }
+        auto const colour = getThemeColours().canvasTextColour;
+        int const textWidth = getTextSize().getWidth() - 12;
+
+        AttributedString attributedText(objText);
+        attributedText.setColour(colour);
+        attributedText.setFont(Fonts::getDefaultFont().withHeight(15));
+        attributedText.setJustification(Justification::centredLeft);
+        attributedText.setWordWrap(AttributedString::byChar);
+        layout.createLayout(attributedText, textWidth);
+        repaint();
     }
 
     void setPdBounds(Rectangle<int> const b) override
@@ -116,7 +119,7 @@ public:
 
             pd::Interface::moveObject(patch, gobj.get(), b.getX(), b.getY());
 
-            if (TextObjectHelper::getWidthInChars(gobj.get())) {
+            if (TextObjectHelper::getWidthInChars(gobj.cast<t_text>())) {
                 TextObjectHelper::setWidthInChars(gobj.get(), b.getWidth() / glist_fontwidth(patch));
             }
         }
@@ -138,36 +141,42 @@ public:
 
     void render(NVGcontext* nvg) override
     {
+        auto const& colours = getThemeColours();
+
         auto const bounds = getLocalBounds();
         auto const b = bounds.toFloat();
         auto const sb = b.reduced(0.5f); // reduce size of background to stop AA edges from showing through
 
-        auto const bgCol = isDown ? cnv->guiObjectInternalOutlineCol : cnv->guiObjectBackgroundCol;
+        auto const bgCol = nvgColour(isDown ? colours.guiObjectInternalOutlineColour : colours.guiObjectBackgroundColour);
 
         // Draw background
-        nvgDrawObjectWithFlag(nvg, sb.getX(), sb.getY(), sb.getWidth(), sb.getHeight(),
+        nanovg::nvgDrawObjectWithFlag(nvg, sb.getX(), sb.getY(), sb.getWidth(), sb.getHeight(),
             bgCol, bgCol, bgCol,
-            Corners::objectCornerRadius, ObjectFlagType::FlagMessage, static_cast<PlugDataLook&>(cnv->getLookAndFeel()).getUseFlagOutline());
+            getPlugDataLook(*this).getObjectCornerRadius(), ObjectFlagType::FlagMessage, getPlugDataLook(*this).getUseFlagOutline());
 
-        auto const flagCol = isDown && ::getValue<bool>(object->locked) ? cnv->selectedOutlineCol : cnv->guiObjectInternalOutlineCol;
-        auto const outlineCol = object->isSelected() ? cnv->selectedOutlineCol : cnv->objectOutlineCol;
+        auto const flagCol = isDown && ::getValue<bool>(object->locked) ? nvgColour(colours.objectSelectedOutlineColour) : nvgColour(colours.guiObjectInternalOutlineColour);
+        auto const outlineCol = nvgColour(object->isSelected() ? colours.objectSelectedOutlineColour : colours.objectOutlineColour);
 
         // Draw highlight around inner area when box is clicked
         // We do this by drawing an inner area that is bright, while changing the background colour darker
         if (isDown) {
             auto const dB = bounds.reduced(5);
-            nvgDrawRoundedRect(nvg, dB.getX(), dB.getY(), dB.getWidth(), dB.getHeight(), cnv->guiObjectBackgroundCol, cnv->guiObjectBackgroundCol, 0);
+            nanovg::nvgDrawRoundedRect(nvg, dB.getX(), dB.getY(), dB.getWidth(), dB.getHeight(), nvgColour(colours.guiObjectBackgroundColour), nvgColour(colours.guiObjectBackgroundColour), 0);
         }
 
         // Draw outline & flag with shader
-        nvgDrawObjectWithFlag(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(),
-            nvgRGBA(0, 0, 0, 0), outlineCol, flagCol,
-            Corners::objectCornerRadius, ObjectFlagType::FlagMessage, static_cast<PlugDataLook&>(cnv->getLookAndFeel()).getUseFlagOutline());
+        nanovg::nvgDrawObjectWithFlag(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(),
+            nanovg::nvgRGBA(0, 0, 0, 0), outlineCol, flagCol,
+            getPlugDataLook(*this).getObjectCornerRadius(), ObjectFlagType::FlagMessage, getPlugDataLook(*this).getUseFlagOutline());
 
+        auto& llgc = *cnv->editor->getNanoLLGC();
         if (editor) {
-            imageRenderer.renderJUCEComponent(nvg, *editor, getImageScale());
+            llgc.renderComponent(*editor);
         } else {
-            textRenderer.renderText(nvg, border.subtractedFrom(getLocalBounds()).toFloat(), getImageScale());
+            Graphics g(llgc);
+            auto const textBounds = border.subtractedFrom(bounds).toFloat();
+            NVGGraphicsContext::ScopedAnchoredDraw anchor(llgc, textBounds);
+            layout.draw(g, textBounds);
         }
     }
 
@@ -192,7 +201,7 @@ public:
         updateTextLayout();
 
         if (editor) {
-            editor->setBounds(getLocalBounds().withTrimmedRight(5));
+            editor->setBounds(getLocalBounds());
         }
     }
 
@@ -209,11 +218,9 @@ public:
     void showEditor() override
     {
         if (editor == nullptr) {
-            editor.reset(TextObjectHelper::createTextEditor(object, 15));
-
-            editor->setLookAndFeel(&object->getLookAndFeel());
-            editor->setBorder(border.addedTo(BorderSize<int>(0, 0, 1, 0)));
-            editor->setBounds(getLocalBounds().withTrimmedRight(5));
+            editor.reset(TextObjectHelper::createTextEditor(object, Fonts::getDefaultFont().withHeight(15)));
+            editor->setBorder(border);
+            editor->setBounds(getLocalBounds());
             editor->setText(objectText, false);
             editor->addListener(this);
             editor->addKeyListener(this);
@@ -226,12 +233,7 @@ public:
             cnv->showSuggestions(object, editor.get());
 
             editor->onFocusLost = [this] {
-                if (cnv->suggestor->hasKeyboardFocus(true) || Component::getCurrentlyFocusedComponent() == editor.get()) {
-                    editor->grabKeyboardFocus();
-                    return;
-                }
-
-                hideEditor();
+                cnv->suggestor->checkEditorFocusLoss(editor.get());
             };
 
             object->updateBounds();
@@ -281,9 +283,7 @@ public:
 
     void click()
     {
-        cnv->pd->enqueueFunctionAsync<t_pd>(ptr, [](t_pd* obj) {
-            pd_float(obj, 0);
-        });
+        sendMessage("float", { 0.0f }, Async);
     }
 
     void mouseUp(MouseEvent const& e) override
@@ -311,7 +311,7 @@ public:
         if (auto messObj = ptr.get<t_text>()) {
             binbuf_gettext(messObj->te_binbuf, &text, &size);
         } else {
-            return {};
+            return { };
         }
 
         auto const result = String::fromUTF8(text, size);
@@ -377,5 +377,10 @@ public:
     std::unique_ptr<ComponentBoundsConstrainer> createConstrainer() override
     {
         return TextObjectHelper::createConstrainer(object);
+    }
+
+    ResizeDirection getAllowedResizeDirections() const override
+    {
+        return ResizeDirection::HorizontalOnly;
     }
 };

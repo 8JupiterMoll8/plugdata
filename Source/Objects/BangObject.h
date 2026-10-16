@@ -27,20 +27,25 @@ public:
         , iemHelper(obj, parent, this)
     {
         iemHelper.iemColourChangedCallback = [this] {
-            bgCol = convertColour(getValue<Colour>(iemHelper.secondaryColour));
-            fgCol = convertColour(getValue<Colour>(iemHelper.primaryColour));
+            bgCol = nvgColour(getValue<Colour>(iemHelper.secondaryColour));
+            fgCol = nvgColour(getValue<Colour>(iemHelper.primaryColour));
         };
 
         objectParameters.addParamSize(&sizeProperty, true);
         objectParameters.addParamInt("Min. flash time", cGeneral, &bangInterrupt, 50);
         objectParameters.addParamInt("Max. flash time", cGeneral, &bangHold, 250);
 
-        iemHelper.addIemParameters(objectParameters, true, true, 17, 7);
+        iemHelper.addIemParameters(objectParameters, true, true, true, 0, -10);
     }
 
     void onConstrainerCreate() override
     {
         constrainer->setFixedAspectRatio(1);
+    }
+
+    ResizeDirection getAllowedResizeDirections() const override
+    {
+        return DiagonalOnly;
     }
 
     void update() override
@@ -54,12 +59,12 @@ public:
         iemHelper.update();
     }
 
-    bool inletIsSymbol() override
+    bool hideInlet() override
     {
         return iemHelper.hasReceiveSymbol();
     }
 
-    bool outletIsSymbol() override
+    bool hideOutlet() override
     {
         return iemHelper.hasSendSymbol();
     }
@@ -104,11 +109,7 @@ public:
             return;
 
         // startEdition();
-        pd->enqueueFunctionAsync<t_pd>(ptr, [](t_pd* bng) {
-            sys_lock();
-            pd_bang(bng);
-            sys_unlock();
-        });
+        sendMessage("bang", { }, Async);
         // stopEdition();
 
         // Make sure we don't re-click with an accidental drag
@@ -118,9 +119,11 @@ public:
 
     void render(NVGcontext* nvg) override
     {
+        auto const& colours = getThemeColours();
+
         auto b = getLocalBounds().toFloat();
 
-        nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), bgCol, object->isSelected() ? cnv->selectedOutlineCol : cnv->objectOutlineCol, Corners::objectCornerRadius);
+        nanovg::nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), bgCol, object->isSelected() ? nvgColour(colours.objectSelectedOutlineColour) : nvgColour(colours.objectOutlineColour), getPlugDataLook(*this).getObjectCornerRadius());
 
         b = b.reduced(1);
         auto const width = std::max(b.getWidth(), b.getHeight());
@@ -132,16 +135,16 @@ public:
 
         auto const outerCircleBounds = b.reduced((width - circleOuter) * sizeReduction);
 
-        nvgBeginPath(nvg);
-        nvgCircle(nvg, b.getCentreX(), b.getCentreY(), outerCircleBounds.getWidth() / 2.0f);
-        nvgStrokeColor(nvg, cnv->guiObjectInternalOutlineCol);
-        nvgStrokeWidth(nvg, circleThickness);
-        nvgStroke(nvg);
+        nanovg::nvgBeginPath(nvg);
+        nanovg::nvgCircle(nvg, b.getCentreX(), b.getCentreY(), outerCircleBounds.getWidth() / 2.0f);
+        nanovg::nvgStrokeColor(nvg, nvgColour(colours.guiObjectInternalOutlineColour));
+        nanovg::nvgStrokeWidth(nvg, circleThickness);
+        nanovg::nvgStroke(nvg);
 
         // Fill ellipse if bangState is true
         if (bangState) {
             auto const iCB = b.reduced((width - circleOuter + circleThickness) * sizeReduction);
-            nvgDrawRoundedRect(nvg, iCB.getX(), iCB.getY(), iCB.getWidth(), iCB.getHeight(), fgCol, fgCol, iCB.getWidth() * 0.5f);
+            nanovg::nvgDrawRoundedRect(nvg, iCB.getX(), iCB.getY(), iCB.getWidth(), iCB.getHeight(), fgCol, fgCol, iCB.getWidth() * 0.5f);
         }
     }
 

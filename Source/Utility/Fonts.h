@@ -10,90 +10,103 @@ enum FontStyle {
     Bold,
     Semibold,
     Monospace,
-    Variable,
     Tabular
 };
 
 struct Fonts {
     Fonts()
     {
-        HeapArray<uint8_t> interUnicodeZip;
-        interUnicodeZip.reserve(7 * 1024 * 1024);
-        int i = 0;
-
-        while (true) {
-            int size = 0;
-            auto* resource = BinaryData::getNamedResource(("InterUnicode_" + String(i)).toRawUTF8(), size);
-            if (!resource)
-                break;
-            interUnicodeZip.insert(interUnicodeZip.end(), resource, resource + size);
-            ++i;
-        }
-
-        // Create a MemoryInputStream from the combined ZIP data buffer
-        MemoryInputStream zipInputStream(interUnicodeZip.data(), interUnicodeZip.size(), false);
-
-        // Open the ZIP archive from memory
-        ZipFile zipFile(zipInputStream);
-
-        HeapArray<uint8_t> interUnicode;
-        interUnicode.reserve(17 * 1024 * 1024); // reserve enough memory for decompressed font
-
-        auto numEntries = zipFile.getNumEntries();
-
-        if (numEntries != 0) {
-            auto const fileEntry = zipFile.getEntry(numEntries - 1); // or use 0 if you want first entry
-
-            // Create a InputStream for the file entry
-            std::unique_ptr<InputStream> fileStream(zipFile.createStreamForEntry(*fileEntry));
-            if (fileStream) {
-                // Read the decompressed font data into interUnicode array
-                constexpr int bufferSize = 8192;
-                char buffer[bufferSize];
-
-                while (!fileStream->isExhausted()) {
-                    auto const bytesRead = fileStream->read(buffer, bufferSize);
-                    if (bytesRead <= 0)
-                        break;
-                    interUnicode.insert(interUnicode.end(), reinterpret_cast<uint8_t const*>(buffer), reinterpret_cast<uint8_t const*>(buffer) + bytesRead);
-                }
-            }
-        }
-
-        // Initialise typefaces
-        if (interUnicode.size()) {
-            defaultTypeface = Typeface::createSystemTypefaceFor(interUnicode.data(), interUnicode.size());
-        } else {
-            defaultTypeface = Typeface::createSystemTypefaceFor(BinaryData::InterRegular_ttf, BinaryData::InterRegular_ttfSize);
-        }
-
-        currentTypeface = defaultTypeface;
-
-        boldTypeface = Typeface::createSystemTypefaceFor(BinaryData::InterBold_ttf, BinaryData::InterBold_ttfSize);
-        semiBoldTypeface = Typeface::createSystemTypefaceFor(BinaryData::InterSemiBold_ttf, BinaryData::InterSemiBold_ttfSize);
-        iconTypeface = Typeface::createSystemTypefaceFor(BinaryData::IconFont_ttf, BinaryData::IconFont_ttfSize);
-        monoTypeface = Typeface::createSystemTypefaceFor(BinaryData::RobotoMono_Regular_ttf, BinaryData::RobotoMono_Regular_ttfSize);
-        variableTypeface = Typeface::createSystemTypefaceFor(BinaryData::InterVariable_ttf, BinaryData::InterVariable_ttfSize);
-        tabularTypeface = Typeface::createSystemTypefaceFor(BinaryData::InterTabular_ttf, BinaryData::InterTabular_ttfSize);
+        defaultTypeface = BinaryData::loadFont(BinaryData::InterVariable_ttf);
+        monoTypeface = BinaryData::loadFont(BinaryData::RobotoMonoVariable_ttf);
+        iconTypeface = BinaryData::loadFont(BinaryData::IconFont_ttf);
+        emojiTypeface = BinaryData::loadFont(BinaryData::NotoEmoji_ttf);
 
         instance = this;
+
+        // The monospace typeface never changes, so its weighted variant only needs preparing once
+        monoBoldFont = getWeightedFont(monoTypeface, 700.0f);
+        defaultFont = Font(FontOptions(defaultTypeface));
+
+        updateWeightedFonts();
     }
 
-    static Font getCurrentFont() { return Font(instance->currentTypeface); }
-    static Font getDefaultFont() { return Font(instance->defaultTypeface); }
-    static Font getBoldFont() { return Font(instance->boldTypeface); }
-    static Font getSemiBoldFont() { return Font(instance->semiBoldTypeface); }
-    static Font getIconFont() { return Font(instance->iconTypeface); }
-    static Font getMonospaceFont() { return Font(instance->monoTypeface); }
-    static Font getVariableFont() { return Font(instance->variableTypeface); }
-    static Font getTabularNumbersFont() { return Font(instance->tabularTypeface); }
+    static Font getDefaultFont() { return instance->defaultFont; }
+    static Font getBoldFont() { return instance->boldFont; }
+    static Font getSemiBoldFont() { return instance->semiBoldFont; }
+    static Font getIconFont() { return { FontOptions(instance->iconTypeface) }; }
+    static Font getMonospaceFont() { return { FontOptions(instance->monoTypeface) }; }
+    static Font getMonospaceBoldFont() { return instance->monoBoldFont; }
+    static Font getTabularNumbersFont() { return { FontOptions(instance->defaultTypeface).withFeatureEnabled(FontFeatureTag(1953396077u)) }; }
 
-    static Font setCurrentFont(Font const& font) { return instance->currentTypeface = font.getTypefacePtr(); }
+    static void resetDefaultFont()
+    {
+        instance->defaultTypeface = BinaryData::loadFont(BinaryData::InterVariable_ttf);
+        instance->defaultFont = Font(FontOptions(instance->defaultTypeface));
+        instance->updateWeightedFonts();
+        instance->updateFallbackFonts();
+    }
+
+    static void setDefaultFont(Font const& font)
+    {
+        instance->defaultTypeface = font.getTypefacePtr();
+        instance->defaultFont = Font(FontOptions(instance->defaultTypeface));
+        instance->updateWeightedFonts();
+        instance->updateFallbackFonts();
+    }
+
+    static float getStringWidth(String text, Font font)
+    {
+        return GlyphArrangement().getStringWidth(font, text);
+    }
+
+    static float getStringWidth(String text, float fontSize)
+    {
+        return GlyphArrangement().getStringWidth(Font(FontOptions(fontSize)), text);
+    }
+
+    static float getStringWidth(String text)
+    {
+        return GlyphArrangement().getStringWidth(getDefaultFont(), text);
+    }
+
+    static int getStringWidthInt(String text, Font font)
+    {
+        return GlyphArrangement().getStringWidth(font, text);
+    }
+
+    static int getStringWidthInt(String text, float fontSize)
+    {
+        return GlyphArrangement().getStringWidth(Font(FontOptions(fontSize)), text);
+    }
+
+    static int getStringWidthInt(String text)
+    {
+        return GlyphArrangement().getStringWidth(getDefaultFont(), text);
+    }
 
     static Array<File> getFontsInFolder(File const& patchFile)
     {
         return patchFile.findChildFiles(File::findFiles, false, "*.ttf;*.otf;");
     }
+
+    template<typename T>
+    static void drawText(T* llgc, String const& text, Rectangle<float> bounds, Font const& font, Colour colour, Justification just = Justification::centredLeft)
+    {
+        typename T::ScopedAnchoredDraw anchor(*llgc, Rectangle<float>());
+        llgc->setFill(colour);
+        llgc->setFont(font);
+        llgc->drawText(text, bounds, just);
+    }
+
+    template<typename T>
+    static void drawText(T* llgc, String const& text, Point<float> pos, Font const& font, Colour colour, Justification just = Justification::centredLeft)
+    {
+        typename T::ScopedAnchoredDraw anchor(*llgc, Rectangle<float>());
+        llgc->setFill(colour);
+        llgc->setFont(font);
+        llgc->drawText(text, pos, just);
+    }
+
 
     static std::optional<Font> findFont(File const& dirToSearch, String const& typefaceFileName)
     {
@@ -112,8 +125,8 @@ struct Fonts {
                     MemoryBlock fontData;
                     fileStream->readIntoMemoryBlock(fontData);
                     auto typeface = Typeface::createSystemTypefaceFor(fontData.getData(), fontData.getSize());
-                    fontTable[font.getFullPathName()] = typeface;
-                    return typeface;
+                    auto cachedFont = fontTable.try_emplace(font.getFullPathName(), FontOptions(typeface));
+                    return cachedFont.first->second;
                 }
             }
         }
@@ -141,10 +154,10 @@ struct Fonts {
 
     static Font getFontFromStyle(FontStyle const style)
     {
-        Font font;
+        Font font = Font(FontOptions());
         switch (style) {
         case Regular:
-            font = Fonts::getCurrentFont();
+            font = Fonts::getDefaultFont();
             break;
         case Bold:
             font = Fonts::getBoldFont();
@@ -154,9 +167,6 @@ struct Fonts {
             break;
         case Monospace:
             font = Fonts::getMonospaceFont();
-            break;
-        case Variable:
-            font = Fonts::getVariableFont();
             break;
         case Tabular:
             font = Fonts::getTabularNumbersFont();
@@ -196,7 +206,7 @@ struct Fonts {
     // For drawing regular text
     static void drawText(Graphics& g, String const& textToDraw, Rectangle<float> const bounds, Colour const colour, int const fontHeight = 15, Justification const justification = Justification::centredLeft)
     {
-        g.setFont(Fonts::getCurrentFont().withHeight(fontHeight));
+        g.setFont(Fonts::getDefaultFont().withHeight(fontHeight));
         g.setColour(colour);
         g.drawText(textToDraw, bounds, justification);
     }
@@ -204,7 +214,7 @@ struct Fonts {
     // For drawing regular text
     static void drawText(Graphics& g, String const& textToDraw, Rectangle<int> const bounds, Colour const colour, int const fontHeight = 15, Justification const justification = Justification::centredLeft)
     {
-        g.setFont(Fonts::getCurrentFont().withHeight(fontHeight));
+        g.setFont(Fonts::getDefaultFont().withHeight(fontHeight));
         g.setColour(colour);
         g.drawText(textToDraw, bounds, justification);
     }
@@ -227,20 +237,81 @@ struct Fonts {
     }
 
 private:
+    static bool supportsWeightVariable(Typeface::Ptr const& typeface)
+    {
+        if (typeface == nullptr)
+            return false;
+
+        constexpr auto weightTag = FontFeatureTag("wght");
+
+        for (auto variable : typeface->getSupportedVariables()) {
+            if (variable == weightTag)
+                return true;
+        }
+
+        return false;
+    }
+
+    // Re-prepare the weighted variants of the current typeface, so we don't have to clone on every request
+    void updateWeightedFonts()
+    {
+        boldFont = getWeightedFont(defaultTypeface, 700.0f);
+        semiBoldFont = getWeightedFont(defaultTypeface, 600.0f);
+    }
+
+    // Families to try before handing over to the OS's own font fallback.
+    StringArray getFallbackFamilies() const
+    {
+        StringArray families { emojiTypeface->getName() };
+
+#if JUCE_MAC
+        // macOS resolves Han characters to PingFang, which uses Apple's private 'hvgl' table which breaks JUCE's font fallback
+        families.add("Hiragino Sans");    // CFF, Japanese + shared Han
+        families.add("Hiragino Sans GB"); // CFF, simplified Chinese
+#endif
+
+        return families;
+    }
+
+    void updateFallbackFonts()
+    {
+        auto const families = getFallbackFamilies();
+        boldFont.setPreferredFallbackFamilies(families);
+        semiBoldFont.setPreferredFallbackFamilies(families);
+        defaultFont.setPreferredFallbackFamilies(families);
+    }
+
+    static Font getWeightedFont(Typeface::Ptr const& typeface, float const weight)
+    {
+        if (typeface == nullptr)
+            return Font(FontOptions()).boldened();
+
+        Font font { FontOptions(typeface) };
+
+        if (!supportsWeightVariable(typeface))
+            return font.boldened();
+
+        FontVariableSetting const settings[] { { "wght", weight } };
+
+        if (auto weightedTypeface = typeface->cloneWithVariableSettings(settings); weightedTypeface != nullptr)
+            return { FontOptions(weightedTypeface) };
+
+        return font.boldened();
+    }
+
     // This is effectively a singleton because it's loaded through SharedResourcePointer
     static inline Fonts* instance = nullptr;
 
-    // Default typeface is Inter combined with Unicode symbols from GoNotoUniversal and emojis from NotoEmoji
     Typeface::Ptr defaultTypeface;
-
-    Typeface::Ptr currentTypeface;
-
-    Typeface::Ptr boldTypeface;
-    Typeface::Ptr semiBoldTypeface;
     Typeface::Ptr iconTypeface;
     Typeface::Ptr monoTypeface;
-    Typeface::Ptr variableTypeface;
-    Typeface::Ptr tabularTypeface;
+    Typeface::Ptr emojiTypeface;
+
+    // Weighted fonts prepared in advance, refreshed whenever the current font changes
+    Font defaultFont { FontOptions() };
+    Font boldFont { FontOptions() };
+    Font semiBoldFont { FontOptions() };
+    Font monoBoldFont { FontOptions() };
 
     static inline auto fontTable = UnorderedMap<String, Font>();
 };

@@ -14,6 +14,7 @@ extern "C" {
 #include <concurrentqueue.h>
 #include <readerwriterqueue.h>
 #include "Patch.h"
+#include "Utility/ModifierKeyListener.h"
 
 class ObjectImplementationManager;
 
@@ -225,11 +226,37 @@ public:
     static void registerLuaClass(char const* object);
     static bool isLuaClass(hash32 objectNameHash);
 
-    virtual void updateConsole(int numMessages, bool newWarning) = 0;
+    virtual void updateConsole(SmallString const& message, bool isWarning, int numMessages, bool newWarning) = 0;
 
     virtual void titleChanged() = 0;
 
     void enqueueFunctionAsync(std::function<void()> const& fn);
+
+    struct KeyHandler : public ModifierKeyListener {
+        KeyHandler(Instance* parent)
+            : pd(parent)
+        {
+        }
+
+        static constexpr int shiftKey = -1;
+        static constexpr int commandKey = -2;
+        static constexpr int altKey = -3;
+        static constexpr int ctrlKey = -4;
+
+        void shiftKeyChanged(bool isHeld) override;
+        void commandKeyChanged(bool isHeld) override;
+        void altKeyChanged(bool isHeld) override;
+        void ctrlKeyChanged(bool isHeld) override;
+        void spaceKeyChanged(bool isHeld) override;
+
+        void convertJUCEKeyToPd(int& keynum, t_symbol*& keysym);
+
+        void sendKeyPress(KeyPress const& key);
+        void sendKeyUpMessages();
+
+        Instance* pd;
+        SmallArray<KeyPress> heldKeys;
+    } keyHandler = { this };
 
     void enqueueGuiMessage(Message const& fn);
 
@@ -256,8 +283,8 @@ public:
         });
     }
 
-    void sendDirectMessage(void* object, SmallString const& msg, SmallArray<Atom>&& list);
-    void sendDirectMessage(void* object, SmallArray<pd::Atom>&& list);
+    void sendDirectMessage(void* object, SmallString const& msg, SmallArray<Atom> const&& list);
+    void sendDirectMessage(void* object, SmallArray<pd::Atom> const&& list);
     void sendDirectMessage(void* object, SmallString const& msg);
     void sendDirectMessage(void* object, float msg);
 
@@ -303,7 +330,7 @@ public:
     void* printReceiver = nullptr;
     void* dataBufferReceiver = nullptr;
 
-    inline static String const defaultPatch = "#N canvas 827 239 734 565 12;";
+    static inline String const defaultPatch = "#N canvas 827 239 734 565 12;";
 
     bool initialiseIntoPluginmode = false;
     bool isPerformingGlobalSync = false;
@@ -322,7 +349,6 @@ private:
 
     std::unique_ptr<FileChooser> openChooser;
     static inline auto luaClasses = UnorderedSet<hash32>(); // Keep track of class names that correspond to pdlua objects
-
 protected:
     struct internal;
 

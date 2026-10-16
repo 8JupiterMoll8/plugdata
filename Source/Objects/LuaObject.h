@@ -6,72 +6,195 @@
 #pragma once
 
 extern "C" {
-#include <pd-lua/lua/lua.h>
+#include <pd-lua/luas/lua/lua.h>
+
+#define NANOSVG_IMPLEMENTATION
+#include <pd-lua/svg/nanosvg.h>
 
 #define PLUGDATA 1
 #include <pd-lua/pdlua.h>
 #undef PLUGDATA
-
-void pdlua_gfx_mouse_down(t_pdlua* o, int x, int y);
-void pdlua_gfx_mouse_up(t_pdlua* o, int x, int y);
-void pdlua_gfx_mouse_move(t_pdlua* o, int x, int y);
-void pdlua_gfx_mouse_drag(t_pdlua* o, int x, int y);
-void pdlua_gfx_repaint(t_pdlua* o, int firsttime);
 }
 
+// Turns the properties a Lua object declares in its properties() method into regular object parameters,
+// and sends inspector changes back to the Lua method that belongs to each property
+class LuaProperties {
+    struct Property {
+        std::unique_ptr<Value> value;
+        ParameterType type;
+        String method;
+    };
+
+    ObjectBase* object;
+    Value::Listener* listener;
+    void* target = nullptr;
+    ObjectParameters* parameters = nullptr;
+
+    // Values are reused across loads, so the inspector's pointers to them stay valid
+    HeapArray<Property> properties;
+    size_t numLoaded = 0;
+    ParameterCategory currentCategory;
+    int numFrames = 0;
+
+    // The properties that are currently running their object's Lua properties method, only set during load()
+    static inline LuaProperties* active = nullptr;
+
+public:
+    LuaProperties(ObjectBase* object, Value::Listener* listener)
+        : object(object)
+        , listener(listener)
+    {
+    }
+
+    // Runs the object's Lua properties method, which adds its properties to params through propertiesCallback
+    void load(t_pdlua* pdlua, ObjectParameters& params)
+    {
+        auto const propertiesFn = pdlua->pd.te_pd->c_propertiesfn;
+        if (!propertiesFn)
+            return;
+
+        ScopedValueSetter<LuaProperties*> const activeSetter(active, this);
+        pdlua->properties.plugdata_properties_callback = &propertiesCallback;
+        target = pdlua;
+        numLoaded = 0;
+        numFrames = 0;
+        parameters = &params;
+        currentCategory = cGeneral;
+        propertiesFn(&pdlua->pd.te_g, nullptr);
+        parameters = nullptr;
+    }
+
+    void propertyChanged(Value& v)
+    {
+        for (size_t i = 0; i < numLoaded; i++) {
+            auto const& [value, type, method] = properties[i];
+            if (!value->refersToSameSourceAs(v))
+                continue;
+
+            auto* instance = object->pd;
+            auto* methodSym = instance->generateSymbol(method);
+            if (type == tColour) {
+                auto* hex = instance->generateSymbol("#" + getValue<Colour>(v).toString().substring(2));
+                object->sendMessage("dialog", { instance->generateSymbol("colorpicker"), methodSym, hex });
+            } else if (type == tString) {
+                object->sendMessage("dialog", { instance->generateSymbol("text"), methodSym, instance->generateSymbol(v.toString()) });
+            } else // combo/number/check are all just float
+            {
+                object->sendMessage("dialog", { instance->generateSymbol("number"), methodSym, getValue<float>(v) });
+            }
+            return;
+        }
+    }
+
+private:
+    Value* nextValue(ParameterType const type, String const& method, var const& init)
+    {
+        if (numLoaded == properties.size()) {
+            properties.emplace_back(Property { std::make_unique<Value>(SynchronousValue()) });
+            properties[numLoaded].value->addListener(listener);
+        }
+
+        auto& [value, propertyType, propertyMethod] = properties[numLoaded++];
+        propertyType = type;
+        propertyMethod = method;
+        setValueExcludingListener(*value, init, listener);
+        return value.get();
+    }
+
+    static void propertiesCallback(void* pdlua, t_symbol* sym, int const argc, t_atom* argv)
+    {
+        auto* self = active;
+        if (!self || self->target != pdlua)
+            return;
+
+        auto const symbol = hash(sym->s_name);
+        auto const atoms = pd::Atom::fromAtoms(argc, argv);
+        auto& category = self->currentCategory;
+
+        if (symbol == hash("add_frame_property") && atoms.size() >= 1) {
+            auto const name = atoms[0].toString();
+            category = name == cDimensions.name ? cDimensions : ParameterCategory { .name = name, .order = cGeneral.order + ++self->numFrames };
+            return;
+        }
+        if (atoms.size() < 3)
+            return;
+
+        auto& parameters = *self->parameters;
+        auto const label = atoms[0].toString();
+        auto const method = atoms[1].toString();
+
+        if (symbol == hash("add_check_property")) {
+            auto const init = var(atoms[2].getFloat() != 0.0f);
+            parameters.addParamBool(label, category, self->nextValue(tBool, method, init), { "No", "Yes" }, init);
+        } else if (symbol == hash("add_text_property")) {
+            auto const init = var(atoms[2].toString());
+            parameters.addParamString(label, category, self->nextValue(tString, method, init), init);
+        } else if (symbol == hash("add_color_property")) {
+            // A string default is a literal colour, instead of a theme colour ID
+            auto const init = Colour::fromString("ff" + atoms[2].toString().fromFirstOccurrenceOf("#", false, false));
+            parameters.addParamColour(label, category, self->nextValue(tColour, method, colourToVar(init)), init.toString());
+        } else if (symbol == hash("add_int_property") && atoms.size() >= 5) {
+            // Lua's default range is +-1e36, which doesn't fit in an int
+            auto const toInt = [](float const f) { return static_cast<int>(jlimit<double>(std::numeric_limits<int>::min(), std::numeric_limits<int>::max(), f)); };
+            auto const init = var(static_cast<int>(atoms[2].getFloat()));
+            parameters.addParamInt(label, category, self->nextValue(tInt, method, init), init, true, toInt(atoms[3].getFloat()), toInt(atoms[4].getFloat()));
+        } else if (symbol == hash("add_float_property") && atoms.size() >= 5) {
+            auto const init = var(atoms[2].getFloat());
+            parameters.addParamFloat(label, category, self->nextValue(tFloat, method, init), init, true, atoms[3].getFloat(), atoms[4].getFloat());
+        } else if (symbol == hash("add_combo_property") && atoms.size() >= 4) {
+            StringArray options;
+            for (int i = 3; i < atoms.size(); i++) {
+                options.add(atoms[i].toString());
+            }
+            auto const init = var(static_cast<int>(atoms[2].getFloat()));
+            parameters.addParamCombo(label, category, self->nextValue(tCombo, method, init), options, init);
+        }
+    }
+};
+
 class LuaObject final : public ObjectBase
-    , private Value::Listener {
+    , private Value::Listener, private AsyncUpdater {
     Colour currentColour;
 
     t_symbol* pdluaxSymbol;
+    t_symbol* pdluaxjitSymbol;
+
     bool isSelected = false;
     Value zoomScale;
     std::unique_ptr<Component> textEditor;
     std::unique_ptr<Dialog> saveDialog;
 
-    UnorderedSegmentedMap<int, NVGFramebuffer> framebuffers;
+    LuaProperties properties;
+
+    int currentTouchIndex = -1;
+
+    UnorderedSegmentedMap<hash32, std::pair<NVGImage, Rectangle<int>>> images;
 
     struct LuaGuiMessage {
-        int layer = -1;
-        t_symbol* symbol = nullptr;
+        t_symbol* symbol;
         SmallArray<t_atom> data;
-        int size = 0;
+        int size;
 
-        LuaGuiMessage() = default;
+        LuaGuiMessage() { }
 
-        LuaGuiMessage(int const l, t_symbol* sym, int const argc, t_atom* argv)
-            : layer(l)
-            , symbol(sym)
-            , size(argc)
+        LuaGuiMessage(t_symbol* sym, int const argc, t_atom* argv)
+            : symbol(sym)
         {
-            if (argc > 0 && argv != nullptr) {
-                data = SmallArray<t_atom>(argv, argv + argc);
-            }
+            data = SmallArray<t_atom>(argv, argv + argc);
+            size = argc;
         }
 
         LuaGuiMessage(LuaGuiMessage const& other) noexcept
-            : layer(other.layer)
-            , symbol(other.symbol)
-            , data(other.data)
-            , size(other.size)
         {
-        }
-
-        LuaGuiMessage(LuaGuiMessage&& other) noexcept
-            : layer(other.layer)
-            , symbol(other.symbol)
-            , data(std::move(other.data))
-            , size(other.size)
-        {
-            other.size = 0;
-            other.symbol = nullptr;
-            other.layer = -1;
+            symbol = other.symbol;
+            size = other.size;
+            data = other.data;
         }
 
         LuaGuiMessage& operator=(LuaGuiMessage const& other) noexcept
         {
+            // Check for self-assignment
             if (this != &other) {
-                layer = other.layer;
                 symbol = other.symbol;
                 size = other.size;
                 data = other.data;
@@ -79,31 +202,18 @@ class LuaObject final : public ObjectBase
 
             return *this;
         }
-
-        LuaGuiMessage& operator=(LuaGuiMessage&& other) noexcept
-        {
-            if (this != &other) {
-                layer = other.layer;
-                symbol = other.symbol;
-                size = other.size;
-                data = std::move(other.data);
-                other.size = 0;
-                other.symbol = nullptr;
-                other.layer = -1;
-            }
-
-            return *this;
-        }
     };
 
+    CriticalSection frameSwapLock;
     UnorderedSegmentedMap<int, HeapArray<LuaGuiMessage>> guiCommandBuffer;
-    moodycamel::ReaderWriterQueue<LuaGuiMessage> guiMessageQueue;
+    UnorderedSegmentedMap<int, HeapArray<LuaGuiMessage>> currentFrame;
 
     static inline auto allDrawTargets = UnorderedMap<t_pdlua*, SmallArray<LuaObject*>>();
 
 public:
-    LuaObject(pd::WeakReference obj, Object* parent)
-        : ObjectBase(obj, parent)
+    LuaObject(pd::WeakReference ptr, Object* parent)
+        : ObjectBase(ptr, parent)
+        , properties(this, &propertyListener)
     {
         if (auto pdlua = ptr.get<t_pdlua>()) {
             pdlua->gfx.plugdata_draw_callback = &drawCallback;
@@ -113,29 +223,26 @@ public:
 
             libpd_set_instance(&pd_maininstance);
             pdluaxSymbol = gensym("pdluax");
+            pdluaxjitSymbol = gensym("pdluaxjit");
             pd->setThis();
         }
 
-        object->editor->nvgSurface.addBufferedObject(this);
         parentHierarchyChanged();
     }
 
     ~LuaObject() override
     {
         pd->lockAudioThread();
-        auto* pdlua = ptr.getRawUnchecked<t_pdlua>();
-        auto const it = allDrawTargets.find(pdlua);
+        auto const it = allDrawTargets.find(ptr.getRawUnchecked<t_pdlua>());
         if (it != allDrawTargets.end()) {
             auto& listeners = it->second;
             listeners.erase(std::ranges::remove(listeners, this).begin(), listeners.end());
-            if (listeners.empty()) {
+            if (listeners.empty())
                 allDrawTargets.erase(it);
-            }
         }
         pd->unlockAudioThread();
 
         zoomScale.removeListener(this);
-        object->editor->nvgSurface.removeBufferedObject(this);
     }
 
     // We can only attach the zoomscale to canvas after the canvas has been added to its own parent
@@ -161,10 +268,10 @@ public:
             int x = 0, y = 0, w = 0, h = 0;
             pd::Interface::getObjectBounds(patch, gobj.cast<t_gobj>(), &x, &y, &w, &h);
 
-            return Rectangle<int>(x, y, gobj->gfx.width + 2, gobj->gfx.height + 2);
+            return Rectangle<int>(x, y, gobj->gfx.width + 1, gobj->gfx.height + 1);
         }
 
-        return {};
+        return { };
     }
 
     void setPdBounds(Rectangle<int> const b) override
@@ -173,8 +280,8 @@ public:
             auto* patch = object->cnv->patch.getRawPointer();
 
             pd::Interface::moveObject(patch, gobj.cast<t_gobj>(), b.getX(), b.getY());
-            gobj->gfx.width = b.getWidth() - 2;
-            gobj->gfx.height = b.getHeight() - 2;
+            gobj->gfx.width = b.getWidth() - 1;
+            gobj->gfx.height = b.getHeight() - 1;
         }
 
         sendRepaintMessage();
@@ -189,20 +296,22 @@ public:
         menu.addItem("Open lua editor", [_this = SafePointer(this)] {
             if (!_this)
                 return;
-            if (auto obj = _this->ptr.get<t_pd>()) {
-                _this->pd->sendDirectMessage(obj.get(), "menu-open", {});
-            }
+            _this->sendMessage("menu-open");
         });
         menu.addItem("Reload lua object", [_this = SafePointer(this)] {
             if (!_this)
                 return;
 
             // prevent potential crash if this was selected
-            _this->cnv->editor->sidebar->hideParameters();
+            if (auto* s = _this->cnv->editor->getSidebarForPanel(Sidebar::InspectorPanel))
+                s->hideParameters();
 
             if (auto pdlua = _this->ptr.get<t_pd>()) {
                 // Reload the lua script
-                pd_typedmess(_this->pdluaxSymbol->s_thing, gensym("reload"), 0, nullptr);
+                if (_this->pdluaxSymbol->s_thing)
+                    pd_typedmess(_this->pdluaxSymbol->s_thing, gensym("reload"), 0, nullptr);
+                if (_this->pdluaxjitSymbol->s_thing)
+                    pd_typedmess(_this->pdluaxjitSymbol->s_thing, gensym("reload"), 0, nullptr);
 
                 // Recreate this object
                 if (auto patch = _this->cnv->patch.getPointer()) {
@@ -213,56 +322,65 @@ public:
         });
     }
 
-    bool hideInGraph() override
-    {
-        return false;
-    }
-
     void mouseDown(MouseEvent const& e) override
     {
+        if (currentTouchIndex > 0)
+            return; // already has a touch
+        currentTouchIndex = e.source.getIndex();
+
         pd->enqueueFunctionAsync<t_pdlua>(ptr, [x = e.x, y = e.y](t_pdlua* pdlua) {
             sys_lock();
-            pdlua_gfx_mouse_down(pdlua, x, y);
+            pdlua->gfx.pdlua_gfx_mouse_down(pdlua, x, y);
             sys_unlock();
         });
     }
 
-    double lastMouseDragTime = 0.0;
-    double lastMouseMoveTime = 0.0;
-
     void mouseDrag(MouseEvent const& e) override
     {
-        auto const now = Time::getMillisecondCounterHiRes();
-        if (now - lastMouseDragTime < 16.0)
+        if (e.source.getIndex() != currentTouchIndex)
             return;
-        lastMouseDragTime = now;
 
         pd->enqueueFunctionAsync<t_pdlua>(ptr, [x = e.x, y = e.y](t_pdlua* pdlua) {
             sys_lock();
-            pdlua_gfx_mouse_drag(pdlua, x, y);
+            pdlua->gfx.pdlua_gfx_mouse_drag(pdlua, x, y);
             sys_unlock();
         });
     }
 
     void mouseMove(MouseEvent const& e) override
     {
-        auto const now = Time::getMillisecondCounterHiRes();
-        if (now - lastMouseMoveTime < 16.0)
-            return;
-        lastMouseMoveTime = now;
-
         pd->enqueueFunctionAsync<t_pdlua>(ptr, [x = e.x, y = e.y](t_pdlua* pdlua) {
             sys_lock();
-            pdlua_gfx_mouse_move(pdlua, x, y);
+            pdlua->gfx.pdlua_gfx_mouse_move(pdlua, x, y);
             sys_unlock();
         });
     }
 
     void mouseUp(MouseEvent const& e) override
     {
+        currentTouchIndex = -1;
+
         pd->enqueueFunctionAsync<t_pdlua>(ptr, [x = e.x, y = e.y](t_pdlua* pdlua) {
             sys_lock();
-            pdlua_gfx_mouse_up(pdlua, x, y);
+            pdlua->gfx.pdlua_gfx_mouse_up(pdlua, x, y);
+            sys_unlock();
+        });
+    }
+
+    void mouseEnter(MouseEvent const& e) override
+    {
+        pd->enqueueFunctionAsync<t_pdlua>(ptr, [x = e.x, y = e.y](t_pdlua* pdlua) {
+            sys_lock();
+            pdlua->gfx.pdlua_gfx_mouse_enter(pdlua, x, y);
+            sys_unlock();
+        });
+    }
+
+    void mouseExit(MouseEvent const& e) override
+    {
+        pd->enqueueFunctionAsync<t_pdlua>(ptr, [x = e.x, y = e.y](t_pdlua* pdlua) {
+            sys_lock();
+            pdlua->gfx.pdlua_gfx_mouse_exit(pdlua, x, y);
             sys_unlock();
         });
     }
@@ -271,7 +389,7 @@ public:
     {
         pd->enqueueFunctionAsync<t_pdlua>(ptr, [](t_pdlua* pdlua) {
             sys_lock();
-            pdlua_gfx_repaint(pdlua, 0);
+            pdlua->gfx.pdlua_gfx_repaint(pdlua, 0);
             sys_unlock();
         });
     }
@@ -286,11 +404,29 @@ public:
         sendRepaintMessage();
     }
 
+    void handleAsyncUpdate() override
+    {
+        repaint();
+    }
+
     void render(NVGcontext* nvg) override
     {
-        for (auto& [layer, fb] : framebuffers) {
-            fb.render(nvg, Rectangle<int>(getWidth() + 1, getHeight()));
+        NVGScopedState scopedState(nvg);
+
+        frameSwapLock.enter();
+        auto frames = currentFrame;
+        frameSwapLock.exit();
+
+
+        auto b = getLocalBounds();
+        nanovg::nvgIntersectRoundedScissor(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), getPlugDataLook(*this).getObjectCornerRadius());
+
+        for (auto& [layer, layerMessages] : frames) {
+            for (auto& guiMessage : layerMessages) {
+                handleGuiMessage(nvg, layer, guiMessage.symbol, guiMessage.size, guiMessage.data.data());
+            }
         }
+
     }
 
     void valueChanged(Value& v) override
@@ -298,8 +434,115 @@ public:
         sendRepaintMessage();
     }
 
+    // Drawing svg with nanovg + nanosvg borrowed from: https://github.com/VCVRack/Rack/blob/v2/src/window/Svg.cpp
+    static void drawSVG(NVGcontext* nvg, char const* svgText)
+    {
+        std::string svgCopy(svgText);
+        auto* svg = nsvgParse(svgCopy.data(), "px", 96);
+        if (!svg)
+            return;
+
+        auto getNVGColor = [](uint32_t color) -> NVGcolor {
+            return nanovg::nvgRGBA(
+                (color >> 0) & 0xff,
+                (color >> 8) & 0xff,
+                (color >> 16) & 0xff,
+                (color >> 24) & 0xff);
+        };
+
+        auto getPaint = [&getNVGColor](NVGcontext* nvg, NSVGpaint* p) -> NVGpaint {
+            assert(p->type == NSVG_PAINT_LINEAR_GRADIENT || p->type == NSVG_PAINT_RADIAL_GRADIENT);
+            NSVGgradient* g = p->gradient;
+            assert(g->nstops >= 1);
+            NVGcolor icol = getNVGColor(g->stops[0].color);
+            NVGcolor ocol = getNVGColor(g->stops[g->nstops - 1].color);
+
+            float inverse[6];
+            nanovg::nvgTransformInverse(inverse, g->xform);
+
+            Point<float> s, e;
+            // Is it always the case that the gradient should be transformed from (0, 0) to (0, 1)?
+            nanovg::nvgTransformPoint(&s.x, &s.y, inverse, 0, 0);
+            nanovg::nvgTransformPoint(&e.x, &e.y, inverse, 0, 1);
+
+            NVGpaint paint;
+            if (p->type == NSVG_PAINT_LINEAR_GRADIENT)
+                paint = nanovg::nvgLinearGradient(nvg, s.x, s.y, e.x, e.y, icol, ocol);
+            else
+                paint = nanovg::nvgRadialGradient(nvg, s.x, s.y, 0.0, 160, icol, ocol);
+            return paint;
+        };
+
+        int shapeIndex = 0;
+        // Iterate shape linked list
+        for (NSVGshape* shape = svg->shapes; shape; shape = shape->next, shapeIndex++) {
+            // Visibility
+            if (!(shape->flags & NSVG_FLAGS_VISIBLE))
+                continue;
+
+            nanovg::nvgSave(nvg);
+
+            // Opacity
+            if (shape->opacity < 1.0)
+                nanovg::nvgGlobalAlpha(nvg, shape->opacity);
+
+            // Build path
+            nanovg::nvgBeginPath(nvg);
+            nanovg::nvgPathWinding(nvg, NVG_NONZERO);
+
+            // Iterate path linked list
+            for (NSVGpath* path = shape->paths; path; path = path->next) {
+                nanovg::nvgMoveTo(nvg, path->pts[0], path->pts[1]);
+                for (int i = 1; i < path->npts; i += 3) {
+                    float* p = &path->pts[2 * i];
+                    nanovg::nvgBezierTo(nvg, p[0], p[1], p[2], p[3], p[4], p[5]);
+                }
+
+                // Close path
+                if (path->closed)
+                    nanovg::nvgClosePath(nvg);
+            }
+
+            // Fill shape
+            if (shape->fill.type) {
+                switch (shape->fill.type) {
+                case NSVG_PAINT_COLOR: {
+                    nanovg::nvgFillColor(nvg, getNVGColor(shape->fill.color));
+                } break;
+                case NSVG_PAINT_LINEAR_GRADIENT:
+                case NSVG_PAINT_RADIAL_GRADIENT: {
+                    nanovg::nvgFillPaint(nvg, getPaint(nvg, &shape->fill));
+                } break;
+                }
+                nanovg::nvgFill(nvg);
+            }
+
+            // Stroke shape
+            if (shape->stroke.type) {
+                nanovg::nvgStrokeWidth(nvg, shape->strokeWidth);
+                // strokeDashOffset, strokeDashArray, strokeDashCount not yet supported
+                nanovg::nvgLineCap(nvg, (NVGlineCap)shape->strokeLineCap);
+                nanovg::nvgLineJoin(nvg, (int)shape->strokeLineJoin);
+
+                switch (shape->stroke.type) {
+                case NSVG_PAINT_COLOR: {
+                    nanovg::nvgStrokeColor(nvg, getNVGColor(shape->stroke.color));
+                } break;
+                case NSVG_PAINT_LINEAR_GRADIENT: {
+                    nanovg::nvgStrokePaint(nvg, getPaint(nvg, &shape->stroke));
+                } break;
+                }
+                nanovg::nvgStroke(nvg);
+            }
+
+            nanovg::nvgRestore(nvg);
+        }
+    }
+
     void handleGuiMessage(NVGcontext* nvg, int const layer, t_symbol* sym, int const argc, t_atom* argv)
     {
+        auto const& colours = getThemeColours();
+
         auto const hashsym = hash(sym->s_name);
         // First check functions that don't need an active graphics context, of modify the active graphics context
         switch (hashsym) {
@@ -307,46 +550,12 @@ public:
             if (getLocalBounds().isEmpty())
                 break;
 
-            auto constexpr pixelScale = 2.0f;
-            auto const zoom = getValue<float>(zoomScale);
-            auto const imageScale = zoom * pixelScale;
-            int const imageWidth = std::ceil(getWidth() * imageScale);
-            int const imageHeight = std::ceil(getHeight() * imageScale);
-            if (!imageWidth || !imageHeight)
-                return;
+            nanovg::nvgSave(nvg);
 
-            framebuffers[layer].bind(nvg, imageWidth, imageHeight);
-
-            nvgViewport(0, 0, imageWidth, imageHeight);
-            nvgClear(nvg);
-            nvgBeginFrame(nvg, getWidth() * zoom, getHeight() * zoom, pixelScale);
-            nvgScale(nvg, zoom, zoom);
-            nvgSave(nvg);
             return;
         }
         case hash("lua_end_paint"): {
-            if (!framebuffers[layer].isValid())
-                return;
-
-            auto const pixelScale = nvgCurrentPixelScale(nvg);
-            auto const scale = getValue<float>(zoomScale) * pixelScale;
-            nvgGlobalScissor(nvg, 0, 0, getWidth() * scale, getHeight() * scale);
-            nvgEndFrame(nvg);
-            framebuffers[layer].unbind();
-            repaint();
-            return;
-        }
-        case hash("lua_resized"): {
-            if (argc >= 2) {
-                if (auto pdlua = ptr.get<t_pdlua>()) {
-                    pdlua->gfx.width = atom_getfloat(argv);
-                    pdlua->gfx.height = atom_getfloat(argv + 1);
-                }
-                MessageManager::callAsync([_object = SafePointer(object)] {
-                    if (_object)
-                        _object->updateBounds();
-                });
-            }
+            nanovg::nvgRestore(nvg);
             return;
         }
         default:
@@ -358,11 +567,11 @@ public:
             if (argc == 1) {
                 int const colourID = std::min<int>(atom_getfloat(argv), 2);
 
-                currentColour = StackArray<Colour, 3> { cnv->findColour(PlugDataColour::guiObjectBackgroundColourId),
-                    cnv->findColour(PlugDataColour::canvasTextColourId),
-                    cnv->findColour(PlugDataColour::guiObjectInternalOutlineColour) }[colourID];
-                nvgFillColor(nvg, convertColour(currentColour));
-                nvgStrokeColor(nvg, convertColour(currentColour));
+                currentColour = StackArray<Colour, 3> { colours.guiObjectBackgroundColour,
+                    colours.canvasTextColour,
+                    colours.guiObjectInternalOutlineColour }[colourID];
+                nanovg::nvgFillColor(nvg, nvgColour(currentColour));
+                nanovg::nvgStrokeColor(nvg, nvgColour(currentColour));
             }
             if (argc >= 3) {
                 Colour const color(static_cast<uint8>(atom_getfloat(argv)),
@@ -370,8 +579,8 @@ public:
                     static_cast<uint8>(atom_getfloat(argv + 2)));
 
                 currentColour = color.withAlpha(argc >= 4 ? atom_getfloat(argv + 3) : 1.0f);
-                nvgFillColor(nvg, convertColour(currentColour));
-                nvgStrokeColor(nvg, convertColour(currentColour));
+                nanovg::nvgFillColor(nvg, nvgColour(currentColour));
+                nanovg::nvgStrokeColor(nvg, nvgColour(currentColour));
             }
             break;
         }
@@ -383,11 +592,11 @@ public:
                 float const y2 = atom_getfloat(argv + 3);
                 float const lineThickness = atom_getfloat(argv + 4);
 
-                nvgStrokeWidth(nvg, lineThickness);
-                nvgBeginPath(nvg);
-                nvgMoveTo(nvg, x1, y1);
-                nvgLineTo(nvg, x2, y2);
-                nvgStroke(nvg);
+                nanovg::nvgStrokeWidth(nvg, lineThickness);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgMoveTo(nvg, x1, y1);
+                nanovg::nvgLineTo(nvg, x2, y2);
+                nanovg::nvgStroke(nvg);
             }
             break;
         }
@@ -398,9 +607,9 @@ public:
                 float const w = atom_getfloat(argv + 2);
                 float const h = atom_getfloat(argv + 3);
 
-                nvgBeginPath(nvg);
-                nvgEllipse(nvg, x + w / 2, y + h / 2, w / 2, h / 2);
-                nvgFill(nvg);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgEllipse(nvg, x + w / 2, y + h / 2, w / 2, h / 2);
+                nanovg::nvgFill(nvg);
             }
             break;
         }
@@ -412,10 +621,10 @@ public:
                 float const h = atom_getfloat(argv + 3);
                 float const lineThickness = atom_getfloat(argv + 4);
 
-                nvgStrokeWidth(nvg, lineThickness);
-                nvgBeginPath(nvg);
-                nvgEllipse(nvg, x + w / 2, y + h / 2, w / 2, h / 2);
-                nvgStroke(nvg);
+                nanovg::nvgStrokeWidth(nvg, lineThickness);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgEllipse(nvg, x + w / 2, y + h / 2, w / 2, h / 2);
+                nanovg::nvgStroke(nvg);
             }
             break;
         }
@@ -426,7 +635,7 @@ public:
                 float const w = atom_getfloat(argv + 2);
                 float const h = atom_getfloat(argv + 3);
 
-                nvgFillRect(nvg, x, y, w, h);
+                nanovg::nvgFillRect(nvg, x, y, w, h);
             }
             break;
         }
@@ -438,8 +647,8 @@ public:
                 float const h = atom_getfloat(argv + 3);
                 float const lineThickness = atom_getfloat(argv + 4);
 
-                nvgStrokeWidth(nvg, lineThickness);
-                nvgStrokeRect(nvg, x, y, w, h);
+                nanovg::nvgStrokeWidth(nvg, lineThickness);
+                nanovg::nvgStrokeRect(nvg, x, y, w, h);
             }
             break;
         }
@@ -451,7 +660,7 @@ public:
                 float const h = atom_getfloat(argv + 3);
                 float const cornerRadius = atom_getfloat(argv + 4);
 
-                nvgFillRoundedRect(nvg, x, y, w, h, cornerRadius);
+                nanovg::nvgFillRoundedRect(nvg, x, y, w, h, cornerRadius);
             }
             break;
         }
@@ -465,10 +674,10 @@ public:
                 float const cornerRadius = atom_getfloat(argv + 4);
                 float const lineThickness = atom_getfloat(argv + 5);
 
-                nvgStrokeWidth(nvg, lineThickness);
-                nvgBeginPath(nvg);
-                nvgRoundedRect(nvg, x, y, w, h, cornerRadius);
-                nvgStroke(nvg);
+                nanovg::nvgStrokeWidth(nvg, lineThickness);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgRoundedRect(nvg, x, y, w, h, cornerRadius);
+                nanovg::nvgStroke(nvg);
             }
             break;
         }
@@ -480,74 +689,171 @@ public:
                 float const y2 = atom_getfloat(argv + 3);
                 float const lineThickness = atom_getfloat(argv + 4);
 
-                nvgStrokeWidth(nvg, lineThickness);
-                nvgBeginPath(nvg);
-                nvgMoveTo(nvg, x1, y1);
-                nvgLineTo(nvg, x2, y2);
-                nvgStroke(nvg);
+                nanovg::nvgStrokeWidth(nvg, lineThickness);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgMoveTo(nvg, x1, y1);
+                nanovg::nvgLineTo(nvg, x2, y2);
+                nanovg::nvgStroke(nvg);
             }
             break;
         }
         case hash("lua_draw_text"): {
-            if (argc >= 5) {
+            if (argc >= 6) {
                 float const x = atom_getfloat(argv + 1);
                 float const y = atom_getfloat(argv + 2);
                 float const w = atom_getfloat(argv + 3);
                 float const fontHeight = atom_getfloat(argv + 4);
+                int const alignment = atom_getfloat(argv + 5);
+                auto const text = String::fromUTF8(atom_getsymbol(argv)->s_name);
 
-                nvgBeginPath(nvg);
-                nvgFontSize(nvg, fontHeight);
-                nvgTextAlign(nvg, NVG_ALIGN_TOP | NVG_ALIGN_LEFT);
-                nvgTextBox(nvg, x, y, w, atom_getsymbol(argv)->s_name, nullptr);
+                float ax = x, ay = y;
+
+                AttributedString txt;
+                txt.append(text, Fonts::getDefaultFont().withPointHeight(fontHeight), currentColour);
+
+                TextLayout layout;
+                layout.createLayout(txt, w);
+                auto textW = layout.getWidth();
+                auto textH = layout.getHeight();
+
+                switch (alignment) {
+                case 1:
+                case 4:
+                case 7:
+                    ax = x - textW / 2.0f;
+                    break; // CENTER_X
+                case 2:
+                case 5:
+                case 8:
+                    ax = x - textW;
+                    break; // RIGHT
+                default:
+                    break; // LEFT
+                }
+
+                switch (alignment) {
+                case 3:
+                case 4:
+                case 5:
+                    ay = y - textH / 2.0f;
+                    break; // MIDDLE
+                case 6:
+                case 7:
+                case 8:
+                    ay = y - textH;
+                    break; // BOTTOM
+                default:
+                    break; // TOP
+                }
+
+                auto* llgc = cnv->editor->getNanoLLGC();
+                Graphics g(*llgc);
+                NVGGraphicsContext::ScopedAnchoredDraw anchor(*llgc, getLocalBounds().toFloat());
+                layout.draw(g, Rectangle<float>(ax, ay, w, textH + 5));
             }
             break;
         }
         case hash("lua_fill_path"): {
             if (argc >= 2) {
-                nvgBeginPath(nvg);
-                nvgMoveTo(nvg, atom_getfloat(argv), atom_getfloat(argv + 1));
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgMoveTo(nvg, atom_getfloat(argv), atom_getfloat(argv + 1));
                 for (int i = 1; i < argc / 2; i++) {
                     float const x = atom_getfloat(argv + i * 2);
                     float const y = atom_getfloat(argv + i * 2 + 1);
-                    nvgLineTo(nvg, x, y);
+                    nanovg::nvgLineTo(nvg, x, y);
                 }
 
-                nvgClosePath(nvg);
-                nvgFill(nvg);
+                nanovg::nvgClosePath(nvg);
+                nanovg::nvgFill(nvg);
             }
             break;
         }
         case hash("lua_stroke_path"): {
             if (argc >= 3) {
-                nvgBeginPath(nvg);
+                nanovg::nvgBeginPath(nvg);
                 auto const strokeWidth = atom_getfloat(argv);
 
                 int const numPoints = (argc - 1) / 2;
-                nvgMoveTo(nvg, atom_getfloat(argv + 1), atom_getfloat(argv + 2));
+                nanovg::nvgMoveTo(nvg, atom_getfloat(argv + 1), atom_getfloat(argv + 2));
                 for (int i = 1; i < numPoints; i++) {
                     float const x = atom_getfloat(argv + i * 2 + 1);
                     float const y = atom_getfloat(argv + i * 2 + 2);
-                    nvgLineTo(nvg, x, y);
+                    nanovg::nvgLineTo(nvg, x, y);
                 }
 
-                nvgStrokeWidth(nvg, strokeWidth);
-                nvgStroke(nvg);
+                nanovg::nvgStrokeWidth(nvg, strokeWidth);
+                nanovg::nvgStroke(nvg);
             }
             break;
         }
         case hash("lua_fill_all"): {
             auto const bounds = getLocalBounds();
-            auto const outlineColour = isSelected ? cnv->selectedOutlineCol : cnv->objectOutlineCol;
+            auto const outlineColour = nvgColour(isSelected ? colours.objectSelectedOutlineColour : colours.objectOutlineColour);
 
-            nvgDrawRoundedRect(nvg, bounds.getX(), bounds.getY(), bounds.getWidth(), bounds.getHeight(), convertColour(currentColour), outlineColour, Corners::objectCornerRadius);
+            nanovg::nvgDrawRoundedRect(nvg, bounds.getX(), bounds.getY(), bounds.getWidth(), bounds.getHeight(), nvgColour(currentColour), outlineColour, getPlugDataLook(*this).getObjectCornerRadius());
+
+            // Make sure subsequent draw calls cannot render over the outline
+            nanovg::nvgIntersectRoundedScissor(nvg, bounds.getX() + 0.75f, bounds.getY() + 0.75f, bounds.getWidth() - 1.5f, bounds.getHeight() - 1.5f, getPlugDataLook(*this).getObjectCornerRadius());
             break;
         }
+        case hash("lua_draw_svg"): {
+            if (argc >= 3) {
+                float const x = atom_getfloat(argv + 1);
+                float const y = atom_getfloat(argv + 2);
+                nanovg::nvgSave(nvg);
+                nanovg::nvgTranslate(nvg, x, y);
+                drawSVG(nvg, atom_getsymbol(argv)->s_name);
+                nanovg::nvgRestore(nvg);
+            }
+            break;
+        }
+        case hash("lua_draw_image"): {
+            if (argc >= 3) {
+                auto* path = atom_getsymbol(argv)->s_name;
+                auto pathHash = hash(path);
+                if (!images.contains(pathHash) || !images.at(pathHash).first.isValid()) {
+                    auto findFile = [this](String const& name) {
+                        if (auto patch = cnv->patch.getPointer()) {
+                            if ((name.startsWith("/") || name.startsWith("./") || name.startsWith("../")) && File(name).existsAsFile()) {
+                                return File(name);
+                            }
 
+                            char dir[MAXPDSTRING];
+                            char* file;
+
+                            int const fd = canvas_open(patch.get(), name.toRawUTF8(), "", dir, &file, MAXPDSTRING, 0);
+                            if (fd >= 0) {
+                                sys_close(fd);
+                                return File(dir).getChildFile(file);
+                            }
+                        }
+                        return File(name);
+                    };
+
+                    auto file = findFile(String::fromUTF8(path));
+                    if (file.existsAsFile()) {
+                        auto image = ImageFileFormat::loadFrom(file);
+                        images[pathHash].first.loadJUCEImage(nvg, image);
+                        images[pathHash].second = image.getBounds();
+                    } else {
+                        return;
+                    }
+                }
+
+                float const x = atom_getfloat(argv + 1);
+                float const y = atom_getfloat(argv + 2);
+                nanovg::nvgSave(nvg);
+                nanovg::nvgTranslate(nvg, x, y);
+                images.at(pathHash).first.render(nvg, images[pathHash].second);
+                nanovg::nvgRestore(nvg);
+            }
+            break;
+        }
         case hash("lua_translate"): {
             if (argc >= 2) {
                 float const tx = atom_getfloat(argv);
                 float const ty = atom_getfloat(argv + 1);
-                nvgTranslate(nvg, tx, ty);
+                nanovg::nvgTranslate(nvg, tx, ty);
             }
             break;
         }
@@ -555,13 +861,13 @@ public:
             if (argc >= 2) {
                 float const sx = atom_getfloat(argv);
                 float const sy = atom_getfloat(argv + 1);
-                nvgScale(nvg, sx, sy);
+                nanovg::nvgScale(nvg, sx, sy);
             }
             break;
         }
         case hash("lua_reset_transform"): {
-            nvgRestore(nvg);
-            nvgSave(nvg);
+            nanovg::nvgRestore(nvg);
+            nanovg::nvgSave(nvg);
             break;
         }
         default:
@@ -569,66 +875,45 @@ public:
         }
     }
 
-    // We need to update the framebuffer in a place where the current graphics context is active (for multi-window support, thanks to Alex for figuring that out)
-    // but we also need to be outside of calls to beginFrame/endFrame
-    // So we have this separate callback function that occurs after activating the GPU context, but before starting the frame
-    void updateFramebuffers(NVGcontext* nvg) override
-    {
-        LuaGuiMessage guiMessage;
-        while (guiMessageQueue.try_dequeue(guiMessage)) {
-            if (guiMessage.layer == -1) // non-layer related messages
-            {
-                handleGuiMessage(nvg, guiMessage.layer, guiMessage.symbol, guiMessage.size, guiMessage.data.data());
-            } else {
-                guiCommandBuffer[guiMessage.layer].add(std::move(guiMessage));
-            }
-        }
-
-        for (auto& [layer, cmdBuf] : guiCommandBuffer) {
-            auto const* startMesage = pd->generateSymbol("lua_start_paint");
-            auto const* endMessage = pd->generateSymbol("lua_end_paint");
-
-            int startIdx = -1, endIdx = -1;
-            bool updateScene = false;
-            for (int i = cmdBuf.size() - 1; i >= 0; i--) {
-                if (cmdBuf[i].symbol == startMesage)
-                    startIdx = i;
-                if (cmdBuf[i].symbol == endMessage)
-                    endIdx = i + 1;
-
-                if (startIdx != -1 && endIdx != -1) {
-                    updateScene = true;
-                    break;
-                }
-            }
-
-            if (updateScene) {
-                if (endIdx > startIdx) {
-                    for (int i = startIdx; i < endIdx; i++) {
-                        handleGuiMessage(nvg, layer, cmdBuf[i].symbol, cmdBuf[i].size, cmdBuf[i].data.data());
-                    }
-                }
-                cmdBuf.erase(cmdBuf.begin(), cmdBuf.begin() + endIdx);
-            }
-
-            if (isSelected != object->isSelected() || !framebuffers[layer].isValid()) {
-                isSelected = object->isSelected();
-                sendRepaintMessage();
-            }
-        }
-    }
-
     static void drawCallback(void* target, int const layer, t_symbol* sym, int argc, t_atom* argv)
     {
         if (!target)
             return;
-
         auto const it = allDrawTargets.find(static_cast<t_pdlua*>(target));
-        if (it != allDrawTargets.end()) {
-            for (auto* object : it->second) {
-                object->guiMessageQueue.enqueue(LuaGuiMessage(layer, sym, argc, argv));
+        if (it == allDrawTargets.end())
+            return;
+        for (auto* object : it->second) {
+            if (sym == gensym("lua_resized")) {
+                if (argc >= 2) {
+                    if (auto pdlua = object->ptr.get<t_pdlua>()) {
+                        pdlua->gfx.width = atom_getfloat(argv);
+                        pdlua->gfx.height = atom_getfloat(argv + 1);
+                    }
+
+                    MessageManager::callAsync([_object = SafePointer(object->object)] {
+                        if (_object)
+                            _object->updateBounds();
+                    });
+                }
+                return;
+            }
+            object->guiCommandBuffer[layer].add({ sym, argc, argv });
+            if (sym == gensym("lua_end_paint")) {
+                object->frameSwapLock.enter();
+                object->currentFrame[layer] = object->guiCommandBuffer[layer];
+                object->frameSwapLock.exit();
+                object->guiCommandBuffer[layer].clear();
+                object->triggerAsyncUpdate();
             }
         }
+    }
+
+    ObjectParameters getParameters() override
+    {
+        auto parameters = ObjectBase::getParameters();
+        if (auto pdlua = ptr.get<t_pdlua>())
+            properties.load(pdlua.get(), parameters); // callback adds to this instead of object->objectParameters
+        return parameters;
     }
 
     void receiveObjectMessage(hash32 const symbol, SmallArray<pd::Atom> const& atoms) override
@@ -640,6 +925,10 @@ public:
 
     void openTextEditor(File fileToOpen)
     {
+        if (fileToOpen.getFileName() == "pd.lua") {
+            return;
+        }
+
         if (textEditor) {
             textEditor->toFront(true);
             return;
@@ -665,7 +954,10 @@ public:
                     if (result == 2) {
                         fileToOpen.replaceWithText(newText);
                         if (auto pdlua = _this->ptr.get<t_pd>()) {
-                            pd_typedmess(_this->pdluaxSymbol->s_thing, gensym("reload"), 0, nullptr);
+                            if (_this->pdluaxSymbol->s_thing)
+                                pd_typedmess(_this->pdluaxSymbol->s_thing, gensym("reload"), 0, nullptr);
+                            if (_this->pdluaxjitSymbol->s_thing)
+                                pd_typedmess(_this->pdluaxjitSymbol->s_thing, gensym("reload"), 0, nullptr);
                             // Recreate this object
                             if (auto patch = _this->cnv->patch.getPointer()) {
                                 pd::Interface::recreateTextObject(patch.get(), pdlua.cast<t_gobj>());
@@ -689,32 +981,60 @@ public:
 
             fileToOpen.replaceWithText(newText);
             if (auto pdlua = ptr.get<t_pd>()) {
-                pd_typedmess(pdluaxSymbol->s_thing, gensym("reload"), 0, nullptr);
+                if (pdluaxSymbol->s_thing)
+                    pd_typedmess(pdluaxSymbol->s_thing, gensym("reload"), 0, nullptr);
+                if (pdluaxjitSymbol->s_thing)
+                    pd_typedmess(pdluaxjitSymbol->s_thing, gensym("reload"), 0, nullptr);
             }
             sendRepaintMessage();
         };
 
         auto const scaleFactor = getApproximateScaleFactorForComponent(cnv->editor);
-        textEditor.reset(Dialogs::showTextEditorDialog(fileToOpen.loadFileAsString(), "lua: " + getText(), onClose, onSave, scaleFactor, true));
+        textEditor.reset(Dialogs::showTextEditorDialog(fileToOpen.loadFileAsString(), "lua: " + getText().toString(), onClose, onSave, scaleFactor, true, fileToOpen));
 
         if (textEditor)
             cnv->editor->openTextEditors.add_unique(ptr);
     }
+
+    void propertyChanged(Value& v) override
+    {
+        properties.propertyChanged(v);
+    }
 };
 
 // A non-GUI Lua object, that we would still like to have clickable for opening the editor
-class LuaTextObject final : public TextBase {
+class LuaTextObject final : public TextObjectBase {
 public:
     std::unique_ptr<Component> textEditor;
     std::unique_ptr<Dialog> saveDialog;
     t_symbol* pdluaxSymbol;
+    t_symbol* pdluaxjitSymbol;
+    LuaProperties properties;
 
     LuaTextObject(pd::WeakReference ptr, Object* object)
-        : TextBase(ptr, object)
+        : TextObjectBase(ptr, object)
+        , properties(this, &propertyListener)
     {
-        libpd_set_instance(&pd_maininstance);
-        pdluaxSymbol = gensym("pdluax");
-        pd->setThis();
+        if (auto pdlua = ptr.get<t_pdlua>()) {
+            libpd_set_instance(&pd_maininstance);
+            pdluaxSymbol = gensym("pdluax");
+            pdluaxjitSymbol = gensym("pdluaxjit");
+            pd->setThis();
+        }
+    }
+
+    ObjectParameters getParameters() override
+    {
+        auto parameters = ObjectBase::getParameters();
+        if (auto pdlua = ptr.get<t_pdlua>())
+            properties.load(pdlua.get(), parameters); // callback adds to this instead of object->objectParameters
+        return parameters;
+    }
+
+    void propertyChanged(Value& v) override
+    {
+        TextObjectBase::propertyChanged(v);
+        properties.propertyChanged(v);
     }
 
     void mouseDown(MouseEvent const& e) override
@@ -723,8 +1043,9 @@ public:
             return;
 
         if (getValue<bool>(object->locked)) {
-            if (auto obj = ptr.get<t_pd>()) {
-                pd->sendDirectMessage(obj.get(), "menu-open", {});
+            auto objectText = getText();
+            if (objectText != "pdlua" && objectText != "pdluax") {
+                sendMessage("menu-open");
             }
         }
     }
@@ -738,31 +1059,39 @@ public:
 
     void getMenuOptions(PopupMenu& menu) override
     {
-        menu.addItem("Open lua editor", [_this = SafePointer(this)] {
-            if (!_this)
-                return;
-            if (auto obj = _this->ptr.get<t_pd>()) {
-                _this->pd->sendDirectMessage(obj.get(), "menu-open", {});
-            }
-        });
+        auto objectText = getText();
+        if (objectText != "pdlua" && objectText != "pdluax") {
+            menu.addItem("Open lua editor", [_this = SafePointer(this)] {
+                if (!_this)
+                    return;
+                _this->sendMessage("menu-open");
+            });
 
-        menu.addItem("Reload lua object", [_this = SafePointer(this)] {
-            if (!_this)
-                return;
-            if (auto pdlua = _this->ptr.get<t_pd>()) {
-                // Reload the lua script
-                pd_typedmess(_this->pdluaxSymbol->s_thing, gensym("reload"), 0, nullptr);
+            menu.addItem("Reload lua object", [_this = SafePointer(this)] {
+                if (!_this)
+                    return;
+                if (auto pdlua = _this->ptr.get<t_pd>()) {
+                    // Reload the lua script
+                    if (_this->pdluaxSymbol->s_thing)
+                        pd_typedmess(_this->pdluaxSymbol->s_thing, gensym("reload"), 0, nullptr);
+                    if (_this->pdluaxjitSymbol->s_thing)
+                        pd_typedmess(_this->pdluaxjitSymbol->s_thing, gensym("reload"), 0, nullptr);
 
-                // Recreate this object
-                if (auto patch = _this->cnv->patch.getPointer()) {
-                    pd::Interface::recreateTextObject(patch.get(), pdlua.cast<t_gobj>());
+                    // Recreate this object
+                    if (auto patch = _this->cnv->patch.getPointer()) {
+                        pd::Interface::recreateTextObject(patch.get(), pdlua.cast<t_gobj>());
+                    }
                 }
-            }
-        });
+            });
+        }
     }
 
     void openTextEditor(File fileToOpen)
     {
+        if (fileToOpen == ProjectInfo::appDataDir.getChildFile("Extra").getChildFile("pdlua").getChildFile("pd.lua")) {
+            return;
+        }
+
         if (textEditor) {
             textEditor->toFront(true);
             return;
@@ -785,7 +1114,10 @@ public:
                     if (result == 2) {
                         fileToOpen.replaceWithText(newText);
                         if (auto pdlua = ptr.get<t_pd>()) {
-                            pd_typedmess(pdluaxSymbol->s_thing, gensym("reload"), 0, nullptr);
+                            if (pdluaxSymbol->s_thing)
+                                pd_typedmess(pdluaxSymbol->s_thing, gensym("reload"), 0, nullptr);
+                            if (pdluaxjitSymbol->s_thing)
+                                pd_typedmess(pdluaxjitSymbol->s_thing, gensym("reload"), 0, nullptr);
                             // Recreate this object
                             if (auto patch = cnv->patch.getPointer()) {
                                 pd::Interface::recreateTextObject(patch.get(), pdlua.cast<t_gobj>());
@@ -808,12 +1140,17 @@ public:
                 return;
             fileToOpen.replaceWithText(newText);
             if (auto pdlua = ptr.get<t_pd>()) {
-                pd_typedmess(pdluaxSymbol->s_thing, gensym("reload"), 0, nullptr);
+                if (pdluaxSymbol->s_thing) {
+                    if (pdluaxSymbol->s_thing)
+                        pd_typedmess(pdluaxSymbol->s_thing, gensym("reload"), 0, nullptr);
+                    if (pdluaxjitSymbol->s_thing)
+                        pd_typedmess(pdluaxjitSymbol->s_thing, gensym("reload"), 0, nullptr);
+                }
             }
         };
 
         auto const scaleFactor = getApproximateScaleFactorForComponent(cnv->editor);
-        textEditor.reset(Dialogs::showTextEditorDialog(fileToOpen.loadFileAsString(), "lua: " + getText(), onClose, onSave, scaleFactor, true));
+        textEditor.reset(Dialogs::showTextEditorDialog(fileToOpen.loadFileAsString(), "lua: " + getText().toString(), onClose, onSave, scaleFactor, true, fileToOpen));
 
         if (textEditor)
             cnv->editor->openTextEditors.add_unique(ptr);

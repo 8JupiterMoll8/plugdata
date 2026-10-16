@@ -62,7 +62,7 @@ public:
         : ObjectBase(ptr, object)
         , mouseListener(this)
     {
-        fillColour = nvgRGBA(24, 25, 32, 240);
+        fillColour = nanovg::nvgRGBA(24, 25, 32, 240);
 
         initParticles(particleCount);
 
@@ -276,7 +276,7 @@ public:
         auto const outlineColour = object->isSelected() && !cnv->isGraph ? cnv->selectedOutlineCol : cnv->objectOutlineCol;
 
         // 1. Draw rounded background container
-        nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), fillColour, outlineColour, Corners::objectCornerRadius);
+        nanovg::nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), fillColour, outlineColour, Corners::objectCornerRadius);
 
         // 2. Draw proximity web/network lines between nearby particles
         size_t const n = particles.size();
@@ -291,12 +291,12 @@ public:
 
                 if (dSq < maxDistSq) {
                     float const alpha = (1.0f - (dSq / maxDistSq)) * 140.0f;
-                    nvgBeginPath(nvg);
-                    nvgMoveTo(nvg, particles[i].x, particles[i].y);
-                    nvgLineTo(nvg, particles[j].x, particles[j].y);
-                    nvgStrokeColor(nvg, nvgRGBA(70, 160, 240, static_cast<unsigned char>(alpha)));
-                    nvgStrokeWidth(nvg, 1.0f);
-                    nvgStroke(nvg);
+                    nanovg::nvgBeginPath(nvg);
+                    nanovg::nvgMoveTo(nvg, particles[i].x, particles[i].y);
+                    nanovg::nvgLineTo(nvg, particles[j].x, particles[j].y);
+                    nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(70, 160, 240, static_cast<unsigned char>(alpha)));
+                    nanovg::nvgStrokeWidth(nvg, 1.0f);
+                    nanovg::nvgStroke(nvg);
                 }
             }
         }
@@ -307,28 +307,28 @@ public:
             float const speedRatio = std::clamp(speed / 8.0f, 0.0f, 1.0f);
 
             // Halo
-            nvgBeginPath(nvg);
-            nvgCircle(nvg, p.x, p.y, p.radius * 2.2f);
+            nanovg::nvgBeginPath(nvg);
+            nanovg::nvgCircle(nvg, p.x, p.y, p.radius * 2.2f);
             unsigned char const haloR = static_cast<unsigned char>(60.0f + speedRatio * 180.0f);
             unsigned char const haloG = static_cast<unsigned char>(160.0f - speedRatio * 80.0f);
             unsigned char const haloB = static_cast<unsigned char>(255.0f - speedRatio * 150.0f);
-            nvgFillColor(nvg, nvgRGBA(haloR, haloG, haloB, 45));
-            nvgFill(nvg);
+            nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(haloR, haloG, haloB, 45));
+            nanovg::nvgFill(nvg);
 
             // Core
-            nvgBeginPath(nvg);
-            nvgCircle(nvg, p.x, p.y, p.radius);
-            nvgFillColor(nvg, nvgRGBA(230, 245, 255, 230));
-            nvgFill(nvg);
+            nanovg::nvgBeginPath(nvg);
+            nanovg::nvgCircle(nvg, p.x, p.y, p.radius);
+            nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(230, 245, 255, 230));
+            nanovg::nvgFill(nvg);
         }
 
         // 4. Draw mouse attractor ripple when active
         if (isAttracting) {
-            nvgBeginPath(nvg);
-            nvgCircle(nvg, attractorPos.x, attractorPos.y, 14.0f);
-            nvgStrokeColor(nvg, nvgRGBA(255, 190, 80, 180));
-            nvgStrokeWidth(nvg, 1.5f);
-            nvgStroke(nvg);
+            nanovg::nvgBeginPath(nvg);
+            nanovg::nvgCircle(nvg, attractorPos.x, attractorPos.y, 14.0f);
+            nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(255, 190, 80, 180));
+            nanovg::nvgStrokeWidth(nvg, 1.5f);
+            nanovg::nvgStroke(nvg);
         }
     }
 

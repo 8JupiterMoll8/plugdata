@@ -7,9 +7,10 @@
 #pragma once
 #include <utility>
 extern "C" {
-#include <pd-lua/lua/lua.h>
-#include <pd-lua/lua/lauxlib.h>
-#include <pd-lua/lua/lualib.h>
+#include <pd-lua/luas/luajit/src/lua.h>
+#include <pd-lua/luas/luajit/src/lauxlib.h>
+#include <pd-lua/luas/luajit/src/lualib.h>
+#include <pd-lua/luas/lua-compat-5.3/c-api/compat-5.3.h>
 }
 
 #include "Components/BouncingViewport.h"
@@ -62,7 +63,7 @@ public:
         }
     }
 
-    void executeScript(juce::String const& filePath) const
+    void executeScript(String const& filePath) const
     {
         // Load the script without executing it
         if (luaL_loadfile(L, filePath.toRawUTF8()) == LUA_OK) {
@@ -73,12 +74,12 @@ public:
             // Execute the chunk, which will register all functions globally
             if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
                 char const* error = lua_tostring(L, -1);
-                pd->logError("Error executing Lua script: " + juce::String::fromUTF8(error));
+                pd->logError("Error executing Lua script: " + String::fromUTF8(error));
                 lua_pop(L, 1); // Remove error message from stack
             }
         } else {
             char const* error = lua_tostring(L, -1);
-            pd->logError("Error loading Lua script: " + juce::String::fromUTF8(error));
+            pd->logError("Error loading Lua script: " + String::fromUTF8(error));
             lua_pop(L, 1); // Remove error message from stack
         }
     }
@@ -183,6 +184,7 @@ class CommandInput final
     : public Component
     , public KeyListener
     , public CommandProcessor
+    , public FocusChangeListener
     , public MarkupDisplay::URLHandler {
 public:
     explicit CommandInput(PluginEditor* editor)
@@ -196,14 +198,14 @@ public:
         }
         lua = luas[editor->pd].get();
 
-        updateCommandInputTarget();
-
         commandInput.setMultiLine(true);
         commandInput.setReturnKeyStartsNewLine(false);
+        clearButton.setEnabled(false);
 
         commandInput.onTextChange = [this] {
             currentCommand = commandInput.getText();
-            updateSize();
+            clearButton.setEnabled(currentCommand.isNotEmpty());
+            updateHelpButtonState();
         };
 
         commandInput.onReturnKey = [this, pd = editor->pd] {
@@ -214,7 +216,7 @@ public:
             if (countBraces(text) > 0) {
                 commandInput.insertTextAtCaret("\n");
                 setConsoleTargetName("lua");
-                updateSize();
+                updateHelpButtonState();
                 return;
             }
 
@@ -236,35 +238,21 @@ public:
 
             commandInput.clear();
             updateCommandInputTarget();
-            updateSize();
-        };
-
-        markupDisplay.setURLHandler(this);
-        markupDisplay.setFont(Fonts::getVariableFont());
-        markupDisplay.setColour(PlugDataColour::canvasBackgroundColourId, findColour(PlugDataColour::levelMeterBackgroundColourId));
-        markupDisplay.setMarkupString(documentationString);
-        addChildComponent(&markupDisplay);
-
-        helpButton.setWantsKeyboardFocus(false);
-        helpButton.setClickingTogglesState(true);
-        helpButton.onClick = [this] {
-            markupDisplay.setVisible(helpButton.getToggleState());
-            updateSize();
+            updateHelpButtonState();
         };
 
         addAndMakeVisible(commandInput);
         addAndMakeVisible(clearButton);
-        addAndMakeVisible(helpButton);
 
         clearButton.setWantsKeyboardFocus(false);
         clearButton.onClick = [this] {
             commandInput.clear();
             currentCommand.clear();
             updateCommandInputTarget();
-            updateSize();
+            updateHelpButtonState();
         };
 
-        commandInput.setBorder({ 3, 3, 0, 0 });
+        commandInput.setBorder({ 4, 3, 0, 0 });
         commandInput.addKeyListener(this);
         commandInput.addMouseListener(this, false);
         commandInput.setFont(Fonts::getDefaultFont().withHeight(15));
@@ -276,13 +264,74 @@ public:
         if (currentCommand.isNotEmpty())
             commandInput.setText(currentCommand);
 
-        updateSize();
+        updateHelpButtonState();
+
+        updateHelperCommands();
+        Desktop::getInstance().addFocusChangeListener(this);
     }
 
-    void updateSize()
+    void updateHelperCommands()
     {
-        auto const width = std::clamp(commandInput.getTextWidth() + consoleTargetLength + 30, std::max(250, getWidth()), 400);
-        setSize(width, std::max(commandInput.getTextHeight(), 15) + 38 + (helpButton.getToggleState() ? 200 : 0));
+        auto isGlobalTarget = consoleTargetName == ">" || consoleTargetName == "lua >";
+        auto& currentHelpers = isGlobalTarget ? helperCommands : objectHelperCommands;
+
+        helperButtons.clear();
+
+        for (auto const& cmd : currentHelpers) {
+            auto* btn = helperButtons.add(new TextButton(cmd));
+            btn->setWantsKeyboardFocus(false);
+            btn->setColour(TextButton::buttonColourId, Colours::transparentBlack);
+            btn->setColour(TextButton::buttonOnColourId, Colours::transparentBlack);
+            btn->setColour(TextButton::textColourOffId, findColour(PlugDataColour::toolbarTextColourId));
+            btn->setColour(ComboBox::outlineColourId, Colours::transparentBlack);
+            btn->onClick = [this, cmd] {
+                commandInput.setText(cmd + " ", sendNotification);
+                commandInput.grabKeyboardFocus();
+                commandInput.moveCaretToEnd();
+            };
+            addChildComponent(btn);
+            btn->setVisible(hasInputFocus);
+        }
+        resized();
+    }
+
+    void updateHelpButtonState(bool animate = false)
+    {
+        int const height = getInputHeight() + (hasInputFocus ? helperRowHeight : 0);
+        auto newBounds = Rectangle<int>(getX(), getBounds().getBottom() - height, getWidth(), height);
+        if(newBounds != getBounds())
+        {
+            setBounds(newBounds);
+            if(auto* parent = getParentComponent())
+                parent->resized();
+        }
+
+
+        if (!animate) {
+            fadeAnimator.complete();
+            for (auto* btn : helperButtons)
+                btn->setVisible(hasInputFocus);
+            return;
+        }
+
+        fadeAnimator = ValueAnimatorBuilder { }
+                           .withEasing(Easings::createEaseInOut())
+                           .withDurationMs(180)
+                           .withValueChangedCallback([this](auto v) {
+                               auto fade = makeAnimationLimits(0.0f, 1.0f).lerp(hasInputFocus ? v : 1.0f - v);
+
+                               for (auto* btn : helperButtons) {
+                                   if(hasInputFocus) btn->setVisible(true);
+                                   btn->setAlpha(fade);
+                               }
+                           })
+                           .build();
+
+        animatorUpdater.addAnimator(fadeAnimator, [this]() {
+            for (auto* btn : helperButtons)
+                btn->setVisible(hasInputFocus);
+        });
+        fadeAnimator.start();
     }
 
     static int countBraces(String const& text)
@@ -308,13 +357,14 @@ public:
         if (auto* cnv = editor->getCurrentCanvas()) {
             auto objects = cnv->getSelectionOfType<Object>();
             if (objects.size() == 1) {
-                name = objects[0]->getType();
+                name = objects[0]->getType().toString();
             } else if (objects.size() > 1) {
                 name = "(" + String(objects.size()) + " selected)";
             }
         }
 
         setConsoleTargetName(name);
+        clearButton.setEnabled(currentCommand.isNotEmpty());
     }
 
     static UnorderedMap<String, Object*> getUniqueObjectNames(Canvas* cnv)
@@ -325,13 +375,13 @@ public:
             if (!object->gui)
                 continue;
 
-            auto type = object->gui->getType();
+            auto type = object->gui->getType().toString();
             if (allAtoms.contains(type)) {
                 auto& found = nameCount[type];
                 found++;
                 result[type + "_" + String(found)] = object;
             } else {
-                auto tokens = StringArray::fromTokens(object->gui->getText(), false);
+                auto tokens = StringArray::fromTokens(object->gui->getText().toString(), false);
                 if (tokens.size()) {
                     auto const isGui = allGuis.contains(tokens[0]);
                     auto const numArgs = std::min(isGui ? 1 : 2, tokens.size());
@@ -408,6 +458,18 @@ public:
         return parsedMessage;
     }
 
+    void showHelp()
+    {
+        auto markupDisplay = std::make_unique<MarkupDisplay::MarkupDisplayComponent>();
+        markupDisplay->setURLHandler(this);
+        markupDisplay->setFont(Fonts::getDefaultFont());
+        markupDisplay->setColour(PlugDataColour::canvasBackgroundColourId, getThemeColours(*this).popupMenuActiveBackgroundColour);
+        markupDisplay->setMarkupString(documentationString);
+        markupDisplay->setSize(250, 200);
+        markupDisplay->setVisible(true);
+        editor->showCalloutBox(std::move(markupDisplay), getScreenBounds().withSizeKeepingCentre(5, 30));
+    }
+
     SmallArray<std::pair<int, String>> executeCommand(pd::Instance* pd, String message) override
     {
         SmallArray<std::pair<int, String>> result;
@@ -480,10 +542,10 @@ public:
                 if (auto* cnv = getCurrentCanvas(true)) {
                     auto names = getUniqueObjectNames(cnv);
                     for (auto& [name, object] : names) {
-                        if (allGuis.contains(object->gui->getType())) {
+                        if (allGuis.contains(object->gui->getType().toString())) {
                             result.add({ 0, name });
                         } else {
-                            result.add({ 0, name + ": " + object->gui->getText() });
+                            result.add({ 0, name + ": " + object->gui->getText().toString() });
                         }
                     }
                 }
@@ -496,12 +558,12 @@ public:
                     for (auto& [name, object] : names) {
                         auto query = argv[1];
                         query = query.trimCharactersAtEnd("*"); // No need for wildcards here
-                        auto text = object->gui->getText();
+                        auto text = object->gui->getText().toString();
                         if (text.contains(query) || name.contains(query)) {
-                            if (allGuis.contains(object->gui->getType())) {
+                            if (allGuis.contains(object->gui->getType().toString())) {
                                 result.add({ 0, name });
                             } else {
-                                result.add({ 0, name + ": " + object->gui->getText() });
+                                result.add({ 0, name + ": " + text });
                             }
                         }
                     }
@@ -516,7 +578,7 @@ public:
             }
             case hash("clear"): {
                 commandHistory.clear();
-                editor->sidebar->clearConsole();
+                editor->consolePanel->clear();
                 if (auto* cnv = getCurrentCanvas()) {
                     cnv->deselectAll();
                     cnv->updateSidebarSelection();
@@ -531,7 +593,7 @@ public:
                     if (patchPtr && argv.size() == 1 && argv[1].containsOnly("0123456789-e.")) {
                         pd->sendDirectMessage(patchPtr.get(), argv[1].getFloatValue());
                     } else if (patchPtr && argv.size() == 1) {
-                        pd->sendDirectMessage(patchPtr.get(), argv[1], {});
+                        pd->sendDirectMessage(patchPtr.get(), argv[1], { });
                     } else if (patchPtr) {
                         SmallArray<pd::Atom> atoms;
                         for (int i = 2; i < argv.size(); i++) {
@@ -580,11 +642,15 @@ public:
 
                 case hash("?"):
                 case hash("help"):
-                    pd->logMessage(argv[2] + ": Show help");
+                    pd->logMessage(argv[1] + ": Show help");
                     break;
 
                 case hash("script"):
-                    pd->logMessage(argv[2] + ": Excute a Lua script from your search path. Usage: script <filename>");
+                    pd->logMessage(argv[1] + ": Excute a Lua script from your search path. Usage: script <filename>");
+                    break;
+
+                case hash("pd"):
+                    pd->logMessage(argv[1] + ": Send a message to pd. Usage: " + argv[1] + " <message>");
                     break;
 
                 case hash("ai"):
@@ -593,43 +659,45 @@ public:
 
                 case hash("cnv"):
                 case hash("canvas"):
-                    pd->logMessage(argv[2] + ": Send a message to current canvas. Usage: " + argv[2] + " <message>");
+                    pd->logMessage(argv[1] + ": Send a message to current canvas. Usage: " + argv[1] + " <message>");
                     break;
 
                 case hash("clear"):
-                    pd->logMessage(argv[2] + ": Clear console and command history");
+                    pd->logMessage(argv[1] + ": Clear console and command history");
                     break;
 
                 case hash("reset"):
-                    pd->logMessage(argv[2] + ": Reset Lua interpreter state");
+                    pd->logMessage(argv[1] + ": Reset Lua interpreter state");
                     break;
 
                 case hash("sel"):
                 case hash("select"):
-                    pd->logMessage(argv[2] + ": Select an object by ID or index. After selecting objects, you can send messages to them. Usage: " + argv[2] + " <id> or " + argv[2] + " <index>");
+                    pd->logMessage(argv[1] + ": Select an object by ID or index. After selecting objects, you can send messages to them. Usage: " + argv[1] + " <id> or " + argv[1] + " <index>");
                     break;
 
                 case hash(">"):
                 case hash("deselect"):
-                    pd->logMessage(argv[2] + ": Deselects all on current canvas");
+                    pd->logMessage(argv[1] + ": Deselects all on current canvas");
                     break;
 
                 case hash("ls"):
                 case hash("list"):
-                    pd->logMessage(argv[2] + ": Print a list of all object IDs on current canvas");
+                    pd->logMessage(argv[1] + ": Print a list of all object IDs on current canvas");
                     break;
 
                 case hash("find"):
                 case hash("search"):
-                    pd->logMessage(argv[2] + ": Search object IDs on current canvas. Usage: " + argv[2] + " <id>.");
+                    pd->logMessage(argv[1] + ": Search object IDs on current canvas. Usage: " + argv[1] + " <id>.");
                     break;
                 default:
+                    pd->logMessage("man: No manual for command: " + argv[1]);
                     break;
                 }
+                break;
             }
             case hash("?"):
             case hash("help"): {
-                helpButton.setToggleState(true, sendNotification);
+                showHelp();
                 break;
             }
             default: {
@@ -658,7 +726,7 @@ public:
                             if (objPtr && argv.size() && argv[0].containsOnly("0123456789-e.")) {
                                 pd->sendDirectMessage(objPtr, argv[0].getFloatValue());
                             } else if (objPtr && argv.size()) {
-                                pd->sendDirectMessage(objPtr, argv[0], {});
+                                pd->sendDirectMessage(objPtr, argv[0], { });
                             } else if (objPtr) {
                                 SmallArray<pd::Atom> atoms;
                                 for (int i = 1; i < argv.size(); i++) {
@@ -699,7 +767,7 @@ public:
                     if (argv.size() == 1 && argv[0].containsOnly("0123456789-e.")) {
                         pd->sendDirectMessage(obj->getPointer(), argv[0].getFloatValue());
                     } else if (argv.size() == 1) {
-                        pd->sendDirectMessage(obj->getPointer(), argv[0], {});
+                        pd->sendDirectMessage(obj->getPointer(), argv[0], { });
                     } else {
                         SmallArray<pd::Atom> atoms;
                         for (int i = 1; i < argv.size(); i++) {
@@ -719,56 +787,82 @@ public:
 
     ~CommandInput() override
     {
+        Desktop::getInstance().removeFocusChangeListener(this);
         onDismiss();
+    }
+
+    void globalFocusChanged(Component* focusedComponent) override
+    {
+        bool const focused = focusedComponent != nullptr
+            && (focusedComponent == &commandInput || isParentOf(focusedComponent));
+
+        if (focused == hasInputFocus)
+            return;
+
+        hasInputFocus = focused;
+        for (auto* btn : helperButtons)
+            btn->setVisible(false);
+
+        updateHelpButtonState(true); // animate on focus change
     }
 
     void handleURL(String const& url) override // when documentation links or codeblocks are clicked
     {
         commandInput.setText(url);
+        commandInput.moveCaretToEnd();
     }
 
     void paintOverChildren(Graphics& g) override
     {
-        auto bounds = getLocalBounds().withTrimmedTop(26);
+        auto const& colours = getThemeColours(*this);
 
-        if (helpButton.getToggleState()) {
-            bounds.removeFromTop(200);
-        }
-
-        g.setColour(findColour(PlugDataColour::dataColourId));
-        g.setFont(Fonts::getSemiBoldFont().withHeight(15));
-        g.drawText(consoleTargetName, bounds.getX() + 7, bounds.getY(), consoleTargetLength, bounds.getHeight() - 3, Justification::centredLeft);
-    }
-
-    void paint(Graphics& g) override
-    {
         auto bounds = getLocalBounds();
+        int const inputHeight = getInputHeight();
+        auto const inputRow = bounds.removeFromBottom(inputHeight);
+
+        g.setColour(colours.toolbarOutlineColour.withAlpha(0.8f));
+        g.drawHorizontalLine(getHeight() - inputHeight, 0, getWidth());
+
+        g.setColour(colours.sidebarTextColour);
         g.setFont(Fonts::getSemiBoldFont().withHeight(15));
-        g.setColour(findColour(PlugDataColour::panelTextColourId));
-        g.drawText("Command input", bounds.removeFromTop(22), Justification::centred);
-
-        bounds.removeFromTop(4);
-
-        if (helpButton.getToggleState()) {
-            bounds.removeFromTop(200);
-        }
-
-        g.setColour(findColour(PlugDataColour::levelMeterBackgroundColourId));
-        g.fillRoundedRectangle(bounds.reduced(2, 2).toFloat(), Corners::defaultCornerRadius);
+        g.drawText(consoleTargetName, inputRow.getX() + 9, inputRow.getY(),
+            consoleTargetLength, inputRow.getHeight() - 1, Justification::centredLeft);
     }
 
     void resized() override
     {
-        auto inputBounds = getLocalBounds().withTrimmedTop(26);
-        if (helpButton.getToggleState()) {
-            markupDisplay.setBounds(inputBounds.removeFromTop(196));
-            inputBounds.removeFromTop(4);
+        auto bounds = getLocalBounds();
+        int const inputHeight = getInputHeight();
+
+        if (hasInputFocus) {
+            auto const helperSpace = std::max(0, bounds.getHeight() - inputHeight);
+            auto helperBounds = bounds.removeFromTop(helperSpace);
+            helperBounds.removeFromLeft(8);
+            for (auto* btn : helperButtons) {
+                auto const w = CachedStringWidth<14>::calculateStringWidth(btn->getButtonText()) + 15;
+                btn->setBounds(helperBounds.removeFromLeft(w).reduced(1, 3));
         }
-        commandInput.setBounds(inputBounds.withTrimmedLeft(consoleTargetLength).withTrimmedRight(30));
-        auto const buttonBounds = inputBounds.removeFromRight(30);
-        clearButton.setBounds(buttonBounds);
-        helpButton.setBounds(getLocalBounds().removeFromTop(22).removeFromRight(22));
     }
+
+        auto const clearBounds = bounds.removeFromRight(32).removeFromBottom(inputHeight);
+        clearButton.setBounds(clearBounds);
+        commandInput.setBounds(bounds.withTrimmedLeft(consoleTargetLength + 4).removeFromBottom(inputHeight));
+    }
+
+    int getInputHeight() const
+    {
+        auto const border = commandInput.getBorder();
+        auto const viewportHeight = commandInput.getHeight() - border.getTopAndBottom();
+        auto const laidOutTextHeight = commandInput.getTextHeight();
+
+        if (laidOutTextHeight > viewportHeight)
+            return std::max(laidOutTextHeight + border.getTopAndBottom(), 30);
+
+        auto const endCaret = commandInput.getCaretRectangleForCharIndex(commandInput.getTotalNumChars());
+        return std::max(endCaret.getBottom() + border.getBottom(), 30);
+    }
+
+    String getConsoleTargetName() const { return consoleTargetName; }
 
     void setConsoleTargetName(String const& target)
     {
@@ -776,7 +870,9 @@ public:
         if (target == "empty")
             consoleTargetName = ">";
         consoleTargetLength = CachedStringWidth<15>::calculateStringWidth(consoleTargetName) + 4;
-        commandInput.setBounds(commandInput.getBounds().withLeft(consoleTargetLength));
+        commandInput.setBounds(commandInput.getBounds().withLeft(consoleTargetLength + 4));
+
+        updateHelperCommands();
         repaint();
     }
 
@@ -795,13 +891,14 @@ public:
         } else {
             currentHistoryIndex = commandHistory.size() - 1;
         }
+        commandInput.moveCaretToEnd();
     }
 
     bool keyPressed(KeyPress const& key, Component*) override
     {
         if (key.getKeyCode() == KeyPress::returnKey && key.getModifiers().isShiftDown()) {
             commandInput.insertTextAtCaret("\n");
-            updateSize();
+            updateHelpButtonState();
             return true;
         }
         if (key.getKeyCode() == KeyPress::upKey && !commandInput.getText().containsChar('\n')) {
@@ -812,17 +909,6 @@ public:
         if (key.getKeyCode() == KeyPress::downKey && !commandInput.getText().containsChar('\n')) {
             currentHistoryIndex--;
             setHistoryCommand();
-            return true;
-        }
-        if (key.getKeyCode() == KeyPress::escapeKey) {
-            if (auto* cnv = editor->getCurrentCanvas()) {
-                if (cnv->selectedComponents.getNumSelected() == 0) {
-                    editor->commandManager.invokeDirectly(CommandIDs::ShowCommandInput, false);
-                    return true;
-                }
-                cnv->deselectAll();
-                updateCommandInputTarget();
-            }
             return true;
         }
         if (key.getKeyCode() == KeyPress::spaceKey) {
@@ -844,20 +930,6 @@ public:
         return false;
     }
 
-    static std::deque<String>& getCommandHistory()
-    {
-        return commandHistory;
-    }
-
-    static void setCommandHistory(StringArray& commands)
-    {
-        commandHistory.clear();
-
-        for (auto& command : commands) {
-            commandHistory.push_back(command);
-        }
-    }
-
 private:
     PluginEditor* editor;
     static inline auto luas = UnorderedMap<pd::Instance*, std::unique_ptr<LuaExpressionParser>>();
@@ -874,7 +946,19 @@ private:
     SmallIconButton clearButton = SmallIconButton(Icons::ClearText);
     SmallIconButton helpButton = SmallIconButton(Icons::Help);
 
-    MarkupDisplay::MarkupDisplayComponent markupDisplay;
+    OwnedArray<TextButton> helperButtons;
+    bool hasInputFocus = false;
+    static constexpr int helperRowHeight = 26;
+
+    VBlankAnimatorUpdater animatorUpdater { this };
+    Animator fadeAnimator = ValueAnimatorBuilder { }.build();
+
+    static inline StringArray const helperCommands = {
+        "help", "man", "ls", "sel", "cnv", "pd"
+    };
+    static inline StringArray const objectHelperCommands = {
+        "deselect",
+    };
 
     static inline String documentationString = {
         "Command input allows you to quickly send commands to objects, pd or the canvas.\n"

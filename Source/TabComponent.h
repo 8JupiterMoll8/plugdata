@@ -1,7 +1,7 @@
 #pragma once
 
-#include "Utility/ZoomableDragAndDropContainer.h"
-#include "Utility/StackDropShadower.h"
+#include <juce_animation/juce_animation.h>
+#include "Utility/StackShadow.h"
 #include "PluginProcessor.h"
 
 class PluginMode;
@@ -9,6 +9,7 @@ class TabComponent final : public Component
     , public DragAndDropTarget
     , public AsyncUpdater {
     class TabBarButtonComponent;
+    class NewTabButton;
 
 public:
     explicit TabComponent(PluginEditor* editor);
@@ -19,19 +20,22 @@ public:
 
     void openHelpPatch(const URL& path);
     void openPatch(const URL& path);
+
     Canvas* openPatch(String const& patchContent);
-    Canvas* openPatch(pd::Patch::Ptr existingPatch, bool warnIfAlreadyOpen = false);
+    Canvas* openPatch(pd::Patch::Ptr existingPatch, bool warnIfAlreadyOpen = false, bool sendVisMessage = true);
     void openPatch();
 
-    void openInPluginMode(pd::Patch::Ptr patch);
+#if JUCE_IOS
+    void openPatchFolder();
+#endif
 
-    void renderArea(NVGcontext* nvg, Rectangle<int> bounds);
+    void openInPluginMode(pd::Patch::Ptr patch);
 
     void nextTab();
     void previousTab();
 
     void askToCloseTab(Canvas* cnv);
-    void closeTab(Canvas* cnv);
+    void closeTab(Canvas* cnv, bool sendVisMessage = true);
     void showTab(Canvas* cnv, int splitIndex = 0);
     void setActiveSplit(Canvas* cnv);
 
@@ -57,6 +61,7 @@ private:
     void sendTabUpdateToVisibleCanvases() const;
 
     void resized() override;
+    void paintOverChildren(Graphics& g) override;
 
     void moveToLeftSplit(TabComponent::TabBarButtonComponent const* tab);
     void moveToRightSplit(TabComponent::TabBarButtonComponent const* tab);
@@ -69,6 +74,7 @@ private:
     void itemDragEnter(SourceDetails const& dragSourceDetails) override;
     void itemDragExit(SourceDetails const& dragSourceDetails) override;
     void itemDragMove(SourceDetails const& dragSourceDetails) override;
+    bool shouldDrawDragImageWhenOver() override;
 
     void mouseDown(MouseEvent const& e) override;
     void mouseUp(MouseEvent const& e) override;
@@ -80,8 +86,8 @@ private:
 
     void showHiddenTabsMenu(int splitIndex);
 
-    StackArray<MainToolbarButton, 2> newTabButtons = { MainToolbarButton(Icons::Add), MainToolbarButton(Icons::Add) };
-    StackArray<MainToolbarButton, 2> tabOverflowButtons = { MainToolbarButton(Icons::ThinDown), MainToolbarButton(Icons::ThinDown) };
+    std::unique_ptr<NewTabButton> newTabButtons[2];
+    StackArray<MainToolbarButton, 2> tabOverflowButtons = { MainToolbarButton(Icons::ChrevronDown), MainToolbarButton(Icons::ChrevronDown) };
 
     StackArray<OwnedArray<TabBarButtonComponent>, 2> tabbars;
     StackArray<SafePointer<Canvas>, 2> splits = { nullptr, nullptr };
@@ -93,7 +99,9 @@ private:
 
     bool draggingOverTabbar = false;
     bool draggingSplitResizer = false;
+    bool animateTabs = false;
     Rectangle<int> splitDropBounds;
+    Rectangle<int> lastBounds;
 
     float splitProportion = 2;
     int splitSize = 0;
@@ -112,6 +120,7 @@ private:
         }
 
         void handleAsyncUpdate() override;
+
     private:
         TabComponent* parent;
     };

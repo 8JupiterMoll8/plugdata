@@ -4,282 +4,10 @@
  // WARRANTIES, see the file, "LICENSE.txt," in this distribution.
  */
 #pragma once
+#include "AllGuis.h"
 #include "Utility/GlobalMouseListener.h"
 #include <raw_keyboard_input/raw_keyboard_input.h>
 #include <Objects/ImplementationBase.h>
-
-// Wrapper for Pd's key, keyup and keyname objects
-class KeyObject final : public ImplementationBase
-    , public KeyListener
-    , public ModifierKeyListener {
-
-    SmallArray<KeyPress> heldKeys;
-    SmallArray<double> keyPressTimes;
-
-    int const shiftKey = -1;
-    int const commandKey = -2;
-    int const altKey = -3;
-    int const ctrlKey = -4;
-
-public:
-    enum KeyObjectType {
-        Key,
-        KeyUp,
-        KeyName
-    };
-    KeyObjectType type;
-    Component::SafePointer<PluginEditor> attachedEditor = nullptr;
-
-    KeyObject(t_gobj* ptr, t_canvas const* parent, PluginProcessor* pd, KeyObjectType const keyObjectType)
-        : ImplementationBase(ptr, parent, pd)
-        , type(keyObjectType)
-    {
-    }
-
-    ~KeyObject() override
-    {
-        if (attachedEditor) {
-            attachedEditor->removeModifierKeyListener(this);
-            attachedEditor->removeKeyListener(this);
-        }
-    }
-
-    void update() override
-    {
-        if (auto const* canvas = getMainCanvas(cnv, true)) {
-            attachedEditor = canvas->editor;
-            attachedEditor->addModifierKeyListener(this);
-            attachedEditor->addKeyListener(this);
-        }
-    }
-
-    bool keyPressed(KeyPress const& key, Component* originatingComponent) override
-    {
-        if (pd->isPerformingGlobalSync)
-            return false;
-
-        auto const keyIdx = heldKeys.index_of(key);
-        auto const alreadyDown = keyIdx >= 0;
-        auto const currentTime = Time::getMillisecondCounterHiRes();
-        if (alreadyDown && currentTime - keyPressTimes[keyIdx] > 80) {
-            keyPressTimes[keyIdx] = currentTime;
-        } else if (!alreadyDown) {
-            heldKeys.add(key);
-            keyPressTimes.add(currentTime);
-        } else {
-            return false;
-        }
-
-        int keyCode = key.getKeyCode();
-
-        if (type == Key) {
-            t_symbol* dummy;
-            parseKey(keyCode, dummy);
-            if (auto obj = ptr.get<t_pd>())
-                pd->sendDirectMessage(obj.get(), keyCode);
-        } else if (type == KeyName) {
-
-            String keyString = key.getTextDescription().fromLastOccurrenceOf(" ", false, false);
-
-            if (keyString.startsWith("#")) {
-                keyString = String::charToString(key.getTextCharacter());
-            }
-            if (!key.getModifiers().isShiftDown()) {
-                keyString = keyString.toLowerCase();
-            }
-
-            t_symbol* keysym = pd->generateSymbol(keyString);
-            parseKey(keyCode, keysym);
-
-            if (auto obj = ptr.get<t_pd>())
-                pd->sendDirectMessage(obj.get(), { 1.0f, keysym });
-        }
-
-        // Never claim the keypress
-        return false;
-    }
-
-    void shiftKeyChanged(bool const isHeld) override
-    {
-        if (isHeld)
-            keyPressed(KeyPress(shiftKey), nullptr);
-        else
-            keyStateChanged(false, nullptr);
-    }
-    void commandKeyChanged(bool const isHeld) override
-    {
-        if (isHeld)
-            keyPressed(KeyPress(commandKey), nullptr);
-        else
-            keyStateChanged(false, nullptr);
-    }
-    void altKeyChanged(bool const isHeld) override
-    {
-        if (isHeld)
-            keyPressed(KeyPress(altKey), nullptr);
-        else
-            keyStateChanged(false, nullptr);
-    }
-    void ctrlKeyChanged(bool const isHeld) override
-    {
-        if (isHeld)
-            keyPressed(KeyPress(ctrlKey), nullptr);
-        else
-            keyStateChanged(false, nullptr);
-    }
-
-    void spaceKeyChanged(bool const isHeld) override
-    {
-        if (isHeld)
-            keyPressed(KeyPress(KeyPress::spaceKey), nullptr);
-        else
-            keyStateChanged(false, nullptr);
-    }
-
-    bool keyStateChanged(bool const isKeyDown, Component* originatingComponent) override
-    {
-        if (pd->isPerformingGlobalSync)
-            return false;
-
-        if (!isKeyDown) {
-            for (int n = heldKeys.size() - 1; n >= 0; n--) {
-                auto key = heldKeys[n];
-
-                bool const keyDown = key.getKeyCode() < 0 ? isKeyDown : key.isCurrentlyDown();
-
-                if (!keyDown) {
-                    int keyCode = key.getKeyCode();
-
-                    if (type == KeyUp) {
-                        t_symbol* dummy;
-                        parseKey(keyCode, dummy);
-                        if (auto obj = ptr.get<t_pd>())
-                            pd->sendDirectMessage(obj.get(), keyCode);
-                    } else if (type == KeyName) {
-
-                        String keyString = key.getTextDescription().fromLastOccurrenceOf(" ", false, false);
-
-                        if (keyString.startsWith("#")) {
-                            keyString = String::charToString(key.getTextCharacter());
-                        }
-                        if (!key.getModifiers().isShiftDown()) {
-                            keyString = keyString.toLowerCase();
-                        }
-
-                        t_symbol* keysym = pd->generateSymbol(keyString);
-                        parseKey(keyCode, keysym);
-                        if (auto obj = ptr.get<t_pd>())
-                            pd->sendDirectMessage(obj.get(), { 0.0f, keysym });
-                    }
-
-                    keyPressTimes.remove_at(n);
-                    heldKeys.remove_at(n);
-                }
-            }
-        }
-
-        // Never claim the keychange
-        return false;
-    }
-
-    void parseKey(int& keynum, t_symbol*& keysym) const
-    {
-        if (keynum == shiftKey) {
-            keysym = pd->generateSymbol("Shift_L");
-            keynum = 0;
-        } else if (keynum == commandKey) {
-            keysym = pd->generateSymbol("Meta_L");
-            keynum = 0;
-        } else if (keynum == altKey) {
-            keysym = pd->generateSymbol("Alt_L");
-            keynum = 0;
-        } else if (keynum == ctrlKey) {
-            keysym = pd->generateSymbol("Control_L");
-            keynum = 0;
-        } else if (keynum == KeyPress::backspaceKey) {
-            keysym = pd->generateSymbol("BackSpace");
-            keynum = 8;
-        } else if (keynum == KeyPress::tabKey)
-            keynum = 9, keysym = pd->generateSymbol("Tab");
-        else if (keynum == KeyPress::returnKey)
-            keynum = 10, keysym = pd->generateSymbol("Return");
-        else if (keynum == KeyPress::escapeKey)
-            keynum = 27, keysym = pd->generateSymbol("Escape");
-        else if (keynum == KeyPress::spaceKey)
-            keynum = 32, keysym = pd->generateSymbol("Space");
-        else if (keynum == KeyPress::deleteKey)
-            keynum = 127, keysym = pd->generateSymbol("Delete");
-
-        else if (keynum == KeyPress::upKey)
-            keynum = 0, keysym = pd->generateSymbol("Up");
-        else if (keynum == KeyPress::downKey)
-            keynum = 0, keysym = pd->generateSymbol("Down");
-        else if (keynum == KeyPress::leftKey)
-            keynum = 0, keysym = pd->generateSymbol("Left");
-        else if (keynum == KeyPress::rightKey)
-            keynum = 0, keysym = pd->generateSymbol("Right");
-        else if (keynum == KeyPress::homeKey)
-            keynum = 0, keysym = pd->generateSymbol("Home");
-        else if (keynum == KeyPress::endKey)
-            keynum = 0, keysym = pd->generateSymbol("End");
-        else if (keynum == KeyPress::pageUpKey)
-            keynum = 0, keysym = pd->generateSymbol("Prior");
-        else if (keynum == KeyPress::pageDownKey)
-            keynum = 0, keysym = pd->generateSymbol("Next");
-        else if (keynum == KeyPress::F1Key)
-            keynum = 0, keysym = pd->generateSymbol("F1");
-        else if (keynum == KeyPress::F2Key)
-            keynum = 0, keysym = pd->generateSymbol("F2");
-        else if (keynum == KeyPress::F3Key)
-            keynum = 0, keysym = pd->generateSymbol("F3");
-        else if (keynum == KeyPress::F4Key)
-            keynum = 0, keysym = pd->generateSymbol("F4");
-        else if (keynum == KeyPress::F5Key)
-            keynum = 0, keysym = pd->generateSymbol("F5");
-        else if (keynum == KeyPress::F6Key)
-            keynum = 0, keysym = pd->generateSymbol("F6");
-        else if (keynum == KeyPress::F7Key)
-            keynum = 0, keysym = pd->generateSymbol("F7");
-        else if (keynum == KeyPress::F8Key)
-            keynum = 0, keysym = pd->generateSymbol("F8");
-        else if (keynum == KeyPress::F9Key)
-            keynum = 0, keysym = pd->generateSymbol("F9");
-        else if (keynum == KeyPress::F10Key)
-            keynum = 0, keysym = pd->generateSymbol("F10");
-        else if (keynum == KeyPress::F11Key)
-            keynum = 0, keysym = pd->generateSymbol("F11");
-        else if (keynum == KeyPress::F12Key)
-            keynum = 0, keysym = pd->generateSymbol("F12");
-
-        else if (keynum == KeyPress::numberPad0)
-            keynum = 48, keysym = pd->generateSymbol("0");
-        else if (keynum == KeyPress::numberPad1)
-            keynum = 49, keysym = pd->generateSymbol("1");
-        else if (keynum == KeyPress::numberPad2)
-            keynum = 50, keysym = pd->generateSymbol("2");
-        else if (keynum == KeyPress::numberPad3)
-            keynum = 51, keysym = pd->generateSymbol("3");
-        else if (keynum == KeyPress::numberPad4)
-            keynum = 52, keysym = pd->generateSymbol("4");
-        else if (keynum == KeyPress::numberPad5)
-            keynum = 53, keysym = pd->generateSymbol("5");
-        else if (keynum == KeyPress::numberPad6)
-            keynum = 54, keysym = pd->generateSymbol("6");
-        else if (keynum == KeyPress::numberPad7)
-            keynum = 55, keysym = pd->generateSymbol("7");
-        else if (keynum == KeyPress::numberPad8)
-            keynum = 56, keysym = pd->generateSymbol("8");
-        else if (keynum == KeyPress::numberPad9)
-            keynum = 57, keysym = pd->generateSymbol("9");
-
-        // on macOS, alphanumeric characters are offset
-#if JUCE_MAC || JUCE_WINDOWS
-        else if (keynum >= 65 && keynum <= 90) {
-            keynum += 32;
-        }
-#endif
-    }
-};
 
 class CanvasMouseObject final : public ImplementationBase
     , public pd::MessageListener
@@ -522,11 +250,11 @@ public:
             return;
 
         if (cnv) {
-            cnv->locked.removeListener(this);
+            cnv->zoomScale.removeListener(this);
         }
 
-        if (auto canvas_zoom = ptr.get<t_fake_zoom>()) {
-            cnv = getMainCanvas(canvas_zoom->x_canvas);
+        if (auto canvasZoom = ptr.get<t_fake_zoom>()) {
+            cnv = getMainCanvas(canvasZoom->x_canvas);
         }
 
         if (!cnv)
@@ -553,6 +281,53 @@ public:
     }
 };
 
+class CanvasEditObject final : public ImplementationBase
+    , public Value::Listener {
+
+    bool wasLocked;
+    Value isLocked = SynchronousValue();
+
+    Component::SafePointer<Canvas> cnv;
+
+public:
+    using ImplementationBase::ImplementationBase;
+
+    void update() override
+    {
+        if (pd->isPerformingGlobalSync)
+            return;
+
+        if (cnv) {
+            cnv->locked.removeListener(this);
+        }
+
+        if (auto canvasEdit = ptr.get<t_fake_edit>()) {
+            cnv = getMainCanvas(canvasEdit->x_canvas);
+        }
+
+        if (!cnv)
+            return;
+
+        isLocked.referTo(cnv->locked);
+        isLocked.addListener(this);
+        wasLocked = getValue<float>(isLocked);
+    }
+
+    void valueChanged(Value&) override
+    {
+        if (pd->isPerformingGlobalSync)
+            return;
+
+        auto const locked = getValue<float>(isLocked);
+        if (wasLocked != locked) {
+            if (auto edit = ptr.get<t_fake_edit>()) {
+                outlet_float(edit->x_obj.ob_outlet, !locked);
+            }
+            wasLocked = locked;
+        }
+    }
+};
+
 // Else "mouse" component
 class MouseObject final : public ImplementationBase
     , public Timer {
@@ -565,9 +340,15 @@ public:
         lastPosition = mouseSource.getScreenPosition();
         lastMouseDownTime = mouseSource.getLastMouseDownTime();
         startTimer(timerInterval);
-        if (auto mouse = this->ptr.get<t_fake_mouse>()) {
-            canvas = mouse->x_glist;
-        }
+
+        globalMouseListener.globalMouseWheel = [this](MouseEvent const& e, MouseWheelDetails const& details) {
+            if (auto obj = this->ptr.get<void>()) {
+                if (details.deltaY != 0.0f)
+                    this->pd->sendDirectMessage(obj.get(), "_wheel", { details.deltaY * 50.f, 0.f });
+                if (details.deltaX != 0.0f)
+                    this->pd->sendDirectMessage(obj.get(), "_wheel", { details.deltaX * 50.f, 1.f });
+            }
+        };
     }
 
     void timerCallback() override
@@ -609,12 +390,12 @@ public:
     }
 
     MouseInputSource mouseSource;
+    GlobalMouseListener globalMouseListener;
 
     Time lastMouseDownTime;
     Point<float> lastPosition;
     bool isDown = false;
     int const timerInterval = 30;
-    t_glist* canvas;
 };
 
 class MouseStateObject final : public ImplementationBase

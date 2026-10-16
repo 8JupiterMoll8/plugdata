@@ -14,18 +14,19 @@ class CommentObject final : public ObjectBase
     Value sizeProperty = SynchronousValue();
 
     std::unique_ptr<TextEditor> editor;
-    BorderSize<int> border = BorderSize<int>(1, 3, 0, 0);
+    BorderSize<int> border = BorderSize<int>(1, 0, 1, 0);
     String objectText;
 
-    CachedTextRender textRenderer;
+    TextLayout layout;
 
 public:
     CommentObject(pd::WeakReference obj, Object* object)
         : ObjectBase(obj, object)
     {
-        objectParameters.addParamInt("Width (chars)", cDimensions, &sizeProperty, true, false);
+        objectParameters.addParamInt("Width (chars)", cDimensions, &sizeProperty, 0, true, 0);
         locked = getValue<bool>(object->locked);
 
+        setViewportIgnoreDragFlag(false);
         updateTextLayout();
     }
 
@@ -36,7 +37,7 @@ public:
 
     void update() override
     {
-        objectText = getText().trimEnd();
+        objectText = getText().toString().trimEnd();
 
         if (auto obj = ptr.get<t_text>()) {
             sizeProperty = TextObjectHelper::getWidthInChars(obj.get());
@@ -47,21 +48,16 @@ public:
 
     void render(NVGcontext* nvg) override
     {
-        if (!editor) {
-            auto const textArea = border.subtractedFrom(getLocalBounds());
-            textRenderer.renderText(nvg, textArea.toFloat(), getImageScale());
+        auto const bounds = getLocalBounds();
+
+        auto& llgc = *cnv->editor->getNanoLLGC();
+        if (editor) {
+            llgc.renderComponent(*editor);
         } else {
-            imageRenderer.renderJUCEComponent(nvg, *editor, getImageScale());
-        }
-    }
-
-    void paintOverChildren(Graphics& g) override
-    {
-        auto const selected = object->isSelected();
-        if (!locked && (object->isMouseOverOrDragging(true) || selected) && !cnv->isGraph) {
-            g.setColour(cnv->editor->getLookAndFeel().findColour(selected ? PlugDataColour::objectSelectedOutlineColourId : PlugDataColour::objectOutlineColourId));
-
-            g.drawRoundedRectangle(getLocalBounds().toFloat().reduced(0.5f), Corners::objectCornerRadius, 1.0f);
+            Graphics g(llgc);
+            auto const textBounds = border.subtractedFrom(bounds).toFloat();
+            NVGGraphicsContext::ScopedAnchoredDraw anchor(llgc, textBounds);
+            layout.draw(g, textBounds);
         }
     }
 
@@ -105,20 +101,23 @@ public:
     void showEditor() override
     {
         if (editor == nullptr) {
-            editor.reset(TextObjectHelper::createTextEditor(object, 15));
-            editor->setLookAndFeel(&object->getLookAndFeel());
-            editor->setColour(TextEditor::textColourId, cnv->editor->getLookAndFeel().findColour(PlugDataColour::commentTextColourId));
+            editor.reset(TextObjectHelper::createTextEditor(object, Fonts::getDefaultFont().withHeight(14.5).withHorizontalScale(calculateHorizontalScale())));
+            editor->setColour(TextEditor::textColourId, getThemeColours().commentTextColour);
 
-            editor->setBorder(border.addedTo(BorderSize<int>(1, 0, 0, 0)));
-            editor->setBounds(getLocalBounds());
+            editor->setBorder(border);
+            editor->setBounds(getLocalBounds().withTrimmedRight(-4));
             editor->setText(objectText, false);
             editor->addListener(this);
             editor->addKeyListener(this);
             editor->selectAll();
-            editor->setJustification(Justification::topLeft);
+            editor->setJustification(Justification::centredLeft);
 
             addAndMakeVisible(editor.get());
             editor->grabKeyboardFocus();
+
+            editor->onTextChange = [this]() {
+                editor->applyFontToAllText(Fonts::getDefaultFont().withHeight(14.5).withHorizontalScale(calculateHorizontalScale()));
+            };
 
             editor->onFocusLost = [this] {
                 hideEditor();
@@ -144,21 +143,81 @@ public:
         return { x, y, textBounds.getWidth(), std::max<int>(textBounds.getHeight() + 4, 19) };
     }
 
+    static StringArray wrapTextLikePd(String const& text, int charWidth)
+    {
+        StringArray result;
+        auto lines = StringArray::fromLines(text);
+        for (auto const& line : lines) {
+            String currentLine;
+            auto words = StringArray::fromTokens(line, " ", "");
+            for (auto const& word : words) {
+                // Would adding this word exceed charWidth?
+                String candidate = currentLine.isEmpty() ? word : currentLine + " " + word;
+                if (candidate.length() <= charWidth) {
+                    currentLine = candidate;
+                } else {
+                    // Flush current line if we have one
+                    if (currentLine.isNotEmpty()) {
+                        result.add(currentLine);
+                        currentLine = { };
+                    }
+                    // Word itself may need to be split by char
+                    String remaining = word;
+                    while (remaining.length() > charWidth) {
+                        result.add(remaining.substring(0, charWidth));
+                        remaining = remaining.substring(charWidth);
+                    }
+                    currentLine = remaining;
+                }
+            }
+
+            if (currentLine.isNotEmpty())
+                result.add(currentLine);
+        }
+
+        return result;
+    }
+
+    float calculateHorizontalScale()
+    {
+        auto const objText = editor ? editor->getText() : objectText;
+
+        int fontWidth = 7;
+        int charWidth = 0;
+        if (auto obj = ptr.get<t_text>()) {
+            charWidth = TextObjectHelper::getWidthInChars(obj.get());
+            fontWidth = glist_fontwidth(cnv->patch.getRawPointer());
+        }
+
+        auto lines = charWidth ? wrapTextLikePd(objText, charWidth) : StringArray::fromLines(objText);
+        if (charWidth == 0) {
+            for (auto const& line : lines) {
+                charWidth = std::max(charWidth, line.length());
+            }
+        }
+
+        int const pdBoxWidth = charWidth * fontWidth;
+        int interMaxLineWidth = 0;
+        for (auto const& line : lines) {
+            int w = CachedFontStringWidth::get()->calculateStringWidth(Fonts::getDefaultFont().withHeight(14.5f), line) + 2;
+            interMaxLineWidth = jmax(interMaxLineWidth, w);
+        }
+
+        return std::clamp(static_cast<float>(pdBoxWidth) / static_cast<float>(interMaxLineWidth), 0.94f, 1.03f);
+    }
+
     Rectangle<int> getTextSize()
     {
         auto const objText = editor ? editor->getText() : objectText;
 
         int fontWidth = 7;
         int charWidth = 0;
-        if (auto obj = ptr.get<void>()) {
+        if (auto obj = ptr.get<t_text>()) {
             charWidth = TextObjectHelper::getWidthInChars(obj.get());
             fontWidth = glist_fontwidth(cnv->patch.getRawPointer());
         }
 
-        auto const textSize = textRenderer.getTextBounds();
-
-        // Calculating string width is expensive, so we cache all the strings that we already calculated the width for
-        int const idealWidth = CachedStringWidth<15>::calculateStringWidth(objText) + 8;
+        int const idealWidth = CachedFontStringWidth::get()->calculateStringWidth(Fonts::getDefaultFont().withHeight(14.5f).withHorizontalScale(calculateHorizontalScale()), objText) + 2;
 
         // We want to adjust the width so ideal text with aligns with fontWidth
         int const offset = idealWidth % fontWidth;
@@ -172,7 +231,7 @@ public:
             textWidth = std::max(charWidth, 2) * fontWidth + offset;
         }
 
-        return { textWidth, textSize.getHeight() };
+        return { textWidth, static_cast<int>(layout.getHeight()) };
     }
 
     void lookAndFeelChanged() override
@@ -184,16 +243,26 @@ public:
     {
         auto const objText = editor ? editor->getText() : objectText;
 
-        auto const colour = cnv->editor->getLookAndFeel().findColour(PlugDataColour::commentTextColourId);
-        int const textWidth = getTextSize().getWidth() - 8;
-        if (textRenderer.prepareLayout(objText, Fonts::getCurrentFont().withHeight(15), colour, textWidth, getValue<int>(sizeProperty), false)) {
-            repaint();
-        }
+        auto const colour = getThemeColours().commentTextColour;
+        int const textWidth = getTextSize().getWidth();
+
+        AttributedString attributedText(objText);
+        attributedText.setColour(colour);
+        attributedText.setFont(Fonts::getDefaultFont().withHeight(14.5f).withHorizontalScale(calculateHorizontalScale()));
+        attributedText.setJustification(Justification::centredLeft);
+        attributedText.setWordWrap(AttributedString::byChar);
+        layout.createLayout(attributedText, textWidth);
+        repaint();
     }
 
     std::unique_ptr<ComponentBoundsConstrainer> createConstrainer() override
     {
         return TextObjectHelper::createConstrainer(object);
+    }
+
+    ResizeDirection getAllowedResizeDirections() const override
+    {
+        return ResizeDirection::HorizontalOnly;
     }
 
     void setPdBounds(Rectangle<int> const b) override
@@ -202,7 +271,7 @@ public:
             auto* patch = cnv->patch.getRawPointer();
             pd::Interface::moveObject(patch, gobj.get(), b.getX(), b.getY());
 
-            if (TextObjectHelper::getWidthInChars(gobj.get())) {
+            if (TextObjectHelper::getWidthInChars(gobj.cast<t_text>())) {
                 TextObjectHelper::setWidthInChars(gobj.get(), b.getWidth() / glist_fontwidth(patch));
             }
         }
@@ -239,11 +308,6 @@ public:
             auto* canvas = cnv->patch.getRawPointer();
             pd::Interface::renameObject(canvas, comment.cast<t_gobj>(), cstr, value.getNumBytesAsUTF8());
         }
-    }
-
-    bool hideInGraph() override
-    {
-        return false;
     }
 
     void lock(bool const isLocked) override
@@ -286,7 +350,7 @@ public:
         updateTextLayout();
 
         if (editor) {
-            editor->setBounds(getLocalBounds());
+            editor->setBounds(getLocalBounds().withTrimmedRight(-4));
         }
     }
 

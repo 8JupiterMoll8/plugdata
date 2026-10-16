@@ -7,13 +7,10 @@
 #pragma once
 
 #include <unordered_map>
-#include <nanovg.h>
+#include <nanovg_async.h>
 #ifdef NANOVG_GL_IMPLEMENTATION
 #    include <juce_opengl/juce_opengl.h>
 using namespace juce::gl;
-#    undef NANOVG_GL_IMPLEMENTATION
-#    include <nanovg_gl_utils.h>
-#    define NANOVG_GL_IMPLEMENTATION 1
 #endif
 
 #include "ObjectGrid.h"          // move to impl
@@ -46,6 +43,7 @@ class TabComponent;
 class BorderResizer;
 class CanvasSearchHighlight;
 class ObjectsResizer;
+class CanvasViewport;
 
 struct ObjectDragState {
     bool wasDragDuplicated : 1 = false;
@@ -106,8 +104,8 @@ public:
     void focusGained(FocusChangeType cause) override;
     void focusLost(FocusChangeType cause) override;
 
-    void updateFramebuffers(NVGcontext* nvg) override;
     void performRender(NVGcontext* nvg, Rectangle<int> invalidRegion);
+    void renderResizeHandles(NVGcontext* nvg, NVGcolor colour, Rectangle<float> bounds);
 
     void resized() override;
 
@@ -163,7 +161,7 @@ public:
     void copySelection();
     void removeSelection();
     void removeSelectedConnections();
-    void dragAndDropPaste(String const& patchString, Point<int> mousePos, int patchWidth, int patchHeight, String const& name = String());
+    void dragAndDropPaste(String const& patchString, Point<int> mousePos, int patchWidth, int patchHeight);
     void pasteSelection();
     void duplicateSelection();
 
@@ -220,7 +218,7 @@ public:
 
     void receiveMessage(t_symbol* symbol, SmallArray<pd::Atom> const& atoms) override;
 
-    void activateCanvasSearchHighlight(Object* obj);
+    void activateCanvasSearchHighlight(Point<float> viewPos, Object* obj);
     void removeCanvasSearchHighlight();
 
     template<typename T>
@@ -235,7 +233,7 @@ public:
         return result;
     }
 
-    std::unique_ptr<Viewport> viewport = nullptr;
+    std::unique_ptr<CanvasViewport> viewport;
 
     bool connectingWithDrag : 1 = false;
     bool connectionCancelled : 1 = false;
@@ -280,8 +278,6 @@ public:
     bool needsSearchUpdate : 1 = false;
     bool altDown : 1 = false;
     bool shiftDown : 1 = false;
-
-    Rectangle<int> currentRenderArea;
 
     // PRD overlay: inline editor to reply to an AI note (double-click a note tag).
     std::unique_ptr<juce::TextEditor> mcpNoteEditor;
@@ -409,7 +405,7 @@ public:
     // glass behind cords/objects. Textures cache the decoded image in a
     // context-safe NVGImage (auto-invalidated when the NanoVG context restarts).
     struct RefImageTexture {
-        int handle = 0;            // nvg texture via nvgCreateImage (stb_image path)
+        NVGImage texture;          // uploaded via the async recorder (render thread owns the GPU)
         NVGcontext* ctx = nullptr; // context it was made on — recreated if it changes
     };
     std::unordered_map<std::string, RefImageTexture> mcpRefImageCache;
@@ -482,8 +478,6 @@ public:
 
     int lastObjectGridSize = -1;
 
-    NVGImage dotsLargeImage;
-
     Point<int> const canvasOrigin;
 
     std::unique_ptr<GraphArea> graphArea;
@@ -504,54 +498,15 @@ public:
     Component objectLayer;
     Component connectionLayer;
 
-    NVGImage resizeHandleImage;
     NVGImage presentationShadowImage;
-
-    NVGcolor canvasBackgroundCol;
-    Colour canvasBackgroundColJuce;
-    NVGcolor canvasMarkingsCol;
-    Colour canvasMarkingsColJuce;
-
-    Colour canvasTextColJuce;
-    NVGcolor presentationBackgroundCol;
-    NVGcolor presentationWindowOutlineCol;
-
-    NVGcolor lassoCol;
-    NVGcolor lassoOutlineCol;
-
-    // objectOutlineColourId
-    NVGcolor objectOutlineCol;
-    NVGcolor outlineCol;
-
-    NVGcolor graphAreaCol;
-
-    NVGcolor commentTextCol;
-
-    // guiObjectInternalOutlineColour
-    Colour guiObjectInternalOutlineColJuce;
-    NVGcolor guiObjectInternalOutlineCol;
-    NVGcolor guiObjectBackgroundCol;
-    Colour guiObjectBackgroundColJuce;
-
-    NVGcolor textObjectBackgroundCol;
-    NVGcolor transparentObjectBackgroundCol;
-
-    // objectSelectedOutlineColourId
-    NVGcolor selectedOutlineCol;
-    NVGcolor indexTextCol;
-    NVGcolor ioletLockedCol;
-
-    NVGcolor baseCol;
-    NVGcolor dataCol;
-    NVGcolor sigCol;
-    NVGcolor gemCol;
-
-    NVGcolor dataColBrighter;
-    NVGcolor sigColBrighter;
-    NVGcolor gemColBrigher;
-    NVGcolor baseColBrigher;
+    NVGImage resizeHandleImage;
+    NVGFramebuffer dotsLargeImage;
 
 private:
+    void updateCanvasDots(NVGcontext* nvg);
+
+    pd::Patch::Ptr getPatchToSave() const;
+
     void changeListenerCallback(ChangeBroadcaster* c) override;
 
     SelectedItemSet<WeakReference<Component>> previousSelectedComponents;

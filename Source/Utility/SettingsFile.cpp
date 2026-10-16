@@ -13,8 +13,6 @@
 #include "SettingsFile.h"
 #include "LookAndFeel.h"
 
-#include "Sidebar/CommandInput.h"
-
 SettingsFileListener::SettingsFileListener()
 {
     SettingsFile::getInstance()->listeners.add(this);
@@ -29,6 +27,8 @@ JUCE_IMPLEMENT_SINGLETON(SettingsFile)
 
 SettingsFile::~SettingsFile()
 {
+    stopTimer();
+    
     // Save current settings before quitting
     saveSettings();
 
@@ -37,25 +37,166 @@ SettingsFile::~SettingsFile()
 
 void SettingsFile::backupCorruptSettings()
 {
-    // Backup previous corrupt settings file, so users can fix if they want to
     auto const corruptSettings = getInstance()->settingsFile;
-
     auto backupLocation = corruptSettings.getParentDirectory().getChildFile(".settings_damaged").getFullPathName();
-    int counter = 1;
-
-    // Increment backup settings file name if previous exists
-    while (File(backupLocation).existsAsFile()) {
-        backupLocation = corruptSettings.getParentDirectory().getChildFile(".settings_damaged_" + String(counter)).getFullPathName();
-        counter++;
-    }
-
     backupSettingsLocation = backupLocation;
-    corruptSettings.moveFileTo(backupLocation);
+    OSUtils::moveFileTo(corruptSettings, backupLocation);
 }
 
 String SettingsFile::getCorruptBackupSettingsLocation()
 {
     return backupSettingsLocation;
+}
+
+// Temporary function for backward compatibility with the old xml theme format
+// TODO: remove before v1.0
+DynamicObject::Ptr SettingsFile::xmlThemeToJson(ValueTree tree)
+{
+    DynamicObject::Ptr result { new DynamicObject };
+    result->setProperty("name", tree.getProperty("theme"));
+
+    auto intProperties = StringArray { "connection_style" };
+    auto boolProperties = StringArray { "straight_connections", "connection_look", "square_iolets", "square_object_corners", "iolet_spacing_edge", "object_flag_outlined", "highlight_syntax" };
+    for (int i = 0; i < tree.getNumProperties(); ++i) {
+        auto const name = tree.getPropertyName(i);
+        auto const value = tree.getProperty(name);
+
+        if (intProperties.contains(name)) {
+            result->setProperty(name, static_cast<int>(tree.getProperty(name)));
+        } else if (boolProperties.contains(name)) {
+            result->setProperty(name, static_cast<bool>(tree.getProperty(name)));
+        } else {
+            result->setProperty(name, tree.getProperty(name));
+        }
+    }
+    result->removeProperty("theme");
+    return result;
+}
+
+// Temporary function to convert to the new settings format
+// Remove before v1.0!
+static var convertFromLegacyFormat(ValueTree s)
+{
+    auto* root = new DynamicObject();
+    var result(root);
+
+    auto copyInt = [&](char const* xmlName, char const* jsonName) {
+        if (s.hasProperty(xmlName))
+            root->setProperty(jsonName, static_cast<int>(s[xmlName]));
+    };
+    auto copyBool = [&](char const* xmlName, char const* jsonName) {
+        if (s.hasProperty(xmlName))
+            root->setProperty(jsonName, static_cast<bool>(static_cast<int>(s[xmlName])));
+    };
+    auto copyFloat = [&](char const* xmlName, char const* jsonName) {
+        if (s.hasProperty(xmlName))
+            root->setProperty(jsonName, static_cast<float>(s[xmlName]));
+    };
+    auto copyString = [&](char const* xmlName, char const* jsonName) {
+        if (s.hasProperty(xmlName))
+            root->setProperty(jsonName, s[xmlName].toString());
+    };
+
+    copyString("browser_path", "browser_path");
+    copyString("theme", "theme");
+    copyString("default_font", "default_font");
+
+    copyInt("oversampling", "oversampling");
+    copyInt("limiter_threshold", "limiter_threshold");
+    copyInt("internal_synth", "internal_synth");
+    copyInt("grid_type", "grid_type");
+    copyInt("grid_size", "grid_size");
+    copyInt("cpu_meter_mapping_mode", "cpu_meter_mapping_mode");
+    copyInt("autosave_interval", "autosave_interval");
+    copyInt("show_minimap", "show_minimap");
+    copyInt("last_welcome_panel", "last_welcome_panel");
+
+    copyFloat("global_scale", "global_scale");
+    copyFloat("default_zoom", "default_zoom");
+
+    copyBool("hvcc_mode", "hvcc_mode");
+    copyBool("protected", "protected");
+    copyBool("debug_connections", "debug_connections");
+    copyBool("grid_enabled", "grid_enabled");
+    copyBool("native_window", "native_window");
+    copyBool("native_file_dialog", "native_file_dialog");
+    copyBool("autoconnect", "autoconnect");
+    copyBool("centre_resized_canvas", "centre_resized_canvas");
+    copyBool("show_all_audio_device_rates", "show_all_audio_device_rates");
+    copyBool("autosave_enabled", "autosave_enabled");
+    copyBool("patch_downwards_only", "patch_downwards_only");
+    copyBool("search_order", "search_order");
+    copyBool("search_xy_show", "search_xy_show");
+    copyBool("search_index_show", "search_index_show");
+    copyBool("open_patches_in_window", "open_patches_in_window");
+    copyBool("cmd_click_switches_mode", "cmd_click_switches_mode");
+    copyBool("touch_mode", "touch_mode");
+
+    // Paths
+    Array<var> paths;
+    if (auto pathsTree = s.getChildWithName("Paths"); pathsTree.isValid())
+        for (auto path : pathsTree)
+            paths.add(path["Path"].toString());
+    root->setProperty("paths", paths);
+
+    // Keymap
+    if (auto keymapTree = s.getChildWithName("KeyMap"); keymapTree.isValid()) {
+        auto keyxml = keymapTree["keyxml"].toString();
+        auto encoded = Base64::toBase64(keyxml.toRawUTF8(), keyxml.getNumBytesAsUTF8());
+        root->setProperty("keymap", encoded);
+    }
+
+    // Themes
+    Array<var> themes;
+    if (auto colourThemes = s.getChildWithName("ColourThemes"); colourThemes.isValid())
+        for (auto themeTree : colourThemes)
+            themes.add(var(SettingsFile::xmlThemeToJson(themeTree).get()));
+    root->setProperty("themes", themes);
+
+    // Active themes
+    if (auto sel = s.getChildWithName("SelectedThemes"); sel.isValid()) {
+        Array<var> active;
+        active.add(sel["first"].toString());
+        active.add(sel["second"].toString());
+        root->setProperty("active_themes", active);
+    }
+
+    // Recently opened
+    Array<var> recent;
+    if (auto recentTree = s.getChildWithName("RecentlyOpened"); recentTree.isValid()) {
+        for (auto item : recentTree) {
+            DynamicObject::Ptr entry = new DynamicObject();
+            entry->setProperty("path", item["Path"].toString());
+            entry->setProperty("time", static_cast<int64>(item["Time"]));
+            entry->setProperty("pinned", static_cast<bool>(item["Pinned"]));
+#if JUCE_IOS
+            if (item.hasProperty("Bookmark")) {
+                entry->setProperty("bookmark", item["Bookmark"].toString());
+            }
+#endif
+            recent.add(var(entry.get()));
+        }
+    }
+    root->setProperty("recently_opened", recent);
+
+    // Libraries
+    Array<var> libraries;
+    if (auto libTree = s.getChildWithName("Libraries"); libTree.isValid())
+        for (auto lib : libTree)
+            libraries.add(lib["Path"].toString());
+    root->setProperty("libraries", libraries);
+
+    // Overlays
+    if (auto overlaysTree = s.getChildWithName("Overlays"); overlaysTree.isValid()) {
+        DynamicObject::Ptr overlays = new DynamicObject();
+        overlays->setProperty("edit", static_cast<int>(overlaysTree["edit"]));
+        overlays->setProperty("lock", static_cast<int>(overlaysTree["lock"]));
+        overlays->setProperty("run", static_cast<int>(overlaysTree["run"]));
+        overlays->setProperty("alt", static_cast<int>(overlaysTree["alt"]));
+        root->setProperty("overlays", var(overlays.get()));
+    }
+
+    return result;
 }
 
 SettingsFile* SettingsFile::initialise()
@@ -65,61 +206,88 @@ SettingsFile* SettingsFile::initialise()
 
     isInitialised = true;
 
-// #define DEBUG_CORRUPT_SETTINGS_DIALOG
-#ifdef DEBUG_CORRUPT_SETTINGS_DIALOG
-    backupSettingsLocation = ProjectInfo::appDataDir.getChildFile(".settings_damaged").getFullPathName();
+#if ENABLE_TESTING
+    // Run the test suite against a disposable copy of the user's settings:
+    // tests get realistic settings to read, but every write goes to a temp
+    // file, so the real settings.json is never modified
+    auto const testSettingsFile = File::createTempFile(".json");
+    if (settingsFile.existsAsFile())
+        settingsFile.copyFileTo(testSettingsFile);
+    settingsFile = testSettingsFile;
+    lockFile = settingsFile.getSiblingFile(settingsFile.getFileNameWithoutExtension() + ".lock");
+    oldSettingsFile = File();
 #endif
+
+    FileSystemWatcher::addGlobalIgnorePath(lockFile);
+    FileSystemWatcher::addGlobalIgnorePath(settingsFile);
 
     // Check if settings file exists, if not, create the default
     // This is expected behaviour for first run / deleting plugdata folder
     // No need to alert the user to this
-    if (!settingsFile.existsAsFile()) {
-        settingsFile.create();
+    if (!settingsFile.existsAsFile() && !oldSettingsFile.existsAsFile()) {
+        for (auto& [name, var] : defaultSettings) {
+            settings[name] = var.clone();
+        }
+        settings["themes"] = JSON::parse(PlugDataLook::defaultThemesJSON);
+        saveSettings();
     } else {
-        std::unique_ptr<XmlElement> const xmlElement(XmlDocument::parse(settingsFile.loadFileAsString()));
+        // Start out with default settings, when overwrite with whatever settings we find in the settings file
+        for (auto& [name, var] : defaultSettings) {
+            if (name == "themes") {
+                settings["themes"] = JSON::fromString(PlugDataLook::defaultThemesJSON);
+                continue;
+            }
+            settings[name] = var.clone();
+        }
+        auto settingsFileToUse = settingsFile;
+        bool xmlSettings = false;
+        if (oldSettingsFile.existsAsFile() && !settingsFile.existsAsFile()) {
+            settingsFileToUse = oldSettingsFile;
+            xmlSettings = true;
+        }
 
-        // First check if settings XML is valid
-        if (verify(xmlElement.get())) {
-            // Use user .settings file
-            settingsTree = ValueTree::fromXml(*xmlElement);
-            // Overwrite previous settings_bak with current good settings (don't touch it after this)
-            settingsFile.copyFileTo(settingsFile.getFullPathName() + "_bak");
+        auto const newSettings = settingsFileToUse.loadFileAsString();
+        var settingsToLoad;
+        if (xmlSettings) {
+            settingsToLoad = convertFromLegacyFormat(ValueTree::fromXml(newSettings));
         } else {
-            // Settings are invalid! Backup old file as .settings_damaged
-            backupCorruptSettings();
+            settingsToLoad = JSON::fromString(newSettings);
+        }
 
-            // See if there is a .settings_bak backup settings file from last run
-            auto const backupSettings = File(settingsFile.getFullPathName() + "_bak");
-            if (backupSettings.existsAsFile()) {
-                std::unique_ptr<XmlElement> const xmlSettingsBackup(XmlDocument::parse(backupSettings.loadFileAsString()));
-                if (verify(xmlSettingsBackup.get())) {
-                    // If backup settings are good, use them
-                    settingsTree = ValueTree::fromXml(*xmlSettingsBackup);
-                    settingsState = BackupSettings;
-                } else {
-                    // Use default plugdata settings (worst case scenario)
-                    settingsFile.create();
-                    settingsState = DefaultSettings;
+        bool validSettings = settingsToLoad.isObject();
+        if (validSettings) {
+            for (auto& property : settingsToLoad.getDynamicObject()->getProperties()) {
+                auto name = property.name.toString();
+                if (settings.contains(name) && !property.value.hasSameTypeAs(settings.at(name))) {
+                    validSettings = false;
+                    break;
                 }
-            } else {
-                // Use default plugdata settings (worst case scenario)
-                settingsFile.create();
-                settingsState = DefaultSettings;
             }
         }
-    }
 
-    // Make sure all the properties exist
-    for (auto& [propertyName, propertyValue] : defaultSettings) {
-        // If it doesn't exist, set it to the default value
-        if (!settingsTree.hasProperty(propertyName) || settingsTree.getProperty(propertyName).toString() == "") {
-            settingsTree.setProperty(propertyName, propertyValue, nullptr);
+        /* TODO: enable after release
+        if (!validSettings) {
+            backupCorruptSettings();
+            auto backupFile = settingsFile.getSiblingFile(".settings_bak");
+            settingsToLoad = JSON::fromString(backupFile.loadFileAsString());
+            jassertfalse;
+        } */
+
+        auto* jsonObject = settingsToLoad.getDynamicObject();
+        if (jsonObject) {
+            for (auto& var : jsonObject->getProperties()) {
+                if (var.name == Identifier("themes")) {
+                    if (auto* themes = var.value.getArray())
+                        loadThemeFromDiff(getProperty<VarArray>("themes"), *themes);
+                    continue;
+            }
+                settings[var.name.toString()] = var.value;
         }
     }
-    // Make sure all the child trees exist
-    for (auto& childName : childTrees) {
-        if (!settingsTree.getChildWithName(childName).isValid()) {
-            settingsTree.appendChild(ValueTree(childName), nullptr);
+
+        if (oldSettingsFile.existsAsFile()) {
+            saveSettings();
+            oldSettingsFile.deleteFile();
         }
     }
 
@@ -127,7 +295,11 @@ SettingsFile* SettingsFile::initialise()
     initialiseThemesTree();
     initialiseOverlayTree();
 
-    initialiseCommandHistory();
+    // First-run settings need the same notifications as settings loaded from disk.
+    for (auto& [name, value] : settings)
+        value.addListener(this);
+
+    setProperty("version", PLUGDATA_VERSION);
 
 #if JUCE_IOS
     if (!ProjectInfo::isStandalone) {
@@ -135,7 +307,7 @@ SettingsFile* SettingsFile::initialise()
     } else if (OSUtils::isIPad()) {
         Desktop::getInstance().setGlobalScaleFactor(1.125f);
     } else {
-        Desktop::getInstance().setGlobalScaleFactor(0.825f);
+        Desktop::getInstance().setGlobalScaleFactor(1.0f);
     }
 
 #else
@@ -143,57 +315,7 @@ SettingsFile* SettingsFile::initialise()
 #endif
     saveSettings();
 
-    settingsTree.addListener(this);
-
     return this;
-}
-
-bool SettingsFile::verify(XmlElement const* xml)
-{
-    // Basic settings file verification
-    // Verify if the xml is valid, and tags match correct name / order
-    // Adjust tags here if future layout changes
-
-    if (xml == nullptr || xml->getTagName() != "SettingsTree")
-        return false;
-
-    // These must at least be present in a valid save file!
-    StringArray expectedNames = {
-        "Paths",
-        "KeyMap",
-        "ColourThemes",
-        "SelectedThemes",
-        "RecentlyOpened",
-        "Libraries",
-        "Overlays"
-    };
-
-    StringArray const optionalNames {
-        "HeavyState",
-        "LastBrowserPaths",
-        "CommandHistory",
-        "EnabledMidiInputPorts",
-        "EnabledMidiOutputPorts"
-    };
-
-    // Check if all expected elements are present and in the correct order
-    bool unexpectedName = false;
-    for (auto const* child = xml->getFirstChildElement(); child != nullptr; child = child->getNextElement()) {
-        auto name = child->getTagName();
-        if (expectedNames.contains(name)) {
-            expectedNames.removeString(name);
-        } else if (!optionalNames.contains(name)) {
-            std::cerr << "Unexpected settings file entry: " << name << std::endl;
-            unexpectedName = true;
-        }
-    }
-
-    for (auto const& expectedName : expectedNames) {
-        std::cerr << "Expected settings file entry not found: " << expectedName << std::endl;
-    }
-
-    // Check if all expected elements were found
-    return expectedNames.isEmpty() && !unexpectedName;
 }
 
 SettingsFile::SettingsState SettingsFile::getSettingsState() const
@@ -208,38 +330,47 @@ void SettingsFile::resetSettingsState()
 
 void SettingsFile::startChangeListener()
 {
+    settingsFileWatcher.unignorePath(settingsFile);
     settingsFileWatcher.addFolder(settingsFile.getParentDirectory());
     settingsFileWatcher.addListener(this);
 }
 
-ValueTree SettingsFile::getKeyMapTree() const
+void SettingsFile::setKeyMap(String const& keymap)
 {
-    return settingsTree.getChildWithName("KeyMap");
+    settings["keymap"] = Base64::toBase64(keymap);
 }
 
-ValueTree SettingsFile::getColourThemesTree() const
+String SettingsFile::getKeyMap() const
 {
-    return settingsTree.getChildWithName("ColourThemes");
+    MemoryOutputStream memOut;
+    Base64::convertFromBase64(memOut, settings.at("keymap").toString());
+    return memOut.toString();
 }
 
-ValueTree SettingsFile::getPathsTree() const
+DynamicObject::Ptr SettingsFile::getTheme(String const& name) const
 {
-    return settingsTree.getChildWithName("Paths");
+    for (auto& theme : getProperty<VarArray>("themes")) {
+        auto themeObject = theme.getDynamicObject();
+        if (themeObject->getProperty("name") == name) {
+            return themeObject;
+        }
+    }
+
+    return nullptr;
 }
 
-ValueTree SettingsFile::getSelectedThemesTree() const
+DynamicObject::Ptr SettingsFile::getCurrentTheme() const
 {
-    return settingsTree.getChildWithName("SelectedThemes");
+    return getTheme(settings.at("theme").toString());
 }
 
-ValueTree SettingsFile::getLibrariesTree() const
+bool SettingsFile::isUsingTouchMode() const
 {
-    return settingsTree.getChildWithName("Libraries");
-}
-
-ValueTree SettingsFile::getTheme(String const& name) const
-{
-    return getColourThemesTree().getChildWithProperty("theme", name);
+#if JUCE_IOS
+    return true;
+#else
+    return getValue<bool>(settings.at("touch_mode"));
+#endif
 }
 
 void SettingsFile::setLastBrowserPathForId(String const& identifier, File const& path)
@@ -247,20 +378,15 @@ void SettingsFile::setLastBrowserPathForId(String const& identifier, File const&
     if (identifier.isEmpty() || !path.exists() || path.isRoot())
         return;
 
-    settingsTree.getChildWithName("LastBrowserPaths").setProperty(identifier, path.getFullPathName(), nullptr);
+    getProperty<DynamicObject>("last_file_browser_paths")->setProperty(identifier, path.getFullPathName());
 }
 
 File SettingsFile::getLastBrowserPathForId(String const& identifier) const
 {
     if (identifier.isEmpty())
-        return {};
+        return { };
 
-    return { settingsTree.getChildWithName("LastBrowserPaths").getProperty(identifier).toString() };
-}
-
-ValueTree SettingsFile::getCurrentTheme() const
-{
-    return getColourThemesTree().getChildWithProperty("theme", settingsTree.getProperty("theme"));
+    return File(getProperty<DynamicObject>("last_file_browser_paths")->getProperty(identifier).toString());
 }
 
 void SettingsFile::initialisePathsTree()
@@ -270,127 +396,80 @@ void SettingsFile::initialisePathsTree()
     HeapArray<File> currentPaths;
     currentPaths.reserve(10);
 
-    auto pathTree = getPathsTree();
+    auto& pathTree = getProperty<VarArray>("paths");
 
     // on iOS, the containerisation of apps leads to problems with custom search paths
     // So we completely reset them every time
 #if JUCE_IOS
-    pathTree.removeAllChildren(nullptr);
+    pathTree.clear();
 #endif
 
     for (auto child : pathTree) {
-        currentPaths.add(File(child.getProperty("Path").toString()));
+        currentPaths.add(child.toString());
     }
 
     for (auto const& path : pd::Library::defaultPaths) {
         if (!currentPaths.contains(path)) {
-            auto pathSubTree = ValueTree("Path");
-            pathSubTree.setProperty("Path", path.getFullPathName(), nullptr);
-            pathTree.appendChild(pathSubTree, nullptr);
-        }
-    }
-
-    // TODO: remove this later. this is to fix a mistake during v0.8.4 development
-    for (auto child : pathTree) {
-        if (child.getProperty("Path").toString().contains("Abstractions/Gem")) {
-            pathTree.removeChild(child, nullptr);
-            break;
+            pathTree.add(path.getFullPathName());
         }
     }
 }
 
-void SettingsFile::saveCommandHistory()
+void SettingsFile::addToRecentlyOpened(URL const& url)
 {
-    auto commandHistory = settingsTree.getChildWithName("CommandHistory");
+    auto& recentlyOpened = getProperty<VarArray>("recently_opened");
+    auto path = url.getLocalFile().getFullPathName();
 
-    if (commandHistory.isValid()) {
-        commandHistory.removeAllProperties(nullptr);
-    } else {
-        commandHistory = ValueTree("CommandHistory");
-        SettingsFile::getInstance()->getValueTree().appendChild(commandHistory, nullptr);
+    for (auto& item : recentlyOpened) {
+        auto* obj = item.getDynamicObject();
+        auto path = obj->getProperty("path").toString();
+        if (File(path) == url.getLocalFile()) {
+            obj->setProperty("time", (int64)Time::getCurrentTime().toMilliseconds());
+#if JUCE_IOS
+            auto bookmarkData = url.getBookmarkData();
+            if (bookmarkData.isNotEmpty()) {
+                obj->setProperty("bookmark", bookmarkData);
     }
-
-    int commandIndex = 0;
-    for (auto& command : CommandInput::getCommandHistory()) {
-        // Don't save more than 50 commands
-        if (commandIndex > 50)
-            break;
-        // Set each command as a unique attribute
-        commandHistory.setProperty("Command" + String(commandIndex), command, nullptr);
-        commandIndex++;
-    }
-}
-
-void SettingsFile::initialiseCommandHistory()
-{
-    auto const commandHistory = settingsTree.getChildWithName("CommandHistory");
-
-    if (!commandHistory.isValid()) {
+#endif
+            recentlyOpened.move(recentlyOpened.indexOf(item), 0);
         return;
     }
-
-    StringArray commands;
-    String lastCommand;
-    for (int i = 0; i < commandHistory.getNumProperties(); i++) {
-        auto command = commandHistory.getProperty("Command" + String(i)).toString();
-        // Filter out duplicate commands (we also do this in CommandInput, but not during loading)
-        if (lastCommand != command) {
-            commands.add(command);
-            lastCommand = command;
-        }
     }
 
-    CommandInput::setCommandHistory(commands);
-}
+    auto* obj = new DynamicObject();
+    obj->setProperty("path", url.getLocalFile().getFullPathName());
+    obj->setProperty("time", (int64)Time::getCurrentTime().toMilliseconds());
 
-void SettingsFile::addToRecentlyOpened(File const& path)
-{
-    auto recentlyOpened = settingsTree.getChildWithName("RecentlyOpened");
-
-    if (!recentlyOpened.isValid()) {
-        recentlyOpened = ValueTree("RecentlyOpened");
-        SettingsFile::getInstance()->getValueTree().appendChild(recentlyOpened, nullptr);
+#if JUCE_IOS
+    // Store iOS bookmark so that we can recover file permissions later
+    auto bookmarkData = url.getBookmarkData();
+    if (bookmarkData.isNotEmpty()) {
+        obj->setProperty("bookmark", bookmarkData);
     }
-
-    if (recentlyOpened.getChildWithProperty("Path", path.getFullPathName()).isValid()) {
-
-        recentlyOpened.getChildWithProperty("Path", path.getFullPathName()).setProperty("Time", Time::getCurrentTime().toMilliseconds(), nullptr);
-
-        int const oldIdx = recentlyOpened.indexOf(recentlyOpened.getChildWithProperty("Path", path.getFullPathName()));
-        recentlyOpened.moveChild(oldIdx, 0, nullptr);
-    } else {
-        ValueTree subTree("Path");
-        subTree.setProperty("Path", path.getFullPathName(), nullptr);
-        subTree.setProperty("Time", Time::getCurrentTime().toMilliseconds(), nullptr);
-#if JUCE_MAC || JUCE_WINDOWS
-        if (path.isOnRemovableDrive())
-            subTree.setProperty("Removable", var(1), nullptr);
 #endif
-        recentlyOpened.addChild(subTree, 0, nullptr);
-    }
+    recentlyOpened.insert(0, var(obj));
 
-    while (recentlyOpened.getNumChildren() > 15) {
+    while (recentlyOpened.size() > 15) {
         auto minTime = Time::getCurrentTime().toMilliseconds();
         int minIdx = -1;
 
         // Find oldest entry
-        for (int i = 0; i < recentlyOpened.getNumChildren(); i++) {
-            auto child = recentlyOpened.getChild(i);
-            auto const pinned = child.hasProperty("Pinned") && static_cast<bool>(child.getProperty("Pinned"));
-            auto const time = static_cast<int64>(child.getProperty("Time"));
+        for (int i = 0; i < recentlyOpened.size(); i++) {
+            auto const pinned = recentlyOpened[i].getProperty("pinned", false);
+            auto const time = static_cast<int64>(recentlyOpened[i].getProperty("time", 0));
             if (time < minTime && !pinned) {
                 minIdx = i;
                 minTime = time;
             }
         }
-
-        recentlyOpened.removeChild(minIdx, nullptr);
+        recentlyOpened.remove(minIdx);
     }
 
     // If we do this inside a plugin, it will add to the DAW's recently opened list!
     if (ProjectInfo::isStandalone) {
         RecentlyOpenedFilesList::registerRecentFileNatively(path);
     }
+    SettingsFile::getInstance()->triggerSettingsChange("recently_opened");
 }
 
 bool SettingsFile::wantsNativeDialog() const
@@ -399,110 +478,29 @@ bool SettingsFile::wantsNativeDialog() const
         return true;
     }
 
-    if (!settingsTree.hasProperty("NativeDialog")) {
-        return true;
-    }
-
-    return settingsTree.getProperty("NativeDialog");
+    return getValue<bool>(settings.at("native_file_dialog"));
 }
 
 void SettingsFile::initialiseThemesTree()
 {
-    // Initialise selected themes tree
-    auto selectedThemes = getSelectedThemesTree();
+    auto selectedThemes = getProperty<VarArray>("active_themes");
+    if (!getTheme(selectedThemes[0].toString())) {
+        selectedThemes.set(0, "light");
+    }
+    if (!getTheme(selectedThemes[1].toString())) {
+        selectedThemes.set(1, "dark");
+    }
+    if (selectedThemes[0] == selectedThemes[1])
+        selectedThemes.set(1, selectedThemes[0].toString() == "dark" ? "light" : "dark");
 
-    if (!selectedThemes.hasProperty("first"))
-        selectedThemes.setProperty("first", "light", nullptr);
-    if (!selectedThemes.hasProperty("second"))
-        selectedThemes.setProperty("second", "dark", nullptr);
-
-    if (selectedThemes.getProperty("first").toString() != getProperty<String>("theme") && selectedThemes.getProperty("second").toString() != getProperty<String>("theme")) {
-
-        setProperty("theme", selectedThemes.getProperty("first").toString());
+    setProperty("active_themes", selectedThemes);
+    auto const currentTheme = getProperty<String>("theme");
+    if (selectedThemes[0].toString() != currentTheme && selectedThemes[1].toString() != currentTheme) {
+        setProperty("theme", selectedThemes[0].toString());
     }
 
-    PlugDataLook::selectedThemes.set(0, selectedThemes.getProperty("first").toString());
-    PlugDataLook::selectedThemes.set(1, selectedThemes.getProperty("second").toString());
-
-    auto const defaultColourThemesTree = ValueTree::fromXml(PlugDataLook::defaultThemesXml);
-    auto colourThemesTree = getColourThemesTree();
-
-    if (colourThemesTree.getNumChildren() == 0) {
-        colourThemesTree.copyPropertiesAndChildrenFrom(defaultColourThemesTree, nullptr);
-    } else {
-
-        // Check if all the default themes are still there
-        // Mostly for updating from v0.6.3 -> v0.7.0
-        for (auto themeTree : defaultColourThemesTree) {
-            if (!colourThemesTree.getChildWithProperty("theme", themeTree.getProperty("theme")).isValid()) {
-
-                colourThemesTree.appendChild(themeTree.createCopy(), nullptr);
-            }
-        }
-
-        // Ensure each theme is valid
-        for (auto themeTree : colourThemesTree) {
-            auto themeName = themeTree.getProperty("theme");
-            // If it's one of the default themes, validate it against the default theme tree
-            if (defaultColourThemesTree.getChildWithProperty("theme", themeName).isValid()) {
-                auto defaultTree = defaultColourThemesTree.getChildWithProperty("theme", themeName);
-
-                for (auto const& [colourId, colourInfo] : PlugDataColourNames) {
-                    auto& [cId, colourName, colourCategory] = colourInfo;
-                    // For when we add new colours in the future
-                    if (!themeTree.hasProperty(colourName) || themeTree.getProperty(colourName).toString().isEmpty() || themeTree.getProperty(colourName).toString() == "00000000") {
-                        themeTree.setProperty(colourName, defaultTree.getProperty(colourName).toString(), nullptr);
-                    }
-                }
-
-                if (!themeTree.hasProperty("straight_connections")) {
-                    themeTree.setProperty("straight_connections", defaultTree.getProperty("straight_connections"), nullptr);
-                }
-                if (!themeTree.hasProperty("connection_style")) {
-                    themeTree.setProperty("connection_style", defaultTree.getProperty("connection_style"), nullptr);
-                }
-                if (!themeTree.hasProperty("square_iolets")) {
-                    themeTree.setProperty("square_iolets", defaultTree.getProperty("square_iolets"), nullptr);
-                }
-                if (!themeTree.hasProperty("square_object_corners")) {
-                    themeTree.setProperty("square_object_corners", defaultTree.getProperty("square_object_corners"), nullptr);
-                }
-                if (!themeTree.hasProperty("object_flag_outlined")) {
-                    themeTree.setProperty("object_flag_outlined", defaultTree.getProperty("object_flag_outlined"), nullptr);
-                }
-                if (!themeTree.hasProperty("iolet_spacing_edge")) {
-                    themeTree.setProperty("iolet_spacing_edge", defaultTree.getProperty("iolet_spacing_edge"), nullptr);
-                }
-                if (!themeTree.hasProperty("highlight_syntax")) {
-                    themeTree.setProperty("highlight_syntax", defaultTree.getProperty("highlight_syntax"), nullptr);
-                }
-            }
-            // Otherwise, just ensure these properties exist
-            else {
-                if (!themeTree.hasProperty("straight_connections")) {
-                    themeTree.setProperty("straight_connections", false, nullptr);
-                }
-                if (!themeTree.hasProperty("connection_style")) {
-                    themeTree.setProperty("connection_style", String(1), nullptr);
-                }
-                if (!themeTree.hasProperty("square_iolets")) {
-                    themeTree.setProperty("square_iolets", false, nullptr);
-                }
-                if (!themeTree.hasProperty("square_object_corners")) {
-                    themeTree.setProperty("square_object_corners", false, nullptr);
-                }
-                if (!themeTree.hasProperty("object_flag_outlined")) {
-                    themeTree.setProperty("object_flag_outlined", false, nullptr);
-                }
-                if (!themeTree.hasProperty("iolet_spacing_edge")) {
-                    themeTree.setProperty("iolet_spacing_edge", false, nullptr);
-                }
-                if (!themeTree.hasProperty("highlight_syntax")) {
-                    themeTree.setProperty("highlight_syntax", true, nullptr);
-                }
-            }
-        }
-    }
+    PlugDataLook::selectedThemes.set(0, selectedThemes[0].toString());
+    PlugDataLook::selectedThemes.set(1, selectedThemes[1].toString());
 }
 
 void SettingsFile::initialiseOverlayTree()
@@ -515,37 +513,38 @@ void SettingsFile::initialiseOverlayTree()
         { "alt", Origin | Border | ActivationState | Index | Coordinate | Order | Direction | aiDefaultFlags }
     };
 
-    auto overlayTree = settingsTree.getChildWithName("Overlays");
-
-    if (!overlayTree.isValid()) {
-        overlayTree = ValueTree("Overlays");
-
+    auto overlays = getProperty<DynamicObject>("overlays");
+    if (!overlays->getProperties().size()) {
         for (auto& [name, settings] : defaults) {
-            overlayTree.setProperty(name, settings, nullptr);
+            overlays->setProperty(name, settings);
         }
-
-        settingsTree.appendChild(overlayTree, nullptr);
-    } else if (!overlayTree.hasProperty("ai_granular_seeded")) {
+    } else if (!overlays->hasProperty("ai_granular_seeded")) {
         // Seed granular AI overlay flags ON once for existing installs
         for (auto const& mode : { String("edit"), String("lock"), String("alt") }) {
-            overlayTree.setProperty(mode, static_cast<int>(overlayTree.getProperty(mode)) | aiDefaultFlags, nullptr);
+            overlays->setProperty(mode, static_cast<int>(overlays->getProperty(mode)) | aiDefaultFlags);
         }
-        overlayTree.setProperty("ai_granular_seeded", 1, nullptr);
+        overlays->setProperty("ai_granular_seeded", 1);
     }
 
     // Migration: the References layer bit (1<<15) was added AFTER the first
     // granular seeding. Without this, persisted masks keep pasted schematics
     // invisible forever. Seed it ON once, with its own marker.
-    if (!overlayTree.hasProperty("ai_references_seeded")) {
+    if (!overlays->hasProperty("ai_references_seeded")) {
         for (auto const& mode : { String("edit"), String("lock"), String("alt") }) {
-            overlayTree.setProperty(mode, static_cast<int>(overlayTree.getProperty(mode)) | AIReferences, nullptr);
+            overlays->setProperty(mode, static_cast<int>(overlays->getProperty(mode)) | AIReferences);
         }
-        overlayTree.setProperty("ai_references_seeded", 1, nullptr);
+        overlays->setProperty("ai_references_seeded", 1);
     }
 }
 
 bool SettingsFile::acquireFileLock()
 {
+#if JUCE_IOS
+    // Don't create a lock file on iOS: the filesystem listener cannot ignore individual files,
+    // so it would retrigger a settings reload on every save. Report the lock as taken instead,
+    // otherwise settings would never be written at all
+    return true;
+#endif
     auto const startTime = Time::getCurrentTime().toMilliseconds();
 
     while (Time::getCurrentTime().toMilliseconds() - startTime < lockTimeoutMs) {
@@ -576,65 +575,132 @@ bool SettingsFile::acquireFileLock()
 
 void SettingsFile::releaseFileLock()
 {
+#if JUCE_IOS
+    return; // No lock file was created, see acquireFileLock()
+#endif
     lockFile.deleteFile();
+}
+
+void SettingsFile::loadThemeFromDiff(Array<var>& currentThemes, Array<var> const& savedThemes)
+{
+    for (auto const& savedTheme : savedThemes) {
+        auto const* savedThemeObj = savedTheme.getDynamicObject();
+        if (!savedThemeObj)
+            continue;
+
+        auto const themeName = savedThemeObj->getProperty("name").toString();
+        bool isDefaultTheme = false;
+        for (auto& current : currentThemes) {
+            auto* currentThemeObj = current.getDynamicObject();
+            if (!currentThemeObj || currentThemeObj->getProperty("name").toString() != themeName)
+                continue;
+
+            isDefaultTheme = true;
+            for (auto const& [propName, propValue] : savedThemeObj->getProperties())
+                if (propName != Identifier("name"))
+                    currentThemeObj->setProperty(propName, propValue);
+            break;
+        }
+        if (!isDefaultTheme)
+            currentThemes.add(savedTheme);
+    }
 }
 
 void SettingsFile::reloadSettings()
 {
     jassert(isInitialised);
 
+    if (settingsFile.loadFileAsString().hashCode64() == lastContentHash)
+        return;
+
     if (acquireFileLock()) {
         auto const newSettings = settingsFile.loadFileAsString();
         auto const contentHash = newSettings.hashCode64();
+
         if (contentHash == lastContentHash) {
             releaseFileLock();
             return;
         }
 
-        auto const newTree = ValueTree::fromXml(newSettings);
-        if (!newTree.isValid()) {
+        var settingsToLoad = JSON::fromString(newSettings);
+        if (!settingsToLoad.isObject()) {
             releaseFileLock();
             return;
         }
 
-        // Children shouldn't be overwritten as that would break some valueTree links
-        for (auto child : settingsTree) {
-            child.copyPropertiesAndChildrenFrom(newTree.getChildWithName(child.getType()), nullptr);
+        // Assemble the final values before touching live Values. Defaults contain mutable
+        // arrays and objects, so sharing them would also change our save-diff baseline.
+        UnorderedMap<String, var> loadedSettings;
+        for (auto const& [name, value] : defaultSettings)
+            loadedSettings[name] = value.clone();
+        loadedSettings["themes"] = JSON::fromString(PlugDataLook::defaultThemesJSON);
+
+        auto* jsonObject = settingsToLoad.getDynamicObject();
+        for (auto& var : jsonObject->getProperties()) {
+            if (var.name == Identifier("themes")) {
+                if (auto* themes = var.value.getArray())
+                    loadThemeFromDiff(*loadedSettings["themes"].getArray(), *themes);
+                continue;
+            }
+            auto const name = var.name.toString();
+            if (!defaultSettings.contains(name) || var.value.hasSameTypeAs(defaultSettings.at(name)))
+                loadedSettings[name] = var.value;
         }
 
-        settingsTree.copyPropertiesFrom(newTree, nullptr);
+        for (auto const& [name, value] : loadedSettings)
+            settings[name] = value;
+        initialiseThemesTree();
+
+        for (auto const& [name, value] : settings)
+            reloadedValues[name] = value.getValue();
+
+        stopTimer();
+        lastContentHash = contentHash;
+        releaseFileLock();
 
         for (auto* listener : listeners) {
             listener->settingsFileReloaded();
         }
-        lastContentHash = contentHash;
-        releaseFileLock();
     }
 }
 
-void SettingsFile::fileChanged(File const file, FileSystemWatcher::FileSystemEvent fileEvent)
+void SettingsFile::filesystemChanged()
 {
-    if (file == settingsFile) {
         reloadSettings();
-    }
 }
 
-void SettingsFile::valueTreePropertyChanged(ValueTree& treeWhosePropertyHasChanged, Identifier const& property)
+void SettingsFile::triggerSettingsChange(String const& name)
 {
+    reloadedValues.erase(name);
+    if (name == "active_themes")
+        initialiseThemesTree();
     for (auto* listener : listeners) {
-        listener->settingsChanged(property.toString(), treeWhosePropertyHasChanged.getProperty(property));
+        listener->settingsChanged(name, settings[name]);
     }
-
     startTimer(saveTimeoutMs);
 }
 
-void SettingsFile::valueTreeChildAdded(ValueTree& parentTree, ValueTree& childWhichHasBeenAdded)
+void SettingsFile::valueChanged(Value& v)
 {
+    for (auto& [name, var] : settings) {
+        if (var.refersToSameSourceAs(v)) {
+            bool fromReload = false;
+            if (auto const it = reloadedValues.find(name); it != reloadedValues.end()) {
+                fromReload = it->second.equalsWithSameType(v.getValue());
+                reloadedValues.erase(it);
+            }
+            if (fromReload && (name == "theme" || name == "themes" || name == "active_themes"))
+                return;
+            if (name == "active_themes")
+                initialiseThemesTree();
+            for (auto* listener : listeners) {
+                listener->settingsChanged(name, v);
+            }
+            if (!fromReload)
     startTimer(saveTimeoutMs);
-}
-
-void SettingsFile::valueTreeChildRemoved(ValueTree& parentTree, ValueTree& childWhichHasBeenRemoved, int indexFromWhichChildWasRemoved)
-{
+            return;
+        }
+    }
     startTimer(saveTimeoutMs);
 }
 
@@ -658,11 +724,67 @@ void SettingsFile::saveSettings()
 {
     jassert(isInitialised);
 
-    saveCommandHistory();
+    auto* properties = new DynamicObject();
 
+    for (auto& [name, value] : settings) {
+        if (name == "themes") {
+            auto const defaultThemes = JSON::fromString(PlugDataLook::defaultThemesJSON);
+            auto const* currentThemesArray = value.getValue().getArray();
+            auto const* defaultThemesArray = defaultThemes.getArray();
+            if (!currentThemesArray)
+                continue;
+
+            Array<var> themesToWrite;
+            for (auto const& currentTheme : *currentThemesArray) {
+                auto const* currentObj = currentTheme.getDynamicObject();
+                if (!currentObj)
+                    continue;
+
+                // Find matching default theme by name
+                DynamicObject const* defaultObj = nullptr;
+                if (defaultThemesArray) {
+                    for (auto const& defaultTheme : *defaultThemesArray) {
+                        auto const* candidate = defaultTheme.getDynamicObject();
+                        if (candidate && candidate->getProperty("name") == currentObj->getProperty("name")) {
+                            defaultObj = candidate;
+                            break;
+                        }
+                    }
+                }
+
+                // Collect only properties that differ from the default
+                auto* diffObj = new DynamicObject();
+                diffObj->setProperty("name", currentObj->getProperty("name"));
+
+                bool hasDiff = false;
+                for (auto const& [propName, propValue] : currentObj->getProperties()) {
+                    if (propName == Identifier("name"))
+                        continue;
+
+                    bool const matchesDefault = defaultObj
+                        && defaultObj->hasProperty(propName)
+                        && defaultObj->getProperty(propName).equalsWithSameType(propValue);
+
+                    if (!matchesDefault) {
+                        diffObj->setProperty(propName, propValue);
+                        hasDiff = true;
+                    }
+                }
+                if (hasDiff)
+                    themesToWrite.add(var(diffObj));
+                else
+                    delete diffObj;
+            }
+
+            if (!themesToWrite.isEmpty())
+                properties->setProperty("themes", themesToWrite);
+        } else if (defaultSettings.contains(name) && !defaultSettings.at(name).equalsWithSameType(value)) {
+            properties->setProperty(name, value);
+        }
+    }
     // Check if content actually changed
-    auto const xml = settingsTree.toXmlString();
-    auto const contentHash = xml.hashCode64();
+    auto const json = JSON::toString(var(properties));
+    auto const contentHash = json.hashCode64();
 
     if (contentHash == lastContentHash) {
         return; // No changes to save
@@ -670,7 +792,7 @@ void SettingsFile::saveSettings()
 
     // Attempt to acquire file lock
     if (acquireFileLock()) {
-        if (settingsFile.replaceWithText(xml)) {
+        if (settingsFile.replaceWithText(json)) {
             lastContentHash = contentHash;
         }
         releaseFileLock();
@@ -680,23 +802,17 @@ void SettingsFile::saveSettings()
 void SettingsFile::setProperty(String const& name, var const& value)
 {
     jassert(isInitialised);
-    settingsTree.setProperty(name, value, nullptr);
+    settings[name] = value;
 }
 
 bool SettingsFile::hasProperty(String const& name) const
 {
     jassert(isInitialised);
-    return settingsTree.hasProperty(name);
+    return settings.contains(name);
 }
 
 Value SettingsFile::getPropertyAsValue(String const& name)
 {
     jassert(isInitialised);
-    return settingsTree.getPropertyAsValue(name, nullptr);
-}
-
-ValueTree& SettingsFile::getValueTree()
-{
-    jassert(isInitialised);
-    return settingsTree;
+    return settings[name];
 }

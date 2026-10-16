@@ -12,7 +12,10 @@ class ButtonObject final : public ObjectBase {
 
     Value primaryColour = SynchronousValue();
     Value secondaryColour = SynchronousValue();
+    Value transparent = SynchronousValue();
     Value sizeProperty = SynchronousValue();
+    Value readOnly = SynchronousValue();
+    Value oval = SynchronousValue();
 
     NVGcolor fgCol;
     NVGcolor bgCol;
@@ -20,7 +23,8 @@ class ButtonObject final : public ObjectBase {
     enum Mode {
         Latch,
         Toggle,
-        Bang
+        Bang,
+        Click
     };
 
     Mode mode;
@@ -32,36 +36,43 @@ public:
         objectParameters.addParamSize(&sizeProperty);
         objectParameters.addParamColourFG(&primaryColour);
         objectParameters.addParamColourBG(&secondaryColour);
+        objectParameters.addParamBool("Transparent", cAppearance, &transparent, { "No", "Yes" });
+        objectParameters.addParamBool("Oval", cAppearance, &oval, { "No", "Yes" });
+        objectParameters.addParamBool("Read Only", cGeneral, &readOnly, { "No", "Yes" });
 
         updateColours();
     }
 
     void onConstrainerCreate() override
     {
-        constrainer->setFixedAspectRatio(1);
         constrainer->setMinimumHeight(9);
         constrainer->setMinimumWidth(9);
     }
 
     void updateColours()
     {
-        bgCol = convertColour(Colour::fromString(secondaryColour.toString()));
-        fgCol = convertColour(Colour::fromString(primaryColour.toString()));
+        bgCol = nvgColour(getValue<Colour>(secondaryColour));
+        fgCol = nvgColour(getValue<Colour>(primaryColour));
         repaint();
     }
 
     void update() override
     {
         if (auto button = ptr.get<t_fake_button>()) {
-            primaryColour = Colour(button->x_fgcolor[0], button->x_fgcolor[1], button->x_fgcolor[2]).toString();
-            secondaryColour = Colour(button->x_bgcolor[0], button->x_bgcolor[1], button->x_bgcolor[2]).toString();
+            primaryColour = colourToVar(Colour::fromString(String::fromUTF8(button->x_fg->s_name).replace("#", "ff")));
+            secondaryColour = colourToVar(Colour::fromString(String::fromUTF8(button->x_bg->s_name).replace("#", "ff")));
+            transparent = button->x_transparent;
             sizeProperty = VarArray(button->x_w, button->x_h);
+            readOnly = button->x_readonly;
+            oval = button->x_oval;
             if (button->x_mode == 0) {
                 mode = Latch;
             } else if (button->x_mode == 1) {
                 mode = Toggle;
-            } else {
+            } else if (button->x_mode == 2) {
                 mode = Bang;
+            } else {
+                mode = Click;
             }
         }
 
@@ -94,7 +105,7 @@ public:
                             _this->repaint();
                         }
                     });
-            } else {
+            } else if (mode != Click) {
                 if (auto button = ptr.get<t_fake_button>()) {
                     outlet_float(button->x_obj.ob_outlet, state);
                 }
@@ -127,7 +138,7 @@ public:
             return Rectangle<int>(x, y, w + 1, h + 1);
         }
 
-        return {};
+        return { };
     }
 
     void setPdBounds(Rectangle<int> const b) override
@@ -149,6 +160,26 @@ public:
         }
     }
 
+    void mouseEnter(MouseEvent const& e) override
+    {
+        if (::getValue<bool>(cnv->locked)) {
+            if (auto button = ptr.get<t_fake_button>()) {
+                if (button->x_snd_hover->s_thing && button->x_snd_hover != gensym("empty") && button->x_snd_hover != pd->generateSymbol(""))
+                    pd_float(button->x_snd_hover->s_thing, 1.0f);
+            }
+        }
+    }
+
+    void mouseExit(MouseEvent const& e) override
+    {
+        if (::getValue<bool>(cnv->locked)) {
+            if (auto button = ptr.get<t_fake_button>()) {
+                if (button->x_snd_hover->s_thing && button->x_snd_hover != gensym("empty") && button->x_snd_hover != pd->generateSymbol(""))
+                    pd_float(button->x_snd_hover->s_thing, 0.0f);
+            }
+        }
+    }
+
     void mouseDown(MouseEvent const& e) override
     {
         if (!e.mods.isLeftButtonDown())
@@ -160,10 +191,22 @@ public:
             state = !state;
         }
 
-        if (mode == Bang) {
+        if (mode == Click) {
+            state = true;
+            if (auto button = ptr.get<t_fake_button>()) {
+                t_atom list[4];
+                SETFLOAT(list, state);
+                SETFLOAT(list + 1, e.getNumberOfClicks() > 1);
+                SETFLOAT(list + 2, e.mods.isShiftDown());
+                SETFLOAT(list + 3, e.mods.isCommandDown() || e.mods.isAltDown());
+                outlet_list(button->x_obj.ob_outlet, pd->generateSymbol("list"), 4, list);
+            }
+        } else if (mode == Bang) {
             state = true;
             if (auto button = ptr.get<t_fake_button>()) {
                 outlet_bang(button->x_obj.ob_outlet);
+                if (button->x_snd->s_thing && !button->x_edit && button->x_snd != gensym("empty") && button->x_snd != pd->generateSymbol(""))
+                    pd_bang(button->x_snd->s_thing);
             }
             Timer::callAfterDelay(250,
                 [_this = SafePointer(this)]() mutable {
@@ -179,6 +222,8 @@ public:
         } else {
             if (auto button = ptr.get<t_fake_button>()) {
                 outlet_float(button->x_obj.ob_outlet, state);
+                if (button->x_snd->s_thing && !button->x_edit && button->x_snd != gensym("empty") && button->x_snd != pd->generateSymbol(""))
+                    pd_float(button->x_snd->s_thing, state);
             }
         }
 
@@ -188,13 +233,33 @@ public:
         repaint();
     }
 
+    bool canReceiveMouseEvent(int const x, int const y) override
+    {
+        return !getValue<bool>(readOnly);
+    }
+
     void mouseUp(MouseEvent const& e) override
     {
+        if (!e.mods.isLeftButtonDown())
+            return;
+
         alreadyTriggered = false;
-        if (mode == Latch) {
+        if (mode == Click) {
+            state = false;
+            if (auto button = ptr.get<t_fake_button>()) {
+                t_atom list[4];
+                SETFLOAT(list, 0);
+                SETFLOAT(list + 1, e.getNumberOfClicks() > 1);
+                SETFLOAT(list + 2, e.mods.isShiftDown());
+                SETFLOAT(list + 3, e.mods.isCommandDown() || e.mods.isAltDown());
+                outlet_list(button->x_obj.ob_outlet, pd->generateSymbol("list"), 4, list);
+            }
+        } else if (mode == Latch) {
             state = false;
             if (auto button = ptr.get<t_fake_button>()) {
                 outlet_float(button->x_obj.ob_outlet, 0);
+                if (button->x_snd->s_thing && !button->x_edit && button->x_snd != gensym("empty") && button->x_snd != pd->generateSymbol(""))
+                    pd_float(button->x_snd->s_thing, 0);
             }
         }
 
@@ -203,26 +268,32 @@ public:
 
     void render(NVGcontext* nvg) override
     {
+        auto const& colours = getThemeColours();
+
         auto const b = getLocalBounds().toFloat();
 
-        nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), bgCol, object->isSelected() ? cnv->selectedOutlineCol : cnv->objectOutlineCol, Corners::objectCornerRadius);
+        auto fillColour = getValue<bool>(transparent) ? nanovg::nvgRGBA(0, 0, 0, 0) : bgCol;
+        nanovg::nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), fillColour, object->isSelected() ? nvgColour(colours.objectSelectedOutlineColour) : nvgColour(colours.objectOutlineColour), getPlugDataLook(*this).getObjectCornerRadius());
 
-        auto const guiBounds = b.reduced(1);
-        auto const outerBounds = guiBounds.reduced(5);
-        auto const innerRectBounds = outerBounds.reduced(2.5);
-        bool spaceToShowRect = false;
+        auto radius = getValue<bool>(oval) ? getWidth() : getPlugDataLook(*this).getObjectCornerRadius();
+        if (!getValue<bool>(transparent)) {
+            auto const guiBounds = b.reduced(1);
+            auto const outerBounds = guiBounds.reduced(5);
+            auto const innerRectBounds = outerBounds.reduced(2.5);
+            bool spaceToShowRect = false;
 
-        if (b.getWidth() >= 25 && b.getHeight() >= 25) {
-            spaceToShowRect = true;
-            nvgDrawRoundedRect(nvg, outerBounds.getX(), outerBounds.getY(), outerBounds.getWidth(), outerBounds.getHeight(), cnv->guiObjectInternalOutlineCol, cnv->guiObjectInternalOutlineCol, Corners::objectCornerRadius);
-            nvgDrawRoundedRect(nvg, innerRectBounds.getX(), innerRectBounds.getY(), innerRectBounds.getWidth(), innerRectBounds.getHeight(), bgCol, bgCol, Corners::objectCornerRadius - 1.0f);
-        }
+            if (b.getWidth() >= 25 && b.getHeight() >= 25) {
+                spaceToShowRect = true;
+                nanovg::nvgDrawRoundedRect(nvg, outerBounds.getX(), outerBounds.getY(), outerBounds.getWidth(), outerBounds.getHeight(), nvgColour(colours.guiObjectInternalOutlineColour), nvgColour(colours.guiObjectInternalOutlineColour), radius);
+                nanovg::nvgDrawRoundedRect(nvg, innerRectBounds.getX(), innerRectBounds.getY(), innerRectBounds.getWidth(), innerRectBounds.getHeight(), bgCol, bgCol, radius - 1.0f);
+            }
 
-        // Fill ellipse if bangState is true
-        if (state) {
-            auto const innerBounds = spaceToShowRect ? innerRectBounds.reduced(1) : guiBounds;
-            auto const cornerRadius = spaceToShowRect ? Corners::objectCornerRadius - 1.5f : Corners::objectCornerRadius - 1;
-            nvgDrawRoundedRect(nvg, innerBounds.getX(), innerBounds.getY(), innerBounds.getWidth(), innerBounds.getHeight(), fgCol, fgCol, cornerRadius);
+            // Fill ellipse if bangState is true
+            if (state) {
+                auto const innerBounds = spaceToShowRect ? innerRectBounds.reduced(1) : guiBounds;
+                auto const cornerRadius = spaceToShowRect ? radius - 1.5f : radius - 1;
+                nanovg::nvgDrawRoundedRect(nvg, innerBounds.getX(), innerBounds.getY(), innerBounds.getWidth(), innerBounds.getHeight(), fgCol, fgCol, cornerRadius);
+            }
         }
     }
 
@@ -240,8 +311,6 @@ public:
             auto const width = std::max(static_cast<int>(arr[0]), constrainer->getMinimumWidth());
             auto height = std::max(static_cast<int>(arr[1]), constrainer->getMinimumHeight());
 
-            constrainer->setFixedAspectRatio(static_cast<float>(width) / height);
-
             setParameterExcludingListener(sizeProperty, VarArray(width, height));
             if (auto button = ptr.get<t_fake_button>()) {
                 button->x_w = width;
@@ -249,21 +318,27 @@ public:
             }
             object->updateBounds();
         } else if (value.refersToSameSourceAs(primaryColour)) {
-            auto const col = Colour::fromString(primaryColour.toString());
             if (auto button = ptr.get<t_fake_button>()) {
-                button->x_fgcolor[0] = col.getRed();
-                button->x_fgcolor[1] = col.getGreen();
-                button->x_fgcolor[2] = col.getBlue();
+                button->x_fg = pd->generateSymbol("#" + getValue<Colour>(primaryColour).toString().substring(2));
             }
             updateColours();
         } else if (value.refersToSameSourceAs(secondaryColour)) {
-            auto const col = Colour::fromString(secondaryColour.toString());
             if (auto button = ptr.get<t_fake_button>()) {
-                button->x_bgcolor[0] = col.getRed();
-                button->x_bgcolor[1] = col.getGreen();
-                button->x_bgcolor[2] = col.getBlue();
+                button->x_bg = pd->generateSymbol("#" + getValue<Colour>(secondaryColour).toString().substring(2));
             }
             updateColours();
+        }
+        if (value.refersToSameSourceAs(transparent)) {
+            if (auto button = ptr.get<t_fake_button>()) {
+                button->x_transparent = getValue<bool>(transparent);
+            }
+            repaint();
+        }
+        if (value.refersToSameSourceAs(oval)) {
+            if (auto button = ptr.get<t_fake_button>()) {
+                button->x_oval = getValue<bool>(oval);
+            }
+            repaint();
         }
     }
 
@@ -272,15 +347,35 @@ public:
         switch (symbol) {
         case hash("bgcolor"): {
             if (atoms.size() >= 3) {
-                setParameterExcludingListener(secondaryColour, Colour(atoms[0].getFloat(), atoms[1].getFloat(), atoms[2].getFloat()).toString());
+                setParameterExcludingListener(secondaryColour, colourToVar(Colour(atoms[0].getFloat(), atoms[1].getFloat(), atoms[2].getFloat())));
                 updateColours();
             }
             break;
         }
         case hash("fgcolor"): {
             if (atoms.size() >= 3) {
-                setParameterExcludingListener(primaryColour, Colour(atoms[0].getFloat(), atoms[1].getFloat(), atoms[2].getFloat()).toString());
+                setParameterExcludingListener(primaryColour, colourToVar(Colour(atoms[0].getFloat(), atoms[1].getFloat(), atoms[2].getFloat())));
                 updateColours();
+            }
+            break;
+        }
+        case hash("readonly"): {
+            if (atoms.size() >= 1) {
+                setParameterExcludingListener(readOnly, atoms[0].getFloat());
+            }
+            break;
+        }
+        case hash("transparent"): {
+            if (atoms.size() >= 1) {
+                setParameterExcludingListener(transparent, atoms[0].getFloat());
+                repaint();
+            }
+            break;
+        }
+        case hash("oval"): {
+            if (atoms.size() >= 1) {
+                setParameterExcludingListener(oval, atoms[0].getFloat());
+                repaint();
             }
             break;
         }
@@ -291,6 +386,7 @@ public:
             repaint();
             break;
         }
+        case hash("click"):
         case hash("latch"):
         case hash("bang"):
         case hash("toggle"): {

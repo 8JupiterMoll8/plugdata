@@ -18,7 +18,7 @@ public:
     String size;
     String json;
     String version;
-    int64 installTime;
+    String folderOverride;
 
     PatchInfo() = default;
 
@@ -32,21 +32,11 @@ public:
         price = jsonData["Price"];
         thumbnailUrl = jsonData["StoreThumb"];
         version = jsonData["Version"];
-        if (jsonData.hasProperty("InstallTime")) {
-            installTime = static_cast<int64>(jsonData["InstallTime"]);
-        } else {
-            installTime = 0;
+        if (jsonData.hasProperty("FolderName")) {
+            folderOverride = jsonData["FolderName"];
         }
-        json = JSON::toString(jsonData, false);
-    }
 
-    void setInstallTime(int64 const millisSinceEpoch)
-    {
-        auto const jsonData = JSON::fromString(json);
-        if (auto* obj = jsonData.getDynamicObject()) {
-            obj->setProperty("InstallTime", millisSinceEpoch);
-            json = JSON::toString(jsonData, false);
-        }
+        json = JSON::toString(jsonData, false);
     }
 
     bool isPatchArchive() const
@@ -57,40 +47,57 @@ public:
 
     String getNameInPatchFolder() const
     {
+        if (folderOverride.isNotEmpty()) {
+            return folderOverride;
+        }
+
         return title.toLowerCase().replace(" ", "-") + "-" + String::toHexString(hash(author) + hash(version));
     }
 
     bool isPatchInstalled() const
     {
-        auto const patchesFolder = ProjectInfo::appDataDir.getChildFile("Patches");
+        updateInstalledPatches();
 
-        for (auto& file : OSUtils::iterateDirectory(patchesFolder, false, false)) {
-            if (OSUtils::isDirectoryFast(file.getFullPathName())) {
-                auto patchFileName = getNameInPatchFolder();
-                if (file.getFileName() == patchFileName) {
-                    return true;
-                }
-            }
-        }
+        for (auto& patch : installedPatches)
+            if (patch["Title"] == title && patch["Author"] == author)
+                return true;
+
         return false;
     }
 
     bool updateAvailable() const
     {
-        auto const patchesFolder = ProjectInfo::appDataDir.getChildFile("Patches");
+        if (!isPatchInstalled())
+            return false;
 
-        for (auto& file : OSUtils::iterateDirectory(patchesFolder, false, false)) {
-            if (OSUtils::isDirectoryFast(file.getFullPathName())) {
-                auto patchFileName = getNameInPatchFolder();
+        for (auto& patch : installedPatches)
+            if (patch["Title"] == title && patch["Author"] == author)
+                if (patch["Version"].toString() == version)
+                    return false;
 
-                if (file.getFileName() == patchFileName) {
+        return true;
+    }
+
+    static void updateInstalledPatches()
+    {
+        auto patchesFolder = ProjectInfo::appDataDir.getChildFile("Patches");
+        auto lastChanged = patchesFolder.getLastModificationTime();
+
+        if (lastChanged != lastUpdate) {
+            installedPatches.clear();
+
+            for (auto& file : OSUtils::iterateDirectory(patchesFolder, false, false)) {
+                if (OSUtils::isDirectoryFast(file.getFullPathName())) {
                     auto metaFile = file.getChildFile("meta.json");
-                    if (metaFile.existsAsFile() && version.isNotEmpty()) {
-                        return JSON::parse(metaFile)["Version"].toString() != version;
+                    if (metaFile.existsAsFile()) {
+                        installedPatches.add(JSON::parse(metaFile));
                     }
                 }
             }
+            lastUpdate = lastChanged;
         }
-        return false;
     }
+
+    static inline Time lastUpdate;
+    static inline SmallArray<var> installedPatches;
 };

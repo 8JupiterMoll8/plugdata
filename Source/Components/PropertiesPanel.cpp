@@ -5,7 +5,6 @@
  */
 
 #include <juce_gui_basics/juce_gui_basics.h>
-#include <melatonin_blur/melatonin_blur.h>
 
 #include "Utility/Config.h"
 #include "Utility/Fonts.h"
@@ -38,13 +37,6 @@ PropertiesPanel::SectionComponent::SectionComponent(PropertiesPanel& propertiesP
         propertyComponents.getFirst()->setRoundedCorners(true, false);
         propertyComponents.getLast()->setRoundedCorners(false, true);
     }
-
-    if (parent.drawShadowAndOutline) {
-        dropShadow = std::make_unique<melatonin::DropShadow>();
-        dropShadow->setColor(Colour(0, 0, 0).withAlpha(0.4f));
-        dropShadow->setRadius(7);
-        dropShadow->setSpread(0);
-    }
 }
 
 PropertiesPanel::SectionComponent::~SectionComponent()
@@ -54,6 +46,8 @@ PropertiesPanel::SectionComponent::~SectionComponent()
 
 void PropertiesPanel::SectionComponent::paint(Graphics& g)
 {
+    auto const& colours = getThemeColours(*this);
+
     auto [x, width] = parent.getContentXAndWidth();
 
     auto titleX = x;
@@ -65,23 +59,21 @@ void PropertiesPanel::SectionComponent::paint(Graphics& g)
     auto const titleHeight = title.isEmpty() ? 0 : parent.titleHeight;
 
     if (titleHeight != 0) {
-        Fonts::drawStyledText(g, title, titleX, 0, width - 4, titleHeight, findColour(PlugDataColour::panelTextColourId), Semibold, 14.5f);
+        Fonts::drawStyledText(g, title, titleX, 0, width - 4, titleHeight, colours.panelTextColour, Semibold, 14.5f);
     }
 
-    auto const propertyBounds = Rectangle<float>(x, titleHeight + 8.0f, width, getHeight() - (titleHeight + 16.0f));
+    auto const propertyBounds = Rectangle<int>(x, titleHeight + 8.0f, width, getHeight() - (titleHeight + 16.0f));
 
     if (parent.drawShadowAndOutline) {
-        Path p;
-        p.addRoundedRectangle(propertyBounds.reduced(3.0f), Corners::largeCornerRadius);
-        dropShadow->render(g, p);
+        StackShadow::drawShadowForRect(g, propertyBounds.reduced(3), 8);
     }
 
     g.setColour(findColour(parent.panelColour));
-    g.fillRoundedRectangle(propertyBounds, Corners::largeCornerRadius);
+    g.fillRoundedRectangle(propertyBounds.toFloat(), Corners::largeCornerRadius);
 
     if (parent.drawShadowAndOutline) {
         g.setColour(findColour(parent.separatorColour));
-        g.drawRoundedRectangle(propertyBounds, Corners::largeCornerRadius, 1.0f);
+        g.drawRoundedRectangle(propertyBounds.toFloat(), Corners::largeCornerRadius, 1.0f);
     }
 
     if (!propertyComponents.isEmpty() && !extraHeaderNames.isEmpty()) {
@@ -89,7 +81,7 @@ void PropertiesPanel::SectionComponent::paint(Graphics& g)
         auto const extraHeaderWidth = propertyBounds.getWidth() / static_cast<float>(extraHeaderNames.size());
 
         for (auto& extraHeader : extraHeaderNames) {
-            auto const colour = findColour(PlugDataColour::panelTextColourId).withAlpha(0.75f);
+            auto const colour = colours.panelTextColour.withAlpha(0.75f);
             Fonts::drawText(g, extraHeader, propertyBounds.removeFromLeft(extraHeaderWidth), colour, 15, Justification::centred);
         }
     }
@@ -105,7 +97,7 @@ void PropertiesPanel::SectionComponent::paintOverChildren(Graphics& g)
 {
     auto [x, width] = parent.getContentXAndWidth();
 
-    g.setColour(findColour(PlugDataColour::toolbarOutlineColourId));
+    g.setColour(getThemeColours(*this).toolbarOutlineColour);
 
     for (int i = 0; i < propertyComponents.size() - 1; i++) {
         auto const y = propertyComponents[i]->getBottom() + padding;
@@ -228,9 +220,9 @@ public:
 
     void paint(Graphics& g) override
     {
-        auto const font = Font(fontName, 15, Font::plain);
+        auto const font = Font(FontOptions(fontName, 15, Font::plain));
         g.setFont(font);
-        g.setColour(findColour(PlugDataColour::panelTextColourId));
+        g.setColour(getThemeColours(*this).panelTextColour);
         g.drawText(fontName, getLocalBounds().reduced(2), Justification::centredLeft);
     }
 
@@ -264,9 +256,10 @@ PropertiesPanel::FontComponent::FontComponent(String const& propertyName, Value 
         comboBox.getRootMenu()->addCustomItem(n + 1, std::make_unique<FontEntry>(extraFontOptions[n]), nullptr, extraFontOptions[n]);
     }
 
-    comboBox.setText(value.toString());
+    comboBox.setText(value.toString(), dontSendNotification);
     comboBox.getProperties().set("Style", "Inspector");
     fontValue.referTo(value);
+    fontValue.addListener(this);
 
     comboBox.onChange = [this, extraFontOptions, propertyName] {
         auto fontName = extraFontOptions[comboBox.getSelectedItemIndex()];
@@ -285,11 +278,21 @@ PropertiesPanel::FontComponent::FontComponent(String const& propertyName, Value 
         fontValue.setValue(fontName);
     };
 
-    setLookAndFeel(&LookAndFeel::getDefaultLookAndFeel());
+    setLookAndFeel(nullptr);
 
     addAndMakeVisible(comboBox);
 
     lookAndFeelChanged();
+}
+
+PropertiesPanel::FontComponent::~FontComponent()
+{
+    fontValue.removeListener(this);
+}
+
+void PropertiesPanel::FontComponent::valueChanged(Value& value)
+{
+    comboBox.setText(value.toString(), dontSendNotification);
 }
 
 PropertiesPanelProperty* PropertiesPanel::FontComponent::createCopy()
@@ -299,7 +302,7 @@ PropertiesPanelProperty* PropertiesPanel::FontComponent::createCopy()
 
 void PropertiesPanel::FontComponent::lookAndFeelChanged()
 {
-    comboBox.setColour(ComboBox::textColourId, isFontMissing ? Colours::red : findColour(PlugDataColour::panelTextColourId));
+    comboBox.setColour(ComboBox::textColourId, isFontMissing ? Colours::red : getThemeColours(*this).panelTextColour);
 }
 
 void PropertiesPanel::FontComponent::setFont(String const& fontName)
@@ -346,7 +349,7 @@ PropertiesPanel::BoolComponent::~BoolComponent()
 void PropertiesPanel::BoolComponent::init()
 {
     toggleStateValue.addListener(this);
-    setLookAndFeel(&LookAndFeel::getDefaultLookAndFeel());
+    setLookAndFeel(nullptr);
     lookAndFeelChanged();
 }
 
@@ -371,6 +374,8 @@ bool PropertiesPanel::BoolComponent::hitTest(int const x, int const y)
 
 void PropertiesPanel::BoolComponent::paint(Graphics& g)
 {
+    auto const& colours = getThemeColours(*this);
+
     bool const isDown = getValue<bool>(toggleStateValue);
     bool const isOver = isMouseOver();
 
@@ -379,13 +384,13 @@ void PropertiesPanel::BoolComponent::paint(Graphics& g)
 
     if (isDown || isOver) {
         // Add some alpha to make it look good on any background...
-        g.setColour(findColour(PlugDataColour::sidebarActiveBackgroundColourId).contrasting(isOver ? 0.125f : 0.2f).withAlpha(0.25f));
+        g.setColour(colours.sidebarActiveBackgroundColour.contrasting(isOver ? 0.125f : 0.2f).withAlpha(0.25f));
         g.fillRoundedRectangle(buttonBounds, Corners::defaultCornerRadius);
     }
-    auto textColour = findColour(PlugDataColour::panelTextColourId);
+    auto textColour = colours.panelTextColour;
 
     if (!isEnabled()) {
-        textColour = findColour(PlugDataColour::panelTextColourId).withAlpha(0.5f);
+        textColour = colours.panelTextColour.withAlpha(0.5f);
     }
     Fonts::drawText(g, textOptions[isDown], bounds, textColour, 14.5f, Justification::centred);
 
@@ -405,6 +410,9 @@ void PropertiesPanel::BoolComponent::mouseExit(MouseEvent const& e)
 
 void PropertiesPanel::BoolComponent::mouseUp(MouseEvent const& e)
 {
+    if (!isRealClickEvent(e))
+        return;
+
     toggleStateValue.setValue(!getValue<bool>(toggleStateValue));
     repaint();
 }
@@ -415,8 +423,9 @@ void PropertiesPanel::BoolComponent::valueChanged(Value& v)
         repaint();
 }
 
-PropertiesPanel::InspectorColourComponent::InspectorColourComponent(String const& propertyName, Value const& value)
+PropertiesPanel::InspectorColourComponent::InspectorColourComponent(String const& propertyName, Value const& value, bool canHaveAlpha)
     : PropertiesPanelProperty(propertyName)
+    , allowAlpha(canHaveAlpha)
 {
 
     currentColour.referTo(value);
@@ -427,28 +436,36 @@ PropertiesPanel::InspectorColourComponent::InspectorColourComponent(String const
     addAndMakeVisible(hexValueEditor);
     hexValueEditor.setJustificationType(Justification::centred);
     hexValueEditor.setInterceptsMouseClicks(false, true);
-    hexValueEditor.setFont(Fonts::getCurrentFont().withHeight(13.5f));
+    hexValueEditor.setFont(Fonts::getDefaultFont().withHeight(13.5f));
 
     hexValueEditor.onEditorShow = [this] {
         auto* editor = hexValueEditor.getCurrentTextEditor();
         editor->setBorder(BorderSize<int>(0, 0, 4, 1));
         editor->setJustification(Justification::centred);
-        editor->setInputRestrictions(7, "#0123456789ABCDEFabcdef");
-        editor->applyColourToAllText(Colour::fromString(currentColour.toString()).contrasting(0.95f));
+        editor->setInputRestrictions(allowAlpha ? 9 : 7, "#0123456789ABCDEFabcdef");
+        editor->applyColourToAllText(getValue<Colour>(currentColour).contrasting(0.95f));
     };
 
     hexValueEditor.onEditorHide = [this] {
-        colour = String("ff") + hexValueEditor.getText().substring(1).toLowerCase();
-        currentColour.setValue(colour);
+        if (allowAlpha) {
+            colour = hexValueEditor.getText().substring(1).toLowerCase();
+        } else {
+            colour = String("ff") + hexValueEditor.getText().substring(1).toLowerCase();
+        }
+        currentColour.setValue(colourToVar(Colour::fromString(colour.toString())));
     };
 
     hexValueEditor.onTextChange = [this] {
-        colour = String("ff") + hexValueEditor.getText().substring(1).toLowerCase();
+        if (allowAlpha) {
+            colour = hexValueEditor.getText().substring(1).toLowerCase();
+        } else {
+            colour = String("ff") + hexValueEditor.getText().substring(1).toLowerCase();
+        }
     };
 
     updateHexValue();
 
-    setLookAndFeel(&LookAndFeel::getDefaultLookAndFeel());
+    setLookAndFeel(nullptr);
 
     repaint();
 }
@@ -465,8 +482,8 @@ PropertiesPanelProperty* PropertiesPanel::InspectorColourComponent::createCopy()
 
 void PropertiesPanel::InspectorColourComponent::updateHexValue()
 {
-    hexValueEditor.setColour(Label::textColourId, Colour::fromString(currentColour.toString()).contrasting(0.95f));
-    hexValueEditor.setText(String("#") + currentColour.toString().substring(2).toUpperCase(), dontSendNotification);
+    hexValueEditor.setColour(Label::textColourId, getValue<Colour>(currentColour).contrasting(0.95f));
+    hexValueEditor.setText(String("#") + getValue<Colour>(currentColour).toString().substring(2).toUpperCase(), dontSendNotification);
 }
 
 void PropertiesPanel::InspectorColourComponent::resized()
@@ -481,7 +498,7 @@ void PropertiesPanel::InspectorColourComponent::resized()
 
 void PropertiesPanel::InspectorColourComponent::paint(Graphics& g)
 {
-    auto const colour = Colour::fromString(currentColour.toString());
+    auto const colour = getValue<Colour>(currentColour);
     auto const hoverColour = isMouseOver ? colour.brighter(0.4f) : colour;
 
     auto swatchBounds = getLocalBounds().removeFromRight(getWidth() / 2).toFloat().reduced(4.5f);
@@ -518,11 +535,11 @@ void PropertiesPanel::InspectorColourComponent::mouseDown(MouseEvent const& e)
     if (e.x > getWidth() - 28) {
         auto const pickerBounds = getScreenBounds().withTrimmedLeft(getWidth() / 2).expanded(5);
 
-        ColourPicker::getInstance().show(findParentComponentOfClass<PluginEditor>(), getTopLevelComponent(), false, Colour::fromString(currentColour.toString()), pickerBounds, [_this = SafePointer(this)](Colour const c) {
+        ColourPicker::getInstance()->show(findParentComponentOfClass<PluginEditor>(), getTopLevelComponent(), false, getValue<Colour>(currentColour), pickerBounds, [_this = SafePointer(this)](Colour const c) {
             if (!_this)
                 return;
 
-            _this->currentColour = c.toString();
+            _this->currentColour = colourToVar(c);
             _this->repaint();
         });
     } else {
@@ -554,7 +571,7 @@ public:
 
     void paint(Graphics& g) override
     {
-        auto const colour = Colour::fromString(colourValue.toString());
+        auto const colour = getValue<Colour>(colourValue);
 
         g.setColour(isMouseOver() ? colour.brighter(0.4f) : colour);
         g.fillEllipse(getLocalBounds().reduced(1).toFloat());
@@ -575,11 +592,11 @@ public:
     void mouseDown(MouseEvent const& e) override
     {
         auto const pickerBounds = getScreenBounds().expanded(5);
-        ColourPicker::getInstance().show(findParentComponentOfClass<PluginEditor>(), getTopLevelComponent(), false, Colour::fromString(colourValue.toString()), pickerBounds, [_this = SafePointer(this)](Colour const c) {
+        ColourPicker::getInstance()->show(findParentComponentOfClass<PluginEditor>(), getTopLevelComponent(), false, getValue<Colour>(colourValue), pickerBounds, [_this = SafePointer(this)](Colour const c) {
             if (!_this)
                 return;
 
-            _this->colourValue = c.toString();
+            _this->colourValue = colourToVar(c);
             _this->repaint();
         });
     }
@@ -612,13 +629,13 @@ PropertiesPanel::ColourComponent::ColourComponent(String const& propertyName, Va
     };
 
     hexValueEditor.onFocusLost = [this] {
-        currentColour.setValue(colour);
+        currentColour.setValue(colourToVar(Colour::fromString(colour.toString())));
     };
 
     addAndMakeVisible(*swatchComponent);
     updateHexValue();
 
-    setLookAndFeel(&LookAndFeel::getDefaultLookAndFeel());
+    setLookAndFeel(nullptr);
 
     repaint();
 }
@@ -631,7 +648,7 @@ PropertiesPanel::ColourComponent::~ColourComponent()
 void PropertiesPanel::ColourComponent::lookAndFeelChanged()
 {
     // TextEditor is special, setColour() will only change newly typed text colour
-    hexValueEditor.applyColourToAllText(findColour(PlugDataColour::panelTextColourId));
+    hexValueEditor.applyColourToAllText(getThemeColours(*this).panelTextColour);
 }
 
 PropertiesPanelProperty* PropertiesPanel::ColourComponent::createCopy()
@@ -641,7 +658,7 @@ PropertiesPanelProperty* PropertiesPanel::ColourComponent::createCopy()
 
 void PropertiesPanel::ColourComponent::updateHexValue()
 {
-    hexValueEditor.setText(String("#") + currentColour.toString().substring(2).toUpperCase());
+    hexValueEditor.setText(String("#") + getValue<Colour>(currentColour).toString().substring(2).toUpperCase());
 }
 
 void PropertiesPanel::ColourComponent::resized()
@@ -762,7 +779,7 @@ PropertiesPanel::FilePathComponent::FilePathComponent(String const& propertyName
     label.setEditable(true, false);
     label.getTextValue().referTo(property);
     label.addMouseListener(this, true);
-    label.setFont(Font(14));
+    label.setFont(Font(FontOptions(14)));
 
     addAndMakeVisible(label);
     addAndMakeVisible(browseButton);
@@ -783,19 +800,11 @@ PropertiesPanelProperty* PropertiesPanel::FilePathComponent::createCopy()
     return new FilePathComponent(getName(), property);
 }
 
-void PropertiesPanel::FilePathComponent::paint(Graphics& g)
-{
-    PropertiesPanelProperty::paint(g);
-
-    g.setColour(findColour(PlugDataColour::panelBackgroundColourId));
-    g.fillRect(getLocalBounds().removeFromRight(getHeight()));
-}
-
 void PropertiesPanel::FilePathComponent::resized()
 {
     auto labelBounds = getLocalBounds().removeFromRight(getWidth() / 2);
-    label.setBounds(labelBounds);
     browseButton.setBounds(labelBounds.removeFromRight(getHeight()));
+    label.setBounds(labelBounds);
 }
 
 PropertiesPanel::DirectoryPathComponent::DirectoryPathComponent(String const& propertyName, Value const& value)
@@ -842,7 +851,7 @@ void PropertiesPanel::DirectoryPathComponent::paint(Graphics& g)
 {
     PropertiesPanelProperty::paint(g);
 
-    g.setColour(findColour(PlugDataColour::panelTextColourId).withAlpha(0.8f));
+    g.setColour(getThemeColours(*this).panelTextColour.withAlpha(0.8f));
     g.setFont(Fonts::getDefaultFont().withHeight(14));
     g.drawText(label, 90, 2, getWidth() - 120, getHeight() - 4, Justification::centredLeft);
 }
@@ -869,13 +878,15 @@ PropertiesPanelProperty* PropertiesPanel::ActionComponent::createCopy()
 
 void PropertiesPanel::ActionComponent::paint(Graphics& g)
 {
+    auto const& colours = getThemeColours(*this);
+
     auto const bounds = getLocalBounds();
     auto textBounds = bounds;
     auto const iconBounds = textBounds.removeFromLeft(textBounds.getHeight());
 
-    auto const colour = findColour(PlugDataColour::panelTextColourId);
+    auto const colour = colours.panelTextColour;
     if (mouseIsOver) {
-        g.setColour(findColour(PlugDataColour::panelActiveBackgroundColourId));
+        g.setColour(colours.panelActiveBackgroundColour);
 
         Path p;
         p.addRoundedRectangle(bounds.getX(), bounds.getY(), bounds.getWidth(), bounds.getHeight(), Corners::largeCornerRadius, Corners::largeCornerRadius, roundTop, roundTop, roundBottom, roundBottom);
@@ -905,7 +916,7 @@ void PropertiesPanel::ActionComponent::mouseUp(MouseEvent const& e)
 
 PropertiesPanel::PropertiesPanel()
 {
-    messageWhenEmpty = "(nothing settable)";
+    messageWhenEmpty = "(no inspector selection)";
 
     addAndMakeVisible(viewport);
     viewport.setViewedComponent(propertyHolderComponent = new PropertyHolderComponent());
@@ -990,7 +1001,7 @@ StringArray PropertiesPanel::getSectionNames() const
 void PropertiesPanel::paint(Graphics& g)
 {
     if (isEmpty()) {
-        g.setColour(findColour(PlugDataColour::panelTextColourId).withAlpha(0.5f));
+        g.setColour(getThemeColours(*this).panelTextColour.withAlpha(0.5f));
         g.setFont(14.0f);
         g.drawText(messageWhenEmpty, getLocalBounds().withHeight(30),
             Justification::centred, true);
@@ -1103,7 +1114,9 @@ void PropertiesSearchPanel::updateResults()
 
 void PropertiesSearchPanel::paint(Graphics& g)
 {
-    g.setColour(findColour(PlugDataColour::panelBackgroundColourId));
+    auto const& colours = getThemeColours(*this);
+
+    g.setColour(colours.panelBackgroundColour);
     g.fillRoundedRectangle(getLocalBounds().reduced(1).toFloat(), Corners::windowCornerRadius);
 
     auto const titlebarBounds = getLocalBounds().removeFromTop(40).toFloat();
@@ -1111,10 +1124,10 @@ void PropertiesSearchPanel::paint(Graphics& g)
     Path p;
     p.addRoundedRectangle(titlebarBounds.getX(), titlebarBounds.getY(), titlebarBounds.getWidth(), titlebarBounds.getHeight(), Corners::windowCornerRadius, Corners::windowCornerRadius, true, true, false, false);
 
-    g.setColour(findColour(PlugDataColour::toolbarBackgroundColourId));
+    g.setColour(colours.toolbarBackgroundColour);
     g.fillPath(p);
 
-    g.setColour(findColour(PlugDataColour::toolbarOutlineColourId));
+    g.setColour(colours.toolbarOutlineColour);
     g.drawHorizontalLine(40, 0.0f, getWidth());
 }
 

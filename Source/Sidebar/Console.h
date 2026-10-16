@@ -6,12 +6,6 @@
 
 #pragma once
 #include <utility>
-extern "C" {
-#include <pd-lua/lua/lua.h>
-#include <pd-lua/lua/lauxlib.h>
-#include <pd-lua/lua/lualib.h>
-}
-
 #include "Utility/CachedStringWidth.h"
 #include "Components/BouncingViewport.h"
 #include "Object.h"
@@ -19,34 +13,6 @@ extern "C" {
 
 class ConsoleSettings final : public Component {
 public:
-    struct ConsoleSettingsButton final : public TextButton {
-        String const icon;
-        String const description;
-
-        ConsoleSettingsButton(String iconString, String descriptionString, bool const toggleButton)
-            : icon(std::move(iconString))
-            , description(std::move(descriptionString))
-        {
-            setClickingTogglesState(toggleButton);
-        }
-
-        void paint(Graphics& g) override
-        {
-            auto colour = findColour(PlugDataColour::toolbarTextColourId);
-            if (isMouseOver()) {
-                colour = colour.contrasting(0.3f);
-            }
-
-            Fonts::drawText(g, description, getLocalBounds().withTrimmedLeft(32), colour, 14);
-
-            if (getToggleState()) {
-                colour = findColour(PlugDataColour::toolbarActiveColourId);
-            }
-
-            Fonts::drawIcon(g, icon, getLocalBounds().withTrimmedLeft(8), colour, 14, false);
-        }
-    };
-
     explicit ConsoleSettings(StackArray<Value, 5>& settingsValues)
     {
         for (auto* button : buttons) {
@@ -82,11 +48,11 @@ public:
 
 private:
     OwnedArray<TextButton> buttons = {
-        new ConsoleSettingsButton(Icons::Clear, "Clear", false),
-        new ConsoleSettingsButton(Icons::Restore, "Restore", false),
-        new ConsoleSettingsButton(Icons::Message, "Show Messages", true),
-        new ConsoleSettingsButton(Icons::Error, "Show Errors", true),
-        new ConsoleSettingsButton(Icons::AutoScroll, "Autoscroll", true)
+        new CalloutMenuButton(Icons::Clear, "Clear", false),
+        new CalloutMenuButton(Icons::Restore, "Restore", false),
+        new CalloutMenuButton(Icons::Message, "Show Messages", true),
+        new CalloutMenuButton(Icons::Error, "Show Errors", true),
+        new CalloutMenuButton(Icons::AutoScroll, "Autoscroll", true)
     };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ConsoleSettings)
@@ -116,8 +82,6 @@ public:
         settingsValues[2] = true;
         settingsValues[3] = true;
         settingsValues[4] = true;
-
-        resized();
     }
 
     static UnorderedMap<String, Object*> getUniqueObjectNames(Canvas* cnv)
@@ -128,7 +92,7 @@ public:
             if (!object->gui)
                 continue;
 
-            auto tokens = StringArray::fromTokens(object->gui->getText(), false);
+            auto tokens = StringArray::fromTokens(object->gui->getText().toString(), false);
             tokens.removeRange(2, tokens.size() - 2);
 
             auto uniqueName = tokens.joinIntoString("_");
@@ -182,6 +146,33 @@ public:
     }
 
     class ConsoleComponent final : public Component {
+        class UpdateNotification final : public TextButton {
+        public:
+            explicit UpdateNotification(String const& availableVersion)
+                : TextButton("Update available: plugdata " + availableVersion)
+            {
+                setTooltip("Download the latest plugdata release");
+                onClick = [] {
+                    URL("https://plugdata.org/download").launchInDefaultBrowser();
+                };
+            }
+
+            void paint(Graphics& g) override
+            {
+                auto const& colours = getThemeColours(*this);
+
+                auto backgroundColour = colours.sidebarBackgroundColour.contrasting(isMouseOver() ? 0.075f : 0.04f);
+                if (isDown())
+                    backgroundColour = colours.sidebarActiveBackgroundColour;
+
+                auto const bounds = getLocalBounds().reduced(0, 1).toFloat().withTrimmedTop(0.5f);
+                g.setColour(backgroundColour);
+                g.fillRoundedRectangle(bounds, Corners::defaultCornerRadius);
+
+                Fonts::drawFittedText(g, getButtonText(), getLocalBounds().reduced(8, 2).translated(0, -1), colours.sidebarTextColour, 1, 0.9f, 14);
+            }
+        };
+
         class ConsoleMessage final : public Component {
 
             ConsoleComponent& console;
@@ -197,6 +188,22 @@ public:
             }
 
             void mouseDown(MouseEvent const& e) override
+            {
+                if (e.source.isTouch())
+                    return;
+
+                handleClick(e);
+            }
+
+            void mouseUp(MouseEvent const& e) override
+            {
+                if (!e.source.isTouch() || e.mouseWasDraggedSinceMouseDown())
+                    return;
+
+                handleClick(e);
+            }
+
+            void handleClick(MouseEvent const& e)
             {
                 if (!e.mods.isShiftDown() && !e.mods.isCommandDown()) {
                     console.selectedItems.clear();
@@ -231,13 +238,15 @@ public:
 
             void paint(Graphics& g) override
             {
+                auto const& colours = getThemeColours(*this);
+
                 auto const isSelected = console.selectedItems.contains(this);
                 auto const showMessages = getValue<bool>(console.settingsValues[2]);
                 auto const showErrors = getValue<bool>(console.settingsValues[3]);
 
                 if (isSelected) {
                     // Draw selected background
-                    g.setColour(findColour(PlugDataColour::sidebarActiveBackgroundColourId));
+                    g.setColour(colours.sidebarActiveBackgroundColour);
                     g.fillRoundedRectangle(getLocalBounds().reduced(0, 1).toFloat().withTrimmedTop(0.5f), Corners::defaultCornerRadius);
 
                     for (auto& item : console.selectedItems) {
@@ -246,16 +255,16 @@ public:
                             return;
                         // Draw connected on top
                         if (item->idx == idx - 1) {
-                            g.setColour(findColour(PlugDataColour::sidebarActiveBackgroundColourId));
+                            g.setColour(colours.sidebarActiveBackgroundColour);
                             g.fillRect(getLocalBounds().toFloat().withTrimmedBottom(5));
 
-                            g.setColour(findColour(PlugDataColour::outlineColourId));
+                            g.setColour(colours.outlineColour);
                             g.drawLine(10, 0, getWidth() - 10, 0);
                         }
 
                         // Draw connected on bottom
                         if (item->idx == idx + 1) {
-                            g.setColour(findColour(PlugDataColour::sidebarActiveBackgroundColourId));
+                            g.setColour(colours.sidebarActiveBackgroundColour);
                             g.fillRect(getLocalBounds().toFloat().withTrimmedTop(5));
                         }
                     }
@@ -273,7 +282,7 @@ public:
                 auto const totalLength = length + calculateRepeatOffset(repeats);
                 auto const numLines = Console::calculateNumLines(message, totalLength, console.getWidth());
 
-                auto textColour = findColour(PlugDataColour::sidebarTextColourId);
+                auto textColour = colours.sidebarTextColour;
 
                 if (type == 1)
                     textColour = Colours::orange;
@@ -286,8 +295,8 @@ public:
                     auto repeatIndicatorBounds = bounds.removeFromLeft(calculateRepeatOffset(repeats)).toFloat().translated(-4, 0.25);
                     repeatIndicatorBounds = repeatIndicatorBounds.withSizeKeepingCentre(repeatIndicatorBounds.getWidth(), 21);
 
-                    auto circleColour = findColour(PlugDataColour::sidebarActiveBackgroundColourId);
-                    auto const backgroundColour = findColour(PlugDataColour::sidebarBackgroundColourId);
+                    auto circleColour = colours.sidebarActiveBackgroundColour;
+                    auto const backgroundColour = colours.sidebarBackgroundColour;
                     auto const contrast = isSelected ? 1.5f : 0.5f;
 
                     circleColour = Colour(circleColour.getRed() + (circleColour.getRed() - backgroundColour.getRed()) * contrast,
@@ -298,7 +307,7 @@ public:
                     auto const circleBounds = repeatIndicatorBounds.reduced(2);
                     g.fillRoundedRectangle(circleBounds, circleBounds.getHeight() / 2.0f);
 
-                    Fonts::drawText(g, String(repeats), repeatIndicatorBounds, findColour(PlugDataColour::sidebarTextColourId), 12, Justification::centred);
+                    Fonts::drawText(g, String(repeats), repeatIndicatorBounds, colours.sidebarTextColour, 12, Justification::centred);
                 }
 
                 // Draw text
@@ -321,6 +330,13 @@ public:
         {
             setAccessible(false);
             setWantsKeyboardFocus(true);
+
+            auto const availableUpdateVersion = getAvailableUpdateVersion();
+            if (availableUpdateVersion.isNotEmpty()) {
+                updateNotification = std::make_unique<UpdateNotification>(availableUpdateVersion);
+                addAndMakeVisible(*updateNotification);
+            }
+
             repaint();
         }
 
@@ -415,7 +431,7 @@ public:
                 totalHeight += std::max(0, height);
             }
 
-            return totalHeight + 8;
+            return totalHeight + getUpdateNotificationHeight() + 8;
         }
 
         static int calculateRepeatOffset(int const numRepeats)
@@ -429,7 +445,7 @@ public:
 
         void mouseDown(MouseEvent const& e) override
         {
-            if (!e.mods.isLeftButtonDown())
+            if (!isRealClickEvent(e))
                 return;
 
             selectedItems.clear();
@@ -442,6 +458,12 @@ public:
             auto const showErrors = getValue<bool>(settingsValues[3]);
 
             int totalHeight = 4;
+            if (updateNotification) {
+                int const rightMargin = viewport.canScrollVertically() ? 13 : 11;
+                updateNotification->setBounds(6, totalHeight, getWidth() - rightMargin, updateNotificationHeight);
+                totalHeight += updateNotificationHeight;
+            }
+
             for (int row = 0; row < static_cast<int>(pd->getConsoleMessages().size()); row++) {
                 if (row >= messages.size())
                     break;
@@ -461,6 +483,103 @@ public:
                 totalHeight += height;
             }
         }
+
+        static String normaliseVersionTag(String version)
+        {
+            version = version.trim().trimCharactersAtStart("vV");
+
+            auto const suffixStart = version.indexOfChar('-');
+            if (suffixStart >= 0)
+                version = version.substring(0, suffixStart);
+
+            return version.trim();
+        }
+
+        static Array<int> getVersionParts(String version)
+        {
+            Array<int> parts;
+            String currentPart;
+
+            version = normaliseVersionTag(version);
+
+            for (int i = 0; i < version.length(); i++) {
+                auto const character = version[i];
+                if (CharacterFunctions::isDigit(character)) {
+                    currentPart += String::charToString(character);
+                    continue;
+                }
+
+                if (currentPart.isNotEmpty()) {
+                    parts.add(currentPart.getIntValue());
+                    currentPart.clear();
+                }
+            }
+
+            if (currentPart.isNotEmpty())
+                parts.add(currentPart.getIntValue());
+
+            while (parts.size() < 4) {
+                parts.add(0);
+            }
+
+            return parts;
+        }
+
+        static int compareVersions(String const& lhs, String const& rhs)
+        {
+            auto const lhsParts = getVersionParts(lhs);
+            auto const rhsParts = getVersionParts(rhs);
+            auto const numParts = std::max(lhsParts.size(), rhsParts.size());
+
+            for (int i = 0; i < numParts; i++) {
+                auto const lhsPart = i < lhsParts.size() ? lhsParts[i] : 0;
+                auto const rhsPart = i < rhsParts.size() ? rhsParts[i] : 0;
+
+                if (lhsPart != rhsPart)
+                    return lhsPart > rhsPart ? 1 : -1;
+            }
+
+            return 0;
+        }
+
+        static String getLatestReleaseTag()
+        {
+            auto const testUpdateVersion = SystemStats::getEnvironmentVariable("PLUGDATA_TEST_UPDATE_VERSION", {}).trim();
+            if (testUpdateVersion.isNotEmpty())
+                return testUpdateVersion;
+
+            int statusCode = 0;
+            auto releaseInfoStream = URL("https://api.github.com/repos/plugdata-team/plugdata/releases/latest")
+                                         .createInputStream(URL::InputStreamOptions(URL::ParameterHandling::inAddress)
+                                                                .withConnectionTimeoutMs(1000)
+                                                                .withStatusCode(&statusCode)
+                                                                .withExtraHeaders("User-Agent: plugdata\r\nAccept: application/vnd.github+json\r\n"));
+
+            if (statusCode != 200 || releaseInfoStream == nullptr)
+                return {};
+
+            auto releaseInfo = JSON::parse(releaseInfoStream->readEntireStreamAsString());
+            auto const latestReleaseVersion = releaseInfo.getProperty("tag_name", {}).toString().trim();
+
+            return latestReleaseVersion.containsIgnoreCase("test") ? String() : latestReleaseVersion;
+        }
+
+        static String getAvailableUpdateVersion()
+        {
+            auto const latestReleaseVersion = normaliseVersionTag(getLatestReleaseTag());
+            if (latestReleaseVersion.isEmpty())
+                return {};
+
+            return compareVersions(latestReleaseVersion, normaliseVersionTag(PLUGDATA_VERSION)) > 0 ? latestReleaseVersion : String();
+        }
+
+        int getUpdateNotificationHeight() const
+        {
+            return updateNotification ? updateNotificationHeight : 0;
+        }
+
+        static constexpr int updateNotificationHeight = 30;
+        std::unique_ptr<UpdateNotification> updateNotification;
 
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ConsoleComponent)
     };

@@ -17,52 +17,33 @@ NVGComponent::NVGComponent(Component* comp)
 
 NVGComponent::~NVGComponent() { }
 
-NVGcolor NVGComponent::convertColour(Colour const c)
-{
-    return nvgRGBA(c.getRed(), c.getGreen(), c.getBlue(), c.getAlpha());
-}
-
-Colour NVGComponent::convertColour(NVGcolor const c)
-{
-    return Colour(c.r, c.g, c.b, c.a);
-}
-
-NVGcolor NVGComponent::findNVGColour(int const colourId) const
-{
-    return convertColour(component.findColour(colourId));
-}
-
 void NVGComponent::setJUCEPath(NVGcontext* nvg, Path const& p)
 {
     Path::Iterator i(p);
 
-    nvgBeginPath(nvg);
+    nanovg::nvgBeginPath(nvg);
 
     while (i.next()) {
         switch (i.elementType) {
         case Path::Iterator::startNewSubPath:
-            nvgMoveTo(nvg, i.x1, i.y1);
+            nanovg::nvgMoveTo(nvg, i.x1, i.y1);
             break;
         case Path::Iterator::lineTo:
-            nvgLineTo(nvg, i.x1, i.y1);
+            nanovg::nvgLineTo(nvg, i.x1, i.y1);
             break;
         case Path::Iterator::quadraticTo:
-            nvgQuadTo(nvg, i.x1, i.y1, i.x2, i.y2);
+            nanovg::nvgQuadTo(nvg, i.x1, i.y1, i.x2, i.y2);
             break;
         case Path::Iterator::cubicTo:
-            nvgBezierTo(nvg, i.x1, i.y1, i.x2, i.y2, i.x3, i.y3);
+            nanovg::nvgBezierTo(nvg, i.x1, i.y1, i.x2, i.y2, i.x3, i.y3);
             break;
         case Path::Iterator::closePath:
-            nvgClosePath(nvg);
+            nanovg::nvgClosePath(nvg);
             break;
         default:
             break;
         }
     }
-}
-
-void NVGComponent::updateFramebuffers(NVGcontext*)
-{
 }
 
 void NVGComponent::render(NVGcontext*)
@@ -79,7 +60,7 @@ NVGImage::NVGImage(NVGcontext* nvg, int width, int height, std::function<void(Gr
     // into the image data, it is not a greyscale image of the graphics context.
     auto const imageFormat = imageFlags & NVGImageFlags::AlphaImage ? Image::SingleChannel : Image::ARGB;
 
-    auto image = Image(imageFormat, width, height, false);
+    auto image = Image(imageFormat, width, height, false, SoftwareImageType());
     if (clearImage)
         image.clear({ 0, 0, width, height }, clearColour);
     Graphics g(image); // Render resize handles with JUCE, since rounded rect exclusion is hard with nanovg
@@ -115,11 +96,8 @@ NVGImage& NVGImage::operator=(NVGImage&& other) noexcept
     if (this != &other) {
         // Delete current image
         if (subImages.not_empty() && nvg) {
-            if (auto* surface = NVGSurface::getSurfaceForContext(nvg)) {
-                surface->makeContextActive();
-            }
             for (auto const& subImage : subImages) {
-                nvgDeleteImage(nvg, subImage.imageId);
+                nanovg::nvgDeleteImage(nvg, subImage.imageId);
             }
         }
 
@@ -148,7 +126,7 @@ void NVGImage::clearAll(NVGcontext const* nvg)
     for (auto* image : allImages) {
         if (image->isValid() && image->nvg == nvg) {
             for (auto const& subImage : image->subImages) {
-                nvgDeleteImage(image->nvg, subImage.imageId);
+                nanovg::nvgDeleteImage(image->nvg, subImage.imageId);
             }
             image->subImages.clear();
             if (image->onImageInvalidate)
@@ -162,42 +140,11 @@ bool NVGImage::isValid() const
     return subImages.not_empty();
 }
 
-void NVGImage::renderJUCEComponent(NVGcontext* nvg, Component& component, float const scale)
-{
-    nvgSave(nvg);
-    nvgScale(nvg, 1.0f / scale, 1.0f / scale);
-
-    Point<float> offset;
-    nvgTransformGetSubpixelOffset(nvg, &offset.x, &offset.y);
-
-    auto w = roundToInt(scale * static_cast<float>(component.getWidth()));
-    auto h = roundToInt(scale * static_cast<float>(component.getHeight()));
-
-    if (w > 0 && h > 0) {
-        Image componentImage(component.isOpaque() ? Image::RGB : Image::ARGB, w, h, true);
-        {
-            Graphics g(componentImage);
-            g.addTransform(AffineTransform::translation(offset.x, offset.y));
-            g.addTransform(AffineTransform::scale(scale, scale));
-            component.paintEntireComponent(g, true);
-        }
-
-        loadJUCEImage(nvg, componentImage);
-
-        render(nvg, { 0, 0, w, h }, true);
-    }
-    nvgRestore(nvg);
-}
-
 void NVGImage::deleteImage()
 {
     if (subImages.size() && nvg) {
         for (auto const& subImage : subImages) {
-            if (auto* surface = NVGSurface::getSurfaceForContext(nvg)) {
-                surface->makeContextActive();
-            }
-
-            nvgDeleteImage(nvg, subImage.imageId);
+            nanovg::nvgDeleteImage(nvg, subImage.imageId);
         }
         subImages.clear();
     }
@@ -209,21 +156,14 @@ void NVGImage::loadJUCEImage(NVGcontext* context, Image const& image, int const 
     totalHeight = image.getHeight();
     nvg = context;
 
-    static int maximumTextureSize = 0;
-    if (!maximumTextureSize) {
-        if (auto* ctx = NVGSurface::getSurfaceForContext(nvg)) {
-            ctx->makeContextActive();
-            nvgMaxTextureSize(maximumTextureSize);
-        }
-    }
-    int const textureSizeLimit = maximumTextureSize == 0 ? 8192 : maximumTextureSize;
+    constexpr int textureSizeLimit = 8192;
 
     // Most of the time, the image is small enough, so we optimise for that
     if (totalWidth <= textureSizeLimit && totalHeight <= textureSizeLimit) {
         Image::BitmapData const imageData(image, Image::BitmapData::readOnly);
 
         if (subImages.size() && subImages[0].bounds == image.getBounds() && nvg == context) {
-            nvgUpdateImage(nvg, subImages[0].imageId, imageData.data);
+            nanovg::nvgUpdateImage(nvg, subImages[0].imageId, imageData.data);
             return;
         }
 
@@ -232,9 +172,9 @@ void NVGImage::loadJUCEImage(NVGcontext* context, Image const& image, int const 
         flags |= withMipmaps ? NVG_IMAGE_GENERATE_MIPMAPS : 0;
 
         if (image.isARGB())
-            subImage.imageId = nvgCreateImageARGB(nvg, totalWidth, totalHeight, flags | NVG_IMAGE_PREMULTIPLIED, imageData.data);
+            subImage.imageId = nanovg::nvgCreateImageARGB(nvg, totalWidth, totalHeight, flags, imageData.data);
         else if (image.isSingleChannel())
-            subImage.imageId = nvgCreateImageAlpha(nvg, totalWidth, totalHeight, flags, imageData.data);
+            subImage.imageId = nanovg::nvgCreateImageAlpha(nvg, totalWidth, totalHeight, flags, imageData.data);
 
         deleteImage();
 
@@ -264,9 +204,9 @@ void NVGImage::loadJUCEImage(NVGcontext* context, Image const& image, int const 
             flags |= withMipmaps ? NVG_IMAGE_GENERATE_MIPMAPS : 0;
 
             if (image.isARGB())
-                subImage.imageId = nvgCreateImageARGB(nvg, w, h, flags | NVG_IMAGE_PREMULTIPLIED, imageData.data);
+                subImage.imageId = nanovg::nvgCreateImageARGB(nvg, w, h, flags, imageData.data);
             else if (image.isSingleChannel())
-                subImage.imageId = nvgCreateImageAlpha(nvg, w, h, flags, imageData.data);
+                subImage.imageId = nanovg::nvgCreateImageAlpha(nvg, w, h, flags, imageData.data);
 
             y += textureSizeLimit;
             subImage.bounds = bounds;
@@ -279,36 +219,36 @@ void NVGImage::loadJUCEImage(NVGcontext* context, Image const& image, int const 
 
 void NVGImage::renderAlphaImage(NVGcontext* nvg, Rectangle<int> const b, NVGcolor const col)
 {
-    nvgSave(nvg);
+    nanovg::nvgSave(nvg);
 
-    nvgScale(nvg, b.getWidth() / static_cast<float>(totalWidth), b.getHeight() / static_cast<float>(totalHeight));
+    nanovg::nvgScale(nvg, b.getWidth() / static_cast<float>(totalWidth), b.getHeight() / static_cast<float>(totalHeight));
     for (auto const& subImage : subImages) {
         auto scaledBounds = subImage.bounds;
-        nvgFillPaint(nvg, nvgImageAlphaPattern(nvg, b.getX() + scaledBounds.getX(), b.getY() + scaledBounds.getY(), scaledBounds.getWidth(), scaledBounds.getHeight(), 0, subImage.imageId, col));
+        nanovg::nvgFillPaint(nvg, nanovg::nvgImageAlphaPattern(nvg, b.getX() + scaledBounds.getX(), b.getY() + scaledBounds.getY(), scaledBounds.getWidth(), scaledBounds.getHeight(), 0, subImage.imageId, col));
 
-        nvgFillRect(nvg, b.getX() + scaledBounds.getX(), b.getY() + scaledBounds.getY(), scaledBounds.getWidth(), scaledBounds.getHeight());
+        nanovg::nvgFillRect(nvg, b.getX() + scaledBounds.getX(), b.getY() + scaledBounds.getY(), scaledBounds.getWidth(), scaledBounds.getHeight());
     }
-    nvgRestore(nvg);
+    nanovg::nvgRestore(nvg);
 }
 
 void NVGImage::render(NVGcontext* nvg, Rectangle<int> const b, bool const quantize)
 {
-    nvgSave(nvg);
+    nanovg::nvgSave(nvg);
 
     float const scaleW = b.getWidth() / static_cast<float>(totalWidth);
     float const scaleH = b.getHeight() / static_cast<float>(totalHeight);
-    nvgScale(nvg, scaleW, scaleH);
+    nanovg::nvgScale(nvg, scaleW, scaleH);
     if (quantize) {
         // Make sure image pixel grid aligns with physical pixels
-        nvgTransformQuantize(nvg);
+        nanovg::nvgTransformQuantize(nvg);
     }
     for (auto const& subImage : subImages) {
         auto scaledBounds = subImage.bounds;
-        nvgFillPaint(nvg, nvgImagePattern(nvg, b.getX() + scaledBounds.getX(), b.getY() + scaledBounds.getY(), scaledBounds.getWidth(), scaledBounds.getHeight(), 0, subImage.imageId, 1.0f));
+        nanovg::nvgFillPaint(nvg, nanovg::nvgImagePattern(nvg, b.getX() + scaledBounds.getX(), b.getY() + scaledBounds.getY(), scaledBounds.getWidth(), scaledBounds.getHeight(), 0, subImage.imageId, 1.0f));
 
-        nvgFillRect(nvg, b.getX() / scaleW + scaledBounds.getX(), b.getY() / scaleH + scaledBounds.getY(), scaledBounds.getWidth(), scaledBounds.getHeight());
+        nanovg::nvgFillRect(nvg, b.getX() / scaleW + scaledBounds.getX(), b.getY() / scaleH + scaledBounds.getY(), scaledBounds.getWidth(), scaledBounds.getHeight());
     }
-    nvgRestore(nvg);
+    nanovg::nvgRestore(nvg);
 }
 
 bool NVGImage::needsUpdate(int const width, int const height) const
@@ -337,12 +277,9 @@ NVGFramebuffer::NVGFramebuffer()
 NVGFramebuffer::~NVGFramebuffer()
 {
     if (fb) {
-        if (auto* surface = NVGSurface::getSurfaceForContext(nvg)) {
-            surface->makeContextActive();
-        }
-
-        nvgDeleteFramebuffer(fb);
+        nanovg::deleteFramebuffer(nvg, fb);
         fb = nullptr;
+        fbImage = -1;
     }
     allFramebuffers.erase(this);
 }
@@ -351,8 +288,9 @@ void NVGFramebuffer::clearAll(NVGcontext const* nvg)
 {
     for (auto* buffer : allFramebuffers) {
         if (buffer->nvg == nvg && buffer->fb) {
-            nvgDeleteFramebuffer(buffer->fb);
+            nanovg::deleteFramebuffer(buffer->nvg, buffer->fb);
             buffer->fb = nullptr;
+            buffer->fbImage = -1;
         }
     }
 }
@@ -372,38 +310,43 @@ void NVGFramebuffer::setDirty()
     fbDirty = true;
 }
 
-void NVGFramebuffer::bind(NVGcontext* ctx, int const width, int const height)
+void NVGFramebuffer::ensureFramebuffer(NVGcontext* ctx, int const width, int const height, int const imageFlags)
 {
-    if (!fb || fbWidth != width || fbHeight != height) {
+    if (fb && (fbWidth != width || fbHeight != height)) {
+        nanovg::deleteFramebuffer(nvg, fb);
+        fb = nullptr;
+    }
+
+    if (!fb) {
         nvg = ctx;
-        if (fb)
-            nvgDeleteFramebuffer(fb);
-        fb = nvgCreateFramebuffer(nvg, width, height, NVG_IMAGE_PREMULTIPLIED);
+        fb = nanovg::createFramebuffer(nvg, width, height, imageFlags);
+        fbImage = nanovg::framebufferImage(nvg, fb);
         fbWidth = width;
         fbHeight = height;
     }
-
-    nvgBindFramebuffer(fb);
 }
 
-void NVGFramebuffer::unbind()
+void NVGFramebuffer::renderToFramebuffer(NVGcontext* nvg, int const width, int const height, std::function<void(NVGcontext*)> renderCallback, int const imageFlags)
 {
-    nvgBindFramebuffer(nullptr);
-}
+    ensureFramebuffer(nvg, width, height, imageFlags);
+    auto const pixelScale = nanovg::nvgCurrentPixelScale(nvg);
 
-void NVGFramebuffer::renderToFramebuffer(NVGcontext* nvg, int const width, int const height, std::function<void(NVGcontext*)> renderCallback)
-{
-    bind(nvg, width, height);
-    renderCallback(nvg);
-    unbind();
+    // Commit the draw as a resource-queue pass: the layer brackets it with
+    // bind/unbind and replays it on the render thread, after the create above and
+    // before the frame that samples this framebuffer -- so a coalesced frame can't
+    // drop the render and leave stale/empty dots (the old flicker).
+    nanovg::commitFramebufferPass(nvg, fb, std::move(renderCallback));
+
+    nanovg::setCurrentPixelScale(nvg, pixelScale);
+
     fbDirty = false;
 }
 
 void NVGFramebuffer::render(NVGcontext* nvg, Rectangle<int> const b)
 {
-    if (fb) {
-        nvgFillPaint(nvg, nvgImagePattern(nvg, 0, 0, b.getWidth(), b.getHeight(), 0, fb->image, 1));
-        nvgFillRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight());
+    if (fb && fbImage != -1) {
+        nanovg::nvgFillPaint(nvg, nanovg::nvgImagePattern(nvg, 0, 0, b.getWidth(), b.getHeight(), 0, fbImage, 1));
+        nanovg::nvgFillRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight());
     }
 }
 
@@ -412,7 +355,7 @@ int NVGFramebuffer::getImage() const
     if (!fb)
         return -1;
 
-    return fb->image;
+    return fbImage;
 }
 
 NVGCachedPath::NVGCachedPath()
@@ -423,7 +366,7 @@ NVGCachedPath::NVGCachedPath()
 NVGCachedPath::~NVGCachedPath()
 {
     if (cacheId != -1) {
-        nvgDeletePath(nvg, cacheId);
+        nanovg::nvgDeletePath(nvg, cacheId);
         cacheId = -1;
     }
     allCachedPaths.erase(this);
@@ -448,7 +391,15 @@ void NVGCachedPath::resetAll()
 void NVGCachedPath::clear()
 {
     if (cacheId != -1) {
-        nvgDeletePath(nvg, cacheId);
+        nanovg::nvgDeletePath(nvg, cacheId);
+        cacheId = -1;
+        nvg = nullptr;
+    }
+}
+
+void NVGCachedPath::clearWithoutDelete()
+{
+    if (cacheId != -1) {
         cacheId = -1;
         nvg = nullptr;
     }
@@ -462,32 +413,32 @@ bool NVGCachedPath::isValid() const
 void NVGCachedPath::save(NVGcontext* ctx)
 {
     if (nvg == ctx && cacheId != -1)
-        nvgDeletePath(nvg, cacheId);
+        nanovg::nvgDeletePath(nvg, cacheId);
     nvg = ctx;
-    cacheId = nvgSavePath(nvg, cacheId);
+    cacheId = nanovg::nvgSavePath(nvg, cacheId);
 }
 
 bool NVGCachedPath::stroke()
 {
     if (!nvg || cacheId == -1)
         return false;
-    return nvgStrokeCachedPath(nvg, cacheId);
+    return nanovg::nvgStrokeCachedPath(nvg, cacheId);
 }
 
 bool NVGCachedPath::fill()
 {
     if (!nvg || cacheId == -1)
         return false;
-    return nvgFillCachedPath(nvg, cacheId);
+    return nanovg::nvgFillCachedPath(nvg, cacheId);
 }
 
 NVGScopedState::NVGScopedState(NVGcontext* nvg)
     : nvg(nvg)
 {
-    nvgSave(nvg);
+    nanovg::nvgSave(nvg);
 }
 
 NVGScopedState::~NVGScopedState()
 {
-    nvgRestore(nvg);
+    nanovg::nvgRestore(nvg);
 }

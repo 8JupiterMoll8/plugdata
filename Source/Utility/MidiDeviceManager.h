@@ -47,6 +47,16 @@ public:
 
     void updateMidiDevices()
     {
+        // Guard for Linux VST3/LV2, where this may not always run on the message thread
+        if (!MessageManager::existsAndIsCurrentThread()) {
+            MessageManager::callAsync([safeThis = WeakReference(this)] {
+                if (safeThis)
+                    safeThis->updateMidiDevices();
+            });
+            return;
+        }
+
+
         availableMidiInputs.clear();
         availableMidiOutputs.clear();
         availableMidiInputs.add_array(MidiInput::getAvailableDevices());
@@ -81,25 +91,31 @@ public:
 
     String getPortDescription(bool const isInput, int const port)
     {
-        if (isInput && inputPorts[port + 1].enabled) {
-            auto const numDevices = inputPorts[port + 1].devices.size();
+        int portNum = port + 1;
+        bool isDawPort = !ProjectInfo::isStandalone && port == 0;
+        if (isInput && (inputPorts[portNum].enabled || isDawPort)) {
+            auto numDevices = inputPorts[portNum].devices.size() + isDawPort;
+            if (numDevices == 1 && isDawPort)
+                return "Port " + String(portNum) + " (" + "DAW input" + ")";
             if (numDevices == 1) {
-                return "Port " + String(port + 1) + " (" + String(inputPorts[port + 1].devices.getFirst()->getName()) + ")";
+                return "Port " + String(portNum) + " (" + String(inputPorts[port + 1].devices.getFirst()->getName()) + ")";
             }
             if (numDevices > 0) {
-                return "Port " + String(port + 1) + " (" + String(numDevices) + " devices)";
+                return "Port " + String(portNum) + " (" + String(numDevices) + " devices)";
             }
-        } else if (!isInput && outputPorts[port + 1].enabled) {
-            auto const numDevices = outputPorts[port + 1].devices.size();
+        } else if (!isInput && (outputPorts[portNum].enabled || isDawPort)) {
+            auto numDevices = outputPorts[portNum].devices.size() + isDawPort;
+            if (numDevices == 1 && isDawPort)
+                return "Port " + String(portNum) + " (" + "DAW output" + ")";
             if (numDevices == 1) {
-                return "Port " + String(port + 1) + " (" + String(outputPorts[port + 1].devices.getFirst()->getName()) + ")";
+                return "Port " + String(portNum) + " (" + String(outputPorts[port + 1].devices.getFirst()->getName()) + ")";
             }
             if (numDevices > 0) {
-                return "Port " + String(port + 1) + " (" + String(numDevices) + " devices)";
+                return "Port " + String(portNum) + " (" + String(numDevices) + " devices)";
             }
         }
 
-        return "Port " + String(port + 1);
+        return "Port " + String(portNum);
     }
 
     int getMidiDevicePort(bool const isInput, MidiDeviceInfo& info)
@@ -151,10 +167,16 @@ public:
         if (isInput) {
             auto* device = moveMidiDevice<MidiInput>(inputPorts, identifier, port + 1);
             if (!device && shouldBeEnabled) {
-                if (auto midiIn = MidiInput::openDevice(identifier, this)) {
-                    auto* input = inputPorts[port + 1].devices.add(midiIn.release());
-                    input->start();
-                    inputPorts[port + 1].enabled = true;
+                auto& targetPort = inputPorts[port + 1];
+                bool alreadyExists = std::any_of(targetPort.devices.begin(), targetPort.devices.end(),
+                    [&](MidiInput const* d) { return d && d->getIdentifier() == identifier; });
+
+                if (!alreadyExists) {
+                    if (auto midiIn = MidiInput::openDevice(identifier, this)) {
+                        auto* input = targetPort.devices.add(midiIn.release());
+                        input->start();
+                        targetPort.enabled = true;
+                    }
                 }
             } else if (device && shouldBeEnabled) {
                 device->start();
@@ -165,10 +187,16 @@ public:
             auto* device = moveMidiDevice<MidiOutput>(outputPorts, identifier, port + 1);
 
             if (!device && shouldBeEnabled) {
-                if (auto midiOut = MidiOutput::openDevice(identifier)) {
-                    auto* output = outputPorts[port + 1].devices.add(midiOut.release());
-                    output->startBackgroundThread();
-                    outputPorts[port + 1].enabled = true;
+                auto& targetPort = outputPorts[port + 1];
+                bool alreadyExists = std::any_of(targetPort.devices.begin(), targetPort.devices.end(),
+                    [&](MidiOutput const* d) { return d && d->getIdentifier() == identifier; });
+
+                if (!alreadyExists) {
+                    if (auto midiOut = MidiOutput::openDevice(identifier)) {
+                        auto* output = targetPort.devices.add(midiOut.release());
+                        output->startBackgroundThread();
+                        targetPort.enabled = true;
+                    }
                 }
             } else if (device && shouldBeEnabled) {
                 device->startBackgroundThread();
@@ -329,13 +357,10 @@ public:
         if (!ProjectInfo::isStandalone)
             return;
 
-        auto const settingsTree = SettingsFile::getInstance()->getValueTree();
-        auto const midiOutputsTree = settingsTree.getChildWithName("EnabledMidiOutputPorts");
-
-        for (int i = 0; i < midiOutputsTree.getNumChildren(); i++) {
-            auto midiPort = midiOutputsTree.getChild(i);
-            auto name = midiPort.getProperty("Name").toString();
-            auto const port = midiPort.hasProperty("Port") ? static_cast<int>(midiPort.getProperty("Port")) : 0;
+        auto const& midiOutputs = SettingsFile::getInstance()->getProperty<VarArray>("enabled_midi_outputs");
+        for (auto& midiPort : midiOutputs) {
+            auto const name = midiPort.getProperty("name", "").toString();
+            auto const port = midiPort.getProperty("port", 0);
             for (auto& output : availableMidiOutputs) {
                 if (output.name == name) {
                     setMidiDevicePort(false, output.identifier, port);
@@ -344,11 +369,10 @@ public:
             }
         }
 
-        auto const midiInputsTree = settingsTree.getChildWithName("EnabledMidiInputPorts");
-        for (int i = 0; i < midiInputsTree.getNumChildren(); i++) {
-            auto midiPort = midiInputsTree.getChild(i);
-            auto name = midiPort.getProperty("Name").toString();
-            auto const port = midiPort.hasProperty("Port") ? static_cast<int>(midiPort.getProperty("Port")) : 0;
+        auto const& midiInputs = SettingsFile::getInstance()->getProperty<VarArray>("enabled_midi_inputs");
+        for (auto& midiPort : midiInputs) {
+            auto const name = midiPort.getProperty("name", "").toString();
+            auto const port = midiPort.getProperty("port", 0);
             for (auto& input : availableMidiInputs) {
                 if (input.name == name) {
                     setMidiDevicePort(true, input.identifier, port);
@@ -364,35 +388,30 @@ public:
         if (!ProjectInfo::isStandalone)
             return;
 
-        auto midiOutputsTree = SettingsFile::getInstance()->getValueTree().getChildWithName("EnabledMidiOutputPorts");
-
-        midiOutputsTree.removeAllChildren(nullptr);
+        auto& midiOutputs = SettingsFile::getInstance()->getProperty<VarArray>("enabled_midi_outputs");
+        midiOutputs.clear();
 
         for (auto& port : outputPorts) {
             if (!port.enabled)
                 continue;
             for (auto const* device : port.devices) {
-                if (midiOutputsTree.getChildWithProperty("Name", device->getName()).isValid())
-                    continue;
-                ValueTree midiOutputPort("MidiPort");
-                midiOutputPort.setProperty("Name", device->getName(), nullptr);
-                midiOutputPort.setProperty("Port", outputPorts.index_of_address(port) - 1, nullptr);
-                midiOutputsTree.appendChild(midiOutputPort, nullptr);
+                auto* outputPort = new DynamicObject();
+                outputPort->setProperty("name", device->getName());
+                outputPort->setProperty("port", outputPorts.index_of_address(port) - 1);
+                midiOutputs.add(var(outputPort));
             }
         }
 
-        auto midiInputsTree = SettingsFile::getInstance()->getValueTree().getChildWithName("EnabledMidiInputPorts");
-        midiInputsTree.removeAllChildren(nullptr);
+        auto& midiInputs = SettingsFile::getInstance()->getProperty<VarArray>("enabled_midi_inputs");
+        midiInputs.clear();
         for (auto& port : inputPorts) {
             if (!port.enabled)
                 continue;
             for (auto const* device : port.devices) {
-                if (midiInputsTree.getChildWithProperty("Name", device->getName()).isValid())
-                    continue;
-                ValueTree midiInputPort("MidiPort");
-                midiInputPort.setProperty("Name", device->getName(), nullptr);
-                midiInputPort.setProperty("Port", inputPorts.index_of_address(port) - 1, nullptr);
-                midiInputsTree.appendChild(midiInputPort, nullptr);
+                auto* inputPort = new DynamicObject();
+                inputPort->setProperty("name", device->getName());
+                inputPort->setProperty("port", inputPorts.index_of_address(port) - 1);
+                midiOutputs.add(var(inputPort));
             }
         }
     }
@@ -458,4 +477,6 @@ private:
     SmallArray<MidiDeviceInfo> availableMidiOutputs;
 
     AtomicValue<int> internalSynthPort;
+
+    JUCE_DECLARE_WEAK_REFERENCEABLE(MidiDeviceManager)
 };

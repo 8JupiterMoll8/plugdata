@@ -8,6 +8,7 @@ enum ParameterType {
     tInt,
     tFloat,
     tColour,
+    tColourAlpha,
     tBool,
     tCombo,
     tRangeFloat,
@@ -16,12 +17,15 @@ enum ParameterType {
     tCustom
 };
 
-enum ParameterCategory {
-    cDimensions,
-    cGeneral,
-    cAppearance,
-    cLabel
+struct ParameterCategory {
+    String name;
+    int order;
 };
+
+inline ParameterCategory const cDimensions = {.name = "Dimensions", .order = 0};
+inline ParameterCategory const cGeneral = {.name = "General", .order = 1};
+inline ParameterCategory const cAppearance = {.name = "Appearance", .order = 2};
+inline ParameterCategory const cLabel = {.name = "Label", .order = 3};
 
 class PropertiesPanelProperty;
 using CustomPanelCreateFn = std::function<PropertiesPanelProperty*()>;
@@ -69,13 +73,15 @@ public:
         objectParameters.add(param);
     }
 
-    void resetAll()
+    void resetAll(Component const& context)
     {
-        auto const& lnf = LookAndFeel::getDefaultLookAndFeel();
+        auto const& lnf = context.getLookAndFeel();
         for (auto param : objectParameters) {
             if (!param.defaultValue.isVoid()) {
-                if (param.type == tColour) {
-                    param.valuePtr->setValue(lnf.findColour(param.defaultValue).toString());
+                if (param.type == tColour || param.type == tColourAlpha) {
+                    // Colour defaults are a theme colour ID, or a literal colour as a hex string
+                    auto const colour = param.defaultValue.isString() ? Colour::fromString(param.defaultValue.toString()) : lnf.findColour(param.defaultValue);
+                    param.valuePtr->setValue(colourToVar(colour));
                 } else if (param.defaultValue.isArray() && param.defaultValue.getArray()->isEmpty()) {
                     return;
                 } else {
@@ -85,9 +91,14 @@ public:
         }
     }
 
+    void clear()
+    {
+        objectParameters.clear();
+    }
+
     // ========= overloads for making different types of parameters =========
 
-    void addParamFloat(String const& pString, ParameterCategory const pCat, Value* pVal, var const& pDefault = var(), bool const clip = false, double const min = 0.0, double const max = 0.0)
+    void addParamFloat(String const& pString, ParameterCategory const pCat, Value* pVal, var const& pDefault = var(), bool const clip = false, double const min = 0.0, double const max = 1 << 30)
     {
         objectParameters.add(ObjectParameter(pString, tFloat, pCat, pVal, StringArray(), pDefault, nullptr, nullptr, clip, min, max));
     }
@@ -112,14 +123,14 @@ public:
         objectParameters.add(ObjectParameter(pString, tColour, pCat, pVal, StringArray(), pDefault));
     }
 
-    void addParamColourFG(Value* pVal)
+    void addParamColourFG(Value* pVal, bool allowAlpha = false)
     {
-        objectParameters.add(ObjectParameter("Foreground", tColour, cAppearance, pVal, StringArray(), PlugDataColour::canvasTextColourId));
+        objectParameters.add(ObjectParameter("Foreground", allowAlpha ? tColourAlpha : tColour, cAppearance, pVal, StringArray(), PlugDataColour::canvasTextColourId));
     }
 
-    void addParamColourBG(Value* pVal)
+    void addParamColourBG(Value* pVal, bool allowAlpha = false)
     {
-        objectParameters.add(ObjectParameter("Background", tColour, cAppearance, pVal, StringArray(), PlugDataColour::guiObjectBackgroundColourId));
+        objectParameters.add(ObjectParameter("Background", allowAlpha ? tColourAlpha : tColour, cAppearance, pVal, StringArray(), PlugDataColour::guiObjectBackgroundColourId));
     }
 
     void addParamColourLabel(Value* pVal)

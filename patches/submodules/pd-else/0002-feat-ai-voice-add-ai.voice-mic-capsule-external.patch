@@ -1,7 +1,7 @@
-From df5b39b65694a6407a5ccf8755e371431f4a99a6 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Alphi <alphi@starchaser.local>
 Date: Mon, 12 Oct 2026 22:03:24 +0200
-Subject: [PATCH 2/2] feat(ai-voice): add [ai.voice] mic capsule external
+Subject: [PATCH 2/3] feat(ai-voice): add [ai.voice] mic capsule external
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
@@ -21,7 +21,7 @@ Methods: record/rec · stop · play · clear · send/ai · mode <melody|beat>
 
 diff --git a/Source/Control/ai_voice.c b/Source/Control/ai_voice.c
 new file mode 100644
-index 00000000..d2773283
+index 000000000..d27732836
 --- /dev/null
 +++ b/Source/Control/ai_voice.c
 @@ -0,0 +1,388 @@

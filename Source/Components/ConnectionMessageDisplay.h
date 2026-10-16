@@ -30,7 +30,7 @@ public:
     {
         setSize(36, 36);
         setVisible(false);
-        setBufferedToImage(true);
+        setAlwaysOnTop(true);
     }
 
     ~ConnectionMessageDisplay() override
@@ -44,6 +44,31 @@ public:
     bool hitTest(int x, int y) override
     {
         return false;
+    }
+
+    float getDesktopScaleFactor() const override
+    {
+        return getApproximateScaleFactorForComponent(editor) * Desktop::getInstance().getGlobalScaleFactor();
+    }
+
+    void hideDisplay()
+    {
+        stopTimer(RepaintTimer);
+        setVisible(false);
+        if (connectionPtr != nullptr && activeConnection) {
+            auto* pd = activeConnection->outobj->cnv->pd;
+            pd->connectionListener = nullptr;
+            connectionPtr = nullptr;
+            activeConnection = nullptr;
+        }
+    }
+
+    void showDisplay()
+    {
+        if (!isOnDesktop()) {
+            addToDesktop(ComponentPeer::windowIsTemporary | ComponentPeer::windowIgnoresKeyPresses | ComponentPeer::windowIgnoresMouseClicks, OSUtils::getDesktopParentPeer(editor));
+        }
+        setVisible(true);
     }
 
     // Activate the current connection info display overlay, to hide give it a nullptr
@@ -76,7 +101,7 @@ public:
             weakRef = true;
             pd->registerWeakReference(connectionPtr, &weakRef);
             mousePosition = screenPosition;
-            isSignalDisplay = connection->outlet->isSignal;
+            isSignalDisplay = connection->outlet->isSignal();
             lastNumChannels = std::min(connection->numSignalChannels, 7);
             startTimer(MouseHoverDelay, mouseDelay);
             stopTimer(MouseHoverExitDelay);
@@ -120,7 +145,7 @@ public:
                         return;
 
                     for (int block = 0; block < blocks; block++) {
-                        StackArray<float, 512> output = {};
+                        StackArray<float, 512> output = { };
                         for (int ch = 0; ch < numChannels; ch++) {
                             auto* start = samples + (ch * numSamples + block * blockSize);
                             auto* destination = output.data() + ch * blockSize;
@@ -152,7 +177,6 @@ private:
         auto const halfEditorWidth = editor->getWidth() / 2;
         auto fontStyle = haveMessage ? FontStyle::Semibold : FontStyle::Regular;
         auto textFont = Font(haveMessage ? Fonts::getSemiBoldFont() : Fonts::getDefaultFont());
-        textFont.setSizeAndStyle(14, FontStyle::Regular, 1.0f, 0.0f);
 
         int totalStringWidth = 8 * 2 + 4;
         for (int i = 0; i < textString.size(); i++) {
@@ -162,7 +186,7 @@ private:
 
             // first item uses system font
             // use cached width calculation for performance
-            int const stringWidth = CachedFontStringWidth::get()->calculateSingleLineWidth(textFont, stringItem);
+            int const stringWidth = CachedFontStringWidth::get()->calculateSingleLineWidth(textFont, stringItem) + 2;
 
             if (totalStringWidth + stringWidth > halfEditorWidth) {
                 auto const elideText = String("(" + String(textString.size() - i) + String(")..."));
@@ -203,8 +227,13 @@ private:
         // make sure the proposed position is inside the editor area
         proposedPosition.setPosition(mousePosition.translated(0, -getHeight()));
         constrainedBounds = proposedPosition.constrainedWithin(editor->getScreenBounds());
-        if (getBounds() != constrainedBounds)
+        if (getBounds() != constrainedBounds) {
+#if JUCE_WINDOWS || JUCE_LINUX || JUCE_BSD
+            setBounds(constrainedBounds.withPosition(constrainedBounds.getPosition() / getApproximateScaleFactorForComponent(editor)));
+#else
             setBounds(constrainedBounds);
+#endif
+        }
     }
 
     void updateSignalGraph()
@@ -228,18 +257,6 @@ private:
         }
     }
 
-    void hideDisplay()
-    {
-        stopTimer(RepaintTimer);
-        setVisible(false);
-        if (connectionPtr != nullptr && activeConnection) {
-            auto* pd = activeConnection->outobj->cnv->pd;
-            pd->connectionListener = nullptr;
-            connectionPtr = nullptr;
-            activeConnection = nullptr;
-        }
-    }
-
     void timerCallback(int const timerID) override
     {
         switch (timerID) {
@@ -260,7 +277,7 @@ private:
                 if (!isSignalDisplay) {
                     updateTextString();
                 }
-                setVisible(true);
+                showDisplay();
             } else {
                 hideDisplay();
             }
@@ -278,20 +295,19 @@ private:
 
     void paint(Graphics& g) override
     {
-        Path messageDisplay;
-        auto internalBounds = getLocalBounds().reduced(8).toFloat();
-        messageDisplay.addRoundedRectangle(internalBounds, Corners::defaultCornerRadius);
+        auto const& colours = getThemeColours(*this);
 
-        StackShadow::renderDropShadow(hash("connection_message_display"), g, messageDisplay, Colour(0, 0, 0).withAlpha(0.3f), 7);
+        auto internalBounds = getLocalBounds().reduced(8);
+        StackShadow::drawShadowForRect(g, internalBounds, 8, Corners::defaultCornerRadius, 0.3f);
 
-        g.setColour(findColour(PlugDataColour::outlineColourId));
-        g.fillRoundedRectangle(internalBounds.expanded(1), Corners::defaultCornerRadius);
-        g.setColour(findColour(PlugDataColour::dialogBackgroundColourId));
-        g.fillRoundedRectangle(internalBounds, Corners::defaultCornerRadius);
+        g.setColour(colours.outlineColour);
+        g.fillRoundedRectangle(internalBounds.expanded(1).toFloat(), Corners::defaultCornerRadius);
+        g.setColour(colours.dialogBackgroundColour);
+        g.fillRoundedRectangle(internalBounds.toFloat(), Corners::defaultCornerRadius);
 
         if (isSignalDisplay) {
             auto totalHeight = internalBounds.getHeight();
-            auto textColour = findColour(PlugDataColour::canvasTextColourId);
+            auto textColour = colours.canvasTextColour;
 
             constexpr int complexFFTSize = signalBlockSize * 2;
             for (int ch = 0; ch < lastNumChannels; ch++) {
@@ -308,7 +324,7 @@ private:
                     g.drawHorizontalLine(channelBounds.getCentreY(), channelBounds.getX(), channelBounds.getRight());
 
                     // Draw text background
-                    g.setColour(findColour(PlugDataColour::dialogBackgroundColourId));
+                    g.setColour(colours.dialogBackgroundColour);
                     g.fillRoundedRectangle(textBounds, Corners::defaultCornerRadius);
 
                     // Draw text
@@ -323,9 +339,9 @@ private:
                     valleyAmplitude = 1;
                 }
 
-                while (peakAmplitude < valleyAmplitude || approximatelyEqual(peakAmplitude, valleyAmplitude)) {
-                    peakAmplitude += 0.001f;
-                    valleyAmplitude -= 0.001f;
+                while (peakAmplitude <= valleyAmplitude || approximatelyEqual(peakAmplitude, valleyAmplitude)) {
+                    peakAmplitude = std::nextafter(peakAmplitude, INFINITY);
+                    valleyAmplitude = std::nextafter(valleyAmplitude, -INFINITY);
                 }
 
                 // Apply FFT to get the peak frequency, we use this to decide the amount of samples we display
@@ -380,7 +396,7 @@ private:
                 auto textBounds = channelBounds.expanded(5).removeFromBottom(18).removeFromRight(textWidth + 8);
 
                 // Draw text background
-                g.setColour(findColour(PlugDataColour::dialogBackgroundColourId));
+                g.setColour(colours.dialogBackgroundColour);
                 g.fillRoundedRectangle(textBounds, Corners::defaultCornerRadius);
 
                 // Draw text
@@ -391,7 +407,7 @@ private:
         } else {
             int startPositionX = 8 + 4;
             for (auto const& item : messageItemsWithFormat) {
-                Fonts::drawStyledText(g, item.text, startPositionX, 0, item.width, getHeight(), findColour(PlugDataColour::panelTextColourId), item.fontStyle, 14, Justification::centredLeft);
+                Fonts::drawStyledText(g, item.text, startPositionX, 0, item.width, getHeight(), colours.panelTextColour, item.fontStyle, 14, Justification::centredLeft);
                 startPositionX += item.width + 4;
             }
         }

@@ -18,10 +18,24 @@ public:
     virtual void settingsFileReloaded() { }
 };
 
+template<typename T>
+struct PropertyReturnType {
+    using Type = T;
+};
+template<>
+struct PropertyReturnType<Array<var>> {
+    using Type = Array<var>&;
+};
+template<>
+struct PropertyReturnType<DynamicObject> {
+    using Type = DynamicObject::Ptr;
+};
+
 // Class that manages the settings file
-class SettingsFile final : public ValueTree::Listener
-    , public FileSystemWatcher::Listener
+class SettingsFile final
+    : public FileSystemWatcher::Listener
     , public Timer
+    , public Value::Listener
     , public DeletedAtShutdown {
 public:
     ~SettingsFile() override;
@@ -30,22 +44,18 @@ public:
 
     void startChangeListener();
 
-    ValueTree getKeyMapTree() const;
-    ValueTree getColourThemesTree() const;
-    ValueTree getPathsTree() const;
-    ValueTree getSelectedThemesTree() const;
-    ValueTree getLibrariesTree() const;
+    void setKeyMap(String const& keymap);
+    String getKeyMap() const;
 
-    ValueTree getTheme(String const& name) const;
-    ValueTree getCurrentTheme() const;
+    DynamicObject::Ptr getTheme(String const& name) const;
+    DynamicObject::Ptr getCurrentTheme() const;
+
+    bool isUsingTouchMode() const;
 
     void setLastBrowserPathForId(String const& identifier, File const& path);
     File getLastBrowserPathForId(String const& identifier) const;
 
-    void addToRecentlyOpened(File const& path);
-
-    void saveCommandHistory();
-    void initialiseCommandHistory();
+    void addToRecentlyOpened(URL const& path);
 
     void initialisePathsTree();
     void initialiseThemesTree();
@@ -53,30 +63,32 @@ public:
 
     void reloadSettings();
 
-    void fileChanged(File file, FileSystemWatcher::FileSystemEvent fileEvent) override;
+    void filesystemChanged() override;
 
-    void valueTreePropertyChanged(ValueTree& treeWhosePropertyHasChanged, Identifier const& property) override;
-    void valueTreeChildAdded(ValueTree& parentTree, ValueTree& childWhichHasBeenAdded) override;
-    void valueTreeChildRemoved(ValueTree& parentTree, ValueTree& childWhichHasBeenRemoved, int indexFromWhichChildWasRemoved) override;
+    void triggerSettingsChange(String const&);
+    void valueChanged(Value& v) override;
 
     void timerCallback() override;
 
     void saveSettings();
 
+#if ENABLE_TESTING
+    File getSettingsFileForTesting() const { return settingsFile; }
+#endif
+
     void setProperty(String const& name, var const& value);
 
     template<typename T>
-    T getProperty(String const& name)
+    typename PropertyReturnType<T>::Type getProperty(String const& name) const
     {
-        if (!isInitialised) {
-            initialise();
-        }
-
-        if constexpr (std::is_same_v<T, String>) {
-            return settingsTree.getProperty(name).toString();
-        } else {
-            return static_cast<T>(settingsTree.getProperty(name));
-        }
+        if constexpr (std::is_same_v<T, String>)
+            return settings.at(name).toString();
+        else if constexpr (std::is_same_v<T, VarArray>)
+            return *settings.at(name).getValue().getArray();
+        else if constexpr (std::is_same_v<T, DynamicObject>)
+            return settings.at(name).getValue().getDynamicObject();
+        else
+            return static_cast<T>(settings.at(name).getValue());
     }
 
     bool hasProperty(String const& name) const;
@@ -84,8 +96,6 @@ public:
     bool wantsNativeDialog() const;
 
     Value getPropertyAsValue(String const& name);
-
-    ValueTree& getValueTree();
 
     void setGlobalScale(float newScale);
 
@@ -97,11 +107,15 @@ public:
     SettingsState getSettingsState() const;
     void resetSettingsState();
 
+    static DynamicObject::Ptr xmlThemeToJson(ValueTree oldSettings);
+    static DynamicObject::Ptr valueTreeToJsonObj(ValueTree const& tree);
+    static ValueTree valueTreeFromJsonObj(DynamicObject* src, Identifier ident);
+
 private:
     bool acquireFileLock();
     void releaseFileLock();
 
-    static bool verify(XmlElement const* settings);
+    static void loadThemeFromDiff(Array<var>& currentThemes, Array<var> const& savedThemes);
 
     void backupCorruptSettings();
     String backupSettingsLocation;
@@ -114,71 +128,89 @@ private:
 
     HeapArray<SettingsFileListener*> listeners;
 
-    File settingsFile = ProjectInfo::appDataDir.getChildFile(".settings");
+    File oldSettingsFile = ProjectInfo::appDataDir.getChildFile(".settings");
+    File settingsFile = ProjectInfo::appDataDir.getChildFile("settings.json");
     File lockFile = settingsFile.getSiblingFile(settingsFile.getFileNameWithoutExtension() + ".lock");
 
-    ValueTree settingsTree = ValueTree("SettingsTree");
     bool settingsChangedInternally = false;
     bool settingsChangedExternally = false;
     int64 lastContentHash = 0;
     static constexpr int64 saveTimeoutMs = 100;
     static constexpr int64 lockTimeoutMs = 5000;
 
-    HeapArray<std::pair<String, var>> defaultSettings {
+
+    UnorderedSegmentedMap<String, Value> settings;
+    UnorderedMap<String, var> reloadedValues;
+
+    UnorderedMap<String, var> const defaultSettings {
         { "browser_path", var(ProjectInfo::appDataDir.getFullPathName()) },
         { "theme", var("light") },
         { "oversampling", var(0) },
         { "limiter_threshold", var(1) },
-        { "protected", var(1) },
-        { "debug_connections", var(1) },
+        { "protected", var(true) },
+        { "debug_connections", var(true) },
         { "internal_synth", var(0) },
-        { "grid_enabled", var(1) },
+        { "grid_enabled", var(true) },
         { "grid_type", var(6) },
         { "grid_size", var(25) },
         { "default_font", var("Inter") },
         { "native_window", var(false) },
+        { "native_file_dialog", var(true) },
         { "autoconnect", var(true) },
-        { "origin", var(0) },
-        { "border", var(0) },
-        { "index", var(0) },
-        { "coordinate", var(0) },
-        { "activation_state", var(0) },
-        { "order", var(0) },
-        { "direction", var(0) },
         { "global_scale", var(1.0f) },
         { "default_zoom", var(100.0f) },
-        { "show_palettes", var(true) },
+        { "text_editor_zoom", var(100.0f) },
         { "cpu_meter_mapping_mode", var(0) },
         { "centre_resized_canvas", var(true) },
-        { "centre_sidepanel_buttons", var(true) },
         { "show_all_audio_device_rates", var(false) },
-        { "add_object_menu_pinned", var(false) },
         { "autosave_interval", var(5) },
-        { "autosave_enabled", var(1) },
-        { "patch_downwards_only", var(false) }, // Option to replicate PD-Vanilla patching downwards only
-        // DEFAULT SETTINGS FOR TOGGLES
+        { "autosave_enabled", var(true) },
+        { "patch_downwards_only", var(false) },
         { "search_order", var(true) },
         { "search_xy_show", var(true) },
         { "search_index_show", var(false) },
         { "open_patches_in_window", var(false) },
         { "cmd_click_switches_mode", var(true) },
         { "show_minimap", var(2) },
+        { "hvcc_mode", var(false) },
+        { "heavy_state", var(new DynamicObject()) },
+        { "touch_mode", var(false) },
+        { "enable_gem", var(false) },
+        { "keymap", var("") },
+        { "last_welcome_panel", var(0) },
+        { "onboarding_completed", var(false) },
+        { "active_themes", var(Array<var> { "light", "dark" }) },
+        { "libraries", var(Array<var> { }) },
+        { "recently_opened", var(Array<var> { }) },
+        { "enabled_midi_outputs", var(Array<var> { }) },
+        { "enabled_midi_inputs", var(Array<var> { }) },
+        { "last_file_browser_paths", var(new DynamicObject()) },
+        { "paths", var(Array<var> { }) },
+        { "overlays", var(new DynamicObject()) },
+        { "themes", var(Array<var> { }) },
+        { "palettes", var(Array<var> { }) },
+        { "palettes_version", var(1) },
+        { "audio_setup", var(new DynamicObject()) },
+        { "window_size", var(Array<var> { 1000, 660 }) },
+        { "suggestions_size", var(Array<var> { 560, 240 }) },
+        { "sidebar_panel_console", var("right") },
+        { "sidebar_panel_doc", var("right") },
+        { "sidebar_panel_param", var("right") },
+        { "sidebar_panel_search", var("right") },
+        { "sidebar_panel_palette", var("right") },
+        { "sidebar_panel_reference", var("right") },
+        { "sidebar_panel_copilot", var("right") },
+        { "sidebar_panel_inspector", var("right") },
+        { "left_sidebar_width", var(250) },
+        { "right_sidebar_width", var(250) },
+        { "left_sidebar_hidden", var(true) },
+        { "right_sidebar_hidden", var(false) },
+        { "inspector_auto_show", var(true) },
+        { "version", var("") },
         // MCP bridge (native C++ in-process bridge)
         { "mcp_bridge_enabled", var(true) },
         { "mcp_bridge_listen_port", var(9000) },
         { "mcp_bridge_send_port", var(19010) },
-    };
-
-    StringArray childTrees {
-        "Paths",
-        "KeyMap",
-        "ColourThemes",
-        "SelectedThemes",
-        "RecentlyOpened",
-        "Libraries",
-        "EnabledMidiOutputPorts",
-        "EnabledMidiInputPorts",
-        "LastBrowserPaths"
     };
 
 public:

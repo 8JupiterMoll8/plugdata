@@ -93,6 +93,15 @@ public:
         return yval;
     }
 
+    t_glist* getEditorCanvas() const
+    {
+        auto* x = canvas->patch.getRawPointer();
+        while (!x->gl_editor && x->gl_owner) {
+            x = x->gl_owner;
+        }
+        return x;
+    }
+
     /* getting and setting values via fielddescs -- note confusing names;
      the above are setting up the fielddesc itself. */
     static t_float fielddesc_getfloat(t_fake_fielddesc const* f, t_template* templ, t_word* wp, int const loud)
@@ -137,8 +146,8 @@ public:
     }
 };
 
-class DrawableCurve final : public DrawableTemplate
-    , public DrawablePath {
+class DrawableCurve final : public DrawableTemplate, public DrawablePath
+    , public DrawableComponent {
 
     t_fake_curve* object;
     GlobalMouseListener globalMouseListener;
@@ -147,6 +156,7 @@ class DrawableCurve final : public DrawableTemplate
 public:
     DrawableCurve(t_scalar* s, t_gobj* obj, t_word* data, t_template* templ, Canvas* cnv, int const x, int const y, t_template* parent = nullptr)
         : DrawableTemplate(s, data, templ, parent, cnv, x, y)
+        , DrawableComponent(static_cast<DrawablePath&>(*this))
         , object(reinterpret_cast<t_fake_curve*>(obj))
         , globalMouseListener(cnv)
     {
@@ -157,9 +167,9 @@ public:
                 return;
 
             if (auto gobj = scalar.get<t_gobj>()) {
-                auto glist = cnv->patch.getPointer();
+                auto* glist = getEditorCanvas();
                 auto const pos = e.getPosition() - cnv->canvasOrigin;
-                gobj_click(gobj.get(), glist.get(), pos.x, pos.y, e.mods.isShiftDown(), e.mods.isAltDown(), e.getNumberOfClicks() > 1, 1);
+                gobj_click(gobj.get(), glist, pos.x, pos.y, e.mods.isShiftDown(), e.mods.isAltDown(), e.getNumberOfClicks() > 1, 1);
                 glist->gl_editor->e_xwas = pos.x;
                 glist->gl_editor->e_ywas = pos.y;
                 mouseWasDown = true;
@@ -173,9 +183,9 @@ public:
                 return;
 
             if (auto gobj = scalar.get<t_gobj>()) {
-                auto glist = cnv->patch.getPointer();
+                auto* glist = getEditorCanvas();
                 auto const pos = e.getPosition() - cnv->canvasOrigin;
-                gobj_click(gobj.get(), glist.get(), pos.x, pos.y, e.mods.isShiftDown(), e.mods.isAltDown(), 0, 0);
+                gobj_click(gobj.get(), glist, pos.x, pos.y, e.mods.isShiftDown(), e.mods.isAltDown(), 0, 0);
                 glist->gl_editor->e_xwas = pos.x;
                 glist->gl_editor->e_ywas = pos.y;
                 mouseWasDown = false;
@@ -185,12 +195,11 @@ public:
             if (!mouseWasDown || !getValue<bool>(canvas->locked) || !canvas->isShowing())
                 return;
             if (auto gobj = scalar.get<t_gobj>()) {
-                auto glist = cnv->patch.getPointer();
+                auto* glist = getEditorCanvas();
                 auto const pos = e.getPosition() - cnv->canvasOrigin;
 
-                auto const* canvas = glist_getcanvas(glist.get());
-                if (canvas->gl_editor->e_motionfn) {
-                    canvas->gl_editor->e_motionfn(&canvas->gl_editor->e_grab->g_pd, pos.x - glist->gl_editor->e_xwas, pos.y - glist->gl_editor->e_ywas, 0);
+                if (glist->gl_editor->e_motionfn) {
+                    glist->gl_editor->e_motionfn(&glist->gl_editor->e_grab->g_pd, pos.x - glist->gl_editor->e_xwas, pos.y - glist->gl_editor->e_ywas, 0);
                 }
 
                 glist->gl_editor->e_xwas = pos.x;
@@ -203,9 +212,9 @@ public:
                 return;
 
             if (auto gobj = scalar.get<t_gobj>()) {
-                auto glist = cnv->patch.getPointer();
+                auto* glist = getEditorCanvas();
                 auto const pos = e.getPosition() - cnv->canvasOrigin;
-                gobj_click(gobj.get(), glist.get(), pos.x, pos.y, e.mods.isShiftDown(), e.mods.isAltDown(), 0, 0);
+                gobj_click(gobj.get(), glist, pos.x, pos.y, e.mods.isShiftDown(), e.mods.isAltDown(), 0, 0);
                 glist->gl_editor->e_xwas = pos.x;
                 glist->gl_editor->e_ywas = pos.y;
             }
@@ -218,17 +227,17 @@ public:
         setJUCEPath(nvg, p);
 
         if (closed) {
-            nvgClosePath(nvg);
+            nanovg::nvgClosePath(nvg);
 
-            nvgFillColor(nvg, convertColour(getFill().colour));
-            nvgFill(nvg);
-            nvgStrokeWidth(nvg, getStrokeType().getStrokeThickness());
-            nvgStrokeColor(nvg, convertColour(getStrokeFill().colour));
-            nvgStroke(nvg);
+            nanovg::nvgFillColor(nvg, nvgColour(getFill().colour));
+            nanovg::nvgFill(nvg);
+            nanovg::nvgStrokeWidth(nvg, getStrokeType().getStrokeThickness());
+            nanovg::nvgStrokeColor(nvg, nvgColour(getStrokeFill().colour));
+            nanovg::nvgStroke(nvg);
         } else {
-            nvgStrokeWidth(nvg, getStrokeType().getStrokeThickness());
-            nvgStrokeColor(nvg, convertColour(getStrokeFill().colour));
-            nvgStroke(nvg);
+            nanovg::nvgStrokeWidth(nvg, getStrokeType().getStrokeThickness());
+            nanovg::nvgStrokeColor(nvg, nvgColour(getStrokeFill().colour));
+            nanovg::nvgStroke(nvg);
         }
     }
 
@@ -338,18 +347,20 @@ public:
     }
 };
 
-class DrawableSymbol final : public DrawableTemplate
-    , public DrawableText {
+class DrawableSymbol final : public DrawableTemplate, public DrawableText
+    , public DrawableComponent {
 
     t_fake_drawnumber* object;
     GlobalMouseListener mouseListener;
-    CachedTextRender textRenderer;
 
+    String typeBuffer;
     float mouseDownValue;
+    int mouseDownY;
 
 public:
     DrawableSymbol(t_scalar* s, t_gobj* obj, t_word* data, t_template* templ, Canvas* cnv, int const x, int const y, t_template* parent = nullptr)
         : DrawableTemplate(s, data, templ, parent, cnv, x, y)
+        , DrawableComponent(static_cast<DrawableText&>(*this))
         , object(reinterpret_cast<t_fake_drawnumber*>(obj))
     {
         mouseListener.globalMouseDown = [this](MouseEvent const& e) {
@@ -358,23 +369,71 @@ public:
         mouseListener.globalMouseDrag = [this](MouseEvent const& e) {
             handleMouseDrag(e.getEventRelativeTo(this));
         };
+
+        setWantsKeyboardFocus(true);
+    }
+
+    bool keyPressed(KeyPress const& key) override
+    {
+        auto updateValueFromText = [this]() {
+            auto newValue = typeBuffer.getFloatValue();
+            if (auto s = scalar.get<t_scalar>()) {
+                int type, onset;
+                t_symbol* arraytype;
+
+                if (!s->sc_template || !template_find_field(templ, object->x_fieldname, &onset, &type, &arraytype) || type != DT_FLOAT) {
+                    return;
+                }
+
+                ((t_word*)((char*)data + onset))->w_float = newValue;
+            }
+            canvas->updateDrawables();
+        };
+
+        auto const chr = key.getTextCharacter();
+        if (key.getKeyCode() == KeyPress::returnKey) {
+            typeBuffer = "";
+            return true;
+        }
+        if (key.getKeyCode() == KeyPress::backspaceKey) {
+            typeBuffer = typeBuffer.substring(0, typeBuffer.length() - 1);
+            updateValueFromText();
+            return true;
+        }
+        if ((chr >= '0' && chr <= '9') || chr == '+' || chr == '-' || chr == '.') {
+            typeBuffer += chr;
+            updateValueFromText();
+            return true;
+        }
+        return false;
+    }
+
+    void focusLost(FocusChangeType cause) override
+    {
+        typeBuffer = "";
     }
 
     void render(NVGcontext* nvg) override
     {
-
-        auto const scale = canvas->isZooming ? canvas->editor->getRenderScale() * 2.0f : canvas->editor->getRenderScale() * std::max(1.0f, getValue<float>(canvas->zoomScale));
         auto const bounds = getBoundingBox().getBoundingBox().toNearestInt();
         NVGScopedState scopedState(nvg);
-        nvgTranslate(nvg, bounds.getX(), bounds.getY());
-        textRenderer.prepareLayout(getText(), getFont(), getColour(), getWidth(), getWidth(), false);
-        textRenderer.renderText(nvg, bounds.withZeroOrigin().toFloat(), scale);
+        nanovg::nvgTranslate(nvg, bounds.getX(), bounds.getY());
+
+        auto& llgc = *canvas->editor->getNanoLLGC();
+        Graphics g(llgc);
+        auto const textBounds = bounds.withZeroOrigin().toFloat();
+        NVGGraphicsContext::ScopedAnchoredDraw anchor(llgc, textBounds);
+        g.setFont(getFont());
+        g.setColour(getColour());
+        g.drawText(getText(), textBounds, Justification::centredLeft);
     }
 
     void handleMouseDown(MouseEvent const& e)
     {
         if (!getLocalBounds().contains(e.getMouseDownPosition()) || !getValue<bool>(canvas->locked) || !canvas->isShowing())
             return;
+
+        grabKeyboardFocus();
 
         if (auto s = scalar.get<t_scalar>()) {
             int type, onset;
@@ -384,6 +443,7 @@ public:
                 return;
             }
 
+            mouseDownY = e.position.y;
             mouseDownValue = ((t_word*)((char*)data + onset))->w_float;
         }
     }
@@ -401,7 +461,7 @@ public:
                 return;
             }
 
-            ((t_word*)((char*)data + onset))->w_float = mouseDownValue - e.getDistanceFromDragStartY() / 6;
+            ((t_word*)((char*)data + onset))->w_float = mouseDownValue - (e.position.y - mouseDownY);
         }
 
         canvas->updateDrawables();
@@ -460,11 +520,11 @@ public:
             }
 
             auto const symbolColour = numberToColour(fielddesc_getfloat(&object->x_color, templ, data, 1));
-            setColour(symbolColour);
+            DrawableText::setColour(symbolColour);
             auto const text = String::fromUTF8(buf);
             auto const font = getFont();
 
-            setBoundingBox(Parallelogram<float>(Rectangle<float>(xloc, yloc, font.getStringWidthFloat(text) + 4.0f, font.getHeight() + 4.0f)));
+            setBoundingBox(Parallelogram<float>(Rectangle<float>(xloc, yloc, Fonts::getStringWidth(text, font) + 4.0f, font.getHeight() + 4.0f)));
             if (auto glist = canvas->patch.getPointer()) {
                 setFontHeight(sys_hostfontsize(glist_getfont(glist.get()), glist_getzoom(glist.get())));
             }
@@ -474,8 +534,8 @@ public:
     }
 };
 
-class DrawablePlot final : public DrawableTemplate
-    , public DrawablePath {
+class DrawablePlot final : public DrawableTemplate, public DrawablePath
+    , public DrawableComponent {
 
     t_fake_curve* object;
     GlobalMouseListener globalMouseListener;
@@ -484,6 +544,7 @@ class DrawablePlot final : public DrawableTemplate
 public:
     DrawablePlot(t_scalar* s, t_gobj* obj, t_word* data, t_template* templ, Canvas* cnv, int const x, int const y, t_template* parent = nullptr)
         : DrawableTemplate(s, data, templ, parent, cnv, x, y)
+        , DrawableComponent(static_cast<DrawablePath&>(*this))
         , object(reinterpret_cast<t_fake_curve*>(obj))
         , globalMouseListener(cnv)
     {
@@ -494,9 +555,9 @@ public:
                 return;
 
             if (auto gobj = scalar.get<t_gobj>()) {
-                auto glist = cnv->patch.getPointer();
+                auto* glist = getEditorCanvas();
                 auto const pos = e.getPosition() - cnv->canvasOrigin;
-                gobj_click(gobj.get(), glist.get(), pos.x, pos.y, e.mods.isShiftDown(), e.mods.isAltDown(), e.getNumberOfClicks() > 1, 1);
+                gobj_click(gobj.get(), glist, pos.x, pos.y, e.mods.isShiftDown(), e.mods.isAltDown(), e.getNumberOfClicks() > 1, 1);
                 glist->gl_editor->e_xwas = pos.x;
                 glist->gl_editor->e_ywas = pos.y;
                 mouseWasDown = true;
@@ -510,9 +571,9 @@ public:
                 return;
 
             if (auto gobj = scalar.get<t_gobj>()) {
-                auto glist = cnv->patch.getPointer();
+                auto* glist = getEditorCanvas();
                 auto const pos = e.getPosition() - cnv->canvasOrigin;
-                gobj_click(gobj.get(), glist.get(), pos.x, pos.y, e.mods.isShiftDown(), e.mods.isAltDown(), 0, 0);
+                gobj_click(gobj.get(), glist, pos.x, pos.y, e.mods.isShiftDown(), e.mods.isAltDown(), 0, 0);
                 glist->gl_editor->e_xwas = pos.x;
                 glist->gl_editor->e_ywas = pos.y;
             }
@@ -521,12 +582,11 @@ public:
             if (!mouseWasDown || !getValue<bool>(canvas->locked) || !canvas->isShowing())
                 return;
             if (auto gobj = scalar.get<t_gobj>()) {
-                auto glist = cnv->patch.getPointer();
+                auto* glist = getEditorCanvas();
                 auto const pos = e.getPosition() - cnv->canvasOrigin;
 
-                auto const* canvas = glist_getcanvas(glist.get());
-                if (canvas->gl_editor->e_motionfn) {
-                    canvas->gl_editor->e_motionfn(&canvas->gl_editor->e_grab->g_pd, pos.x - glist->gl_editor->e_xwas, pos.y - glist->gl_editor->e_ywas, 0);
+                if (glist->gl_editor->e_motionfn) {
+                    glist->gl_editor->e_motionfn(&glist->gl_editor->e_grab->g_pd, pos.x - glist->gl_editor->e_xwas, pos.y - glist->gl_editor->e_ywas, 0);
                 }
 
                 glist->gl_editor->e_xwas = pos.x;
@@ -539,9 +599,9 @@ public:
                 return;
 
             if (auto gobj = scalar.get<t_gobj>()) {
-                auto glist = cnv->patch.getPointer();
+                auto* glist = getEditorCanvas();
                 auto const pos = e.getPosition() - cnv->canvasOrigin;
-                gobj_click(gobj.get(), glist.get(), pos.x, pos.y, e.mods.isShiftDown(), e.mods.isAltDown(), 0, 0);
+                gobj_click(gobj.get(), glist, pos.x, pos.y, e.mods.isShiftDown(), e.mods.isAltDown(), 0, 0);
                 glist->gl_editor->e_xwas = pos.x;
                 glist->gl_editor->e_ywas = pos.y;
             }
@@ -561,11 +621,11 @@ public:
         Path const p = getPath();
         setJUCEPath(nvg, p);
 
-        nvgFillColor(nvg, convertColour(getFill().colour));
-        nvgFill(nvg);
-        nvgStrokeWidth(nvg, getStrokeType().getStrokeThickness());
-        nvgStrokeColor(nvg, convertColour(getStrokeFill().colour));
-        nvgStroke(nvg);
+        nanovg::nvgFillColor(nvg, nvgColour(getFill().colour));
+        nanovg::nvgFill(nvg);
+        nanovg::nvgStrokeWidth(nvg, getStrokeType().getStrokeThickness());
+        nanovg::nvgStrokeColor(nvg, nvgColour(getStrokeFill().colour));
+        nanovg::nvgStroke(nvg);
     }
 
     static int readOwnerTemplate(t_fake_plot* x,
@@ -1101,14 +1161,14 @@ struct ScalarObject final : public ObjectBase {
         if (auto gobj = ptr.get<t_gobj>()) {
             auto* patch = cnv->patch.getRawPointer();
             if (!patch)
-                return {};
+                return { };
 
             int x = 0, y = 0, w = 0, h = 0;
             pd::Interface::getObjectBounds(patch, gobj.get(), &x, &y, &w, &h);
             return { x, y, w + 1, h + 1 };
         }
 
-        return {};
+        return { };
     }
 
     void receiveObjectMessage(hash32 const symbol, SmallArray<pd::Atom> const& atoms) override

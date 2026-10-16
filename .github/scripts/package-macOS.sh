@@ -13,7 +13,13 @@ LV2="./Plugins/LV2/."
 VST3="./Plugins/VST3/."
 AU="./Plugins/AU/."
 CLAP="./Plugins/CLAP/."
+AAX="./Plugins/AAX/."
 APP="./Plugins/Standalone/."
+
+# AAX plugins are temporarily left out of the installer, set to 1 to package them again
+PACKAGE_AAX=0
+
+BINARY_DATA_FILE="./Plugins/Standalone/plugdata.app/Contents/Resources/plugdata.lproj/plugdata-resources.bin"
 
 OUTPUT_BASE_FILENAME="${PRODUCT_NAME}.pkg"
 
@@ -42,28 +48,94 @@ build_flavor()
   mkdir -p $TMPDIR
   cp -a $flavorprod $TMPDIR
 
+  if [ -n "$AC_USERNAME" ]; then
+    find $TMPDIR -type f \( -name "*.so" -o -name "*.dylib" \) -exec \
+        /usr/bin/codesign --verbose --force -s "Developer ID Application: Timothy Schoen (7SV7JPRR2L)" \
+        --options runtime \
+        --entitlements ./Resources/Installer/Entitlements.plist {} \;
+
+    find $TMPDIR -type d \( -name "*.app" -o -name "*.vst3" -o -name "*.component" -o -name "*.clap" -o -name "*.aaxplugin" \) -exec \
+        /usr/bin/codesign --verbose --force -s "Developer ID Application: Timothy Schoen (7SV7JPRR2L)" \
+        --options runtime \
+        --entitlements ./Resources/Installer/Entitlements.plist {} \;
+  fi
+
+  # Remove the resource file only after signing: the shared package's postinstall restores it into each installed bundle.
+  # Inside a .lproj folder, codesign seals it as optional, so the signatures stay valid both without it (which is what
+  # gets notarized), and after the identical file is restored
+  rm -f $TMPDIR/*/Contents/Resources/plugdata.lproj/plugdata-resources.bin
+  rm -f $TMPDIR/*/plugdata-resources.bin
+
   pkgbuild --analyze --root $TMPDIR ${PKG_DIR}/${PRODUCT_NAME}_${flavor}.plist
   plutil -replace BundleIsRelocatable -bool NO ${PKG_DIR}/${PRODUCT_NAME}_${flavor}.plist
   plutil -replace BundleIsVersionChecked -bool NO ${PKG_DIR}/${PRODUCT_NAME}_${flavor}.plist
-  pkgbuild --root $TMPDIR --identifier $ident --version $VERSION  --install-location $loc --min-os-version $min_os --compression latest --component-plist ${PKG_DIR}/${PRODUCT_NAME}_${flavor}.plist ${PKG_DIR}/${PRODUCT_NAME}_${flavor}.pkg
-
+  pkgbuild --root "$TMPDIR" --identifier "$ident" --version "$VERSION" --install-location "$loc" --min-os-version "$min_os" --compression latest --component-plist "${PKG_DIR}/${PRODUCT_NAME}_${flavor}.plist" "${PKG_DIR}/${PRODUCT_NAME}_${flavor}.pkg"
   rm -r $TMPDIR
 }
 
-if [ -n "$AC_USERNAME" ]; then
+build_shared_data()
+{
+  TMPDIR=${TARGET_DIR}/tmp_shared
+  mkdir -p "$TMPDIR"
+  cp "$BINARY_DATA_FILE" "$TMPDIR/"
 
-# Sign app with hardened runtime and audio entitlement
-/usr/bin/codesign --force -s "Developer ID Application: Timothy Schoen (7SV7JPRR2L)" --options runtime --entitlements ./Resources/Installer/Entitlements.plist ./Plugins/Standalone/*.app
+  # Create postinstall script that copies the resource file into whichever plugin bundles were installed
+  SCRIPTS_DIR=${TARGET_DIR}/tmp_scripts
+  mkdir -p "$SCRIPTS_DIR"
+  cat > "$SCRIPTS_DIR/postinstall" << 'EOF'
+#!/bin/bash
 
-# Sign plugins
-/usr/bin/codesign --force -s "Developer ID Application: Timothy Schoen (7SV7JPRR2L)" ./Plugins/VST3/*.vst3
-/usr/bin/codesign --force -s "Developer ID Application: Timothy Schoen (7SV7JPRR2L)" ./Plugins/AU/*.component
-/usr/bin/codesign --force -s "Developer ID Application: Timothy Schoen (7SV7JPRR2L)" ./Plugins/LV2/plugdata.lv2/libplugdata.so
-/usr/bin/codesign --force -s "Developer ID Application: Timothy Schoen (7SV7JPRR2L)" ./Plugins/LV2/plugdata-fx.lv2/libplugdata-fx.so
-/usr/bin/codesign --force -s "Developer ID Application: Timothy Schoen (7SV7JPRR2L)" ./Plugins/CLAP/plugdata.clap/Contents/MacOS/plugdata
-/usr/bin/codesign --force -s "Developer ID Application: Timothy Schoen (7SV7JPRR2L)" ./Plugins/CLAP/plugdata-fx.clap/Contents/MacOS/plugdata-fx
+RESOURCES_FILE="/tmp/plugdata_shared/plugdata-resources.bin"
+RESOURCES_HASH=$(/usr/bin/openssl dgst -sha256 -binary "$RESOURCES_FILE" | /usr/bin/base64)
 
-fi
+BUNDLES=(
+    "/Library/Audio/Plug-Ins/VST3/plugdata.vst3"
+    "/Library/Audio/Plug-Ins/VST3/plugdata-fx.vst3"
+    "/Library/Application Support/Avid/Audio/Plug-Ins/plugdata.aaxplugin"
+    "/Library/Application Support/Avid/Audio/Plug-Ins/plugdata-fx.aaxplugin"
+    "/Library/Audio/Plug-Ins/Components/plugdata.component"
+    "/Library/Audio/Plug-Ins/Components/plugdata-fx.component"
+    "/Library/Audio/Plug-Ins/Components/plugdata-midi.component"
+    "/Library/Audio/Plug-Ins/CLAP/plugdata.clap"
+    "/Library/Audio/Plug-Ins/CLAP/plugdata-fx.clap"
+    "/Applications/plugdata.app"
+)
+
+for bundle in "${BUNDLES[@]}"; do
+    # Only restore the file into bundles whose signature seals this exact file, anything else would break the signature
+    # (for example a bundle left over from an older version, because that format was deselected in the installer)
+    SEAL="$bundle/Contents/_CodeSignature/CodeResources"
+    if [[ -d "$bundle" ]] && { [[ ! -f "$SEAL" ]] || grep -qF "$RESOURCES_HASH" "$SEAL"; }; then
+        mkdir -p "$bundle/Contents/Resources/plugdata.lproj"
+        cp "$RESOURCES_FILE" "$bundle/Contents/Resources/plugdata.lproj/"
+    fi
+done
+
+# LV2 bundles aren't signed as a whole, only their binaries are
+for bundle in "/Library/Audio/Plug-Ins/LV2/plugdata.lv2" "/Library/Audio/Plug-Ins/LV2/plugdata-fx.lv2"; do
+    if [[ -d "$bundle" ]]; then
+        cp "$RESOURCES_FILE" "$bundle/"
+    fi
+done
+
+# Clean up temp location
+rm -rf /tmp/plugdata_shared
+
+exit 0
+EOF
+  chmod +x "$SCRIPTS_DIR/postinstall"
+
+  pkgbuild --root "$TMPDIR" \
+    --identifier "com.plugdata.sharedlibs.pkg.${PRODUCT_NAME}" \
+    --version $VERSION \
+    --install-location "/tmp/plugdata_shared" \
+    --min-os-version $MIN_OS_VERSION \
+    --scripts "$SCRIPTS_DIR" \
+    ${PKG_DIR}/${PRODUCT_NAME}_shared.pkg
+
+  rm -r "$TMPDIR"
+  rm -r "$SCRIPTS_DIR"
+}
 
 BUILD_TYPE=$1
 if [[ "$BUILD_TYPE" == "Universal" ]]; then
@@ -72,7 +144,10 @@ else
   MIN_OS_VERSION="10.11"  # Use default/legacy for 10.11 support
 fi
 
-# # try to build VST3 package
+# Build shared dylib package (always required, installed first)
+build_shared_data
+
+# try to build VST3 package
 if [[ -d $VST3 ]]; then
   build_flavor "VST3" $VST3 "com.plugdata.vst3.pkg.${PRODUCT_NAME}" "/Library/Audio/Plug-Ins/VST3" "$MIN_OS_VERSION"
 fi
@@ -82,14 +157,19 @@ if [[ -d $LV2 ]]; then
   build_flavor "LV2" $LV2 "com.plugdata.lv2.pkg.${PRODUCT_NAME}" "/Library/Audio/Plug-Ins/LV2" "$MIN_OS_VERSION"
 fi
 
-# # try to build AU package
+# try to build AU package
 if [[ -d $AU ]]; then
   build_flavor "AU" $AU "com.plugdata.au.pkg.${PRODUCT_NAME}" "/Library/Audio/Plug-Ins/Components" "$MIN_OS_VERSION"
 fi
 
-# # try to build CLAP package
+# try to build CLAP package
 if [[ -d $CLAP ]]; then
   build_flavor "CLAP" $CLAP "com.plugdata.clap.pkg.${PRODUCT_NAME}" "/Library/Audio/Plug-Ins/CLAP" "$MIN_OS_VERSION"
+fi
+
+# try to build AAX package
+if [[ -d $AAX && $PACKAGE_AAX == 1 ]]; then
+  build_flavor "AAX" $AAX "com.plugdata.aax.pkg.${PRODUCT_NAME}" "/Library/Application Support/Avid/Audio/Plug-Ins" "$MIN_OS_VERSION"
 fi
 
 # try to build App package
@@ -97,7 +177,9 @@ if [[ -d $APP ]]; then
   build_flavor "APP" $APP "com.plugdata.app.pkg.${PRODUCT_NAME}" "/Applications" "$MIN_OS_VERSION"
 fi
 
-
+# Always include shared libs pkg ref
+SHARED_PKG_REF="<pkg-ref id=\"com.plugdata.sharedlibs.pkg.${PRODUCT_NAME}\"/>"
+SHARED_CHOICE_DEF="<choice id=\"com.plugdata.sharedlibs.pkg.${PRODUCT_NAME}\" visible=\"false\" title=\"Shared Libraries\"><pkg-ref id=\"com.plugdata.sharedlibs.pkg.${PRODUCT_NAME}\"/></choice><pkg-ref id=\"com.plugdata.sharedlibs.pkg.${PRODUCT_NAME}\" version=\"${VERSION}\" onConclusion=\"none\">${PRODUCT_NAME}_shared.pkg</pkg-ref>"
 
 if [[ -d $VST3 ]]; then
 	VST3_PKG_REF="<pkg-ref id=\"com.plugdata.vst3.pkg.${PRODUCT_NAME}\"/>"
@@ -119,6 +201,11 @@ if [[ -d $CLAP ]]; then
 	CLAP_CHOICE="<line choice=\"com.plugdata.clap.pkg.${PRODUCT_NAME}\"/>"
 	CLAP_CHOICE_DEF="<choice id=\"com.plugdata.clap.pkg.${PRODUCT_NAME}\" visible=\"true\" start_selected=\"true\" title=\"CLAP Plug-in\"><pkg-ref id=\"com.plugdata.clap.pkg.${PRODUCT_NAME}\"/></choice><pkg-ref id=\"com.plugdata.clap.pkg.${PRODUCT_NAME}\" version=\"${VERSION}\" onConclusion=\"none\">${PRODUCT_NAME}_CLAP.pkg</pkg-ref>"
 fi
+if [[ -d $AAX && $PACKAGE_AAX == 1 ]]; then
+	AAX_PKG_REF="<pkg-ref id=\"com.plugdata.aax.pkg.${PRODUCT_NAME}\"/>"
+	AAX_CHOICE="<line choice=\"com.plugdata.aax.pkg.${PRODUCT_NAME}\"/>"
+	AAX_CHOICE_DEF="<choice id=\"com.plugdata.aax.pkg.${PRODUCT_NAME}\" visible=\"true\" start_selected=\"false\" title=\"AAX Plug-in\"><pkg-ref id=\"com.plugdata.aax.pkg.${PRODUCT_NAME}\"/></choice><pkg-ref id=\"com.plugdata.aax.pkg.${PRODUCT_NAME}\" version=\"${VERSION}\" onConclusion=\"none\">${PRODUCT_NAME}_AAX.pkg</pkg-ref>"
+fi
 if [[ -d $APP ]]; then
 	APP_PKG_REF="<pkg-ref id=\"com.plugdata.app.pkg.${PRODUCT_NAME}\"/>"
 	APP_CHOICE="<line choice=\"com.plugdata.app.pkg.${PRODUCT_NAME}\"/>"
@@ -132,24 +219,30 @@ cat > ${TARGET_DIR}/distribution.xml << XMLEND
 <installer-gui-script minSpecVersion="1">
     <title>plugdata Installer</title>
     <license file="Resources/Installer/LICENSE.rtf" mime-type="application/rtf"/>
+    ${SHARED_PKG_REF}
     ${VST3_PKG_REF}
     ${AU_PKG_REF}
     ${LV2_PKG_REF}
     ${CLAP_PKG_REF}
+    ${AAX_PKG_REF}
     ${APP_PKG_REF}
     <options require-scripts="false" customize="always" />
     <options hostArchitectures="arm64,x86_64" />
     <choices-outline>
+        <line choice="com.plugdata.sharedlibs.pkg.${PRODUCT_NAME}"/>
         ${VST3_CHOICE}
         ${AU_CHOICE}
         ${LV2_CHOICE}
         ${CLAP_CHOICE}
+        ${AAX_CHOICE}
         ${APP_CHOICE}
     </choices-outline>
+    ${SHARED_CHOICE_DEF}
     ${VST3_CHOICE_DEF}
     ${AU_CHOICE_DEF}
     ${LV2_CHOICE_DEF}
     ${CLAP_CHOICE_DEF}
+    ${AAX_CHOICE_DEF}
     ${APP_CHOICE_DEF}
 </installer-gui-script>
 XMLEND
@@ -170,9 +263,26 @@ fi
 # Sign installer
 productsign -s "Developer ID Installer: Timothy Schoen (7SV7JPRR2L)" ${PRODUCT_NAME}.pkg $1
 
-# Notarize installer
+# Notarize installer, and fail the build if that doesn't work, so we never upload an installer that Gatekeeper blocks
 xcrun notarytool store-credentials "notary_login" --apple-id ${AC_USERNAME} --password ${AC_PASSWORD} --team-id "7SV7JPRR2L"
-xcrun notarytool submit $1 --keychain-profile "notary_login" --wait
-xcrun stapler staple "plugdata-MacOS-$1.pkg"
+NOTARY_RESULT=$(xcrun notarytool submit $1 --keychain-profile "notary_login" --wait --output-format plist)
+NOTARY_STATUS=$(echo "$NOTARY_RESULT" | plutil -extract status raw -o - - 2>/dev/null) || NOTARY_STATUS="no result"
+NOTARY_ID=$(echo "$NOTARY_RESULT" | plutil -extract id raw -o - - 2>/dev/null) || NOTARY_ID=""
+echo "Notarization status: $NOTARY_STATUS"
+if [[ "$NOTARY_STATUS" != "Accepted" ]]; then
+    # The notary log lists the issues that were found
+    [[ -n "$NOTARY_ID" ]] && xcrun notarytool log "$NOTARY_ID" --keychain-profile "notary_login"
+    exit 1
+fi
+
+# The ticket can take a moment to become available after notarization, so retry stapling a few times
+for attempt in 1 2 3; do
+    xcrun stapler staple $1 && break
+    if [[ $attempt == 3 ]]; then
+        echo "Stapling failed"
+        exit 1
+    fi
+    sleep 30
+done
 
 .github/scripts/generate-upload-info.sh $1

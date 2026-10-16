@@ -6,10 +6,13 @@
 #pragma once
 #include "Utility/Fonts.h"
 
-class NoteObject final : public ObjectBase, public AsyncUpdater {
+extern "C" {
+void note_initialize(t_fake_note* x);
+}
 
-    Colour textColour;
-    BorderSize<int> border { 1, 7, 1, 2 };
+class NoteObject final : public ObjectBase
+    , public AsyncUpdater {
+    BorderSize<int> border { 1, 7, 1, 0 };
 
     String currentNoteText;
     TextEditor noteEditor;
@@ -27,28 +30,31 @@ class NoteObject final : public ObjectBase, public AsyncUpdater {
     Value receiveSymbol = SynchronousValue();
     Value width = SynchronousValue();
 
-    bool locked;
-    bool wasSelectedOnMouseDown = false;
-    bool needsRepaint = false;
+    bool locked : 1;
+    bool wasSelectedOnMouseDown : 1 = false;
+    bool needsRepaint : 1 = false;
 
 public:
     NoteObject(pd::WeakReference obj, Object* object)
         : ObjectBase(obj, object)
     {
+        auto const& colours = getThemeColours();
+
         locked = getValue<bool>(object->locked);
 
-        if (auto note = ptr.get<t_pd>()) {
-            auto* patch = cnv->patch.getRawPointer();
-
-            (*note.get())->c_wb->w_visfn(note.cast<t_gobj>(), patch, 1);
+        if (auto note = ptr.get<t_fake_note>()) {
+            if (!note->x_init)
+                note_initialize(note.get());
         }
 
         addAndMakeVisible(noteEditor);
 
+        setViewportIgnoreDragFlag(false);
+
         noteEditor.getProperties().set("NoBackground", true);
         noteEditor.getProperties().set("NoOutline", true);
-        noteEditor.setColour(TextEditor::textColourId, cnv->editor->getLookAndFeel().findColour(PlugDataColour::canvasTextColourId));
-        noteEditor.setColour(ScrollBar::thumbColourId, cnv->editor->getLookAndFeel().findColour(PlugDataColour::scrollbarThumbColourId));
+        noteEditor.setColour(TextEditor::textColourId, colours.canvasTextColour);
+        noteEditor.setColour(ScrollBar::thumbColourId, colours.scrollbarThumbColour);
 
         noteEditor.setAlwaysOnTop(true);
         noteEditor.setMultiLine(true);
@@ -81,6 +87,9 @@ public:
             if (auto note = ptr.get<t_fake_note>()) {
                 binbuf_clear(note->x_binbuf);
                 binbuf_restore(note->x_binbuf, atoms.size(), atoms.data());
+                if (note->x_buf)
+                    freebytes(note->x_buf, note->x_bufsize);
+
                 binbuf_gettext(note->x_binbuf, &note->x_buf, &note->x_bufsize);
             }
 
@@ -107,7 +116,7 @@ public:
         return true;
     }
 
-    bool inletIsSymbol() override
+    bool hideInlet() override
     {
         // we want to hide the note inlet regardless if it's symbol or not in locked mode
         auto const receiveSym = receiveSymbol.toString();
@@ -119,27 +128,19 @@ public:
 
     void render(NVGcontext* nvg) override
     {
+        auto const& colours = getThemeColours();
+
         if (getValue<bool>(fillBackground) || getValue<bool>(outline)) {
-            auto const fillColour = getValue<bool>(fillBackground) ? convertColour(Colour::fromString(secondaryColour.toString())) : nvgRGBA(0, 0, 0, 0);
-            auto outlineColour = nvgRGBA(0, 0, 0, 0);
+            auto const fillColour = getValue<bool>(fillBackground) ? nvgColour(getValue<Colour>(secondaryColour)) : nanovg::nvgRGBA(0, 0, 0, 0);
+            auto outlineColour = nanovg::nvgRGBA(0, 0, 0, 0);
             if (getValue<bool>(outline)) {
                 bool const selected = object->isSelected() && !cnv->isGraph;
-                outlineColour = convertColour(cnv->editor->getLookAndFeel().findColour(selected ? PlugDataColour::objectSelectedOutlineColourId : PlugDataColour::objectOutlineColourId));
+                outlineColour = nvgColour(selected ? colours.objectSelectedOutlineColour : colours.objectOutlineColour);
             }
-            nvgDrawRoundedRect(nvg, 0, 0, getWidth(), getHeight(), fillColour, outlineColour, Corners::objectCornerRadius);
+            nanovg::nvgDrawRoundedRect(nvg, 0, 0, getWidth(), getHeight(), fillColour, outlineColour, getPlugDataLook(*this).getObjectCornerRadius());
         }
 
-        auto const scale = getImageScale();
-        if (needsRepaint || isEditorShown() || imageRenderer.needsUpdate(roundToInt(getWidth() * scale), roundToInt(getHeight() * scale))) {
-            imageRenderer.renderJUCEComponent(nvg, noteEditor, scale);
-            needsRepaint = false;
-        } else {
-            NVGScopedState state(nvg);
-            nvgScale(nvg, 1.0f / scale, 1.0f / scale);
-            auto w = roundToInt(scale * static_cast<float>(noteEditor.getWidth()));
-            auto h = roundToInt(scale * static_cast<float>(noteEditor.getHeight()));
-            imageRenderer.render(nvg, { 0, 0, w, h }, true);
-        }
+        cnv->editor->getNanoLLGC()->renderComponent(noteEditor);
     }
 
     void paint(Graphics& g) override { }
@@ -147,11 +148,9 @@ public:
     void update() override
     {
         if (auto note = ptr.get<t_fake_note>()) {
-            textColour = Colour(note->x_red, note->x_green, note->x_blue);
-
             currentNoteText = getNote();
-            primaryColour = Colour(note->x_red, note->x_green, note->x_blue).toString();
-            secondaryColour = Colour(note->x_bg[0], note->x_bg[1], note->x_bg[2]).toString();
+            primaryColour = colourToVar(Colour(note->x_red, note->x_green, note->x_blue));
+            secondaryColour = colourToVar(Colour(note->x_bg[0], note->x_bg[1], note->x_bg[2]));
             fontSize = note->x_fontsize;
 
             bold = note->x_bold;
@@ -171,18 +170,21 @@ public:
             auto const receiveSym = String::fromUTF8(note->x_rcv_raw->s_name);
             receiveSymbol = receiveSym == "empty" ? "" : note->x_rcv_raw->s_name;
         }
-        
+
+        updateFont();
+
         triggerAsyncUpdate();
     }
-    
+
     void handleAsyncUpdate() override
     {
         auto const newFont = getFont();
-        
-        noteEditor.setColour(TextEditor::textColourId, Colour::fromString(primaryColour.toString()));
+
         noteEditor.setIndents(0, 2);
         noteEditor.setFont(newFont);
         noteEditor.setText(currentNoteText);
+        noteEditor.applyColourToAllText(getValue<Colour>(primaryColour));
+        noteEditor.repaint();
 
         auto const justificationType = getValue<int>(justification);
         if (justificationType == 1) {
@@ -192,9 +194,8 @@ public:
         } else if (justificationType == 3) {
             noteEditor.setJustification(Justification::topRight);
         }
-        
-        getLookAndFeel().setColour(Label::textWhenEditingColourId, cnv->editor->getLookAndFeel().findColour(Label::textWhenEditingColourId));
-        getLookAndFeel().setColour(Label::textColourId, cnv->editor->getLookAndFeel().findColour(Label::textColourId));
+
+        needsRepaint = true;
     }
 
     void updateSizeProperty() override
@@ -233,7 +234,7 @@ public:
 
     void resized() override
     {
-        noteEditor.setBounds(getLocalBounds());
+        noteEditor.setBounds(getLocalBounds().withTrimmedRight(-6));
     }
 
     void mouseEnter(MouseEvent const& e) override
@@ -248,11 +249,6 @@ public:
         repaint();
     }
 
-    bool hideInGraph() override
-    {
-        return false;
-    }
-
     bool canReceiveMouseEvent(int x, int y) override
     {
         return !locked;
@@ -263,17 +259,27 @@ public:
         return !noteEditor.isReadOnly();
     }
 
+    int getTextHeightForWidth(int const width)
+    {
+        auto const editorBounds = noteEditor.getBounds();
+        noteEditor.setBounds(editorBounds.getX(), editorBounds.getY(), width + 6, 1);
+        auto const textHeight = noteEditor.getTextHeight();
+        noteEditor.setBounds(editorBounds);
+
+        return textHeight;
+    }
+
     Rectangle<int> getPdBounds() override
     {
-        auto const height = noteEditor.getTextHeight();
+        auto const stringWidth = CachedFontStringWidth::get()->calculateStringWidth(getFont(), getNote()) + 12;
 
         if (auto note = ptr.get<t_fake_note>()) {
-            int width = note->x_resized ? note->x_max_pixwidth : CachedFontStringWidth::get()->calculateStringWidth(getFont(), getNote()) + 12;
+            int const width = note->x_resized ? note->x_max_pixwidth : stringWidth;
 
-            return { note->x_obj.te_xpix, note->x_obj.te_ypix, width, height + 4 };
+            return { note->x_obj.te_xpix, note->x_obj.te_ypix, width, getTextHeightForWidth(width) + 2 };
         }
 
-        return {};
+        return { };
     }
 
     std::unique_ptr<ComponentBoundsConstrainer> createConstrainer() override
@@ -308,8 +314,7 @@ public:
                 note->x_resized = 1;
                 note->x_max_pixwidth = bounds.getWidth() - Object::doubleMargin;
 
-                // Set editor size first, so getTextHeight will return a correct result
-                noteObject->noteEditor.setSize(note->x_max_pixwidth, noteObject->noteEditor.getHeight());
+                // getPdBounds() measures the text at the new width for us
                 bounds = object->gui->getPdBounds().expanded(Object::margin) + object->cnv->canvasOrigin;
             }
         };
@@ -335,7 +340,7 @@ public:
             return String::fromUTF8(note->x_buf, note->x_bufsize).trim().replace("\\ ", " ").replace("\\,", ",").replace("\\;", ";");
         }
 
-        return {};
+        return { };
     }
 
     void propertyChanged(Value& v) override
@@ -353,7 +358,7 @@ public:
 
             object->updateBounds();
         } else if (v.refersToSameSourceAs(primaryColour)) {
-            auto const colour = Colour::fromString(primaryColour.toString());
+            auto const colour = getValue<Colour>(primaryColour);
             noteEditor.applyColourToAllText(colour);
             if (auto note = ptr.get<t_fake_note>())
                 colourToHexArray(colour, &note->x_red);
@@ -361,7 +366,7 @@ public:
             repaint();
         } else if (v.refersToSameSourceAs(secondaryColour)) {
             if (auto note = ptr.get<t_fake_note>())
-                colourToHexArray(Colour::fromString(secondaryColour.toString()), note->x_bg);
+                colourToHexArray(getValue<Colour>(secondaryColour), note->x_bg);
             needsRepaint = true;
             repaint();
         } else if (v.refersToSameSourceAs(fontSize)) {
@@ -393,9 +398,7 @@ public:
             repaint();
         } else if (v.refersToSameSourceAs(receiveSymbol)) {
             auto const receive = receiveSymbol.toString();
-            if (auto note = ptr.get<t_fake_note>()) {
-                pd->sendDirectMessage(note.get(), "receive", { pd->generateSymbol(receive) });
-            }
+            sendMessage("receive", { pd->generateSymbol(receive) });
         } else if (v.refersToSameSourceAs(justification)) {
             auto const justificationType = getValue<int>(justification);
             if (auto note = ptr.get<t_fake_note>())
@@ -407,13 +410,13 @@ public:
             } else if (justificationType == 3) {
                 noteEditor.setJustification(Justification::topRight);
             }
+            updateFont();
         } else if (v.refersToSameSourceAs(outline)) {
             if (auto note = ptr.get<t_fake_note>()) {
                 note->x_outline = getValue<int>(outline);
                 note->x_fontface = note->x_bold + 2 * note->x_italic + 4 * note->x_outline;
             }
-            needsRepaint = true;
-            repaint();
+            updateFont();
         } else if (v.refersToSameSourceAs(font)) {
             auto const fontName = font.toString();
             if (auto note = ptr.get<t_fake_note>())
@@ -433,12 +436,12 @@ public:
         auto const typefaceName = font.toString();
 
         if (typefaceName.isEmpty() || typefaceName == "Inter") {
-            return Fonts::getVariableFont().withStyle(style).withHeight(fontHeight);
+            return Fonts::getDefaultFont().withStyle(style).withHeight(fontHeight);
         }
 
         // Check if a system typeface exists, before we start searching for a font file
         // We do this because it's the most common case, and finding font files is slow
-        auto typeface = Font(typefaceName, static_cast<float>(fontHeight), style);
+        auto typeface = Font(FontOptions(typefaceName, static_cast<float>(fontHeight), style));
         if (typeface.getTypefacePtr() != nullptr) {
             return typeface;
         }
@@ -510,19 +513,19 @@ public:
         }
         case hash("color"): {
             if (auto note = ptr.get<t_fake_note>()) {
-                primaryColour = Colour(note->x_red, note->x_green, note->x_blue).toString();
+                primaryColour = colourToVar(Colour(note->x_red, note->x_green, note->x_blue));
             }
             break;
         }
         case hash("bgcolor"): {
             if (auto note = ptr.get<t_fake_note>()) {
-                secondaryColour = Colour(note->x_bg[0], note->x_bg[1], note->x_bg[2]).toString();
+                secondaryColour = colourToVar(Colour(note->x_bg[0], note->x_bg[1], note->x_bg[2]));
             }
             break;
         }
         case hash("just"): {
             if (auto note = ptr.get<t_fake_note>()) {
-                justification = note->x_textjust;
+                justification = note->x_textjust + 1;
             }
             break;
         }
@@ -534,6 +537,7 @@ public:
             if (auto note = ptr.get<t_fake_note>()) {
                 outline = note->x_outline;
             }
+            repaint();
         }
         case hash("receive"): {
             if (atoms.size() >= 1)

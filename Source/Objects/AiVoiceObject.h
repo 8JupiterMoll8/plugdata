@@ -11,6 +11,7 @@
 #include "Canvas.h"
 #include "PluginEditor.h"
 #include "Pd/MCPBridge.h"
+#include "Utility/NVGTextShim.h"
 #include <vector>
 #include <cmath>
 
@@ -270,36 +271,36 @@ public:
 
         auto const outlineColour = object->isSelected() && !cnv->isGraph
             ? cnv->selectedOutlineCol
-            : (rec ? nvgRGBA(255, 70, 70, 220) : (play ? nvgRGBA(60, 220, 120, 220) : nvgRGBA(180, 90, 255, 180)));
+            : (rec ? nanovg::nvgRGBA(255, 70, 70, 220) : (play ? nanovg::nvgRGBA(60, 220, 120, 220) : nanovg::nvgRGBA(180, 90, 255, 180)));
 
         // 1. Chassis — same family panel as the cassette.
-        NVGcolor bgGradTop = nvgRGBA(24, 22, 34, 250);
-        NVGcolor bgGradBot = nvgRGBA(16, 15, 24, 255);
-        NVGpaint bgPaint = nvgLinearGradient(nvg, b.getX(), b.getY(), b.getX(), b.getBottom(), bgGradTop, bgGradBot);
-        nvgBeginPath(nvg);
-        nvgRoundedRect(nvg, b.getX(), b.getY(), w, h, Corners::objectCornerRadius);
-        nvgFillPaint(nvg, bgPaint);
-        nvgFill(nvg);
-        nvgStrokeColor(nvg, outlineColour);
-        nvgStrokeWidth(nvg, 1.2f);
-        nvgStroke(nvg);
+        NVGcolor bgGradTop = nanovg::nvgRGBA(24, 22, 34, 250);
+        NVGcolor bgGradBot = nanovg::nvgRGBA(16, 15, 24, 255);
+        NVGpaint bgPaint = nanovg::nvgLinearGradient(nvg, b.getX(), b.getY(), b.getX(), b.getBottom(), bgGradTop, bgGradBot);
+        nanovg::nvgBeginPath(nvg);
+        nanovg::nvgRoundedRect(nvg, b.getX(), b.getY(), w, h, Corners::objectCornerRadius);
+        nanovg::nvgFillPaint(nvg, bgPaint);
+        nanovg::nvgFill(nvg);
+        nanovg::nvgStrokeColor(nvg, outlineColour);
+        nanovg::nvgStrokeWidth(nvg, 1.2f);
+        nanovg::nvgStroke(nvg);
 
         // 2. Label banner: AI VOICE + take id + mode.
-        nvgBeginPath(nvg);
-        nvgRoundedRect(nvg, b.getX() + 6.0f, b.getY() + 5.0f, w - 88.0f, 16.0f, 3.0f);
-        nvgFillColor(nvg, nvgRGBA(38, 35, 52, 230));
-        nvgFill(nvg);
+        nanovg::nvgBeginPath(nvg);
+        nanovg::nvgRoundedRect(nvg, b.getX() + 6.0f, b.getY() + 5.0f, w - 88.0f, 16.0f, 3.0f);
+        nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(38, 35, 52, 230));
+        nanovg::nvgFill(nvg);
 
-        nvgFontSize(nvg, 10.5f);
-        nvgFontFace(nvg, "Inter-Bold");
-        nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
-        nvgFillColor(nvg, nvgRGBA(195, 150, 255, 240));
-        nvgText(nvg, b.getX() + 12.0f, b.getY() + 13.0f, "AI VOICE", nullptr);
+        mcpnvg::nvgFontSize(nvg, 10.5f);
+        mcpnvg::nvgFontFace(nvg, "Inter-Bold");
+        mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+        nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(195, 150, 255, 240));
+        mcpnvg::nvgText(nvg, b.getX() + 12.0f, b.getY() + 13.0f, "AI VOICE", nullptr);
 
-        nvgFontSize(nvg, 9.5f);
-        nvgFontFace(nvg, "Inter");
-        nvgFillColor(nvg, nvgRGBA(160, 160, 180, 200));
-        nvgText(nvg, b.getX() + 72.0f, b.getY() + 13.0f, takeId.toRawUTF8(), nullptr);
+        mcpnvg::nvgFontSize(nvg, 9.5f);
+        mcpnvg::nvgFontFace(nvg, "Inter");
+        nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(160, 160, 180, 200));
+        mcpnvg::nvgText(nvg, b.getX() + 72.0f, b.getY() + 13.0f, takeId.toRawUTF8(), nullptr);
 
         // 3. Mic capsule window: VU meter + peak-hold + status line.
         float const winX = b.getX() + 10.0f;
@@ -307,49 +308,49 @@ public:
         float const winW = w - 94.0f;
         float const winH = h - 34.0f;
         if (winW > 20.0f && winH > 10.0f) {
-            nvgBeginPath(nvg);
-            nvgRoundedRect(nvg, winX, winY, winW, winH, 3.0f);
-            nvgFillColor(nvg, nvgRGBA(10, 9, 16, 255));
-            nvgFill(nvg);
-            nvgStrokeColor(nvg, nvgRGBA(60, 55, 80, 200));
-            nvgStrokeWidth(nvg, 1.0f);
-            nvgStroke(nvg);
+            nanovg::nvgBeginPath(nvg);
+            nanovg::nvgRoundedRect(nvg, winX, winY, winW, winH, 3.0f);
+            nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(10, 9, 16, 255));
+            nanovg::nvgFill(nvg);
+            nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(60, 55, 80, 200));
+            nanovg::nvgStrokeWidth(nvg, 1.0f);
+            nanovg::nvgStroke(nvg);
 
             // VU bar (green → amber → red by level)
             float const barH = juce::jmax(4.0f, winH * 0.34f);
             float const barY = winY + winH - barH - 6.0f;
             float const barMaxW = winW - 12.0f;
             float const lvl = juce::jlimit(0.0f, 1.0f, meterLevel);
-            NVGcolor vu = lvl < 0.7f ? nvgRGBA(60, 220, 120, 230)
-                        : (lvl < 0.9f ? nvgRGBA(240, 190, 70, 235) : nvgRGBA(255, 80, 80, 240));
-            nvgBeginPath(nvg);
-            nvgRoundedRect(nvg, winX + 6.0f, barY, juce::jmax(1.0f, barMaxW * lvl), barH, 2.0f);
-            nvgFillColor(nvg, vu);
-            nvgFill(nvg);
+            NVGcolor vu = lvl < 0.7f ? nanovg::nvgRGBA(60, 220, 120, 230)
+                        : (lvl < 0.9f ? nanovg::nvgRGBA(240, 190, 70, 235) : nanovg::nvgRGBA(255, 80, 80, 240));
+            nanovg::nvgBeginPath(nvg);
+            nanovg::nvgRoundedRect(nvg, winX + 6.0f, barY, juce::jmax(1.0f, barMaxW * lvl), barH, 2.0f);
+            nanovg::nvgFillColor(nvg, vu);
+            nanovg::nvgFill(nvg);
 
             // Peak-hold tick
             float const pk = juce::jlimit(0.0f, 1.0f, meterPeak);
             if (pk > 0.02f) {
-                nvgBeginPath(nvg);
-                nvgRect(nvg, winX + 6.0f + barMaxW * pk - 1.0f, barY - 2.0f, 2.0f, barH + 4.0f);
-                nvgFillColor(nvg, nvgRGBA(255, 255, 255, 190));
-                nvgFill(nvg);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgRect(nvg, winX + 6.0f + barMaxW * pk - 1.0f, barY - 2.0f, 2.0f, barH + 4.0f);
+                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(255, 255, 255, 190));
+                nanovg::nvgFill(nvg);
             }
 
             // Status line: rec blink / notes / mode
-            nvgFontSize(nvg, 9.5f);
-            nvgFontFace(nvg, "Inter");
-            nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+            mcpnvg::nvgFontSize(nvg, 9.5f);
+            mcpnvg::nvgFontFace(nvg, "Inter");
+            mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
             if (rec) {
                 float const blink = 0.5f + 0.5f * std::sin(pulsePhase);
-                nvgFillColor(nvg, nvgRGBA(255, 70, 70, static_cast<int>(120 + 135 * blink)));
-                nvgText(nvg, winX + 8.0f, winY + 6.0f, "● REC", nullptr);
+                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(255, 70, 70, static_cast<int>(120 + 135 * blink)));
+                mcpnvg::nvgText(nvg, winX + 8.0f, winY + 6.0f, "● REC", nullptr);
             } else {
                 juce::String status = juce::String(noteCount) + " notes";
                 if (hasWav) status += " · wav";
                 status += " | " + juce::String(bpm) + " BPM";
-                nvgFillColor(nvg, nvgRGBA(150, 150, 170, 210));
-                nvgText(nvg, winX + 8.0f, winY + 6.0f, status.toRawUTF8(), nullptr);
+                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(150, 150, 170, 210));
+                mcpnvg::nvgText(nvg, winX + 8.0f, winY + 6.0f, status.toRawUTF8(), nullptr);
             }
         }
 
@@ -360,22 +361,22 @@ public:
         auto drawBtn = [&](int y, char const* label, bool active, NVGcolor activeCol) {
             float const bx = b.getX() + static_cast<float>(btnX);
             float const by = b.getY() + static_cast<float>(y);
-            nvgBeginPath(nvg);
-            nvgRoundedRect(nvg, bx, by, static_cast<float>(btnW), static_cast<float>(btnH), 3.0f);
-            nvgFillColor(nvg, active ? activeCol : nvgRGBA(38, 35, 52, 230));
-            nvgFill(nvg);
-            nvgStrokeColor(nvg, nvgRGBA(70, 65, 95, 220));
-            nvgStrokeWidth(nvg, 1.0f);
-            nvgStroke(nvg);
+            nanovg::nvgBeginPath(nvg);
+            nanovg::nvgRoundedRect(nvg, bx, by, static_cast<float>(btnW), static_cast<float>(btnH), 3.0f);
+            nanovg::nvgFillColor(nvg, active ? activeCol : nanovg::nvgRGBA(38, 35, 52, 230));
+            nanovg::nvgFill(nvg);
+            nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(70, 65, 95, 220));
+            nanovg::nvgStrokeWidth(nvg, 1.0f);
+            nanovg::nvgStroke(nvg);
 
-            nvgFontSize(nvg, 9.0f);
-            nvgFontFace(nvg, "Inter-Bold");
-            nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-            nvgFillColor(nvg, active ? nvgRGBA(20, 18, 28, 255) : nvgRGBA(190, 185, 210, 230));
-            nvgText(nvg, bx + static_cast<float>(btnW) * 0.5f, by + static_cast<float>(btnH) * 0.5f, label, nullptr);
+            mcpnvg::nvgFontSize(nvg, 9.0f);
+            mcpnvg::nvgFontFace(nvg, "Inter-Bold");
+            mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+            nanovg::nvgFillColor(nvg, active ? nanovg::nvgRGBA(20, 18, 28, 255) : nanovg::nvgRGBA(190, 185, 210, 230));
+            mcpnvg::nvgText(nvg, bx + static_cast<float>(btnW) * 0.5f, by + static_cast<float>(btnH) * 0.5f, label, nullptr);
         };
-        drawBtn(6, rec ? "STOP" : "REC", rec, nvgRGBA(255, 80, 80, 235));
-        drawBtn(8 + btnH, "PLAY", play, nvgRGBA(60, 220, 120, 235));
-        drawBtn(10 + btnH * 2, "TRANSMIT", false, nvgRGBA(195, 150, 255, 235));
+        drawBtn(6, rec ? "STOP" : "REC", rec, nanovg::nvgRGBA(255, 80, 80, 235));
+        drawBtn(8 + btnH, "PLAY", play, nanovg::nvgRGBA(60, 220, 120, 235));
+        drawBtn(10 + btnH * 2, "TRANSMIT", false, nanovg::nvgRGBA(195, 150, 255, 235));
     }
 };

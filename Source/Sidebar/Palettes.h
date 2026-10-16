@@ -18,7 +18,6 @@
 #include "PluginEditor.h"
 #include "Sidebar/PaletteItem.h"
 #include "Utility/OfflineObjectRenderer.h"
-#include "Utility/ZoomableDragAndDropContainer.h"
 #include "Utility/CachedStringWidth.h"
 #include "Utility/RateReducer.h"
 #include "Components/Buttons.h"
@@ -33,26 +32,20 @@ public:
 
     void paint(Graphics& g) override
     {
+        auto const& colours = getThemeColours(*this);
+
         auto const bounds = getLocalBounds().reduced(5, 2);
         auto textBounds = bounds;
         auto const iconBounds = textBounds.removeFromLeft(textBounds.getHeight());
 
-        auto const colour = findColour(PlugDataColour::sidebarTextColourId);
+        auto const colour = colours.sidebarTextColour;
         if (mouseIsOver) {
-            g.setColour(findColour(PlugDataColour::sidebarActiveBackgroundColourId));
+            g.setColour(colours.sidebarActiveBackgroundColour);
             g.fillRoundedRectangle(bounds.toFloat(), Corners::defaultCornerRadius);
         }
 
         Fonts::drawIcon(g, Icons::Add, iconBounds, colour, 12);
         Fonts::drawText(g, "Add from clipboard", textBounds, colour, 14);
-    }
-
-    bool hitTest(int const x, int const y) override
-    {
-        if (getLocalBounds().reduced(5, 2).contains(x, y)) {
-            return true;
-        }
-        return false;
     }
 
     void mouseEnter(MouseEvent const& e) override
@@ -73,10 +66,10 @@ public:
     }
 };
 
-class PaletteDraggableList final : public Component
+class PaletteList final : public Component
     , public ValueTree::Listener {
 public:
-    PaletteDraggableList(PluginEditor* e, ValueTree tree)
+    PaletteList(PluginEditor* e, ValueTree tree)
         : editor(e)
         , paletteTree(tree)
     {
@@ -127,7 +120,6 @@ public:
                         _paletteItem->nameLabel.showEditor();
                 });
 
-            // pushViewportToBottom = true;
             resized();
         };
 
@@ -140,17 +132,14 @@ public:
         auto const itemsBounds = getLocalBounds().withHeight(height);
         auto totalHeight = 0;
 
-        auto& animator = Desktop::getInstance().getAnimator();
-
         Rectangle<int> bounds;
         for (auto* item : items) {
             bounds = itemsBounds.withPosition(0, totalHeight);
-            if (item != draggedItem) {
+            if (item != draggedItem && bounds != item->getTargetBounds()) {
                 if (shouldAnimate) {
-                    animator.animateComponent(item, bounds, 1.0f, 200, false, 3.0f, 0.0f);
+                    item->animateToPosition(bounds);
                 } else {
-                    animator.cancelAnimation(item, false);
-                    item->setBounds(bounds);
+                    item->cancelAnimation(bounds);
                 }
             }
             totalHeight += height;
@@ -163,10 +152,6 @@ public:
         shouldAnimate = false;
 
         auto const viewport = findParentComponentOfClass<BouncingViewport>();
-        // if (pushViewportToBottom) {
-        //     viewport->setViewPositionProportionately(0.0f, 1.0f);
-        //     pushViewportToBottom = false;
-        // } else
         if (viewport && viewport->getViewPositionY() != viewportPosHackY)
             viewport->setViewPosition(Point<int>(0, viewportPosHackY));
     }
@@ -242,12 +227,17 @@ public:
 
     void mouseDown(MouseEvent const& e) override
     {
-        if (isItemShowingMenu || !e.mods.isLeftButtonDown())
+        if (isItemShowingMenu || !isRealClickEvent(e))
             return;
 
         auto const viewport = findParentComponentOfClass<BouncingViewport>();
         viewportPosHackY = viewport->getViewPositionY();
         accumulatedOffsetY = { 0, 0 };
+    }
+
+    void showPasteButton(bool show)
+    {
+        pasteButton.setVisible(show);
     }
 
     AddItemButton pasteButton;
@@ -265,214 +255,170 @@ public:
     bool shouldAnimate = false;
 
     int viewportPosHackY;
-    // bool pushViewportToBottom = false;
     Point<int> accumulatedOffsetY;
 };
 
-class PaletteComponent final : public Component {
-public:
-    PaletteComponent(PluginEditor* e, ValueTree tree)
-        : paletteTree(tree)
-        , editor(e)
-    {
-        paletteDraggableList = new PaletteDraggableList(e, tree);
-
-        viewport.setViewedComponent(paletteDraggableList, false);
-        viewport.setScrollBarsShown(true, false, false, false);
-        addAndMakeVisible(viewport);
-
-        auto const title = tree.getPropertyAsValue("Name", nullptr).toString();
-
-        nameLabel.setText(title, dontSendNotification);
-        nameLabel.setEditable(true);
-        nameLabel.setJustificationType(Justification::centred);
-
-        nameLabel.onEditorShow = [this] {
-            if (auto* editor = nameLabel.getCurrentTextEditor()) {
-                editor->setColour(TextEditor::outlineColourId, Colours::transparentBlack);
-                editor->setColour(TextEditor::focusedOutlineColourId, Colours::transparentBlack);
-                editor->setJustification(Justification::centred);
-            }
-        };
-
-        nameLabel.onTextChange = [this, tree]() mutable {
-            tree.setProperty("Name", nameLabel.getText(), nullptr);
-        };
-
-        addAndMakeVisible(nameLabel);
-        lookAndFeelChanged();
-    }
-
-    ~PaletteComponent() override
-    {
-        delete paletteDraggableList;
-    }
-
-    void lookAndFeelChanged() override
-    {
-        nameLabel.setFont(Fonts::getBoldFont());
-    }
-
-    void showAndGrabEditorFocus()
-    {
-        MessageManager::callAsync([_this = SafePointer(this)] {
-            if (_this)
-                _this->nameLabel.showEditor();
-        });
-    }
-
-    void paint(Graphics& g) override
-    {
-        // toolbar bar
-        auto backgroundColour = findColour(PlugDataColour::toolbarBackgroundColourId);
-        if (ProjectInfo::isStandalone && !editor->isActiveWindow()) {
-            backgroundColour = backgroundColour.brighter(backgroundColour.getBrightness() / 2.5f);
-        }
-
-        g.setColour(backgroundColour);
-        g.fillRect(getLocalBounds().toFloat().removeFromTop(30).withTrimmedTop(0.5f));
-
-        g.setColour(findColour(PlugDataColour::toolbarOutlineColourId));
-        g.drawLine(0, 30.0f, getWidth(), 30.0f);
-    }
-
-    void resized() override
-    {
-        paletteDraggableList->setBounds(getLocalBounds().withTrimmedTop(32));
-        viewport.setBounds(getLocalBounds().withTrimmedTop(32));
-
-        nameLabel.setBounds(getLocalBounds().removeFromTop(32));
-    }
-
-    ValueTree getTree()
-    {
-        return paletteTree;
-    }
-
-private:
-    PaletteDraggableList* paletteDraggableList;
-    ValueTree paletteTree;
-    PluginEditor* editor;
-    BouncingViewport viewport;
-
-    Label nameLabel;
-};
-
 class PaletteSelector final : public TextButton {
-
 public:
     PaletteSelector(String const& textToShow, ValueTree palette)
         : palette(palette)
     {
         setRadioGroupId(hash("palette"));
         setButtonText(textToShow);
-        setSize(30, CachedStringWidth<14>::calculateStringWidth(textToShow) + 30);
-        // setClickingTogglesState(true);
+
+        nameLabel.setText(textToShow, dontSendNotification);
+        nameLabel.setJustificationType(Justification::centred);
+        nameLabel.setFont(Fonts::getDefaultFont().withHeight(13.5f));
+        nameLabel.setInterceptsMouseClicks(false, false);
+        nameLabel.setColour(Label::backgroundColourId, Colours::transparentBlack);
+        nameLabel.setColour(Label::outlineColourId, Colours::transparentBlack);
+        nameLabel.setColour(Label::textWhenEditingColourId, findColour(TextButton::textColourOnId));
+        nameLabel.setColour(Label::backgroundWhenEditingColourId, Colours::transparentBlack);
+        nameLabel.setColour(TextEditor::focusedOutlineColourId, Colours::transparentBlack);
+        nameLabel.setEditable(false, false, false);
+
+        nameLabel.onEditorShow = [this] {
+            if (auto* editor = nameLabel.getCurrentTextEditor()) {
+                editor->setJustification(Justification::centred);
+                editor->setColour(TextEditor::outlineColourId, Colours::transparentBlack);
+                editor->setColour(TextEditor::focusedOutlineColourId, Colours::transparentBlack);
+                editor->onTextChange = [this, editor]() {
+                    auto const newText = editor->getText();
+                    updateSize(newText);
+                    onResize();
+                };
+            }
+        };
+        nameLabel.onEditorHide = [this] {
+            auto const newText = nameLabel.getText();
+            setButtonText(newText);
+            updateSize(newText);
+            onRename(newText);
+        };
+
+        addAndMakeVisible(nameLabel);
+
+        updateSize(textToShow);
+        updater.addAnimator(animator);
+        setViewportIgnoreDragFlag(true);
     }
 
     void mouseDown(MouseEvent const& e) override
     {
         if (e.mods.isRightButtonDown()) {
             PopupMenu menu;
+            menu.addItem("Rename palette", [this] { showEditor(); });
             menu.addItem("Export palette", exportClicked);
             menu.addItem("Delete palette", deleteClicked);
             auto const position = e.getScreenPosition();
             menu.showMenuAsync(PopupMenu::Options().withTargetComponent(this).withTargetScreenArea(Rectangle<int>(position, position.translated(1, 1))));
+            return;
         }
-
         TextButton::mouseDown(e);
+    }
+
+    void mouseDoubleClick(MouseEvent const& e) override
+    {
+        if (e.mods.isLeftButtonDown())
+            showEditor();
+    }
+
+    void showEditor()
+    {
+        nameLabel.showEditor();
     }
 
     void setTextToShow(String const& text)
     {
         setButtonText(text);
-        setSize(30, CachedStringWidth<14>::calculateStringWidth(text) + 30);
+        nameLabel.setText(text, dontSendNotification);
+        updateSize(text);
     }
 
     void lookAndFeelChanged() override
     {
+        nameLabel.setFont(Fonts::getDefaultFont().withHeight(13.5f));
         repaint();
     }
 
     void paint(Graphics& g) override
     {
         if (getToggleState() || isMouseOver()) {
-            g.setColour(findColour(PlugDataColour::toolbarHoverColourId));
-            g.fillRoundedRectangle(getLocalBounds().toFloat().reduced(4.0f, 4.0f), Corners::defaultCornerRadius);
+            g.setColour(getThemeColours(*this).toolbarHoverColour);
+            g.fillRoundedRectangle(getLocalBounds().toFloat().reduced(2.0f), Corners::defaultCornerRadius);
         }
-        g.saveState();
-
-        auto const midX = static_cast<float>(getWidth()) * 0.5f;
-        auto const midY = static_cast<float>(getHeight()) * 0.5f;
-
-        auto const transform = AffineTransform::rotation(-MathConstants<float>::halfPi, midX, midY);
-        g.addTransform(transform);
-
-        g.setFont(Fonts::getCurrentFont().withHeight(getWidth() * 0.5f));
 
         auto const colour = findColour(getToggleState() ? TextButton::textColourOnId
                                                         : TextButton::textColourOffId)
                                 .withMultipliedAlpha(isEnabled() ? 1.0f : 0.5f);
-
-        g.setColour(colour);
-        g.drawText(getButtonText(), getLocalBounds().reduced(2).transformedBy(transform), Justification::centred, false);
-
-        g.restoreState();
+        nameLabel.setColour(Label::textColourId, colour);
     }
 
-    ValueTree getTree()
+    void resized() override
     {
-        return palette;
+        nameLabel.setBounds(getLocalBounds());
+    }
+
+    ValueTree getTree() { return palette; }
+
+    void animateToPosition(Rectangle<int> targetBounds)
+    {
+        animationStartBounds = getBounds();
+        animationEndBounds = targetBounds;
+        animator.start();
+    }
+
+    void cancelAnimation(Rectangle<int> targetBounds)
+    {
+        animator.complete();
+        setBounds(targetBounds);
+    }
+
+    Rectangle<int> getTargetBounds()
+    {
+        return animator.isComplete() ? getBounds() : animationEndBounds;
     }
 
     std::function<void()> exportClicked = [] { };
     std::function<void()> deleteClicked = [] { };
+    std::function<void(String const&)> onRename = [](String const&) { };
+    std::function<void()> onResize = []() { };
 
 private:
+    void updateSize(String const& text)
+    {
+        setSize(CachedStringWidth<14>::calculateStringWidth(text) + 20, 26);
+    }
+
     ValueTree palette;
+    Label nameLabel;
+    Rectangle<int> animationStartBounds, animationEndBounds;
+    VBlankAnimatorUpdater updater { this };
+    Animator animator = ValueAnimatorBuilder { }
+                            .withEasing(Easings::createEaseInOut())
+                            .withDurationMs(260)
+                            .withValueChangedCallback([this](float v) {
+                                auto start = std::make_tuple(animationStartBounds.getX(), animationStartBounds.getY(), animationStartBounds.getWidth(), animationStartBounds.getHeight());
+                                auto end = std::make_tuple(animationEndBounds.getX(), animationEndBounds.getY(), animationEndBounds.getWidth(), animationEndBounds.getHeight());
+                                auto const [x, y, w, h] = makeAnimationLimits(start, end).lerp(v);
+                                setBounds(x, y, w, h);
+                            })
+                            .build();
 };
 
 class Palettes final : public Component
-    , public SettingsFileListener
     , public ValueTree::Listener {
 public:
     explicit Palettes(PluginEditor* e)
         : editor(e)
-        , resizer(this)
     {
-        if (!palettesFile.exists()) {
-            palettesFile.create();
-            initialisePalettesFile();
-        } else {
-            auto const paletteFileContent = palettesFile.loadFileAsString();
-            if (paletteFileContent.isEmpty()) {
-                initialisePalettesFile();
-            } else {
-                palettesTree = ValueTree::fromXml(paletteFileContent);
+        auto& state = SettingsFile::getInstance()->getProperty<VarArray>("palettes");
 
-                for (auto paletteCategory : palettesTree) {
-                    for (auto [name, palette] : defaultPalettes) {
-                        if (name != paletteCategory.getProperty("Name").toString())
-                            continue;
-
-                        for (auto& [paletteName, patch] : palette) {
-                            auto exitingChildWithName = paletteCategory.getChildWithProperty("Name", paletteName);
-                            if (!exitingChildWithName.isValid()) {
-                                ValueTree paletteTree("Item");
-                                paletteTree.setProperty("Name", paletteName, nullptr);
-                                paletteTree.setProperty("Patch", patch, nullptr);
-                                paletteCategory.appendChild(paletteTree, nullptr);
-                            } else {
-                                // TODO: temporary for version transition. Remove after v1 release
-                                auto p = exitingChildWithName.getProperty("Patch").toString();
-                                p = p.replace("palette/", "else/");
-                                exitingChildWithName.setProperty("Patch", p, nullptr);
-                            }
-                        }
-                    }
-                }
-            }
+        if (state.isEmpty()) {
+            initialisePalettes(state);
         }
+
+        populateValueTree(state);
 
         palettesTree.addListener(this);
 
@@ -520,8 +466,17 @@ public:
                         if (!result.exists())
                             return;
 
-                        auto const paletteXml = result.loadFileAsString();
-                        auto importedPalette = ValueTree::fromXml(paletteXml);
+                        auto const paletteText = result.loadFileAsString();
+                        ValueTree importedPalette;
+
+                        var paletteContent = JSON::fromString(paletteText);
+                        if(paletteContent.isObject())
+                        {
+                            importedPalette = paletteFromJSON(paletteContent);
+                        }
+                        else {
+                            importedPalette = ValueTree::fromXml(paletteText);
+                        }
                         importedPalette.setProperty("Name", var(result.getFileNameWithoutExtension()), nullptr);
                         newPalette(importedPalette);
                     },
@@ -538,28 +493,33 @@ public:
             }
         };
 
+        currentPaletteList = std::make_unique<PaletteList>(e, palettesTree);
+        viewport.setViewedComponent(currentPaletteList.get(), false);
+        viewport.setScrollBarsShown(true, false, false, false);
+        addAndMakeVisible(viewport);
+
         paletteBar.setVisible(true);
-        paletteViewport.setViewedComponent(&paletteBar, false);
-        paletteViewport.setScrollBarsShown(true, false, false, false);
-        paletteViewport.setScrollBarThickness(4);
-        paletteViewport.setScrollBarPosition(false, false);
+        addAndMakeVisible(paletteBar);
 
-        addAndMakeVisible(paletteViewport);
-        addAndMakeVisible(view.get());
-        addAndMakeVisible(resizer);
-
-        resizer.setAlwaysOnTop(true);
+        addAndMakeVisible(searchInput);
+        searchInput.setBackgroundColour(PlugDataColour::sidebarActiveBackgroundColourId);
+        searchInput.setTextToShowWhenEmpty("Type to search palettes", getThemeColours(*this).sidebarTextColour.withAlpha(0.5f));
+        searchInput.setJustification(Justification::centredLeft);
+        searchInput.setBorder({ 1, 23, 5, 1 });
+        searchInput.onTextChange = [this] {
+            updateSearch(searchInput.getText());
+        };
 
         paletteBar.addAndMakeVisible(addButton);
 
         setSize(300, 0);
 
         generatePalettes();
-
-        showPalettes = SettingsFile::getInstance()->getProperty<bool>("show_palettes");
-        setVisible(showPalettes);
-
-        showPalette(ValueTree());
+        if (paletteSelectors.size()) {
+            paletteSelectors[0]->triggerClick();
+        } else {
+            showPalette(ValueTree());
+        }
     }
 
     ~Palettes() override
@@ -567,62 +527,65 @@ public:
         savePalettes();
     }
 
-    bool isExpanded() const
+    void updateSearch(String const& searchText)
     {
-        return view.get() && view->isVisible();
-    }
-
-    void initialisePalettesFile()
-    {
-        palettesTree = ValueTree("Palettes");
-
-        for (auto const& [name, palette] : defaultPalettes) {
-
-            auto categoryTree = ValueTree("Category");
-            categoryTree.setProperty("Name", name, nullptr);
-
-            for (auto& [paletteName, patch] : palette) {
-                auto paletteTree = ValueTree("Item");
-                paletteTree.setProperty("Name", paletteName, nullptr);
-                paletteTree.setProperty("Patch", patch, nullptr);
-                categoryTree.appendChild(paletteTree, nullptr);
+        if (searchText.isEmpty()) {
+            paletteBar.setVisible(true);
+            if (paletteSelectors.size()) {
+                paletteSelectors[0]->triggerClick();
+            } else {
+                showPalette(ValueTree());
             }
-
-            palettesTree.appendChild(categoryTree, nullptr);
+            return;
         }
 
-        savePalettes();
-    }
+        paletteBar.setVisible(false);
 
-private:
-    void settingsChanged(String const& name, var const& value) override
-    {
-        if (name == "show_palettes") {
-            auto const settingsTree = SettingsFile::getInstance()->getValueTree();
-            // Check if we have recently opened files
-            if (settingsTree.getChildWithName("RecentlyOpened").getNumChildren() || editor->getCurrentCanvas()) {
-                if (isVisible() != static_cast<bool>(value)) {
-                    setVisible(value);
-
-                    // Update the editor and nvg surface in case we are rendering through image
-                    // So that the editor can correctly set the size of the canvas area
-                    editor->resized();
-                    editor->nvgSurface.resized();
+        ValueTree searchResult = ValueTree("Search");
+        for (auto category : palettesTree) {
+            for (auto item : category) {
+                if (item.getProperty("Name").toString().containsIgnoreCase(searchText)) {
+                    searchResult.appendChild(item.createCopy(), nullptr);
                 }
             }
         }
-        if (name == "centre_sidepanel_buttons") {
-            resized();
+        showPalette(searchResult);
+    }
+
+    void populateValueTree(Array<var>& state)
+    {
+        palettesTree = ValueTree("Palettes");
+        for (auto const& categoryVar : state) {
+            palettesTree.appendChild(paletteFromJSON(categoryVar), nullptr);
         }
     }
 
+    void initialisePalettes(Array<var>& state)
+    {
+        for (auto const& [name, palette] : defaultPalettes) {
+            DynamicObject::Ptr categoryObj = new DynamicObject();
+            categoryObj->setProperty("name", name);
+
+            Array<var> items;
+            for (auto const& [paletteName, patch] : palette) {
+                DynamicObject::Ptr itemObj = new DynamicObject();
+                itemObj->setProperty("name", paletteName);
+                itemObj->setProperty("patch", patch);
+
+                items.add(var(itemObj.get()));
+            }
+
+            categoryObj->setProperty("items", items);
+
+            state.add(var(categoryObj.get()));
+        }
+    }
+
+private:
+
     bool hitTest(int const x, int y) override
     {
-        if (!isExpanded()) {
-            return x < 30;
-        }
-
-        return true;
+        return x > 3;
     }
 
     void lookAndFeelChanged() override
@@ -630,62 +593,79 @@ private:
         resized();
     }
 
+    void paintOverChildren(Graphics& g) override
+    {
+        auto const& colours = getThemeColours(*this);
+
+        auto const backgroundColour = colours.sidebarBackgroundColour;
+        auto const transparentColour = backgroundColour.withAlpha(0.0f);
+
+        // Draw a gradient to fade the content out underneath the search input
+        if (currentPaletteList) {
+            auto const scrollOffset = viewport.canScrollVertically();
+            g.setGradientFill(ColourGradient(backgroundColour, 0.0f, 26.0f, transparentColour, 0.0f, 42.0f, false));
+            g.fillRect(Rectangle<int>(0, searchInput.getBottom(), getWidth() - scrollOffset, 12));
+        }
+
+        Fonts::drawIcon(g, Icons::Search, 2, 1, 32, colours.sidebarTextColour, 12);
+    }
+
     void resized() override
     {
-        int totalHeight = 0;
-        for (auto const* button : paletteSelectors) {
-            totalHeight += button->getHeight();
-        }
+        constexpr int rowHeight = 26;
+        constexpr int rowGap = 4;
+        constexpr int tabSpacing = 4;
+        constexpr int sidePadding = 5;
+        constexpr int verticalPadding = 30;
+        constexpr int addButtonWidth = 26;
 
-        totalHeight += 46;
+        int const rightEdge = getWidth() - sidePadding;
 
-        Rectangle<int> selectorBounds;
-        if (totalHeight > getHeight() || !SettingsFile::getInstance()->getProperty<bool>("centre_sidepanel_buttons")) {
-            selectorBounds = getLocalBounds().removeFromLeft(30).withTrimmedTop(34);
-        } else {
-            selectorBounds = getLocalBounds().removeFromLeft(30).withSizeKeepingCentre(30, totalHeight);
-        }
+        searchInput.setBounds(sidePadding, verticalPadding - 26, getWidth() - sidePadding * 2, 26);
 
-        paletteBar.setBounds(0, 0, 30, std::max(totalHeight, getHeight()));
+        int categoriesHeight = verticalPadding;
+        if (paletteBar.isVisible()) {
+            int x = sidePadding;
+            int y = verticalPadding + rowGap;
+            int rows = 1;
 
-        paletteViewport.setBounds(getLocalBounds().removeFromLeft(30));
-
-        int const offset = totalHeight > paletteViewport.getMaximumVisibleHeight() ? -4 : 0;
-
-        auto& animator = Desktop::getInstance().getAnimator();
-
-        totalHeight = selectorBounds.getY();
-
-        for (auto* button : paletteSelectors) {
-            String buttonText = button->getButtonText();
-            int const height = button->getHeight();
-
-            if (button != draggedTab) {
-                auto bounds = Rectangle<int>(offset, totalHeight, 30, height);
-                if (shouldAnimate) {
-                    animator.animateComponent(button, bounds, 1.0f, 200, false, 3.0f, 0.0f);
-                } else {
-                    animator.cancelAnimation(button, false);
-                    button->setBounds(bounds);
+            auto wrapIfNeeded = [&](int const w) {
+                if (x > sidePadding && x + w > rightEdge) {
+                    x = sidePadding;
+                    y += rowHeight + rowGap;
+                    rows++;
                 }
+            };
+
+            for (auto* button : paletteSelectors) {
+                auto const w = button->getWidth();
+                wrapIfNeeded(w);
+                auto bounds = Rectangle<int>(x, y, w, rowHeight);
+                if (button != draggedTab && bounds != button->getTargetBounds()) {
+                    if (shouldAnimate)
+                        button->animateToPosition(bounds);
+                    else
+                        button->cancelAnimation(bounds);
+                }
+                x += w + tabSpacing;
             }
 
-            totalHeight += height;
+            wrapIfNeeded(addButtonWidth);
+            addButton.toFront(false);
+            addButton.setBounds(x, y, addButtonWidth, rowHeight);
+
+            categoriesHeight = verticalPadding + rows * rowHeight + (rows - 1) * rowGap;
+            paletteBar.setBounds(0, 0, getWidth(), categoriesHeight);
         }
 
         shouldAnimate = false;
 
-        addButton.toFront(false);
-        addButton.setBounds(Rectangle<int>(offset, totalHeight, 30, 30));
-
-        if (view)
-            view->setBounds(getLocalBounds().withTrimmedLeft(30));
-
-        resizer.setBounds(getWidth() - 5, 0, 5, getHeight());
-
         repaint();
-
         paletteBar.addMouseListener(this, true);
+
+        if (currentPaletteList)
+            currentPaletteList->setBounds(getLocalBounds().withHeight(currentPaletteList->getHeight()));
+        viewport.setBounds(getLocalBounds().withTrimmedTop(categoriesHeight + rowGap));
     }
 
     void mouseUp(MouseEvent const& e) override
@@ -708,16 +688,37 @@ private:
                 draggedTab->toFront(false);
                 mouseDownPos = draggedTab->getPosition();
             }
-        } else {
-            draggedTab->setTopLeftPosition(mouseDownPos.translated(0, e.getDistanceFromDragStartY()));
+            return;
+        }
 
-            int const idx = paletteSelectors.indexOf(draggedTab);
-            if (idx > 0 && draggedTab->getBounds().getCentreY() < paletteSelectors[idx - 1]->getBounds().getCentreY()) {
+        auto newPosition = mouseDownPos.translated(e.getDistanceFromDragStartX(), e.getDistanceFromDragStartY());
+        newPosition.y = std::max(30, static_cast<int>(newPosition.y / 30) * 30) + 4; // snap to rows
+        newPosition.x = std::clamp(newPosition.x, draggedTab->getWidth() / -2, (getWidth() - draggedTab->getWidth()) + 1);
+        draggedTab->setTopLeftPosition(newPosition);
+
+        auto const dragCentre = draggedTab->getBounds().getCentre();
+        int const idx = paletteSelectors.indexOf(draggedTab);
+
+        // Check previous neighbour
+        if (idx > 0) {
+            auto const& prev = paletteSelectors[idx - 1]->getBounds();
+            bool const shouldSwap = dragCentre.y < prev.getY()
+                || (dragCentre.y < prev.getBottom() && dragCentre.x < prev.getCentreX());
+            if (shouldSwap) {
                 paletteSelectors.swap(idx, idx - 1);
                 palettesTree.moveChild(idx, idx - 1, nullptr);
                 shouldAnimate = true;
                 resized();
-            } else if (idx < paletteSelectors.size() - 1 && draggedTab->getBounds().getCentreY() > paletteSelectors[idx + 1]->getBounds().getCentreY()) {
+                return;
+            }
+        }
+
+        // Check next neighbour
+        if (idx < paletteSelectors.size() - 1) {
+            auto const& next = paletteSelectors[idx + 1]->getBounds();
+            bool const shouldSwap = dragCentre.y > next.getBottom()
+                || (dragCentre.y > next.getY() && dragCentre.x > next.getCentreX());
+            if (shouldSwap) {
                 paletteSelectors.swap(idx, idx + 1);
                 palettesTree.moveChild(idx, idx + 1, nullptr);
                 shouldAnimate = true;
@@ -733,23 +734,12 @@ private:
                 button->setToggleState(false, dontSendNotification);
             }
 
-            resizer.setVisible(false);
-            view.reset(nullptr);
+            viewport.setViewedComponent(nullptr, false);
+            currentPaletteList.reset();
         } else {
-            // for (auto* paletteSelector : paletteSelectors) {
-            //     if (paletteSelector->getTree() == paletteToShow)
-            //         paletteSelector->setVisible(true);
-            //         resizer.setVisible(true);
-            // }
-            view = std::make_unique<PaletteComponent>(editor, paletteToShow);
-
-            // if the user hasn't changed the default title of this palette
-            // put the editor into editor mode (for now)
-            if (paletteToShow.getPropertyAsValue("Name", nullptr).toString().compare("Untitled palette") == 0) {
-                view->showAndGrabEditorFocus();
-            }
-            addAndMakeVisible(view.get());
-            resizer.setVisible(true);
+            currentPaletteList = std::make_unique<PaletteList>(editor, paletteToShow);
+            currentPaletteList->showPasteButton(paletteToShow.getType() != Identifier("Search"));
+            viewport.setViewedComponent(currentPaletteList.get(), false);
         }
 
         resized();
@@ -758,37 +748,69 @@ private:
             parent->resized();
     }
 
-    void paint(Graphics& g) override
+    ValueTree paletteFromJSON(var palette)
     {
-        if (view) {
-            g.setColour(findColour(PlugDataColour::sidebarBackgroundColourId));
-            g.fillRect(getLocalBounds().toFloat().withTrimmedTop(29.5f));
-            g.fillRect(getLocalBounds().toFloat().removeFromLeft(30).withTrimmedTop(29.5f));
+        if (auto* categoryObj = palette.getDynamicObject()) {
+            ValueTree result("Category");
+            result.setProperty("Name", categoryObj->getProperty("name"), nullptr);
+            auto itemsVar = categoryObj->getProperty("items");
+
+            if (auto* itemsArray = itemsVar.getArray()) {
+                for (auto const& itemVar : *itemsArray) {
+                    if (auto* itemObj = itemVar.getDynamicObject()) {
+                        ValueTree itemTree("Item");
+                        itemTree.setProperty("Name", itemObj->getProperty("name"), nullptr);
+                        itemTree.setProperty("Patch", itemObj->getProperty("patch"), nullptr);
+                        if (itemObj->hasProperty("bg_color")) {
+                            auto colourString = itemObj->getProperty("bg_color").toString();
+                            if (colourString.startsWithChar('#')) {
+                                colourString = colourString.substring(1);
+                                if (colourString.length() == 6)
+                                    colourString = "ff" + colourString;
+                            }
+                            itemTree.setProperty("BgColor", Colour::fromString(colourString).toString(), nullptr);
+                        }
+
+                        result.appendChild(itemTree, nullptr);
+                    }
+                }
+            }
+
+            return result;
         }
+
+        return ValueTree();
     }
 
-    void paintOverChildren(Graphics& g) override
+    var paletteToJSON(ValueTree palette)
     {
-        g.setColour(findColour(PlugDataColour::toolbarOutlineColourId));
-        if (view) {
-            auto const hasTabbar = editor->getCurrentCanvas() != nullptr;
-            auto const lineHeight = hasTabbar ? 30.f : 0.0f;
-            g.drawLine(0, lineHeight, getWidth(), lineHeight);
-            g.drawLine(getWidth() - 0.5f, 29.5f, getWidth() - 0.5f, getHeight());
+        DynamicObject::Ptr paletteObject = new DynamicObject();
+        paletteObject->setProperty("name", palette.getProperty("Name"));
 
-            g.setColour(findColour(PlugDataColour::toolbarOutlineColourId).withAlpha(0.5f));
-            g.drawLine(29.5f, 29.5f, 29.5f, getHeight());
-        } else {
-            g.drawLine(29.5f, 29.5f, 29.5f, getHeight());
+        Array<var> items;
+        for (auto item : palette) {
+            DynamicObject::Ptr itemObj = new DynamicObject();
+            itemObj->setProperty("name", item.getProperty("Name"));
+            itemObj->setProperty("patch", item.getProperty("Patch"));
+            if (item.hasProperty("BgColor"))
+                itemObj->setProperty("bg_color", "#" + Colour::fromString(item.getProperty("BgColor").toString()).toDisplayString(false));
+
+            items.add(var(itemObj.get()));
         }
+
+        paletteObject->setProperty("items", items);
+        return var(paletteObject.get());
     }
 
     void savePalettes()
     {
-        auto const paletteContent = palettesTree.toXmlString();
-        if (paletteContent.isNotEmpty()) {
-            palettesFile.replaceWithText(paletteContent);
+        Array<var> categories;
+        for (auto category : palettesTree) {
+            categories.add(paletteToJSON(category));
         }
+
+        SettingsFile::getInstance()->setProperty("palettes", var(categories));
+        SettingsFile::getInstance()->setProperty("palettes_version", var(paletteVersion));
     }
 
     void generatePalettes()
@@ -838,18 +860,13 @@ private:
         auto const title = newPaletteTree.getPropertyAsValue("Name", nullptr).toString();
         auto* button = paletteSelectors.add(new PaletteSelector(title, newPaletteTree));
         button->onClick = [this, button, newPaletteTree] {
-            if (button->getToggleState()) {
-                showPalette(ValueTree());
-            } else {
-                button->setToggleState(true, dontSendNotification);
-                savePalettes();
-                showPalette(newPaletteTree);
-            }
+            button->setToggleState(true, dontSendNotification);
+            savePalettes();
+            showPalette(newPaletteTree);
         };
 
         button->exportClicked = [this, newPaletteTree] {
-            auto paletteContent = newPaletteTree.toXmlString();
-
+            auto paletteContent = JSON::toString(paletteToJSON(newPaletteTree));
             Dialogs::showSaveDialog([paletteContent](URL const& url) {
                 auto result = url.getLocalFile();
                 if (result.getParentDirectory().exists()) {
@@ -880,6 +897,15 @@ private:
             resized();
         };
 
+        button->onRename = [this, newPaletteTree](String const& newName) mutable {
+            newPaletteTree.setProperty("Name", newName, nullptr);
+            resized();
+        };
+
+        button->onResize = [this]() mutable {
+            resized();
+        };
+
         paletteBar.addAndMakeVisible(button);
 
         if (!construct) {
@@ -890,18 +916,17 @@ private:
 
     PluginEditor* editor;
 
-    File palettesFile = ProjectInfo::appDataDir.getChildFile(".palettes_test_7");
-    //    File palettesFile = ProjectInfo::appDataDir.getChildFile(".palettes"); // TODO: move palette location once we have finished all the default palettes
-
     ValueTree objectTree;
     ValueTree palettesTree;
-
-    std::unique_ptr<PaletteComponent> view = nullptr;
 
     Point<int> mouseDownPos;
     SafePointer<PaletteSelector> draggedTab = nullptr;
 
-    Viewport paletteViewport;
+    std::unique_ptr<PaletteList> currentPaletteList;
+    ValueTree paletteTree;
+    BouncingViewport viewport;
+
+    SearchEditor searchInput;
     Component paletteBar;
 
     MainToolbarButton addButton = MainToolbarButton(Icons::Add);
@@ -914,7 +939,9 @@ private:
         { "Generators",
             {
                 { "vco", "#X obj 0 0 vco.m~" },
+                { "super osc", "#X obj 0 0 superosc.m~" },
                 { "lfo", "#X obj 0 0 lfo.m~" },
+                { "noise", "#X obj 0 0 noise.m~" },
                 { "plaits", "#X obj 0 0 plaits.m~" },
                 { "6 operator FM", "#X obj 0 0 pm6.m~" },
                 { "signal generator", "#X obj 0 0 sig.m~" },
@@ -922,12 +949,14 @@ private:
                 { "pluck", "#X obj 0 0 pluck.m~" },
                 { "brane", "#X obj 0 0 brane.m~" },
                 { "sfont", "#X obj 0 0 sfont.m~" },
-                { "8-step sequencer", "#X obj 0 0 seq8.m~" },
                 { "adsr", "#X obj 0 0 adsr.m~" },
+                { "instrument", "#X obj 0 0 instrument.m~" },
             } },
         { "Filters",
             {
                 { "vcf", "#X obj 0 0 vcf.m~" },
+                { "bob filter", "#X obj 0 0 bob.m~" },
+                { "transpose", "#X obj 0 0 transp.m~" },
             } },
         { "Effects",
             {
@@ -936,62 +965,24 @@ private:
                 { "phaser", "#X obj 0 0 phaser.m~" },
                 { "flanger", "#X obj 0 0 flanger.m~" },
                 { "drive", "#X obj 0 0 drive.m~" },
-                { "bitcrusher", "#X obj 0 0 crusher.m~" },
+                { "bitcrusher", "#X obj 0 0 crush.m~" },
                 { "reverb", "#X obj 0 0 plate.rev.m~" },
                 { "vca", "#X obj 0 0 vca.m~" },
+                { "vca2", "#X obj 0 0 vca2.m~" },
                 { "ringmod", "#X obj 0 0 rm.m~" },
-                { "drive", "#X obj 0 0 drive.m~" },
+                { "level", "#X obj 0 0 level.m~" },
+            } },
+        { "Sequencers",
+            {
+                { "sequencer", "#X obj 0 0 seq.m~" },
+                { "clock", "#X obj 0 0 clock.m" },
             } },
         { "Extra",
             {
                 { "presets", "#X obj 0 0 presets.m" },
+                { "keyboard", "#X obj 0 0 keyboard.m" },
             } }
     };
 
-    bool showPalettes = false;
-
-    class ResizerComponent final : public Component {
-    public:
-        explicit ResizerComponent(Component* toResize)
-            : target(toResize)
-        {
-        }
-
-    private:
-        void mouseDown(MouseEvent const& e) override
-        {
-            if (!e.mods.isLeftButtonDown())
-                return;
-            dragStartWidth = target->getWidth();
-        }
-
-        void mouseDrag(MouseEvent const& e) override
-        {
-            if (rateReducer.tooFast())
-                return;
-
-            int newWidth = dragStartWidth + e.getDistanceFromDragStartX();
-            newWidth = std::clamp(newWidth, 100, std::max(target->getParentWidth() / 2, 150));
-
-            target->setBounds(0, target->getY(), newWidth, target->getHeight());
-            target->getParentComponent()->resized();
-        }
-
-        void mouseMove(MouseEvent const& e) override
-        {
-            bool const resizeCursor = e.getEventRelativeTo(target).getPosition().getX() > target->getWidth() - 5;
-            e.originalComponent->setMouseCursor(resizeCursor ? MouseCursor::LeftRightResizeCursor : MouseCursor::NormalCursor);
-        }
-
-        void mouseExit(MouseEvent const& e) override
-        {
-            e.originalComponent->setMouseCursor(MouseCursor::NormalCursor);
-        }
-
-        RateReducer rateReducer = RateReducer(45);
-        int dragStartWidth = 0;
-        Component* target;
-    };
-
-    ResizerComponent resizer;
+    static constexpr int paletteVersion = 1;
 };

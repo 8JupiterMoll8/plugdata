@@ -10,6 +10,12 @@
 #include "Containers.h"
 #include "Hash.h"
 
+#if JUCE_IOS
+#    define ONLY_MENU_ITEM_DEF 1
+#    include "Components/TouchPopupMenu.h"
+#    undef ONLY_MENU_ITEM_DEF
+#endif
+
 namespace juce {
 class ComponentPeer;
 }
@@ -27,32 +33,37 @@ struct OSUtils {
 #if defined(_WIN32) || defined(_WIN64)
     static bool createJunction(std::string from, std::string to);
     static bool createHardLink(std::string from, std::string to);
-    static bool runAsAdmin(std::string file, std::string lpParameters, void* hWnd);
-    static void useWindowsNativeDecorations(void* windowHandle, bool rounded);
+    static bool runAsAdmin(std::string file, std::string lpParameters, juce::ComponentPeer* peer);
+    static void useWindowsNativeDecorations(juce::ComponentPeer* peer, bool rounded);
 #elif defined(__unix__) && !defined(__APPLE__)
-    static void maximiseX11Window(void* handle, bool shouldBeMaximised);
-    static bool isX11WindowMaximised(void* handle);
-    static void updateX11Constraints(void* handle);
+    static bool isWaylandWindow(juce::ComponentPeer* peer);
+    static void maximiseLinuxWindow(juce::ComponentPeer* peer, bool shouldBeMaximised);
+    static bool isLinuxWindowMaximised(juce::ComponentPeer* peer);
+    static void updateLinuxWindowConstraints(juce::ComponentPeer* peer);
 #elif JUCE_MAC
-    static void setWindowMovable(void* nativeHandle, bool canMove);
-    static void enableInsetTitlebarButtons(void* nativeHandle, bool enabled);
-    static void hideTitlebarButtons(void* view, bool hideMinimiseButton, bool hideMaximiseButton, bool hideCloseButton);
+    static void setWindowMovable(juce::ComponentPeer* peer, bool canMove);
+    static void enableInsetTitlebarButtons(juce::ComponentPeer* peer, bool enabled);
+    static void hideTitlebarButtons(juce::ComponentPeer* peer, bool hideMinimiseButton, bool hideMaximiseButton, bool hideCloseButton);
 #endif
 
     static SmallArray<juce::File> iterateDirectory(juce::File const& directory, bool recursive, bool onlyFiles, int maximum = -1);
     static bool isDirectoryFast(juce::String const& path);
     static bool isFileFast(juce::String const& path);
     static hash32 getUniqueFileHash(juce::String const& path);
+    static bool moveFileTo(juce::File const& target, juce::File const& destination);
 
     static KeyboardLayout getKeyboardLayout();
 
     static bool is24HourTimeFormat();
-    static bool isFileQuarantined(const juce::File& file);
-    static void removeFromQuarantine(const juce::File& file);
+    static bool isFileQuarantined(juce::File const& file);
+    static void removeFromQuarantine(juce::File const& file);
 
 #if JUCE_MAC || JUCE_IOS
     static float MTLGetPixelScale(void* view);
     static void* MTLCreateView(void* parent, int x, int y, int width, int height);
+    // Returns the view's CAMetalLayer. Must be called on the main thread, but the
+    // returned layer can then be used from the render thread.
+    static void* MTLGetLayer(void* view);
     static void MTLDeleteView(void* view);
     static void MTLSetVisible(void* view, bool shouldBeVisible);
 #endif
@@ -68,50 +79,21 @@ struct OSUtils {
             return std::make_unique<ScrollTracker>();
         }
 
-        static bool isScrolling()
+        static bool isPerformingGesture()
         {
-            return instance->scrolling;
+            return instance->gesturing;
         }
 
     private:
-        bool scrolling = false;
+        bool gesturing = false;
         void* observer;
         static inline std::unique_ptr<ScrollTracker> instance = create();
     };
 #elif JUCE_IOS
-    class ScrollTracker {
-    public:
-        ScrollTracker(juce::ComponentPeer* peer);
-
-        ~ScrollTracker();
-
-        static ScrollTracker* create(juce::ComponentPeer* peer)
-        {
-            if (instance)
-                return instance;
-
-            if (!peer->getComponent().isVisible())
-                return nullptr;
-
-            return instance = new ScrollTracker(peer);
-        }
-
-        static bool isScrolling()
-        {
-            return instance->scrolling;
-        }
-
-    private:
-        bool scrolling = false;
-        void* observer;
-        static inline ScrollTracker* instance = nullptr;
-    };
-
     static juce::BorderSize<int> getSafeAreaInsets();
     static bool isIPad();
     static float getScreenCornerRadius();
-    static void showMobileMainMenu(juce::ComponentPeer* peer, std::function<void(int)> callback);
-    static void showMobileCanvasMenu(juce::ComponentPeer* peer, std::function<void(int)> callback);
     static bool addOpenURLMethodToDelegate();
+    static void showiOSNativeMenu(juce::ComponentPeer* peer, juce::String const& title, SmallArray<TouchPopupMenuItem> const& items, SmallArray<SmallArray<TouchPopupMenuItem>> const& sub, juce::Point<int> screenPosition);
 #endif
 };

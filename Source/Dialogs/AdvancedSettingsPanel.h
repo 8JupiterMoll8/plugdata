@@ -16,7 +16,6 @@ public:
         : editor(editor)
     {
         auto* settingsFile = SettingsFile::getInstance();
-        auto settingsTree = settingsFile->getValueTree();
 
         PropertiesArray interfaceProperties;
         PropertiesArray otherProperties;
@@ -31,11 +30,7 @@ public:
             windowProperties.add(new PropertiesPanel::BoolComponent("Use system titlebar", nativeTitlebar, { "No", "Yes" }));
             propertiesPanel.addSection("Window", windowProperties);
         } else {
-            if (!settingsTree.hasProperty("NativeDialog")) {
-                settingsTree.setProperty("NativeDialog", true, nullptr);
-            }
-
-            nativeDialogValue.referTo(settingsTree.getPropertyAsValue("NativeDialog", nullptr));
+            nativeDialogValue.referTo(settingsFile->getPropertyAsValue("native_window"));
             otherProperties.add(new PropertiesPanel::BoolComponent("Use system file dialogs", nativeDialogValue, StringArray { "No", "Yes" }));
         }
 
@@ -45,10 +40,6 @@ public:
             interfaceProperties.add(new PropertiesPanel::BoolComponent("Open patches in new window", openPatchesInWindow, { "No", "Yes" }));
         }
 #endif
-
-        showPalettesValue.referTo(settingsFile->getPropertyAsValue("show_palettes"));
-        showPalettesValue.addListener(this);
-        interfaceProperties.add(new PropertiesPanel::BoolComponent("Show palette bar", showPalettesValue, { "No", "Yes" }));
 
         commandClickSwitchesModeValue.referTo(settingsFile->getPropertyAsValue("cmd_click_switches_mode"));
         commandClickSwitchesModeValue.addListener(this);
@@ -122,9 +113,11 @@ public:
             ComboBox comboBox;
         };
 
+#if !JUCE_IOS // iOS has different default scale values (smaller for iPhone, bigger for iPad), which breaks if the user touches it
         scaleValue = settingsFile->getProperty<float>("global_scale");
         scaleValue.addListener(this);
         interfaceProperties.add(new ScaleComponent("Global scale factor", scaleValue));
+#endif
 
         defaultZoom = settingsFile->getProperty<float>("default_zoom");
         defaultZoom.addListener(this);
@@ -134,11 +127,13 @@ public:
         centreResized.addListener(this);
         interfaceProperties.add(new PropertiesPanel::BoolComponent("Centre canvas when resized", centreResized, { "No", "Yes" }));
 
-        centreSidepanelButtons = settingsFile->getPropertyAsValue("centre_sidepanel_buttons");
-        interfaceProperties.add(new PropertiesPanel::BoolComponent("Sidepanel controls position", centreSidepanelButtons, { "Top", "Centre" }));
-
         showMinimap = settingsFile->getPropertyAsValue("show_minimap");
         interfaceProperties.add(new PropertiesPanel::ComboComponent("Show minimap", showMinimap, { "Never", "When outside of patch", "Always" }));
+
+#if !JUCE_IOS
+        touchMode = settingsFile->getPropertyAsValue("touch_mode");
+        interfaceProperties.add(new PropertiesPanel::BoolComponent("Enable touch mode", touchMode, { "No", "Yes" }));
+#endif
 
         patchDownwardsOnly = settingsFile->getPropertyAsValue("patch_downwards_only");
         otherProperties.add(new PropertiesPanel::BoolComponent("Patch downwards only", patchDownwardsOnly, { "No", "Yes" }));
@@ -217,6 +212,9 @@ public:
     {
         if (v.refersToSameSourceAs(nativeTitlebar)) {
             // Make sure titlebar buttons are greyed out because a dialog is still showing
+            if (auto* pluginEditor = dynamic_cast<PluginEditor*>(editor))
+                pluginEditor->updateStandaloneWindowControls();
+
             if (auto const* window = dynamic_cast<DocumentWindow*>(getTopLevelComponent())) {
                 if (auto* closeButton = window->getCloseButton())
                     closeButton->setEnabled(false);
@@ -246,6 +244,7 @@ public:
     Value centreResized;
     Value centreSidepanelButtons;
     Value showMinimap;
+    Value touchMode;
 
     Value openPatchesInWindow;
     Value showPalettesValue;

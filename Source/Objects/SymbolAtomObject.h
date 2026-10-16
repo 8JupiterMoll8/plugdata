@@ -13,15 +13,7 @@ class SymbolAtomObject final : public ObjectBase
 
     Value sizeProperty = SynchronousValue();
     AtomHelper atomHelper;
-
-    String lastMessage;
-
     Label input;
-
-    NVGcolor backgroundColour;
-    NVGcolor selectedOutlineColour;
-    Colour selCol;
-    NVGcolor outlineColour;
 
 public:
     SymbolAtomObject(pd::WeakReference obj, Object* parent)
@@ -99,13 +91,13 @@ public:
 
     void resized() override
     {
-        input.setFont(Font(getHeight() - 6));
+        input.setFont(Font(FontOptions(getHeight() - 6)));
         input.setBounds(getLocalBounds());
     }
 
     Rectangle<int> getPdBounds() override
     {
-        return atomHelper.getPdBounds(input.getFont().getStringWidth(input.getText(true)));
+        return atomHelper.getPdBounds(Fonts::getStringWidth(input.getText(true), input.getFont()));
     }
 
     void setPdBounds(Rectangle<int> const b) override
@@ -120,9 +112,7 @@ public:
 
     void setSymbol(String const& value)
     {
-        if (auto gatom = ptr.get<t_fake_gatom>()) {
-            cnv->pd->sendDirectMessage(gatom.get(), SmallString(value));
-        }
+        sendMessage("symbol", { pd->generateSymbol(value) });
     }
 
     String getSymbol() const
@@ -131,7 +121,7 @@ public:
             return String::fromUTF8(atom_getsymbol(fake_gatom_getatom(gatom.get()))->s_name);
         }
 
-        return {};
+        return { };
     }
 
     void mouseUp(MouseEvent const& e) override
@@ -148,46 +138,44 @@ public:
 
     void lookAndFeelChanged() override
     {
-        input.setColour(Label::textWhenEditingColourId, cnv->editor->getLookAndFeel().findColour(PlugDataColour::canvasTextColourId));
-        input.setColour(Label::textColourId, cnv->editor->getLookAndFeel().findColour(PlugDataColour::canvasTextColourId));
-        input.setColour(TextEditor::textColourId, cnv->editor->getLookAndFeel().findColour(PlugDataColour::canvasTextColourId));
+        auto const& colours = getThemeColours();
 
-        backgroundColour = convertColour(cnv->editor->getLookAndFeel().findColour(PlugDataColour::guiObjectBackgroundColourId));
-        selCol = cnv->editor->getLookAndFeel().findColour(PlugDataColour::objectSelectedOutlineColourId);
-        selectedOutlineColour = convertColour(selCol);
-        outlineColour = convertColour(cnv->editor->getLookAndFeel().findColour(PlugDataColour::objectOutlineColourId));
-
+        input.setColour(Label::textWhenEditingColourId, colours.canvasTextColour);
+        input.setColour(Label::textColourId, colours.canvasTextColour);
+        input.setColour(TextEditor::textColourId, colours.canvasTextColour);
         repaint();
     }
 
     void render(NVGcontext* nvg) override
     {
+        auto const& colours = getThemeColours();
+
         auto const b = getLocalBounds().toFloat();
         auto const sb = b.reduced(0.5f); // reduce size of background to stop AA edges from showing through
 
         // Draw background
-        nvgDrawObjectWithFlag(nvg, sb.getX(), sb.getY(), sb.getWidth(), sb.getHeight(),
-            cnv->guiObjectBackgroundCol, cnv->guiObjectBackgroundCol, cnv->guiObjectBackgroundCol,
-            Corners::objectCornerRadius, ObjectFlagType::FlagTop, static_cast<PlugDataLook&>(cnv->getLookAndFeel()).getUseFlagOutline());
+        nanovg::nvgDrawObjectWithFlag(nvg, sb.getX(), sb.getY(), sb.getWidth(), sb.getHeight(),
+            nvgColour(colours.guiObjectBackgroundColour), nvgColour(colours.guiObjectBackgroundColour), nvgColour(colours.guiObjectBackgroundColour),
+            getPlugDataLook(*this).getObjectCornerRadius(), ObjectFlagType::FlagTop, getPlugDataLook(*this).getUseFlagOutline());
 
-        imageRenderer.renderJUCEComponent(nvg, input, getImageScale());
+        cnv->editor->getNanoLLGC()->renderComponent(input);
 
         bool const highlighted = hasKeyboardFocus(true) && getValue<bool>(object->locked);
-        auto const flagCol = highlighted ? cnv->selectedOutlineCol : cnv->guiObjectInternalOutlineCol;
-        auto const outlineCol = object->isSelected() || hasKeyboardFocus(true) ? cnv->selectedOutlineCol : cnv->objectOutlineCol;
+        auto const flagCol = highlighted ? nvgColour(colours.objectSelectedOutlineColour) : nvgColour(colours.guiObjectInternalOutlineColour);
+        auto const outlineCol = nvgColour(object->isSelected() || hasKeyboardFocus(true) ? colours.objectSelectedOutlineColour : colours.objectOutlineColour);
 
         // Fill the internal of the shape with transparent colour, draw outline & flag with shader
-        nvgDrawObjectWithFlag(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(),
-            nvgRGBA(0, 0, 0, 0), outlineCol, flagCol,
-            Corners::objectCornerRadius, ObjectFlagType::FlagTop, static_cast<PlugDataLook&>(cnv->getLookAndFeel()).getUseFlagOutline());
+        nanovg::nvgDrawObjectWithFlag(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(),
+            nanovg::nvgRGBA(0, 0, 0, 0), outlineCol, flagCol,
+            getPlugDataLook(*this).getObjectCornerRadius(), ObjectFlagType::FlagTop, getPlugDataLook(*this).getUseFlagOutline());
     }
 
-    bool inletIsSymbol() override
+    bool hideInlet() override
     {
         return atomHelper.hasReceiveSymbol();
     }
 
-    bool outletIsSymbol() override
+    bool hideOutlet() override
     {
         return atomHelper.hasSendSymbol();
     }

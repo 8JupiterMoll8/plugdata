@@ -21,12 +21,13 @@ struct SettingsDialogPanel : public Component {
 class SettingsDialog final : public Component {
 
 public:
-    explicit SettingsDialog(PluginEditor* pluginEditor)
+    explicit SettingsDialog(PluginEditor* pluginEditor, int initialPanel)
         : processor(dynamic_cast<PluginProcessor*>(pluginEditor->getAudioProcessor()))
         , editor(pluginEditor)
     {
         setVisible(false);
 
+        lastPanel = initialPanel < 0 ? lastPanel : initialPanel;
         currentPanel = std::clamp<int>(lastPanel, 0, toolbarButtons.size() - 1);
 
         for (int i = 0; i < toolbarButtons.size(); i++) {
@@ -111,7 +112,9 @@ public:
 
     void paint(Graphics& g) override
     {
-        g.setColour(findColour(PlugDataColour::panelBackgroundColourId));
+        auto const& colours = getThemeColours(*this);
+
+        g.setColour(colours.panelBackgroundColour);
         g.fillRoundedRectangle(getLocalBounds().reduced(1).toFloat(), Corners::windowCornerRadius);
 
         auto const titlebarBounds = getLocalBounds().removeFromTop(toolbarHeight).toFloat();
@@ -119,10 +122,10 @@ public:
         Path p;
         p.addRoundedRectangle(titlebarBounds.getX(), titlebarBounds.getY(), titlebarBounds.getWidth(), titlebarBounds.getHeight(), Corners::windowCornerRadius, Corners::windowCornerRadius, true, true, false, false);
 
-        g.setColour(findColour(PlugDataColour::toolbarBackgroundColourId));
+        g.setColour(colours.toolbarBackgroundColour);
         g.fillPath(p);
 
-        g.setColour(findColour(PlugDataColour::toolbarOutlineColourId));
+        g.setColour(colours.toolbarOutlineColour);
         g.drawHorizontalLine(toolbarHeight, 0.0f, getWidth());
     }
 
@@ -138,7 +141,7 @@ public:
     PluginEditor* editor;
     ComponentBoundsConstrainer constrainer;
 
-    MainToolbarButton searchButton = MainToolbarButton(Icons::Search);
+    MainToolbarButton searchButton = MainToolbarButton(Icons::SearchFilled);
     std::unique_ptr<PropertiesSearchPanel> searcher;
 
     static constexpr int toolbarHeight = 40;
@@ -152,7 +155,7 @@ public:
         SettingsToolbarButton(Icons::Audio, "Audio"),
         SettingsToolbarButton(Icons::MIDI, "MIDI"),
         SettingsToolbarButton(Icons::Pencil, "Themes"),
-        SettingsToolbarButton(Icons::Search, "Paths"),
+        SettingsToolbarButton(Icons::SearchFilled, "Paths"),
         SettingsToolbarButton(Icons::Keyboard, "Shortcuts"),
         SettingsToolbarButton(Icons::Wrench, "Advanced")
     };

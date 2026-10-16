@@ -47,10 +47,12 @@ public:
         cancelImageDownloads();
         imagePool.addJob([this] {
             SmallArray<PatchInfo> patches;
-            int statusCode = 0;
-            auto const webstream = URL("https://plugdata.org/store.json").createInputStream(URL::InputStreamOptions(URL::ParameterHandling::inAddress).withConnectionTimeoutMs(10000).withStatusCode(&statusCode));
-            
-            if (!webstream || statusCode >= 400) {
+
+            String jsonString;
+#if ENABLE_TESTING
+            // The test suite injects mock catalog JSON (or forces a failure)
+            // here, so no network request is made during testing
+            if (mockStoreShouldFail) {
                 MessageManager::callAsync([this] {
                     for (auto& listener : listeners) {
                         listener->databaseDownloadFailed();
@@ -58,19 +60,36 @@ public:
                 });
                 return;
             }
-
-            MemoryBlock jsonData;
-            MemoryOutputStream mo(jsonData, false);
-
-            mo.preallocate(32000); // fit store.json file with some extra space
-            while(true)
+            if (mockStoreJson.isNotEmpty()) {
+                jsonString = mockStoreJson;
+            } else
+#endif
             {
-                auto const written = mo.writeFromInputStream(*webstream, 1<<14);
-                if (written == 0)
-                    break;
+                int statusCode = 0;
+                auto const webstream = URL("https://plugdata.org/store.json").createInputStream(URL::InputStreamOptions(URL::ParameterHandling::inAddress).withConnectionTimeoutMs(10000).withStatusCode(&statusCode));
+
+                if (!webstream || statusCode >= 400) {
+                    MessageManager::callAsync([this] {
+                        for (auto& listener : listeners) {
+                            listener->databaseDownloadFailed();
+                        }
+                    });
+                    return;
+                }
+
+                MemoryBlock jsonData;
+                MemoryOutputStream mo(jsonData, false);
+
+                mo.preallocate(32000); // fit store.json file with some extra space
+                while (true) {
+                    auto const written = mo.writeFromInputStream(*webstream, 1 << 14);
+                    if (written == 0)
+                        break;
+                }
+                jsonString = jsonData.toString(); // Converting to string is important on Windows to get correct character encoding
             }
 
-            auto const parsedData = JSON::parse(jsonData.toString()); // Converting to string is important on Windows to get correct character encoding
+            auto const parsedData = JSON::parse(jsonString);
             auto patchData = parsedData["Patches"];
             if (patchData.isArray()) {
                 for (int i = 0; i < patchData.size(); ++i) {
@@ -83,10 +102,10 @@ public:
             for (auto& patch : patches) {
                 sortedPatches.emplace_back(patch, patch.isPatchInstalled() + 2 * patch.updateAvailable());
             }
-            
+
             // Don't show paid patches on iOS, because then Apple might want a cut of the sale, which we cannot do
 #if JUCE_IOS
-            sortedPatches.remove_if([](auto const& item){
+            sortedPatches.remove_if([](auto const& item) {
                 return item.first.price != "Free";
             });
 #endif
@@ -113,7 +132,7 @@ public:
 
     void downloadImage(hash32 hash, URL location)
     {
-        imagePool.addJob([this, hash, location]{
+        imagePool.addJob([this, hash, location] {
             static UnorderedMap<hash32, MemoryBlock> downloadImageCache;
             static CriticalSection cacheMutex; // Prevent threadpool jobs from touching cache at the same time
 
@@ -128,34 +147,35 @@ public:
                     }
                 }
             }
-            
+
             // Load the image data from the URL
-            if(imageData.getSize() == 0) {
+            if (imageData.getSize() == 0) {
                 int statusCode = 0;
                 auto const webstream = location.createInputStream(URL::InputStreamOptions(URL::ParameterHandling::inAddress).withConnectionTimeoutMs(10000).withStatusCode(&statusCode));
                 if (!webstream || statusCode >= 400) {
-                        return; // For images, we just quietly fail
+                    return; // For images, we just quietly fail
                 }
                 MemoryOutputStream mo(imageData, false);
 
                 mo.preallocate(300000); // fits most store thumbnails
-                while(true)
-                {
-                    if(cancelledImageDownload) return;
-                    
-                    auto const written = mo.writeFromInputStream(*webstream, 1<<16);
+                while (true) {
+                    if (cancelledImageDownload)
+                        return;
+
+                    auto const written = mo.writeFromInputStream(*webstream, 1 << 16);
                     if (written == 0)
                         break;
                 }
-                
+
                 {
                     ScopedLock lock(cacheMutex);
                     downloadImageCache[hash] = imageData;
                 }
             }
-            
-            if(cancelledImageDownload) return;
-           
+
+            if (cancelledImageDownload)
+                return;
+
             ScopedLock const lock(listenersLock);
             for (auto& listener : listeners) {
                 listener->imageDownloadCompleted(hash, imageData);
@@ -210,29 +230,32 @@ public:
             ZipFile zip(input);
 
             auto const patchesDir = ProjectInfo::appDataDir.getChildFile("Patches");
-            auto result = zip.uncompressTo(patchesDir, true);
-            auto const downloadedPatch = patchesDir.getChildFile(zip.getEntry(0)->filename);
 
-            auto const targetLocation = downloadedPatch.getParentDirectory().getChildFile(info.getNameInPatchFolder());
-            targetLocation.deleteRecursively(true);
+            auto extractedDir = TemporaryFile(patchesDir.getChildFile(info.getNameInPatchFolder()), TemporaryFile::useHiddenFile);
+            auto result = zip.uncompressTo(extractedDir.getFile(), true);
 
-            downloadedPatch.moveFileTo(targetLocation);
+            for (auto downloadedPatch : OSUtils::iterateDirectory(extractedDir.getFile(), false, false)) {
+                if (!downloadedPatch.isDirectory() || downloadedPatch.getFileName() == "__MACOSX")
+                    continue;
 
-            auto const metaFile = targetLocation.getChildFile("meta.json");
-            if (!metaFile.existsAsFile()) {
-                info.setInstallTime(Time::currentTimeMillis());
-                auto json = info.json;
-                metaFile.replaceWithText(info.json);
-            } else {
-                info = PatchInfo(JSON::fromString(metaFile.loadFileAsString()));
-                info.setInstallTime(Time::currentTimeMillis());
-                auto json = info.json;
-                metaFile.replaceWithText(info.json);
-            }
+                PatchInfo currentInfo;
+                auto metaFile = downloadedPatch.getChildFile("meta.json");
+                if (metaFile.existsAsFile()) {
+                    auto json = JSON::fromString(metaFile.loadFileAsString());
+                    currentInfo = json.isVoid() ? info : PatchInfo(json);
+                } else {
+                    currentInfo = info;
+                }
 
-            auto const macOSTrash = ProjectInfo::appDataDir.getChildFile("Patches").getChildFile("__MACOSX");
-            if (macOSTrash.isDirectory()) {
-                macOSTrash.deleteRecursively();
+                auto const targetLocation = patchesDir.getChildFile(currentInfo.getNameInPatchFolder());
+                targetLocation.deleteRecursively(true);
+
+                OSUtils::moveFileTo(downloadedPatch, targetLocation);
+
+                metaFile = targetLocation.getChildFile("meta.json");
+                if (!metaFile.existsAsFile()) {
+                    metaFile.replaceWithText(currentInfo.json);
+                }
             }
 
             MessageManager::callAsync([this, downloadHash, result] {
@@ -258,14 +281,23 @@ private:
 
     ThreadPool imagePool = ThreadPool(3);
     ThreadPool patchPool = ThreadPool(2);
-    
-    std::atomic<bool> cancelledImageDownload = false;
+
+    AtomicValue<bool> cancelledImageDownload = false;
 
 public:
+#if ENABLE_TESTING
+    // The test suite injects mock catalog JSON (or forces a failure) so the
+    // store database can be exercised without any network access
+    static inline String mockStoreJson;
+    static inline bool mockStoreShouldFail = false;
+#endif
+
     JUCE_DECLARE_SINGLETON(DownloadPool, false);
 };
 
+#ifndef PLUGDATA_TEST_TRANSLATION_UNIT // implemented in Dialogs.cpp's TU
 JUCE_IMPLEMENT_SINGLETON(DownloadPool);
+#endif
 
 class OnlineImage final : public Component
     , public DownloadPool::DownloadListener {
@@ -287,12 +319,11 @@ public:
 
     void imageDownloadCompleted(hash32 const hash, MemoryBlock const& imageData) override
     {
-        if (hash == imageHash && width && height)
-        {
+        if (hash == imageHash && width && height) {
             Image webpImage;
-            const auto* webpData = static_cast<const uint8_t*>(imageData.getData());
+            auto const* webpData = static_cast<uint8_t const*>(imageData.getData());
             size_t const dataSize = imageData.getSize();
-            
+
             WebPDecoderConfig config;
             if (WebPInitDecoderConfig(&config)) {
                 if (WebPGetFeatures(webpData, dataSize, &config.input) == VP8_STATUS_OK) {
@@ -300,14 +331,14 @@ public:
                     float const srcHeight = config.input.height;
                     int const targetWidth = getWidth();
                     int const targetHeight = getHeight();
-                    
+
                     // Calculate the aspect ratios
                     float const srcAspect = srcWidth / srcHeight;
                     float const targetAspect = static_cast<float>(targetWidth) / static_cast<float>(targetHeight);
-                    
+
                     // Crop the image to match the target aspect ratio
                     int cropX = 0, cropY = 0, cropWidth = srcWidth, cropHeight = srcHeight;
-                    
+
                     if (srcAspect > targetAspect) {
                         // Image is wider than the target, crop width
                         cropWidth = static_cast<int>(srcHeight * targetAspect);
@@ -317,8 +348,7 @@ public:
                         cropHeight = static_cast<int>(srcWidth / targetAspect);
                         cropY = (srcHeight - cropHeight) / 2; // Center the crop
                     }
-                    
-                    
+
                     config.options.use_scaling = 1;
                     config.options.scaled_width = targetWidth;
                     config.options.scaled_height = targetHeight;
@@ -327,9 +357,9 @@ public:
                     config.options.crop_top = cropY;
                     config.options.crop_width = cropWidth;
                     config.options.crop_height = cropHeight;
-                    
+
                     config.output.colorspace = MODE_rgbA; // or MODE_bgra for JUCE
-                    
+
                     if (WebPDecode(webpData, dataSize, &config) == VP8_STATUS_OK) {
                         uint8_t const* const decodedData = config.output.u.RGBA.rgba;
                         int const width = config.output.width;
@@ -337,26 +367,50 @@ public:
                         int const stride = config.output.u.RGBA.stride;
 
                         // Now copy this into a juce::Image
-                        webpImage = juce::Image(juce::Image::PixelFormat::ARGB, width, height, true);
-                        juce::Image::BitmapData const bitmapData(webpImage, juce::Image::BitmapData::writeOnly);
-                        
-                        for (int y = 0; y < targetHeight; ++y) {
-                            for (int x = 0; x < targetWidth; ++x) {
+                        webpImage = Image(Image::PixelFormat::ARGB, width, height, true);
+                        Image::BitmapData const bitmapData(webpImage, Image::BitmapData::writeOnly);
+
+                        int const radius = Corners::defaultCornerRadius + 3;
+                        float const centre = radius - 0.5f;
+                        for (int y = 0; y < height; ++y) {
+                            for (int x = 0; x < width; ++x) {
                                 int const index = y * stride + x * 4;
+
                                 uint8_t const r = decodedData[index + 0];
                                 uint8_t const g = decodedData[index + 1];
                                 uint8_t const b = decodedData[index + 2];
-                                uint8_t const a = decodedData[index + 3];
-                                bitmapData.setPixelColour(x, y, juce::Colour(r, g, b, a));
+                                uint8_t a = decodedData[index + 3];
+
+                                float dx = 0.0f;
+                                float dy = 0.0f;
+
+                                // Calculate rounded edges
+                                if (x < radius)
+                                    dx = centre - x;
+                                else if (x >= width - radius)
+                                    dx = x - (width - radius) + 0.5f;
+
+                                if (y < radius)
+                                    dy = centre - y;
+
+                                if (dx > 0.0f && dy > 0.0f) {
+                                    float const distance = std::sqrt(dx * dx + dy * dy);
+
+                                    // 1 inside, 0 outside, ~1px AA transition.
+                                    float const coverage = std::clamp(radius + 0.5f - distance, 0.0f, 1.0f);
+
+                                    a = static_cast<uint8_t>(a * coverage);
+                                }
+
+                                bitmapData.setPixelColour(x, y, Colour(r, g, b, a));
                             }
                         }
                     }
                 }
             }
-            
+
             MessageManager::callAsync([_this = SafePointer(this), image = webpImage.createCopy()] {
-                if(_this)
-                {
+                if (_this) {
                     _this->image = image;
                     _this->repaint();
                     _this->spinner.stopSpinning();
@@ -371,12 +425,11 @@ public:
         image = Image();
 
         imageURL = url;
-        if(width != 0 && height != 0)
-        {
+        if (width != 0 && height != 0) {
             startDownload();
         }
     }
-        
+
     void startDownload()
     {
         DownloadPool::getInstance()->downloadImage(imageHash, imageURL);
@@ -389,22 +442,22 @@ public:
         // Create a rounded rectangle to use as a mask
         Path roundedRectanglePath;
         roundedRectanglePath.addRoundedRectangle(0, 0, getWidth(), getHeight(), Corners::largeCornerRadius, Corners::largeCornerRadius, roundTop, roundTop, roundBottom, roundBottom);
-        
+
         if (!image.isValid()) {
-            g.setColour(findColour(PlugDataColour::panelForegroundColourId));
+            g.setColour(getThemeColours(*this).panelForegroundColour);
             g.fillPath(roundedRectanglePath);
             return;
         }
-        
+
         g.saveState();
-        
+
         g.reduceClipRegion(roundedRectanglePath);
-        
+
         Rectangle<float> const targetBounds(0, 0, static_cast<float>(getWidth()), static_cast<float>(getHeight()));
-        
+
         g.setImageResamplingQuality(Graphics::highResamplingQuality);
         g.drawImage(image, targetBounds, RectanglePlacement::centred | RectanglePlacement::fillDestination);
-        
+
         g.restoreState();
     }
 
@@ -412,7 +465,8 @@ public:
     {
         width = getWidth();
         height = getHeight();
-        if(!imageURL.isEmpty() && !image.isValid()) startDownload();
+        if (!imageURL.isEmpty() && !image.isValid())
+            startDownload();
         spinner.setCentrePosition(getWidth() / 2, getHeight() / 2);
     }
 
@@ -426,8 +480,8 @@ private:
     URL imageURL;
     Image image;
     Spinner spinner;
-    std::atomic<hash32> imageHash;
-    std::atomic<int> width, height;
+    AtomicValue<hash32> imageHash;
+    AtomicValue<int> width, height;
 
     static inline float scale = 0.0f;
 
@@ -456,39 +510,39 @@ private:
     void paintOverChildren(Graphics& g) override
     {
         auto const b = getLocalBounds().reduced(6);
-        g.setColour(findColour(PlugDataColour::toolbarOutlineColourId));
+        g.setColour(getThemeColours(*this).toolbarOutlineColour);
         g.drawRoundedRectangle(b.toFloat(), Corners::largeCornerRadius, 1.0f);
     }
 
     void paint(Graphics& g) override
     {
+        auto const& colours = getThemeColours(*this);
+
         auto b = getLocalBounds().reduced(6);
 
-        Path p;
-        p.addRoundedRectangle(b.reduced(3.0f), Corners::largeCornerRadius);
-        StackShadow::renderDropShadow(hash("patch_display"), g, p, Colour(0, 0, 0).withAlpha(0.4f), 7, { 0, 1 });
+        StackShadow::drawShadowForRect(g, b.reduced(3.0f), 8, Corners::largeCornerRadius, 0.4f, 1);
 
         if (isMouseOver()) {
-            g.setColour(findColour(PlugDataColour::panelActiveBackgroundColourId));
+            g.setColour(colours.panelActiveBackgroundColour);
         } else {
-            g.setColour(findColour(PlugDataColour::panelForegroundColourId));
+            g.setColour(colours.panelForegroundColour);
         }
 
         g.fillRoundedRectangle(b.toFloat(), Corners::largeCornerRadius);
 
-        g.setColour(findColour(PlugDataColour::toolbarOutlineColourId));
+        g.setColour(colours.toolbarOutlineColour);
         g.drawRoundedRectangle(b.toFloat(), Corners::largeCornerRadius, 1.0f);
 
         b.removeFromTop(171); // space for image
         auto nameArea = b.removeFromTop(24);
 
-        g.setColour(findColour(PlugDataColour::panelActiveBackgroundColourId).withAlpha(0.5f));
+        g.setColour(colours.panelActiveBackgroundColour.withAlpha(0.5f));
         g.fillRect(nameArea);
 
         auto platformArea = nameArea.removeFromRight(80).reduced(4).toFloat();
         platformArea.removeFromLeft(10);
 
-        auto const textColour = findColour(PlugDataColour::panelTextColourId);
+        auto const textColour = colours.panelTextColour;
         Fonts::drawText(g, "by " + info.author, nameArea.withTrimmedLeft(10), textColour, 13.5f, Justification::left);
 
         auto textBounds = b.reduced(10, 4);
@@ -497,7 +551,7 @@ private:
 
         auto layout = TextLayout();
         auto description = AttributedString(info.description);
-        description.setFont(Font(14.5f));
+        description.setFont(Font(FontOptions(14.5f)));
         description.setColour(textColour);
         layout.createLayout(description, textBounds.getWidth(), 150);
 
@@ -529,8 +583,11 @@ private:
         repaint();
     }
 
-    void mouseDown(MouseEvent const& e) override
+    void mouseUp(MouseEvent const& e) override
     {
+        if (!isRealClickEvent(e))
+            return;
+
         callback(info);
     }
 
@@ -641,7 +698,7 @@ class PatchFullDisplay final : public Component
     class Viewport final : public BouncingViewport {
         void paint(Graphics& g) override
         {
-            g.fillAll(findColour(PlugDataColour::panelForegroundColourId));
+            g.fillAll(getThemeColours(*this).panelForegroundColour);
         }
     };
     Viewport viewport;
@@ -676,8 +733,8 @@ class PatchFullDisplay final : public Component
             if (type == View)
                 return Icons::Info;
             if (type == Cancel)
-                return {};
-            return {};
+                return { };
+            return { };
         }
 
         String getText() const
@@ -694,7 +751,7 @@ class PatchFullDisplay final : public Component
                 return "View online";
             if (type == Cancel)
                 return "Cancel";
-            return {};
+            return { };
         }
 
         void setType(Type const newType)
@@ -705,18 +762,20 @@ class PatchFullDisplay final : public Component
 
         void paint(Graphics& g) override
         {
+            auto const& colours = getThemeColours(*this);
+
             auto const b = getLocalBounds().reduced(2.0f, 4.0f).toFloat();
 
             auto const mouseOver = isMouseOver();
-            auto fillColour = findColour(PlugDataColour::toolbarActiveColourId);
+            auto fillColour = colours.toolbarActiveColour;
             auto outlineColour = fillColour;
-            auto const greyColour = findColour(PlugDataColour::panelActiveBackgroundColourId);
+            auto const greyColour = colours.panelActiveBackgroundColour;
 
             if (type == Cancel) {
                 fillColour = greyColour;
                 outlineColour = greyColour;
             } else if (type == View) {
-                fillColour = mouseOver ? greyColour.contrasting(0.6f) : findColour(PlugDataColour::panelBackgroundColourId).withAlpha(0.0f);
+                fillColour = mouseOver ? greyColour.contrasting(0.6f) : colours.panelBackgroundColour.withAlpha(0.0f);
                 outlineColour = greyColour.contrasting(0.6f);
             }
 
@@ -870,13 +929,15 @@ public:
 
     void paintOverChildren(Graphics& g) override
     {
+        auto const& colours = getThemeColours(*this);
+
         // Drag image outline
-        g.setColour(findColour(PlugDataColour::toolbarOutlineColourId));
+        g.setColour(colours.toolbarOutlineColour);
         g.drawRoundedRectangle(image.getBounds().toFloat(), Corners::largeCornerRadius, 1.0f);
 
         if (downloadProgress != 0.0f) {
-            g.setFont(Fonts::getCurrentFont().withHeight(14.0f));
-            g.setColour(findColour(PlugDataColour::panelTextColourId).withAlpha(0.75f));
+            g.setFont(Fonts::getDefaultFont().withHeight(14.0f));
+            g.setColour(colours.panelTextColour.withAlpha(0.75f));
             g.drawText("Installing: " + String(downloadProgress) + "%", downloadButton.getBounds().translated(0, 30), Justification::centred);
 
             auto bounds = downloadButton.getBounds().reduced(2, 4);
@@ -886,7 +947,7 @@ public:
             clipPath.addRoundedRectangle(bounds, Corners::defaultCornerRadius);
             g.reduceClipRegion(clipPath);
 
-            g.setColour(findColour(PlugDataColour::toolbarActiveColourId));
+            g.setColour(colours.toolbarActiveColour);
             g.fillRect(bounds.removeFromBottom(4).withWidth(bounds.getWidth() * (downloadProgress / 100.0f)));
             g.restoreState();
         }
@@ -894,18 +955,20 @@ public:
 
     void paint(Graphics& g) override
     {
+        auto const& colours = getThemeColours(*this);
+
         auto const b = getLocalBounds().reduced(12);
 
-        g.fillAll(findColour(PlugDataColour::panelForegroundColourId));
+        g.fillAll(colours.panelForegroundColour);
 
         auto contentArea = b.reduced(20, 6);
-        auto const textColour = findColour(PlugDataColour::panelTextColourId);
+        auto const textColour = colours.panelTextColour;
         g.setColour(textColour);
 
         g.setFont(Fonts::getBoldFont().withHeight(26));
         g.drawText(currentPatch.title, contentArea.removeFromTop(40), Justification::centredLeft);
 
-        g.setFont(Fonts::getCurrentFont().withHeight(16.5f));
+        g.setFont(Fonts::getDefaultFont().withHeight(16.5f));
         g.drawText("by " + currentPatch.author, contentArea.removeFromTop(24), Justification::centredLeft);
 
         contentArea.removeFromTop(8);
@@ -918,21 +981,22 @@ public:
 
         auto layout = TextLayout();
         AttributedString descriptionText(currentPatch.description);
-        descriptionText.setFont(Font(15.5f));
+        descriptionText.setFont(Font(FontOptions(15.5f)));
         descriptionText.setColour(textColour);
         layout.createLayout(descriptionText, contentArea.getWidth(), contentArea.getHeight());
 
         layout.draw(g, contentArea.removeFromTop(30).translated(0, 4).toFloat());
 
         auto extraInfoBounds = contentArea.removeFromTop(72).reduced(0, 12).translated(0, -4);
+
         Path p;
         p.addRoundedRectangle(extraInfoBounds, Corners::largeCornerRadius);
-        StackShadow::renderDropShadow(hash("patch_extra_info"), g, p, Colour(0, 0, 0).withAlpha(0.1f), 7, { 0, 1 });
+        StackShadow::drawShadowForRect(g, extraInfoBounds, 8, Corners::largeCornerRadius, 0.1f, 1);
 
-        g.setColour(findColour(PlugDataColour::panelForegroundColourId));
+        g.setColour(colours.panelForegroundColour);
         g.fillPath(p); // Adjust the thickness as needed
 
-        g.setColour(findColour(PlugDataColour::outlineColourId));
+        g.setColour(colours.outlineColour);
         g.strokePath(p, PathStrokeType(0.5f)); // Adjust the thickness as needed
 
         auto const hasSizeInfo = currentPatch.size.isNotEmpty();
@@ -940,7 +1004,7 @@ public:
         auto drawExtraInfo = [this, extraInfoItemWidth, &extraInfoBounds](Graphics& g, String const& icon, String const& label, String const& value) mutable {
             auto infoBounds = extraInfoBounds.removeFromLeft(extraInfoItemWidth).withSizeKeepingCentre(110, 32).translated(-12, 0);
 
-            g.setColour(findColour(PlugDataColour::panelTextColourId));
+            g.setColour(getThemeColours(*this).panelTextColour);
             g.setFont(Fonts::getIconFont().withHeight(15));
             g.drawText(icon, infoBounds.removeFromLeft(24), Justification::centredLeft);
 
@@ -958,7 +1022,7 @@ public:
         drawExtraInfo(g, Icons::Time, "Release date", currentPatch.releaseDate);
 
         auto const imageBounds = contentArea.removeFromTop(500).withSizeKeepingCentre(getWidth(), 500);
-        g.setColour(findColour(PlugDataColour::panelBackgroundColourId));
+        g.setColour(colours.panelBackgroundColour);
         g.fillRect(imageBounds);
 
         contentArea.removeFromTop(12);
@@ -1005,15 +1069,17 @@ struct PatchStore final : public Component
 
     MainToolbarButton backButton = MainToolbarButton(Icons::Back);
     MainToolbarButton refreshButton = MainToolbarButton(Icons::Refresh);
-    MainToolbarButton searchButton = MainToolbarButton(Icons::Search);
+    MainToolbarButton searchButton = MainToolbarButton(Icons::SearchFilled);
 
     SearchEditor input;
     Spinner spinner;
-        
+
     bool connectionError = false;
 
     PatchStore()
     {
+        auto const& colours = getThemeColours(*this);
+
         contentViewport.setViewedComponent(&patchContainer, false);
         patchContainer.setVisible(true);
         addAndMakeVisible(contentViewport);
@@ -1072,8 +1138,8 @@ struct PatchStore final : public Component
             refreshButton.setEnabled(false);
         };
 
-        input.setTextToShowWhenEmpty("Type to search for patches", findColour(PlugDataColour::panelTextColourId).withAlpha(0.5f));
-        input.setColour(TextEditor::textColourId, findColour(PlugDataColour::panelTextColourId));
+        input.setTextToShowWhenEmpty("Type to search for patches", colours.panelTextColour.withAlpha(0.5f));
+        input.setColour(TextEditor::textColourId, colours.panelTextColour);
         input.setBorder({ 1, 3, 5, 1 });
         input.setJustification(Justification::centredLeft);
         input.onTextChange = [this] {
@@ -1103,9 +1169,11 @@ struct PatchStore final : public Component
 
     void paint(Graphics& g) override
     {
+        auto const& colours = getThemeColours(*this);
+
         OnlineImage::setScreenScale(g.getInternalContext().getPhysicalPixelScaleFactor());
 
-        g.setColour(findColour(PlugDataColour::panelBackgroundColourId));
+        g.setColour(colours.panelBackgroundColour);
         g.fillRoundedRectangle(getLocalBounds().toFloat(), Corners::windowCornerRadius);
 
         auto const bounds = getLocalBounds().removeFromTop(40).toFloat();
@@ -1113,16 +1181,15 @@ struct PatchStore final : public Component
         Path p;
         p.addRoundedRectangle(bounds.getX(), bounds.getY(), bounds.getWidth(), bounds.getHeight(), Corners::largeCornerRadius, Corners::largeCornerRadius, true, true, false, false);
 
-        g.setColour(findColour(PlugDataColour::toolbarBackgroundColourId));
+        g.setColour(colours.toolbarBackgroundColour);
         g.fillPath(p);
 
-        Fonts::drawStyledText(g, "Discover", Rectangle<float>(0.0f, 4.0f, getWidth(), 32.0f), findColour(PlugDataColour::panelTextColourId), Semibold, 15, Justification::centred);
+        Fonts::drawStyledText(g, "Discover", Rectangle<float>(0.0f, 4.0f, getWidth(), 32.0f), colours.panelTextColour, Semibold, 15, Justification::centred);
 
-        g.setColour(findColour(PlugDataColour::toolbarOutlineColourId));
+        g.setColour(colours.toolbarOutlineColour);
         g.drawLine(0, 40, getWidth(), 40);
-        
-        if(connectionError)
-        {
+
+        if (connectionError) {
             Fonts::drawStyledText(g, "Error: could not connect to server", Rectangle<float>(0.0f, 54.0f, getWidth(), 32.0f), Colours::orange, Semibold, 15, Justification::centred);
         }
     }
@@ -1138,7 +1205,7 @@ struct PatchStore final : public Component
 
         contentViewport.setBounds(b);
 
-        patchContainer.setSize(getWidth(), patchContainer.getHeight());
+        patchContainer.setSize(getWidth() - contentViewport.getScrollBarThickness(), patchContainer.getHeight());
 
         backButton.setBounds(2, 0, 40, 40);
         refreshButton.setBounds(2, 0, 40, 40);
@@ -1156,11 +1223,11 @@ struct PatchStore final : public Component
         spinner.stopSpinning();
         repaint();
     }
-        
+
     void databaseDownloadFailed() override
     {
         connectionError = true;
-        patchContainer.showPatches({});
+        patchContainer.showPatches({ });
         refreshButton.setEnabled(true);
         spinner.stopSpinning();
         repaint();

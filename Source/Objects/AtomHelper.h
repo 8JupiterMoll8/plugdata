@@ -70,9 +70,6 @@ public:
 
         sendSymbol = getSendSymbol();
         receiveSymbol = getReceiveSymbol();
-
-        gui->getLookAndFeel().setColour(Label::textWhenEditingColourId, cnv->editor->getLookAndFeel().findColour(Label::textWhenEditingColourId));
-        gui->getLookAndFeel().setColour(Label::textColourId, cnv->editor->getLookAndFeel().findColour(Label::textColourId));
     }
 
     int getWidthInChars() const
@@ -108,7 +105,7 @@ public:
             return { x, y, w, getAtomHeight() };
         }
 
-        return {};
+        return { };
     }
 
     void setPdBounds(Rectangle<int> const b)
@@ -278,15 +275,16 @@ public:
             auto const bounds = getLabelBounds();
 
             label->setBounds(bounds);
-            label->setFont(Font(fontHeight));
+            label->setFont(Font(FontOptions(fontHeight)));
             label->setText(text, dontSendNotification);
 
-            auto textColour = cnv->editor->getLookAndFeel().findColour(PlugDataColour::canvasTextColourId);
-            if (std::abs(textColour.getBrightness() - cnv->editor->getLookAndFeel().findColour(PlugDataColour::canvasBackgroundColourId).getBrightness()) < 0.3f) {
-                textColour = cnv->editor->getLookAndFeel().findColour(PlugDataColour::canvasBackgroundColourId).contrasting();
+            auto const& colours = getThemeColours(*object);
+            auto textColour = colours.canvasTextColour;
+            if (std::abs(textColour.getBrightness() - colours.canvasBackgroundColour.getBrightness()) < 0.3f) {
+                textColour = colours.canvasBackgroundColour.contrasting();
             }
 
-            label->setColour(Label::textColourId, textColour);
+            label->setLabelColour(textColour);
             object->cnv->addAndMakeVisible(label);
         } else {
             labels.clear();
@@ -320,7 +318,7 @@ public:
         int labelLength = lastLabelLength;
 
         if (lastFontHeight != fontHeight || lastLabelTextHash != currentHash) {
-            labelLength = Font(fontHeight).getStringWidth(getExpandedLabelText());
+            labelLength = Fonts::getStringWidthInt(getExpandedLabelText(), fontHeight);
             lastFontHeight = fontHeight;
             lastLabelTextHash = currentHash;
             lastLabelLength = labelLength;
@@ -418,7 +416,7 @@ public:
             return String::fromUTF8(atom->a_symto->s_name);
         }
 
-        return {};
+        return { };
     }
 
     String getReceiveSymbol() const
@@ -427,7 +425,7 @@ public:
             return String::fromUTF8(atom->a_symfrom->s_name);
         }
 
-        return {};
+        return { };
     }
 
     void setSendSymbol(String const& symbol) const

@@ -18,9 +18,8 @@ class KeyboardObject final : public ObjectBase
     Value toggleMode = SynchronousValue();
     Value sizeProperty = SynchronousValue();
 
-    int lastKey = -1;
-    int clickedKey = -1;
-
+    UnorderedMap<int, int> lastKeys;
+    UnorderedMap<int, int> clickedKeys;
     UnorderedSet<int> heldKeys;
     UnorderedSet<int> toggledKeys;
 
@@ -62,6 +61,8 @@ public:
             sendSymbol = sndSym != "empty" ? sndSym : "";
             receiveSymbol = rcvSym != "empty" ? rcvSym : "";
 
+            updateMinimumSize();
+
             MessageManager::callAsync([_this = SafePointer(this)] {
                 if (_this) {
                     // Call async to make sure pd obj has updated
@@ -73,19 +74,21 @@ public:
 
     void render(NVGcontext* nvg) override
     {
+        auto const& colours = getThemeColours();
+
         auto const b = getLocalBounds();
 
         bool const selected = object->isSelected() && !cnv->isGraph;
-        auto const outlineColour = convertColour(cnv->editor->getLookAndFeel().findColour(selected ? PlugDataColour::objectSelectedOutlineColourId : PlugDataColour::objectOutlineColourId));
+        auto const outlineColour = nvgColour(selected ? colours.objectSelectedOutlineColour : colours.objectOutlineColour);
 
-        auto const strokeColour = convertColour(cnv->editor->getLookAndFeel().findColour(PlugDataColour::guiObjectInternalOutlineColour));
-        auto const whiteKeyColour = nvgRGB(225, 225, 225);
-        auto const blackKeyColour = nvgRGB(90, 90, 90);
-        auto const activeKeyColour = cnv->editor->getLookAndFeel().findColour(PlugDataColour::dataColourId);
+        auto const strokeColour = nvgColour(colours.guiObjectInternalOutlineColour);
+        auto const whiteKeyColour = nanovg::nvgRGB(225, 225, 225);
+        auto const blackKeyColour = nanovg::nvgRGB(90, 90, 90);
+        auto const activeKeyColour = colours.dataColour;
 
-        nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), whiteKeyColour, outlineColour, Corners::objectCornerRadius);
+        nanovg::nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), whiteKeyColour, outlineColour, getPlugDataLook(*this).getObjectCornerRadius());
 
-        nvgStrokeColor(nvg, strokeColour);
+        nanovg::nvgStrokeColor(nvg, strokeColour);
 
         auto const whiteNoteWidth = getWhiteKeyWidth();
         auto const blackNoteWidth = whiteNoteWidth * 0.7f;
@@ -98,66 +101,63 @@ public:
 
         // Fill held white notes
         if (!heldKeys.empty()) {
-            nvgBeginPath(nvg);
+            nanovg::nvgBeginPath(nvg);
             for (auto& key : heldKeys) {
                 if (key < lowest || key >= highest)
                     continue;
                 auto pos = getKeyPosition(key - lowest, true);
                 if (!MidiMessage::isMidiNoteBlack(key)) {
-                    nvgRect(nvg, pos.getStart(), 1.0f, whiteNoteWidth, getHeight() - 2.0f);
+                    nanovg::nvgRect(nvg, pos.getStart(), 1.0f, whiteNoteWidth, getHeight() - 2.0f);
                 }
             }
-            nvgFillColor(nvg, convertColour(activeKeyColour));
-            nvgFill(nvg);
+            nanovg::nvgFillColor(nvg, nvgColour(activeKeyColour));
+            nanovg::nvgFill(nvg);
         }
 
         // Draw outlines for white notes
-        nvgBeginPath(nvg);
+        nanovg::nvgBeginPath(nvg);
         for (int i = 1; i < numWhiteNotes; i++) {
-            nvgMoveTo(nvg, i * whiteNoteWidth, 1.0f);
-            nvgLineTo(nvg, i * whiteNoteWidth, getHeight() - 1.0f);
+            nanovg::nvgMoveTo(nvg, i * whiteNoteWidth, 1.0f);
+            nanovg::nvgLineTo(nvg, i * whiteNoteWidth, getHeight() - 1.0f);
         }
-        nvgStroke(nvg);
+        nanovg::nvgStroke(nvg);
 
         // Fill black notes
-        nvgBeginPath(nvg);
+        nanovg::nvgBeginPath(nvg);
         for (int i = 0; i < numBlackNotes; i++) {
             auto const octave = i / 5 * 12;
             auto pos = getKeyPosition(blackNotes[i % 5] + octave, true);
-            nvgRect(nvg, pos.getStart(), 1.0f, blackNoteWidth, blackKeyHeight);
+            nanovg::nvgRect(nvg, pos.getStart(), 1.0f, blackNoteWidth, blackKeyHeight);
         }
 
-        nvgFillColor(nvg, blackKeyColour);
-        nvgFill(nvg);
+        nanovg::nvgFillColor(nvg, blackKeyColour);
+        nanovg::nvgFill(nvg);
 
         // Fill held black notes
         if (!heldKeys.empty()) {
-            nvgBeginPath(nvg);
+            nanovg::nvgBeginPath(nvg);
             for (auto& key : heldKeys) {
                 if (key < lowest || key >= highest)
                     continue;
                 auto pos = getKeyPosition(key - lowest, true);
                 if (MidiMessage::isMidiNoteBlack(key)) {
-                    nvgRect(nvg, pos.getStart(), 1.0f, blackNoteWidth, blackKeyHeight);
+                    nanovg::nvgRect(nvg, pos.getStart(), 1.0f, blackNoteWidth, blackKeyHeight);
                 }
             }
-            nvgFillColor(nvg, convertColour(activeKeyColour.darker(0.5f)));
-            nvgFill(nvg);
+            nanovg::nvgFillColor(nvg, nvgColour(activeKeyColour.darker(0.5f)));
+            nanovg::nvgFill(nvg);
         }
 
         // Draw octave numbers
         if (!cnv->locked.getValue() && !cnv->editor->isInPluginMode()) {
-            nvgFillColor(nvg, nvgRGB(90, 90, 90));
-            nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
             auto const fontSizeScaled = b.getHeight() - 2 < 60 ? 13.0f * (b.getHeight() - 2) / 60.0f : 13;
-            nvgFontSize(nvg, jmax(4.0f, fontSizeScaled));
             auto const octaveNumHeight = whiteNoteWidth * 1.2f;
             auto const scaledHeight = jmin(13.0f, b.getHeight() - 2 < 60 ? octaveNumHeight * (b.getHeight() - 2.0f) / 60.0f : octaveNumHeight);
             for (int i = 0; i < getValue<int>(octaves); i++) {
                 auto const position = i * 7 * whiteNoteWidth;
                 auto text = String(i + startOctave);
                 auto rectangle = Rectangle<int>(position, b.getHeight() - scaledHeight, whiteNoteWidth, scaledHeight);
-                nvgText(nvg, rectangle.getCentreX(), rectangle.getCentreY(), text.toRawUTF8(), nullptr);
+                Fonts::drawText(cnv->editor->getNanoLLGC(), text, rectangle.toFloat(), Fonts::getDefaultFont().withHeight(jmax(4.0f, fontSizeScaled)), Colour(90, 90, 90), Justification::centred);
             }
         }
     }
@@ -180,7 +180,7 @@ public:
             return Rectangle<int>(x, y, obj->x_space * getNumWhiteKeys(), obj->x_height);
         }
 
-        return {};
+        return { };
     }
 
     void setPdBounds(Rectangle<int> const b) override
@@ -227,16 +227,13 @@ public:
             object->updateBounds();
         } else if (value.refersToSameSourceAs(sendSymbol)) {
             auto const symbol = sendSymbol.toString();
-            if (auto obj = ptr.get<void>())
-                pd->sendDirectMessage(obj.get(), "send", { pd->generateSymbol(symbol) });
+            sendMessage("send", { pd->generateSymbol(symbol) });
         } else if (value.refersToSameSourceAs(receiveSymbol)) {
             auto const symbol = receiveSymbol.toString();
-            if (auto obj = ptr.get<void>())
-                pd->sendDirectMessage(obj.get(), "receive", { pd->generateSymbol(symbol) });
+            sendMessage("receive", { pd->generateSymbol(symbol) });
         } else if (value.refersToSameSourceAs(toggleMode)) {
             auto const toggle = getValue<int>(toggleMode);
-            if (auto obj = ptr.get<void>())
-                pd->sendDirectMessage(obj.get(), "toggle", { static_cast<float>(toggle) });
+            sendMessage("toggle", { static_cast<float>(toggle) });
         }
     }
 
@@ -255,7 +252,16 @@ public:
                 heldKeys.insert(i);
                 repaint();
             }
-            if (!notes[i] && heldKeys.contains(i) && clickedKey != i && !getValue<bool>(toggleMode)) {
+
+            bool keyIsPressed = false;
+            for (auto const& [_, key] : clickedKeys) {
+                if (key == i) {
+                    keyIsPressed = true;
+                    break;
+                }
+            }
+
+            if (!notes[i] && heldKeys.contains(i) && !keyIsPressed) {
                 heldKeys.erase(i);
                 repaint();
             }
@@ -425,13 +431,13 @@ public:
         }
     }
 
-    bool inletIsSymbol() override
+    bool hideInlet() override
     {
         auto const rSymbol = receiveSymbol.toString();
         return rSymbol.isNotEmpty() && rSymbol != "empty";
     }
 
-    bool outletIsSymbol() override
+    bool hideOutlet() override
     {
         auto const sSymbol = sendSymbol.toString();
         return sSymbol.isNotEmpty() && sSymbol != "empty";
@@ -517,10 +523,15 @@ public:
 
     void mouseDown(MouseEvent const& e) override
     {
+        if (!e.mods.isLeftButtonDown())
+            return;
+
+        auto touchIndex = e.source.getIndex();
+
         auto [midiNoteNumber, midiNoteVelocity] = positionToNoteAndVelocity(e.position);
         midiNoteNumber += getValue<int>(lowC) * 12;
 
-        clickedKey = midiNoteNumber;
+        clickedKeys[touchIndex] = midiNoteNumber;
 
         if (e.mods.isShiftDown()) {
             if (toggledKeys.count(midiNoteNumber)) {
@@ -536,12 +547,12 @@ public:
                 sendNoteOff(midiNoteNumber);
             } else {
                 heldKeys.insert(midiNoteNumber);
-                lastKey = midiNoteNumber;
+                lastKeys[touchIndex] = midiNoteNumber;
                 sendNoteOn(midiNoteNumber, midiNoteVelocity);
             }
         } else {
             heldKeys.insert(midiNoteNumber);
-            lastKey = midiNoteNumber;
+            lastKeys[touchIndex] = midiNoteNumber;
 
             sendNoteOn(midiNoteNumber, midiNoteVelocity);
         }
@@ -560,20 +571,25 @@ public:
 
     void mouseDrag(MouseEvent const& e) override
     {
+        if (!e.mods.isLeftButtonDown())
+            return;
+
+        auto touchIndex = e.source.getIndex();
+
         auto [midiNoteNumber, midiNoteVelocity] = positionToNoteAndVelocity(e.position);
         midiNoteNumber += getValue<int>(lowC) * 12;
 
-        clickedKey = midiNoteNumber;
+        clickedKeys[touchIndex] = midiNoteNumber;
 
         if (!getValue<bool>(toggleMode) && !e.mods.isShiftDown() && !heldKeys.count(midiNoteNumber)) {
             for (auto& note : heldKeys) {
                 sendNoteOff(note);
             }
-            if (lastKey != midiNoteNumber) {
-                heldKeys.erase(lastKey);
+            if (lastKeys[touchIndex] != midiNoteNumber) {
+                heldKeys.erase(lastKeys[touchIndex]);
             }
 
-            lastKey = midiNoteNumber;
+            lastKeys[touchIndex] = midiNoteNumber;
 
             heldKeys.insert(midiNoteNumber);
             sendNoteOn(midiNoteNumber, midiNoteVelocity);
@@ -589,11 +605,15 @@ public:
     // So we completely replace mouseUpOnKey functionality here, mouseUp() will stop mouseUpOnKey() being called.
     void mouseUp(MouseEvent const& e) override
     {
-        clickedKey = -1;
+        if (!e.mods.isLeftButtonDown())
+            return;
+
+        auto touchIndex = e.source.getIndex();
+        clickedKeys.erase(touchIndex);
 
         if (!getValue<bool>(toggleMode) && !e.mods.isShiftDown()) {
-            heldKeys.erase(lastKey);
-            sendNoteOff(lastKey);
+            heldKeys.erase(lastKeys[touchIndex]);
+            sendNoteOff(lastKeys[touchIndex]);
         }
         repaint();
     }

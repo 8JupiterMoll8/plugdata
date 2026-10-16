@@ -17,33 +17,6 @@
 class DocumentBrowserSettings final : public Component {
 
 public:
-    struct DocumentBrowserSettingsButton final : public TextButton {
-        String const icon;
-        String const description;
-
-        DocumentBrowserSettingsButton(String iconString, String descriptionString)
-            : icon(std::move(iconString))
-            , description(std::move(descriptionString))
-        {
-        }
-
-        void paint(Graphics& g) override
-        {
-            auto colour = findColour(PlugDataColour::toolbarTextColourId);
-            if (isMouseOver()) {
-                colour = colour.contrasting(0.3f);
-            }
-
-            Fonts::drawText(g, description, getLocalBounds().withTrimmedLeft(28), colour, 14);
-
-            if (getToggleState()) {
-                colour = findColour(PlugDataColour::toolbarActiveColourId);
-            }
-
-            Fonts::drawIcon(g, icon, getLocalBounds().withTrimmedLeft(8), colour, 14, false);
-        }
-    };
-
     DocumentBrowserSettings(std::function<void()> const& chooseCustomLocation, std::function<void()> const& resetDefaultLocation)
     {
         addAndMakeVisible(customLocationButton);
@@ -71,8 +44,8 @@ public:
     }
 
 private:
-    DocumentBrowserSettingsButton customLocationButton = DocumentBrowserSettingsButton(Icons::Open, "Show custom folder...");
-    DocumentBrowserSettingsButton restoreLocationButton = DocumentBrowserSettingsButton(Icons::Restore, "Show default folder");
+    CalloutMenuButton customLocationButton = CalloutMenuButton(Icons::Open, "Show custom folder...", false);
+    CalloutMenuButton restoreLocationButton = CalloutMenuButton(Icons::Restore, "Show default folder", false);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(DocumentBrowserSettings)
 };
@@ -128,6 +101,9 @@ private:
     static inline auto const pathIdentifier = Identifier("Path");
     static inline auto const iconIdentifier = Identifier("Icon");
 
+    static inline auto const fileIcon = Icons::File;
+    static inline auto const folderIcon = Icons::FolderFilled;
+
     ValueTree generateDirectoryValueTree(File const& directory)
     {
         static File versionDataDir = ProjectInfo::appDataDir.getChildFile("Versions");
@@ -135,16 +111,16 @@ private:
         static File libraryDir = ProjectInfo::appDataDir.getChildFile("Library");
 
         if (threadShouldExit() || directory == versionDataDir || directory == toolchainDir || directory == libraryDir) {
-            return {};
+            return { };
         }
 
         ValueTree rootNode("Folder");
         rootNode.setProperty(nameIdentifier, directory.getFileName(), nullptr);
         rootNode.setProperty(pathIdentifier, directory.getFullPathName(), nullptr);
-        rootNode.setProperty(iconIdentifier, Icons::Folder, nullptr);
+        rootNode.setProperty(iconIdentifier, folderIcon, nullptr);
 
         // visitedDirectories keeps track of dirs we've already processed to prevent infinite loops
-        static SmallArray<hash32> visitedDirectories = {};
+        static SmallArray<hash32> visitedDirectories = { };
 
         auto const directoryHash = OSUtils::getUniqueFileHash(directory.getFullPathName());
         if (!visitedDirectories.contains(directoryHash)) {
@@ -161,27 +137,27 @@ private:
         }
 
         for (auto const& file : OSUtils::iterateDirectory(directory, false, true)) {
-            if (file.getFileName().startsWith("."))
+            if (file.getFileName().startsWith(".") || file.getFileName() == "settings.json")
                 continue;
 
             ValueTree childNode(fileIdentifier);
             childNode.setProperty(nameIdentifier, file.getFileName(), nullptr);
             childNode.setProperty(pathIdentifier, file.getFullPathName(), nullptr);
-            childNode.setProperty(iconIdentifier, Icons::File, nullptr);
+            childNode.setProperty(iconIdentifier, fileIcon, nullptr);
 
             rootNode.appendChild(childNode, nullptr);
         }
 
         if (threadShouldExit())
-            return {};
+            return { };
 
         struct {
             static int compareElements(ValueTree const& first, ValueTree const& second)
             {
-                if (first.getProperty(iconIdentifier) == Icons::File && second.getProperty(iconIdentifier) == Icons::Folder) {
+                if (first.getProperty(iconIdentifier) == fileIcon && second.getProperty(iconIdentifier) == folderIcon) {
                     return 1;
                 }
-                if (first.getProperty(iconIdentifier) == Icons::Folder && second.getProperty(iconIdentifier) == Icons::File) {
+                if (first.getProperty(iconIdentifier) == folderIcon && second.getProperty(iconIdentifier) == fileIcon) {
                     return -1;
                 }
 
@@ -261,7 +237,7 @@ public:
 
         searchInput.setJustification(Justification::centredLeft);
         searchInput.setBorder({ 1, 23, 5, 1 });
-        searchInput.setTextToShowWhenEmpty("Type to search documentation", findColour(PlugDataColour::sidebarTextColourId).withAlpha(0.5f));
+        searchInput.setTextToShowWhenEmpty("Type to search documentation", getThemeColours(*this).sidebarTextColour.withAlpha(0.5f));
         searchInput.setInterceptsMouseClicks(true, true);
         addAndMakeVisible(searchInput);
 
@@ -393,17 +369,19 @@ public:
 
     void paint(Graphics& g) override
     {
-        g.setColour(findColour(PlugDataColour::sidebarActiveBackgroundColourId));
+        g.setColour(getThemeColours(*this).sidebarActiveBackgroundColour);
         g.fillRoundedRectangle(searchInput.getBounds().reduced(6, 4).toFloat(), Corners::defaultCornerRadius);
     }
 
     void lookAndFeelChanged() override
     {
+        auto const& colours = getThemeColours(*this);
+
         searchInput.setColour(TextEditor::backgroundColourId, Colours::transparentBlack);
-        searchInput.setColour(TextEditor::textColourId, findColour(PlugDataColour::sidebarTextColourId));
+        searchInput.setColour(TextEditor::textColourId, colours.sidebarTextColour);
         searchInput.setColour(TextEditor::outlineColourId, Colours::transparentBlack);
 
-        searchInput.applyColourToAllText(findColour(PlugDataColour::panelTextColourId));
+        searchInput.applyColourToAllText(colours.panelTextColour);
     }
 
     void resized() override
@@ -414,10 +392,9 @@ public:
 
     void paintOverChildren(Graphics& g) override
     {
-        g.setColour(findColour(PlugDataColour::toolbarOutlineColourId));
-        g.drawLine(0.5f, 0, 0.5f, getHeight() - 27.5f);
+        auto const& colours = getThemeColours(*this);
 
-        auto const backgroundColour = findColour(PlugDataColour::sidebarBackgroundColourId);
+        auto const backgroundColour = colours.sidebarBackgroundColour;
         auto const transparentColour = backgroundColour.withAlpha(0.0f);
 
         // Draw a gradient to fade the content out underneath the search input
@@ -425,10 +402,10 @@ public:
         g.setGradientFill(ColourGradient(backgroundColour, 0.0f, 26.0f, transparentColour, 0.0f, 42.0f, false));
         g.fillRect(Rectangle<int>(0, searchInput.getBottom(), getWidth() - scrollOffset, 12));
 
-        Fonts::drawIcon(g, Icons::Search, 2, 1, 32, findColour(PlugDataColour::sidebarTextColourId), 12);
+        Fonts::drawIcon(g, Icons::Search, 2, 1, 32, colours.sidebarTextColour, 12);
 
         if (isDraggingFile) {
-            g.setColour(findColour(PlugDataColour::scrollbarThumbColourId));
+            g.setColour(colours.scrollbarThumbColour);
             g.drawRect(getLocalBounds().reduced(1), 2.0f);
         }
     }

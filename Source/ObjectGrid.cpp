@@ -13,28 +13,47 @@
 #include "Canvas.h"
 #include "PluginEditor.h"
 #include "Connection.h"
+#include "CanvasViewport.h"
 
 ObjectGrid::ObjectGrid(Canvas* cnv)
     : cnv(cnv)
+    , updater(cnv)
 {
     gridEnabled = SettingsFile::getInstance()->getProperty<int>("grid_enabled");
     gridType = SettingsFile::getInstance()->getProperty<int>("grid_type");
     gridSize = SettingsFile::getInstance()->getProperty<int>("grid_size");
 }
 
+void ObjectGrid::positionNewObject(Object* newObject, Point<int> mousePosition)
+{
+    if (ModifierKeys::getCurrentModifiers().isShiftDown() || gridType == 0 || !gridEnabled) {
+        return;
+    }
+
+    newObject->originalBounds = newObject->getBounds();
+    ScopedValueSetter toleranceSetter(objectTolerance, 15);
+    auto offset = performMove(newObject, { 0, 0 });
+
+    auto nb = newObject->getObjectBounds() + offset;
+    if (newObject->gui)
+        newObject->gui->setPdBounds(nb);
+    else
+        newObject->setObjectBounds(nb);
+
+    clearIndicators(false);
+}
+
 SmallArray<Object*> ObjectGrid::getSnappableObjects(Object const* draggedObject)
 {
     auto const& cnv = draggedObject->cnv;
     if (!cnv->viewport)
-        return {};
+        return { };
 
     SmallArray<Object*> snappable;
-
-    auto const scaleFactor = std::sqrt(std::abs(cnv->getTransform().getDeterminant()));
-    auto const viewBounds = cnv->viewport->getViewArea() / scaleFactor;
+    auto const viewBounds = cnv->viewport->getViewArea();
 
     for (auto* object : cnv->objects) {
-        if (draggedObject == object || object->isSelected() || !viewBounds.intersects(object->getBounds()))
+        if (draggedObject == object || object->isSelected() || !viewBounds.intersects(object->getBounds().toFloat()))
             continue; // don't look at dragged object, selected objects, or objects that are outside of view bounds
 
         snappable.add(object);
@@ -50,6 +69,31 @@ SmallArray<Object*> ObjectGrid::getSnappableObjects(Object const* draggedObject)
     });
 
     return snappable;
+}
+
+void ObjectGrid::startLineFadeAnimation(int idx, float ms, float targetAlpha)
+{
+    lineAnimators[idx].complete();
+
+    lineTargetAlpha[idx] = targetAlpha;
+    lineAnimators[idx] = ValueAnimatorBuilder { }
+                             .withDurationMs(ms)
+                             .withEasing(Easings::createEaseOut())
+                             .withValueChangedCallback([this, idx](float v) {
+                                 lineAlpha[idx] = makeAnimationLimits(lineAlpha[idx], lineTargetAlpha[idx]).lerp(v);
+                                 auto const lineArea = cnv->editor->nvgSurface.getLocalArea(cnv, Rectangle<int>(lines[idx].getStart(), lines[idx].getEnd()).expanded(2));
+
+                                 cnv->editor->nvgSurface.invalidateArea(lineArea);
+                                 /*
+                                 if(cnv->editor->nvgSurface.getLocalBounds().contains(lineArea)) {
+                                     cnv->editor->nvgSurface.invalidateArea(lineArea);
+                                 } */
+                             })
+                             .build();
+    updater.addAnimator(lineAnimators[idx], [this, idx]() {
+        lines[idx] = { };
+    });
+    lineAnimators[idx].start();
 }
 
 void ObjectGrid::settingsChanged(String const& name, var const& value)
@@ -381,20 +425,15 @@ Line<int> ObjectGrid::getObjectIndicatorLine(Side const side, Rectangle<int> b1,
     }
     }
 
-    return {};
+    return { };
 }
 
 void ObjectGrid::clearIndicators(bool const fast)
 {
-    float const lineFadeMs = fast ? 50 : 250;
-
-    lineAlphaMultiplier[0] = dsp::FastMathApproximations::exp(-MathConstants<float>::twoPi * 1000.0f / 60.0f / lineFadeMs);
-    lineAlphaMultiplier[1] = lineAlphaMultiplier[0];
+    float const lineFadeMs = fast ? 50 : 400;
     if (lineTargetAlpha[0] != 0.0f || lineTargetAlpha[1] != 0.0f) {
-        lineTargetAlpha[0] = 0.0f;
-        lineTargetAlpha[1] = 0.0f;
-        if (!isTimerRunning())
-            startTimerHz(60);
+        startLineFadeAnimation(0, lineFadeMs, 0.0f);
+        startLineFadeAnimation(1, lineFadeMs, 0.0f);
     }
 }
 
@@ -402,10 +441,7 @@ void ObjectGrid::setIndicator(int const idx, Line<int> const line)
 {
     auto const lineIsEmpty = line.getLength() == 0;
     if (lineIsEmpty && line != lines[idx]) {
-        lineAlphaMultiplier[idx] = dsp::FastMathApproximations::exp(-MathConstants<float>::twoPi * 1000.0f / 60.0f / 50);
-        lineTargetAlpha[idx] = 0.0f;
-        if (!isTimerRunning())
-            startTimerHz(60);
+        startLineFadeAnimation(idx, 50.f, 0.0f);
     } else if (line != lines[idx]) {
         lineTargetAlpha[idx] = 1.0f;
         lineAlpha[idx] = 1.0f;
@@ -421,54 +457,27 @@ void ObjectGrid::setIndicator(int const idx, Line<int> const line)
     }
 }
 
-void ObjectGrid::timerCallback()
-{
-    if (lines[0].getLength() != 0 && lineAlpha[0] != 0.0f) {
-        auto const lineArea = cnv->editor->nvgSurface.getLocalArea(cnv, Rectangle<int>(lines[0].getStart(), lines[0].getEnd()).expanded(2));
-        cnv->editor->nvgSurface.invalidateArea(lineArea);
-    }
-    if (lines[1].getLength() != 0 && lineAlpha[1] != 0.0f) {
-        auto const lineArea = cnv->editor->nvgSurface.getLocalArea(cnv, Rectangle<int>(lines[1].getStart(), lines[1].getEnd()).expanded(2));
-        cnv->editor->nvgSurface.invalidateArea(lineArea);
-    }
-
-    bool done = true;
-    for (int i = 0; i < 2; i++) {
-        lineAlpha[i] = jmap<float>(lineAlphaMultiplier[i], lineTargetAlpha[i], lineAlpha[i]);
-        if (std::abs(lineAlpha[i] - lineTargetAlpha[i]) < 1e-4) {
-            lineAlpha[i] = lineTargetAlpha[i];
-            lines[i] = Line<int>();
-        } else {
-            done = false;
-        }
-    }
-
-    if (done) {
-        stopTimer();
-    }
-}
-
 void ObjectGrid::render(NVGcontext* nvg)
 {
-    if (lines[0].getLength() != 0) {
-        auto const& lnf = LookAndFeel::getDefaultLookAndFeel();
-        nvgStrokeColor(nvg, NVGComponent::convertColour(lnf.findColour(PlugDataColour::gridLineColourId).withAlpha(lineAlpha[0])));
-        nvgStrokeWidth(nvg, 1.0f);
+    auto const& colours = getThemeColours(*cnv);
 
-        nvgBeginPath(nvg);
-        nvgMoveTo(nvg, lines[0].getStartX(), lines[0].getStartY());
-        nvgLineTo(nvg, lines[0].getEndX(), lines[0].getEndY());
-        nvgStroke(nvg);
+    if (lines[0].getLength() != 0) {
+        nanovg::nvgStrokeColor(nvg, nvgColour(colours.gridLineColour.withAlpha(lineAlpha[0])));
+        nanovg::nvgStrokeWidth(nvg, 1.0f);
+
+        nanovg::nvgBeginPath(nvg);
+        nanovg::nvgMoveTo(nvg, lines[0].getStartX(), lines[0].getStartY());
+        nanovg::nvgLineTo(nvg, lines[0].getEndX(), lines[0].getEndY());
+        nanovg::nvgStroke(nvg);
     }
 
     if (lines[1].getLength() != 0) {
-        auto const& lnf = LookAndFeel::getDefaultLookAndFeel();
-        nvgStrokeColor(nvg, NVGComponent::convertColour(lnf.findColour(PlugDataColour::gridLineColourId).withAlpha(lineAlpha[1])));
-        nvgStrokeWidth(nvg, 1.0f);
+        nanovg::nvgStrokeColor(nvg, nvgColour(colours.gridLineColour.withAlpha(lineAlpha[1])));
+        nanovg::nvgStrokeWidth(nvg, 1.0f);
 
-        nvgBeginPath(nvg);
-        nvgMoveTo(nvg, lines[1].getStartX(), lines[1].getStartY());
-        nvgLineTo(nvg, lines[1].getEndX(), lines[1].getEndY());
-        nvgStroke(nvg);
+        nanovg::nvgBeginPath(nvg);
+        nanovg::nvgMoveTo(nvg, lines[1].getStartX(), lines[1].getStartY());
+        nanovg::nvgLineTo(nvg, lines[1].getEndX(), lines[1].getEndY());
+        nanovg::nvgStroke(nvg);
     }
 }

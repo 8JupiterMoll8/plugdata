@@ -25,15 +25,15 @@ public:
         object->setColour(PlugDataColour::outlineColourId, Colours::transparentBlack);
 
         iemHelper.iemColourChangedCallback = [this] {
-            bgColour = Colour::fromString(iemHelper.secondaryColour.toString());
-            bgCol = convertColour(bgColour);
-            selectionAreaCol = convertColour(bgColour.contrasting(0.75f));
+            bgColour = getValue<Colour>(iemHelper.secondaryColour);
+            bgCol = nvgColour(bgColour);
+            selectionAreaCol = nvgColour(bgColour.contrasting(0.75f));
         };
 
         objectParameters.addParamSize(&sizeProperty);
-        objectParameters.addParamInt("Active area size", ParameterCategory::cDimensions, &hitAreaSize, 15);
-        objectParameters.addParamColour("Background", cGeneral, &iemHelper.secondaryColour, PlugDataColour::guiObjectInternalOutlineColour);
-        iemHelper.addIemParameters(objectParameters, false, true, 20, 12, 14);
+        objectParameters.addParamInt("Active area size", cDimensions, &hitAreaSize, 15);
+        objectParameters.addParamColour("Background", cGeneral, &iemHelper.secondaryColour, PlugDataColour::guiObjectInternalOutlineColourId);
+        iemHelper.addIemParameters(objectParameters, false, true, false, 20, 12, 14);
         setRepaintsOnMouseActivity(true);
     }
 
@@ -46,12 +46,12 @@ public:
         }
     }
 
-    bool inletIsSymbol() override
+    bool hideInlet() override
     {
         return iemHelper.hasReceiveSymbol();
     }
 
-    bool outletIsSymbol() override
+    bool hideOutlet() override
     {
         return iemHelper.hasSendSymbol();
     }
@@ -86,6 +86,7 @@ public:
         switch (symbol) {
         case hash("size"):
             updateHitArea();
+            break;
         default:
             iemHelper.receiveObjectMessage(symbol, atoms);
         }
@@ -110,7 +111,7 @@ public:
             return { cnvObj->x_gui.x_obj.te_xpix, cnvObj->x_gui.x_obj.te_ypix, cnvObj->x_gui.x_w, cnvObj->x_gui.x_h };
         }
 
-        return {};
+        return { };
     }
 
     void resized() override
@@ -124,7 +125,7 @@ public:
     bool hitTest(int const x, int const y) override
     {
         if (hitArea.contains(x, y)) {
-            return true;
+            return !getValue<bool>(cnv->locked);
         }
 
         return false;
@@ -133,7 +134,7 @@ public:
     bool canReceiveMouseEvent(int const x, int const y) override
     {
         if (hitArea.contains(x - Object::margin, y - Object::margin)) {
-            return true;
+            return !getValue<bool>(cnv->locked);
         }
 
         return false;
@@ -166,17 +167,17 @@ public:
             return Rectangle<int>(x, y, pdSize.getWidth(), pdSize.getHeight());
         }
 
-        return {};
+        return { };
     }
 
     void render(NVGcontext* nvg) override
     {
         auto const b = getLocalBounds().toFloat();
-        nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), bgCol, bgCol, Corners::objectCornerRadius);
+        nanovg::nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), bgCol, bgCol, getPlugDataLook(*this).getObjectCornerRadius());
 
         if (!cnv->isGraph && !getValue<bool>(object->locked) && !getValue<bool>(object->commandLocked) && !hideHitArea) {
-            auto const selectionRectColour = object->isSelected() || isMouseOver() ? cnv->selectedOutlineCol : selectionAreaCol;
-            nvgDrawRoundedRect(nvg, hitArea.getX(), hitArea.getY(), hitArea.getWidth(), hitArea.getHeight(), nvgRGBA(0, 0, 0, 0), selectionRectColour, Corners::objectCornerRadius);
+            auto const selectionRectColour = object->isSelected() || isMouseOver() ? nvgColour(getThemeColours().objectSelectedOutlineColour) : selectionAreaCol;
+            nanovg::nvgDrawRoundedRect(nvg, hitArea.getX(), hitArea.getY(), hitArea.getWidth(), hitArea.getHeight(), nanovg::nvgRGBA(0, 0, 0, 0), selectionRectColour, getPlugDataLook(*this).getObjectCornerRadius());
         }
     }
 

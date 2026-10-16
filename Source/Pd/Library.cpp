@@ -65,8 +65,7 @@ Library::~Library()
 
 void Library::updateLibrary()
 {
-    auto const settingsTree = ValueTree::fromXml(ProjectInfo::appDataDir.getChildFile(".settings").loadFileAsString());
-    auto const pathTree = settingsTree.getChildWithName("Paths");
+    auto const& pathTree = SettingsFile::getInstance()->getProperty<VarArray>("paths");
 
     pd->lockAudioThread();
     pd->setThis();
@@ -85,21 +84,21 @@ void Library::updateLibrary()
             continue;
 
         auto newName = String::fromUTF8(m->me_name->s_name);
-        if (!(newName.startsWith("else/") || newName.startsWith("cyclone/") || newName.endsWith("_aliased"))) {
+        if (!(newName.startsWith("else/") || newName.startsWith("cyclone/") || newName.endsWith("_aliased") || newName.endsWith(":gfx"))) {
             allObjects.add(newName);
         }
     }
 
     // Find patches in our search tree
-    for (auto path : pathTree) {
-        auto filePath = path.getProperty("Path").toString();
+    for (auto const& path : pathTree) {
+        auto filePath = path.toString();
 
         auto file = File(filePath);
         if (!file.exists() || !file.isDirectory())
             continue;
 
         for (auto const& file : OSUtils::iterateDirectory(file, false, true)) {
-            if (file.hasFileExtension("pd")) {
+            if (file.hasFileExtension("pd") || file.hasFileExtension("pd_lua")) {
                 auto filename = file.getFileNameWithoutExtension();
                 if (!filename.startsWith("help-") && !filename.endsWith("-help")) {
                     allObjects.add(filename);
@@ -124,93 +123,113 @@ void Library::run()
 {
     HeapArray<uint8_t> decodedDocs;
     decodedDocs.reserve(2 * 1024 * 1024);
+    {
+        auto documentation = BinaryData::getResource(BinaryData::Documentation_bin);
+        Decompress::extractXz((uint8_t*)documentation.data(), documentation.size(), decodedDocs);
+    }
 
-    Decompress::extractXz(reinterpret_cast<uint8_t const*>(BinaryData::Documentation_bin), BinaryData::Documentation_binSize, decodedDocs);
+    MemoryInputStream stream(decodedDocs.data(), decodedDocs.size(), false);
 
-    MemoryInputStream instream(decodedDocs.data(), decodedDocs.size(), false);
-    ValueTree documentationTree = ValueTree::readFromStream(instream);
+    while (!stream.isExhausted()) {
+        ObjectReferenceTable table;
+        table.title = stream.readString();
+        table.description = stream.readString();
+        table.body = stream.readString();
+        table.origin = stream.readString();
+        int numCategories = stream.readInt();
+        for (int i = 0; i < numCategories; ++i)
+            table.categories.add(stream.readString());
+
+        for (auto* iolets : { &table.inlets, &table.outlets }) {
+            int count = stream.readInt();
+            for (int i = 0; i < count; ++i) {
+                ObjectReferenceTable::IoletReference iolet;
+                iolet.repeating = stream.readBool();
+                int count = stream.readInt();
+                for (int i = 0; i < count; ++i)
+                    iolet.messages.add({ stream.readString(), stream.readString() });
+                iolet.tooltip = stream.readString();
+                iolets->add(iolet);
+            }
+        }
+        for (auto* items : { &table.arguments, &table.methods, &table.flags }) {
+            int count = stream.readInt();
+            for (int i = 0; i < count; ++i)
+                items->add({ stream.readString(), stream.readString() });
+        }
+        documentation.add(table);
+    }
 
     auto weights = HeapArray<float>(2);
     weights[0] = 6.0f; // More weight for name
     weights[1] = 3.0f; // More weight for description
     searchDatabase.setWeights(weights.vector());
 
-    for (auto objectEntry : documentationTree) {
-        auto categoriesTree = objectEntry.getChildWithName("categories");
-
+    for (auto& doc : documentation) {
         HeapArray<std::string> fields;
-        int numProperties = objectEntry.getNumProperties();
-        for (int i = 0; i < numProperties; i++) // Name and description
-        {
-            auto property = objectEntry.getProperty(objectEntry.getPropertyName(i)).toString();
-            fields.add(property.toStdString());
-        }
-        for (auto subtree : objectEntry) // Parent tree for arguments, inlets, outlets
-        {
-            for (auto child : subtree) // tree for individual arguments, inlets, outlets, etc.
-            {
-                for (int i = 0; i < child.getNumProperties(); i++) {
-                    auto property = child.getProperty(child.getPropertyName(i)).toString();
-                    if (!property.containsOnly("0123456789.,-")) {
-                        fields.add(property.toStdString());
-                    }
-                }
-            }
-        }
+        fields.add(doc.title.toStdString());
+        fields.add(doc.description.toStdString());
+        for (auto& str : doc.categories)
+            fields.add(str.toStdString());
+        for (auto& str : doc.inlets)
+            fields.add(str.tooltip.toStdString());
+        for (auto& str : doc.outlets)
+            fields.add(str.tooltip.toStdString());
+        for (auto& str : doc.arguments)
+            fields.add(str.description.toStdString());
+        for (auto& str : doc.flags)
+            fields.add(str.description.toStdString());
+        for (auto& str : doc.methods)
+            fields.add(str.description.toStdString());
 
-        String origin;
-        for (auto category : categoriesTree) {
-            auto cat = category.getProperty("name").toString();
-            if (objectOrigins.contains(cat)) {
-                origin = cat;
-            }
-        }
-
-        auto name = objectEntry.getProperty("name").toString();
-
-        if (origin == "Gem") {
+        if (doc.origin == "Gem") {
 #if !ENABLE_GEM
             continue;
 #else
-            gemObjects.add(name);
+            gemObjects.add(doc.title);
 #endif
         }
 
-        searchDatabase.addEntry(objectEntry, fields.vector());
+        searchDatabase.addEntry(&doc, fields.vector());
         searchDatabase.setThreshold(0.4f);
 
-        if (origin.isEmpty()) {
-            documentationIndex[hash(name)] = objectEntry;
-        } else if (origin == "Gem") {
-            documentationIndex[hash(origin + "/" + name)] = objectEntry;
-        } else if (origin == "MERDA") {
-            documentationIndex[hash("ELSE/" + name)] = objectEntry;
-        } else if (documentationIndex.count(hash(name))) {
-            documentationIndex[hash(origin + "/" + name)] = objectEntry;
+        if (doc.origin.isEmpty()) {
+            documentationIndex[hash(doc.title)] = &doc;
+        } else if (doc.origin == "Gem") {
+            documentationIndex[hash(doc.origin + "/" + doc.title)] = &doc;
+        } else if (doc.origin == "MERDA") {
+            documentationIndex[hash("ELSE/" + doc.title)] = &doc;
+        } else if (documentationIndex.count(hash(doc.title))) {
+            documentationIndex[hash(doc.origin + "/" + doc.title)] = &doc;
         } else {
-            documentationIndex[hash(name)] = objectEntry;
-            documentationIndex[hash(origin + "/" + name)] = objectEntry;
+            documentationIndex[hash(doc.title)] = &doc;
+            documentationIndex[hash(doc.origin + "/" + doc.title)] = &doc;
         }
     }
 
+    databaseReady = true;
     initWait.signal();
 }
 
-void Library::waitForInitialisationToFinish()
+void Library::ensureDatabaseInitialised() const
 {
-    if (!isInitialised) {
-        initWait.wait();
-        isInitialised = true;
-    }
+    if (databaseReady)
+        return;
+
+    initWait.wait();
 }
 
 bool Library::isGemObject(String const& query) const
 {
+    ensureDatabaseInitialised();
+
     return gemObjects.contains(query);
 }
 
 StringArray Library::autocomplete(String const& query, File const& patchDirectory) const
 {
+    ensureDatabaseInitialised();
+
     StringArray result;
     result.ensureStorageAllocated(20);
 
@@ -218,7 +237,7 @@ StringArray Library::autocomplete(String const& query, File const& patchDirector
     if (patchDirectory.isDirectory()) {
         for (auto const& file : OSUtils::iterateDirectory(patchDirectory, false, true, 20)) {
             auto filename = file.getFileNameWithoutExtension();
-            if (file.hasFileExtension("pd") && filename.startsWith(query) && !filename.startsWith("help-") && !filename.endsWith("-help")) {
+            if ((file.hasFileExtension("pd") || file.hasFileExtension("pd_lua")) && filename.startsWith(query) && !filename.startsWith("help-") && !filename.endsWith("-help")) {
                 result.add(filename);
             }
         }
@@ -242,7 +261,7 @@ StringArray Library::autocomplete(String const& query, File const& patchDirector
         if (result.size() >= 20)
             break;
 
-        auto name = fuzzyMatch.key.getProperty("name").toString();
+        auto const& name = fuzzyMatch.key->title;
         if (name.isNotEmpty()) {
             result.addIfNotAlreadyThere(name);
         }
@@ -253,6 +272,8 @@ StringArray Library::autocomplete(String const& query, File const& patchDirector
 
 StringArray Library::searchObjectDocumentation(String const& query)
 {
+    ensureDatabaseInitialised();
+
     StringArray result;
     result.ensureStorageAllocated(20);
 
@@ -266,7 +287,7 @@ StringArray Library::searchObjectDocumentation(String const& query)
     result.ensureStorageAllocated(result.size() + fuzzyResults.size());
 
     for (auto& fuzzyMatch : fuzzyResults) {
-        auto name = fuzzyMatch.key.getProperty("name").toString();
+        auto const& name = fuzzyMatch.key->title;
         if (name.isNotEmpty()) {
             result.addIfNotAlreadyThere(name);
         }
@@ -275,41 +296,34 @@ StringArray Library::searchObjectDocumentation(String const& query)
     return result;
 }
 
-ValueTree Library::getObjectInfo(String const& name)
+Library::ObjectReferenceTable const& Library::getObjectInfo(SmallString const& name)
 {
-    return documentationIndex[hash(name)];
+    ensureDatabaseInitialised();
+
+    static Library::ObjectReferenceTable emptyObject = { };
+
+    auto hashName = hash(name);
+    if (!documentationIndex.contains(hashName))
+        return emptyObject;
+
+    return *documentationIndex[hashName];
 }
 
-StackArray<StringArray, 2> Library::parseIoletTooltips(ValueTree const& iolets, String const& name, int const numIn, int const numOut)
+StackArray<StringArray, 2> Library::parseIoletTooltips(ObjectReferenceTable::IoletsReference const& inlets, ObjectReferenceTable::IoletsReference const& outlets, SmallString const& name, int const numIn, int const numOut)
 {
     StackArray<StringArray, 2> result;
-    SmallArray<std::pair<String, bool>, 8> inlets;
-    SmallArray<std::pair<String, bool>, 8> outlets;
 
-    auto const args = StringArray::fromTokens(name.fromFirstOccurrenceOf(" ", false, false), true);
-
-    for (auto iolet : iolets) {
-        auto isVariable = iolet.getProperty("variable").toString() == "1";
-        auto tooltip = iolet.getProperty("tooltip");
-        if (iolet.getType() == Identifier("inlet")) {
-            inlets.add({ tooltip, isVariable });
-        }
-
-        if (iolet.getType() == Identifier("outlet")) {
-            outlets.add({ tooltip, isVariable });
-        }
-    }
-
+    auto const args = StringArray::fromTokens(name.fromFirstOccurrenceOf(" ").toString(), true);
     for (int type = 0; type < 2; type++) {
         int const total = type ? numOut : numIn;
         auto& descriptions = type ? outlets : inlets;
+
         // if the amount of inlets is not equal to the amount in the spec, look for repeating iolets
         if (descriptions.size() < total) {
             for (int i = 0; i < descriptions.size(); i++) {
-                if (descriptions[i].second) { // repeating inlet found
+                if (descriptions[i].repeating) {
                     for (int j = 0; j < total - descriptions.size() + 1; j++) {
-
-                        auto description = descriptions[i].first;
+                        auto description = descriptions[i].tooltip;
                         description = description.replace("$mth", String(j));
                         description = description.replace("$nth", String(j + 1));
 
@@ -320,12 +334,12 @@ StackArray<StringArray, 2> Library::parseIoletTooltips(ValueTree const& iolets, 
                         result[type].add(description);
                     }
                 } else {
-                    result[type].add(descriptions[i].first);
+                    result[type].add(descriptions[i].tooltip);
                 }
             }
         } else {
             for (auto&& description : descriptions) {
-                result[type].add(description.first);
+                result[type].add(description.tooltip);
             }
         }
     }
@@ -350,15 +364,14 @@ File Library::findPatch(String const& patchToFind)
 
 File Library::findFile(String const& fileToFind)
 {
-    auto const pathTree = SettingsFile::getInstance()->getValueTree().getChildWithName("Paths");
-    for (auto path : pathTree) {
-        auto searchPath = File(path.getProperty("Path").toString());
+    for (auto path : SettingsFile::getInstance()->getProperty<VarArray>("paths")) {
+        auto searchPath = File(path.toString());
         auto childFile = searchPath.getChildFile(fileToFind);
         if (OSUtils::isFileFast(childFile.getFullPathName()))
             return childFile;
     }
 
-    return {};
+    return { };
 }
 
 String Library::getObjectOrigin(t_gobj* obj)
@@ -384,7 +397,7 @@ String Library::getObjectOrigin(t_gobj* obj)
         }
     }
 
-    return {};
+    return { };
 }
 
 File Library::findHelpfile(String const& helpName)
@@ -409,7 +422,7 @@ File Library::findHelpfile(String const& helpName)
         }
     }
 
-    return {};
+    return { };
 }
 
 File Library::findHelpfile(t_gobj* obj, File const& parentPatchFile)
@@ -425,7 +438,7 @@ File Library::findHelpfile(t_gobj* obj, File const& parentPatchFile)
         int const ac = binbuf_getnatom(ob->te_binbuf);
         t_atom const* av = binbuf_getvec(ob->te_binbuf);
         if (ac < 1)
-            return {};
+            return { };
 
         atom_string(av, namebuf, MAXPDSTRING);
         helpName = String::fromUTF8(namebuf);
@@ -455,7 +468,7 @@ File Library::findHelpfile(t_gobj* obj, File const& parentPatchFile)
     }
 
     for (auto path : helpPaths) {
-        patchHelpPaths.add(helpDir.isNotEmpty() ? path.getChildFile(helpDir) : path);
+        patchHelpPaths.add(helpDir.isNotEmpty() && !File::isAbsolutePath(helpDir) ? path.getChildFile(helpDir) : path);
     }
 
     String firstName = helpName + "-help.pd";
@@ -473,7 +486,7 @@ File Library::findHelpfile(t_gobj* obj, File const& parentPatchFile)
                 return file;
             }
         }
-        return {};
+        return { };
     };
 
     for (auto& path : patchHelpPaths) {
@@ -497,7 +510,7 @@ File Library::findHelpfile(t_gobj* obj, File const& parentPatchFile)
         }
     }
 
-    return {};
+    return { };
 }
 
 } // namespace pd

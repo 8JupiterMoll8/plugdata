@@ -24,13 +24,15 @@ public:
 
     void paint(Graphics& g) override
     {
+        auto const& colours = getThemeColours(*this);
+
         auto const bounds = getLocalBounds();
         auto textBounds = bounds;
         auto const iconBounds = textBounds.removeFromLeft(textBounds.getHeight());
 
-        auto const colour = findColour(PlugDataColour::panelTextColourId);
+        auto const colour = colours.panelTextColour;
         if (mouseIsOver) {
-            g.setColour(findColour(PlugDataColour::panelActiveBackgroundColourId));
+            g.setColour(colours.panelActiveBackgroundColour);
 
             Path p;
             p.addRoundedRectangle(bounds.getX(), bounds.getY(), bounds.getWidth(), bounds.getHeight(), Corners::largeCornerRadius, Corners::largeCornerRadius, roundTop, roundTop, true, true);
@@ -55,6 +57,9 @@ public:
 
     void mouseUp(MouseEvent const& e) override
     {
+        if (!isRealClickEvent(e))
+            return;
+
         onClick();
     }
 
@@ -108,11 +113,11 @@ public:
         addChildComponent(editor);
         editor.addListener(this);
 
-        editor.setColour(TextEditor::backgroundColourId, findColour(PlugDataColour::panelActiveBackgroundColourId));
+        editor.setColour(TextEditor::backgroundColourId, getThemeColours(*this).panelActiveBackgroundColour);
         editor.setColour(TextEditor::focusedOutlineColourId, Colours::transparentBlack);
         editor.setColour(TextEditor::outlineColourId, Colours::transparentBlack);
 
-        editor.setFont(Font(15));
+        editor.setFont(Font(FontOptions(15)));
 
         addAndMakeVisible(resetButton);
         resetButton.onClick = [this] {
@@ -151,40 +156,40 @@ public:
 
     void paint(Graphics& g) override
     {
+        auto const& colours = getThemeColours(*this);
+
         auto [x, width] = getContentXAndWidth();
         int const height = (getNumRows() + 1) * 32;
 
         // Draw area behind reset button
-        auto const resetButtonBounds = resetButton.getBounds().toFloat();
+        auto const resetButtonBounds = resetButton.getBounds();
 
-        Path p;
-        p.addRoundedRectangle(resetButtonBounds.reduced(3.0f), Corners::largeCornerRadius);
-        StackShadow::renderDropShadow(hash("search_panel_reset_button"), g, p, Colour(0, 0, 0).withAlpha(0.4f), 7);
+        StackShadow::drawShadowForRect(g, resetButtonBounds.reduced(3.0f), 8, Corners::largeCornerRadius, 0.4f);
 
-        g.setColour(findColour(PlugDataColour::panelForegroundColourId));
-        g.fillRoundedRectangle(resetButtonBounds, Corners::largeCornerRadius);
+        g.setColour(colours.panelForegroundColour);
+        g.fillRoundedRectangle(resetButtonBounds.toFloat(), Corners::largeCornerRadius);
 
-        g.setColour(findColour(PlugDataColour::toolbarOutlineColourId));
-        g.drawRoundedRectangle(resetButtonBounds, Corners::largeCornerRadius, 1.0f);
+        g.setColour(colours.toolbarOutlineColour);
+        g.drawRoundedRectangle(resetButtonBounds.toFloat(), Corners::largeCornerRadius, 1.0f);
 
         // Draw area behind properties
-        auto const propertyBounds = Rectangle<float>(x, 90.0f, width, height);
+        auto const propertyBounds = Rectangle<int>(x, 90.0f, width, height);
 
-        p = Path();
-        p.addRoundedRectangle(propertyBounds.reduced(3.0f), Corners::largeCornerRadius);
-        StackShadow::renderDropShadow(hash("search_path_panel"), g, p, Colour(0, 0, 0).withAlpha(0.4f), 7);
+        StackShadow::drawShadowForRect(g, propertyBounds.reduced(3.0f), 8, Corners::largeCornerRadius, 0.4f);
 
-        g.setColour(findColour(PlugDataColour::panelForegroundColourId));
-        g.fillRoundedRectangle(propertyBounds, Corners::largeCornerRadius);
+        g.setColour(colours.panelForegroundColour);
+        g.fillRoundedRectangle(propertyBounds.toFloat(), Corners::largeCornerRadius);
 
-        g.setColour(findColour(PlugDataColour::toolbarOutlineColourId));
-        g.drawRoundedRectangle(propertyBounds, Corners::largeCornerRadius, 1.0f);
+        g.setColour(colours.toolbarOutlineColour);
+        g.drawRoundedRectangle(propertyBounds.toFloat(), Corners::largeCornerRadius, 1.0f);
 
         Fonts::drawStyledText(g, "Search paths", x, 0, width - 4, 36.0f, findColour(PropertyComponent::labelTextColourId), Semibold, 15.0f);
     }
 
     void paintListBoxItem(int const rowNumber, Graphics& g, int const width, int const height, bool const rowIsSelected) override
     {
+        auto const& colours = getThemeColours(*this);
+
         auto [x, newWidth] = getContentXAndWidth();
 
         if (rowIsSelected) {
@@ -193,14 +198,14 @@ public:
             Path p;
             p.addRoundedRectangle(x, 0.0f, newWidth, height, Corners::largeCornerRadius, Corners::largeCornerRadius, roundTop, roundTop, false, false);
 
-            g.setColour(findColour(PlugDataColour::panelActiveBackgroundColourId));
+            g.setColour(colours.panelActiveBackgroundColour);
             g.fillPath(p);
         }
 
-        g.setColour(findColour(PlugDataColour::toolbarOutlineColourId).withAlpha(0.5f));
+        g.setColour(colours.toolbarOutlineColour.withAlpha(0.5f));
         g.drawHorizontalLine(height - 1.0f, x, x + newWidth);
 
-        Fonts::drawText(g, paths[rowNumber], x + 12, 0, width - 9, height, findColour(PlugDataColour::panelTextColourId), 15);
+        Fonts::drawText(g, paths[rowNumber], x + 12, 0, width - 9, height, colours.panelTextColour, 15);
     }
 
     void deleteKeyPressed(int const row) override
@@ -273,10 +278,10 @@ private:
     {
         paths.clear();
 
-        for (auto child : SettingsFile::getInstance()->getPathsTree()) {
-            if (child.hasType("Path")) {
-                paths.addIfNotAlreadyThere(child.getProperty("Path").toString());
-            }
+        for (auto& child : SettingsFile::getInstance()->getProperty<VarArray>("paths")) {
+            auto path = child.toString();
+            if (path.isNotEmpty())
+                paths.add(path);
         }
 
         listBox.updateContent();
@@ -286,15 +291,13 @@ private:
     }
     void internalChange()
     {
-        auto pathsTree = SettingsFile::getInstance()->getPathsTree();
-        pathsTree.removeAllChildren(nullptr);
+        auto& pathsTree = SettingsFile::getInstance()->getProperty<VarArray>("paths");
+        pathsTree.clear();
 
         for (auto const& path : paths) {
             auto dir = File(path);
             if (dir.isDirectory()) {
-                auto newPath = ValueTree("Path");
-                newPath.setProperty("Path", dir.getFullPathName(), nullptr);
-                pathsTree.appendChild(newPath, nullptr);
+                pathsTree.add(dir.getFullPathName());
             }
         }
 
@@ -466,11 +469,11 @@ public:
         addChildComponent(editor);
         editor.addListener(this);
 
-        editor.setColour(TextEditor::backgroundColourId, findColour(PlugDataColour::panelActiveBackgroundColourId));
+        editor.setColour(TextEditor::backgroundColourId, getThemeColours(*this).panelActiveBackgroundColour);
         editor.setColour(TextEditor::focusedOutlineColourId, Colours::transparentBlack);
         editor.setColour(TextEditor::outlineColourId, Colours::transparentBlack);
 
-        editor.setFont(Font(15));
+        editor.setFont(Font(FontOptions(15)));
 
         listBox.getViewport()->setScrollBarsShown(false, false, false, false);
 
@@ -485,20 +488,20 @@ public:
 
     void paint(Graphics& g) override
     {
+        auto const& colours = getThemeColours(*this);
+
         auto [x, width] = getContentXAndWidth();
         int const height = (getNumRows() + 1) * 32;
 
-        auto const propertyBounds = Rectangle<float>(x, 40.0f, width, height);
+        auto const propertyBounds = Rectangle<int>(x, 40.0f, width, height);
 
-        Path p;
-        p.addRoundedRectangle(propertyBounds.reduced(3.0f), Corners::largeCornerRadius);
-        StackShadow::renderDropShadow(hash("libraries_panel"), g, p, Colour(0, 0, 0).withAlpha(0.4f), 7);
+        StackShadow::drawShadowForRect(g, propertyBounds.reduced(3.0f), 8, Corners::largeCornerRadius, 0.4f);
 
-        g.setColour(findColour(PlugDataColour::panelForegroundColourId));
-        g.fillRoundedRectangle(propertyBounds, Corners::largeCornerRadius);
+        g.setColour(colours.panelForegroundColour);
+        g.fillRoundedRectangle(propertyBounds.toFloat(), Corners::largeCornerRadius);
 
-        g.setColour(findColour(PlugDataColour::toolbarOutlineColourId));
-        g.drawRoundedRectangle(propertyBounds, Corners::largeCornerRadius, 1.0f);
+        g.setColour(colours.toolbarOutlineColour);
+        g.drawRoundedRectangle(propertyBounds.toFloat(), Corners::largeCornerRadius, 1.0f);
 
         Fonts::drawStyledText(g, "Libraries to load", x, 0, width - 4, 36.0f, findColour(PropertyComponent::labelTextColourId), Semibold, 15.0f);
     }
@@ -512,22 +515,23 @@ public:
 
     void paintListBoxItem(int const rowNumber, Graphics& g, int const width, int const height, bool const rowIsSelected) override
     {
+        auto const& colours = getThemeColours(*this);
+
         auto [x, newWidth] = getContentXAndWidth();
 
         if (rowIsSelected) {
-
             bool const roundTop = rowNumber == 0;
             Path p;
             p.addRoundedRectangle(x, 0.0f, newWidth, height, Corners::largeCornerRadius, Corners::largeCornerRadius, roundTop, roundTop, false, false);
 
-            g.setColour(findColour(PlugDataColour::panelActiveBackgroundColourId));
+            g.setColour(colours.panelActiveBackgroundColour);
             g.fillPath(p);
         }
 
-        g.setColour(findColour(PlugDataColour::toolbarOutlineColourId).withAlpha(0.5f));
+        g.setColour(colours.toolbarOutlineColour.withAlpha(0.5f));
         g.drawHorizontalLine(height - 1.0f, x, x + newWidth);
 
-        Fonts::drawText(g, librariesToLoad[rowNumber], x + 12, 0, width - 9, height, findColour(PlugDataColour::panelTextColourId), 15);
+        Fonts::drawText(g, librariesToLoad[rowNumber], x + 12, 0, width - 9, height, colours.panelTextColour, 15);
     }
 
     void deleteKeyPressed(int const row) override
@@ -580,10 +584,10 @@ public:
     {
         librariesToLoad.clear();
 
-        for (auto child : SettingsFile::getInstance()->getLibrariesTree()) {
-            if (child.hasType("Library")) {
-                librariesToLoad.addIfNotAlreadyThere(child.getProperty("Name").toString());
-            }
+        for (auto& child : SettingsFile::getInstance()->getProperty<VarArray>("libraries")) {
+            auto library = child.toString();
+            if (library.isNotEmpty())
+                librariesToLoad.add(library);
         }
 
         listBox.updateContent();
@@ -593,14 +597,12 @@ public:
     }
     void internalChange()
     {
-        auto librariesTree = SettingsFile::getInstance()->getLibrariesTree();
-        librariesTree.removeAllChildren(nullptr);
+        auto& librariesTree = SettingsFile::getInstance()->getProperty<VarArray>("libraries");
+        librariesTree.clear();
 
         for (auto const& name : librariesToLoad) {
             if (name.isNotEmpty()) {
-                auto newLibrary = ValueTree("Library");
-                newLibrary.setProperty("Name", name, nullptr);
-                librariesTree.appendChild(newLibrary, nullptr);
+                librariesTree.add(name);
             }
         }
 
@@ -692,6 +694,39 @@ private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LibraryLoadPanel)
 };
 
+class EnableGemToggle : public Component {
+public:
+    EnableGemToggle()
+        : boolComponent("Enable GEM", SettingsFile::getInstance()->getPropertyAsValue("enable_gem"), { "No", "Yes" })
+    {
+        addAndMakeVisible(boolComponent);
+    }
+
+private:
+    void paint(Graphics& g) override
+    {
+        auto const& colours = getThemeColours(*this);
+
+        Fonts::drawStyledText(g, "GEM", 4, 0, getWidth() - 4, 26, colours.panelTextColour, Semibold, 14.5f);
+
+        auto b = getLocalBounds().withTrimmedTop(26).reduced(4);
+        StackShadow::drawShadowForRect(g, b.reduced(3), 8, Corners::largeCornerRadius, 0.4f);
+
+        g.setColour(colours.panelForegroundColour);
+        g.fillRoundedRectangle(b.toFloat(), Corners::largeCornerRadius);
+
+        g.setColour(colours.toolbarOutlineColour);
+        g.drawRoundedRectangle(b.toFloat(), Corners::largeCornerRadius, 1.0f);
+    }
+
+    void resized() override
+    {
+        boolComponent.setBounds(getLocalBounds().withTrimmedTop(26).reduced(4));
+    }
+
+    PropertiesPanel::BoolComponent boolComponent;
+};
+
 class PathsSettingsPanel final : public SettingsDialogPanel
     , public ComponentListener {
 public:
@@ -699,13 +734,16 @@ public:
     {
         container.addAndMakeVisible(searchPathsPanel);
         container.addAndMakeVisible(libraryLoadPanel);
+        container.addAndMakeVisible(enableGemToggle);
 
         searchPathsPanel.onChange = [this] {
             updateBounds();
+            SettingsFile::getInstance()->triggerSettingsChange("paths");
         };
 
         libraryLoadPanel.onChange = [this] {
             updateBounds();
+            SettingsFile::getInstance()->triggerSettingsChange("libraries");
         };
 
         container.setVisible(true);
@@ -720,7 +758,8 @@ public:
 private:
     void updateBounds()
     {
-        searchPathsPanel.setSize(getWidth(), 96.0f + (searchPathsPanel.getNumRows() + 1) * 32.0f);
+        enableGemToggle.setBounds(getLocalBounds().withTrimmedTop(4).removeFromTop(78).reduced(41, 6));
+        searchPathsPanel.setBounds(0, 74, getWidth(), 96.0f + (searchPathsPanel.getNumRows() + 1) * 32.0f);
         libraryLoadPanel.setBounds(libraryLoadPanel.getX(), searchPathsPanel.getBottom() + 4.0f, getWidth(), 52.0f + (libraryLoadPanel.getNumRows() + 1) * 32.0f);
 
         container.setBounds(getLocalBounds().getUnion(searchPathsPanel.getBounds()).getUnion(libraryLoadPanel.getBounds()));
@@ -732,6 +771,7 @@ private:
         updateBounds();
     }
 
+    EnableGemToggle enableGemToggle;
     SearchPathPanel searchPathsPanel;
     LibraryLoadPanel libraryLoadPanel;
 

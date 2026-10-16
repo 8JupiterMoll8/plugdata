@@ -1,7 +1,9 @@
 #pragma once
 
 #include <juce_data_structures/juce_data_structures.h>
+#include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_graphics/juce_graphics.h>
+#include <bit>
 
 using namespace juce;
 
@@ -44,7 +46,7 @@ struct ProjectInfo {
 #else
     static inline File const appDataDir = File::getSpecialLocation(File::SpecialLocationType::userDocumentsDirectory).getChildFile("plugdata");
 #endif
-    static inline String const versionSuffix = "-test1";
+    static inline String const versionSuffix = "-test4";
     static inline File const versionDataDir = appDataDir.getChildFile("Versions").getChildFile(ProjectInfo::versionString + versionSuffix);
 };
 
@@ -54,10 +56,15 @@ T getValue(Value const& v)
     if constexpr (std::is_same_v<T, String>) {
         return v.toString();
     } else if constexpr (std::is_same_v<T, Colour>) {
-        return Colour::fromString(v.toString());
+        return std::bit_cast<Colour>(static_cast<int>(v.getValue()));
     } else {
         return static_cast<T>(v.getValue());
     }
+}
+
+inline var colourToVar(Colour const& c)
+{
+    return var(std::bit_cast<int>(c)); // juce::Colour is just a bgra int, so value->colour->value conversion can just be a cast
 }
 
 inline void setValueExcludingListener(Value& parameter, var const& value, Value::Listener* listener)
@@ -66,10 +73,7 @@ inline void setValueExcludingListener(Value& parameter, var const& value, Value:
     jassert(dynamic_cast<SynchronousValueSource*>(&parameter.getValueSource()) != nullptr);
 
     parameter.removeListener(listener);
-
-    auto oldValue = parameter.getValue();
     parameter.setValue(value);
-
     parameter.addListener(listener);
 }
 
@@ -104,6 +108,11 @@ inline String convertURLtoUTF8(String const& input)
     }
 
     return output.trimEnd();
+}
+
+inline bool isRealClickEvent(MouseEvent const& e)
+{
+    return e.source.isTouch() ? (e.mods.isLeftButtonDown() && !e.mouseWasDraggedSinceMouseDown()) : e.mods.isLeftButtonDown();
 }
 
 inline String getRelativeTimeDescription(String const& timestampString)

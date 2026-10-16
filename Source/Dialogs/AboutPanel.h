@@ -21,17 +21,19 @@ class AboutPanel final : public Component {
     class CreditsViewport final : public BouncingViewport {
         void paint(Graphics& g) override
         {
-            g.setColour(findColour(PlugDataColour::panelBackgroundColourId));
+            g.setColour(getThemeColours(*this).panelBackgroundColour);
             g.fillRoundedRectangle(getLocalBounds().toFloat(), Corners::windowCornerRadius);
         }
 
         void paintOverChildren(Graphics& g) override
         {
-            g.setColour(findColour(PlugDataColour::panelBackgroundColourId));
+            auto const& colours = getThemeColours(*this);
+
+            g.setColour(colours.panelBackgroundColour);
             g.fillRoundedRectangle(getLocalBounds().removeFromTop(16).withTrimmedRight(8).toFloat(), Corners::windowCornerRadius);
 
             // Draw fade for credits viewport
-            g.setGradientFill(ColourGradient::vertical(findColour(PlugDataColour::panelBackgroundColourId), 36, findColour(PlugDataColour::panelBackgroundColourId).withAlpha(0.0f), 48));
+            g.setGradientFill(ColourGradient::vertical(colours.panelBackgroundColour, 36, colours.panelBackgroundColour.withAlpha(0.0f), 48));
             g.fillRect(0, 16, getWidth() - 16, 48);
         }
     };
@@ -88,15 +90,15 @@ class AboutPanel final : public Component {
 
         void paint(Graphics& g) override
         {
+            auto const& colours = getThemeColours(*this);
+
             auto bounds = getLocalBounds().withTrimmedTop(46).reduced(16, 4);
 
-            Fonts::drawStyledText(g, "Contributors", bounds.getX(), bounds.getY() - 8, bounds.getWidth(), 15.0f, findColour(PlugDataColour::panelTextColourId), Semibold, 15.0f);
+            Fonts::drawStyledText(g, "Contributors", bounds.getX(), bounds.getY() - 8, bounds.getWidth(), 15.0f, colours.panelTextColour, Semibold, 15.0f);
 
             bounds.removeFromTop(16);
 
-            Path firstShadowPath;
-            firstShadowPath.addRoundedRectangle(Rectangle<int>(bounds.getX(), bounds.getY(), bounds.getWidth(), contributors.size() * 48).reduced(4), Corners::largeCornerRadius);
-            StackShadow::renderDropShadow(hash("contributors"), g, firstShadowPath, Colour(0, 0, 0).withAlpha(0.32f), 8);
+            StackShadow::drawShadowForRect(g, Rectangle<int>(bounds.getX(), bounds.getY(), bounds.getWidth(), contributors.size() * 48).reduced(4), 9, Corners::largeCornerRadius, 0.32f);
 
             for (int i = 0; i < contributors.size(); i++) {
                 auto rowBounds = bounds.removeFromTop(48);
@@ -106,25 +108,24 @@ class AboutPanel final : public Component {
                 Path outline;
                 outline.addRoundedRectangle(rowBounds.getX(), rowBounds.getY(), rowBounds.getWidth(), rowBounds.getHeight(), Corners::largeCornerRadius, Corners::largeCornerRadius, first, first, last, last);
 
-                g.setColour(findColour(PlugDataColour::panelForegroundColourId));
+                g.setColour(colours.panelForegroundColour);
                 g.fillPath(outline);
 
-                g.setColour(findColour(PlugDataColour::outlineColourId));
+                g.setColour(colours.toolbarOutlineColour);
                 g.strokePath(outline, PathStrokeType(1));
 
-                Fonts::drawText(g, name, rowBounds.reduced(12, 2).translated(0, -8), findColour(PlugDataColour::panelTextColourId), 15);
-                Fonts::drawText(g, role, rowBounds.reduced(12, 2).translated(0, 8), findColour(PlugDataColour::panelTextColourId).withAlpha(0.5f), 15);
+                Fonts::drawText(g, name, rowBounds.reduced(12, 2).translated(0, -8), colours.panelTextColour, 15);
+                Fonts::drawText(g, role, rowBounds.reduced(12, 2).translated(0, 8), colours.panelTextColour.withAlpha(0.5f), 15);
             }
 
             bounds.removeFromTop(24);
 
-            Fonts::drawStyledText(g, "Corporate sponsors", bounds.getX(), bounds.getY() - 8, bounds.getWidth(), 15.0f, findColour(PlugDataColour::panelTextColourId), Semibold, 15.0f);
+            Fonts::drawStyledText(g, "Corporate sponsors", bounds.getX(), bounds.getY() - 8, bounds.getWidth(), 15.0f, colours.panelTextColour, Semibold, 15.0f);
 
             bounds.removeFromTop(16);
 
-            Path secondShadowPath;
-            secondShadowPath.addRoundedRectangle(Rectangle<int>(bounds.getX(), bounds.getY(), bounds.getWidth(), corporateSponsors.size() * 32).reduced(4), Corners::largeCornerRadius);
-            StackShadow::renderDropShadow(hash("corporate_credits_panel"), g, secondShadowPath, Colour(0, 0, 0).withAlpha(0.32f), 8);
+            StackShadow::drawShadowForRect(g, Rectangle<int>(bounds.getX(), bounds.getY(), bounds.getWidth(), corporateSponsors.size() * 32).reduced(4), 9, Corners::largeCornerRadius, 0.32f);
+
             for (int i = 0; i < corporateSponsors.size(); i++) {
                 auto rowBounds = bounds.removeFromTop(36);
                 auto first = i == 0;
@@ -133,26 +134,25 @@ class AboutPanel final : public Component {
                 Path outline;
                 outline.addRoundedRectangle(rowBounds.getX(), rowBounds.getY(), rowBounds.getWidth(), rowBounds.getHeight(), Corners::largeCornerRadius, Corners::largeCornerRadius, first, first, last, last);
 
-                g.setColour(findColour(PlugDataColour::panelForegroundColourId));
+                g.setColour(colours.panelForegroundColour);
                 g.fillPath(outline);
 
-                g.setColour(findColour(PlugDataColour::outlineColourId));
+                g.setColour(colours.toolbarOutlineColour);
                 g.strokePath(outline, PathStrokeType(1));
 
-                Fonts::drawText(g, name, rowBounds.reduced(12, 2), findColour(PlugDataColour::panelTextColourId), 15);
+                Fonts::drawText(g, name, rowBounds.reduced(12, 2), colours.panelTextColour, 15);
 
                 jassert(!bounds.isEmpty());
             }
 
             bounds.removeFromTop(24);
 
-            Fonts::drawStyledText(g, "Sponsors", bounds.getX(), bounds.getY() - 8, bounds.getWidth(), 15.0f, findColour(PlugDataColour::panelTextColourId), Semibold, 15.0f);
+            Fonts::drawStyledText(g, "Sponsors", bounds.getX(), bounds.getY() - 8, bounds.getWidth(), 15.0f, colours.panelTextColour, Semibold, 15.0f);
 
             bounds.removeFromTop(16);
 
-            Path thirdShadowPath;
-            thirdShadowPath.addRoundedRectangle(Rectangle<int>(bounds.getX(), bounds.getY(), bounds.getWidth(), sponsors.size() * 32).reduced(4), Corners::largeCornerRadius);
-            StackShadow::renderDropShadow(hash("credits_panel"), g, thirdShadowPath, Colour(0, 0, 0).withAlpha(0.32f), 8);
+            StackShadow::drawShadowForRect(g, Rectangle<int>(bounds.getX(), bounds.getY(), bounds.getWidth(), sponsors.size() * 32).reduced(4), 9, Corners::largeCornerRadius, 0.32f);
+
             for (int i = 0; i < sponsors.size(); i++) {
                 auto rowBounds = bounds.removeFromTop(36);
                 auto first = i == 0;
@@ -161,13 +161,13 @@ class AboutPanel final : public Component {
                 Path outline;
                 outline.addRoundedRectangle(rowBounds.getX(), rowBounds.getY(), rowBounds.getWidth(), rowBounds.getHeight(), Corners::largeCornerRadius, Corners::largeCornerRadius, first, first, last, last);
 
-                g.setColour(findColour(PlugDataColour::panelForegroundColourId));
+                g.setColour(colours.panelForegroundColour);
                 g.fillPath(outline);
 
-                g.setColour(findColour(PlugDataColour::outlineColourId));
+                g.setColour(colours.toolbarOutlineColour);
                 g.strokePath(outline, PathStrokeType(1));
 
-                Fonts::drawText(g, name, rowBounds.reduced(12, 2), findColour(PlugDataColour::panelTextColourId), 15);
+                Fonts::drawText(g, name, rowBounds.reduced(12, 2), colours.panelTextColour, 15);
 
                 jassert(!bounds.isEmpty());
             }
@@ -182,9 +182,16 @@ class AboutPanel final : public Component {
     class LicensePanel final : public Component {
         TextEditor license;
 
-        static inline String const licenseText = "Copyright Timothy Schoen\n\n"
-                                                 "This app is licensed under the GNU General Public License version 3 (GPL-3.0). You are free to use, modify, and distribute the software, provided that any derivative works also carry the same license and the source code remains accessible.\n"
-                                                 "This application comes with absolutely no warranty.";
+        static inline String const licenseText = String::fromUTF8("Copyright \xc2\xa9 Timothy Schoen\n"
+                                                                  "\n"
+                                                                  "This program is free software: you can redistribute it and/or modify\n"
+                                                                  "it under the terms of the GNU Affero General Public License (AGPL-3.0) as published by the Free Software Foundation.\n"
+                                                                  "\n"
+                                                                  "Portions of this program originating from the plugdata repository (excluding third-party submodules) are licensed under the GNU General Public License (GPL-3.0) by their respective contributors. When combined with software licensed under the AGPL-3.0 (including the JUCE framework), the resulting work is distributed under the terms of the AGPL-3.0.\n"
+                                                                  "\n"
+                                                                  "This program is distributed in the hope that it will be useful,\n"
+                                                                  "but WITHOUT ANY WARRANTY; without even the implied warranty of\n"
+                                                                  "MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.");
 
     public:
         LicensePanel() = default;
@@ -197,7 +204,7 @@ class AboutPanel final : public Component {
                 license.setReadOnly(true);
                 license.setMultiLine(true);
                 license.setText(licenseText);
-                license.setFont(Font(15));
+                license.setFont(Font(FontOptions(15)));
                 license.setLineSpacing(1.0f);
                 addAndMakeVisible(license);
             }
@@ -210,7 +217,7 @@ class AboutPanel final : public Component {
 
         void paint(Graphics& g) override
         {
-            g.setColour(findColour(PlugDataColour::panelBackgroundColourId));
+            g.setColour(getThemeColours(*this).panelBackgroundColour);
             g.fillRoundedRectangle(getLocalBounds().toFloat(), Corners::windowCornerRadius);
         }
     };
@@ -221,7 +228,7 @@ class AboutPanel final : public Component {
 
     MainToolbarButton backButton;
 
-    Image logo = ImageFileFormat::loadFrom(BinaryData::plugdata_large_logo_png, BinaryData::plugdata_large_logo_pngSize);
+    Image logo = BinaryData::loadImage(BinaryData::plugdata_large_logo_png);
 
 public:
     AboutPanel()
@@ -291,18 +298,20 @@ public:
 
     void paint(Graphics& g) override
     {
-        g.setColour(findColour(PlugDataColour::panelBackgroundColourId));
+        auto const& colours = getThemeColours(*this);
+
+        g.setColour(colours.panelBackgroundColour);
         g.fillRoundedRectangle(getLocalBounds().toFloat(), Corners::windowCornerRadius);
 
-        Fonts::drawStyledText(g, "plugdata", 0, 100, getWidth(), 30, findColour(PlugDataColour::panelTextColourId), Bold, 30, Justification::centred);
+        Fonts::drawStyledText(g, "plugdata", 0, 100, getWidth(), 30, colours.panelTextColour, Bold, 30, Justification::centred);
 
-        g.setFont(Font(16));
+        g.setFont(Font(FontOptions(16)));
         g.drawFittedText("By Timothy Schoen", 0, 132, getWidth(), 30, Justification::centred, 1);
 
-        g.setColour(findColour(PlugDataColour::dataColourId).withAlpha(0.2f));
+        g.setColour(colours.dataColour.withAlpha(0.2f));
         auto const versionBounds = getLocalBounds().withTrimmedTop(162).removeFromTop(32).withSizeKeepingCentre(64, 24);
         g.fillRoundedRectangle(versionBounds.toFloat(), 12.0f);
-        Fonts::drawStyledText(g, "v" + String(ProjectInfo::versionString), versionBounds.getX(), versionBounds.getY(), versionBounds.getWidth(), versionBounds.getHeight(), findColour(PlugDataColour::panelTextColourId), Semibold, 16, Justification::centred);
+        Fonts::drawStyledText(g, "v" + String(ProjectInfo::versionString), versionBounds.getX(), versionBounds.getY(), versionBounds.getWidth(), versionBounds.getHeight(), colours.panelTextColour, Semibold, 16, Justification::centred);
 
         Rectangle<float> const logoBounds = getLocalBounds().removeFromTop(120.0f).withSizeKeepingCentre(84.0f, 84.0f).toFloat();
 
@@ -311,9 +320,8 @@ public:
         g.setImageResamplingQuality(Graphics::mediumResamplingQuality);
 
         for (auto& shadow : SmallArray<Rectangle<int>> { viewWebsite.getBounds().getUnion(viewOnGithub.getBounds()), reportIssue.getBounds(), sponsor.getBounds(), showCredits.getBounds().getUnion(showLicense.getBounds()) }) {
-            Path shadowPath;
-            shadowPath.addRoundedRectangle(shadow.reduced(4), Corners::largeCornerRadius);
-            StackShadow::renderDropShadow(hash("about_panel"), g, shadowPath, Colour(0, 0, 0).withAlpha(0.32f), 8);
+
+            StackShadow::drawShadowForRect(g, shadow.reduced(4), 9, Corners::largeCornerRadius, 0.32f);
         }
 
         backButton.setBounds(2, 0, 40, 40);

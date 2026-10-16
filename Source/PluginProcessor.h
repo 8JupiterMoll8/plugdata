@@ -43,8 +43,9 @@ class Library;
 class PlugDataParameter;
 class Autosave;
 class InternalSynth;
+class Recorder;
 class SettingsFile;
-class StatusbarSource;
+class ToolbarSource;
 struct PlugDataLook;
 class PluginEditor;
 class ConnectionMessageDisplay;
@@ -118,6 +119,8 @@ public:
     void getStateInformation(MemoryBlock& destData) override;
     void setStateInformation(void const* data, int sizeInBytes) override;
 
+    String findLostPatch(String const& name) const;
+
     pd::Patch::Ptr findPatchInPluginMode(int editorIndex);
 
     void receiveNoteOn(int channel, int pitch, int velocity) override;
@@ -136,7 +139,7 @@ public:
     void clearTextEditor(uint64_t ptr) override;
     bool isTextEditorDialogShown(uint64_t ptr) override;
 
-    void updateConsole(int numMessages, bool newWarning) override;
+    void updateConsole(SmallString const& message, bool isWarning, int numMessages, bool newWarning) override;
     void onSelectionChanged(String const& selector, SmallArray<pd::Atom> const& list) override;
     void onConsoleMessage(String const& message, bool isError) override;
 
@@ -158,6 +161,7 @@ public:
         return nbus > 0;
     }
 
+    void settingsChanged(String const& name, var const& value) override;
     void settingsFileReloaded() override;
     void settingsChanged(String const& name, var const& value) override;
     t_canvas* getCanvasBySymbol(const String& canvas_symbol);
@@ -204,15 +208,20 @@ public:
 
     void runBackupLoop();
 
-    int lastUIWidth = 1000, lastUIHeight = 650;
+    bool toggleRecording(PluginEditor* editor);
+
+    // Written from PluginEditor::resized() on the message thread, but read from
+    // getStateInformation(), which the host can call from any thread
+    AtomicValue<int> lastUIWidth = 1000, lastUIHeight = 660;
 
     AtomicValue<float>* volume;
-    ValueTree pluginModeTheme;
+    DynamicObject::Ptr pluginModeTheme;
     float pluginModeScale = 1.0f;
 
     String currentThemeName;
+    bool appliedIoletSpacingEdge = false;
 
-    SettingsFile* settingsFile;
+    SettingsFile* settingsFile = nullptr;
 
     std::unique_ptr<pd::Library> objectLibrary;
 
@@ -220,7 +229,7 @@ public:
 
     Value commandLocked = Value(var(false));
 
-    std::unique_ptr<StatusbarSource> statusbarSource;
+    std::unique_ptr<ToolbarSource> toolbarSource;
 
     struct AiMark { int state = 0; bool transient = false; };
     // PRD overlay: AI state marker for a gobj (0 = none). Used by Object::paint.
@@ -581,7 +590,7 @@ private:
     AudioProcessLoadMeasurer cpuLoadMeasurer;
 
     bool midiByteIsSysex = false;
-    uint8 midiByteBuffer[512] = {};
+    uint8 midiByteBuffer[512] = { };
     size_t midiByteIndex = 0;
 
     SmallArray<pd::Atom> atoms_playhead;
@@ -598,9 +607,9 @@ private:
     std::unique_ptr<perfetto::TracingSession> tracingSession;
 #endif
 
-    static inline String const else_version = "ELSE v1.0-rc13";
-    static inline String const cyclone_version = "cyclone v0.9-2";
-    static inline String const heavylib_version = "heavylib v0.4";
+    static inline String const else_version = "ELSE v1.0-rc14";
+    static inline String const cyclone_version = "cyclone v0.9-4";
+    static inline String const heavylib_version = "heavylib v0.5.0";
     static inline String const gem_version = "Gem v0.94";
     // this gets updated with live version data later
     static String pdlua_version;
@@ -626,7 +635,7 @@ private:
     private:
         void handleAsyncUpdate() override
         {
-            auto const details = AudioProcessorListener::ChangeDetails {}.withParameterInfoChanged(true);
+            auto const details = AudioProcessorListener::ChangeDetails { }.withParameterInfoChanged(true);
             processor.updateHostDisplay(details);
         }
 
@@ -638,7 +647,8 @@ private:
     int backupRunLoopInterval;
     TimedCallback backupRunLoop = TimedCallback([this] { runBackupLoop(); });
     CriticalSection backupLoopLock;
-    std::atomic<bool> isProcessingAudio;
+    AtomicValue<bool> isProcessingAudio;
+    std::unique_ptr<Recorder> recorder;
     t_gobj* resolveStableId(const String& canvasName, const String& objectId);
 
     // Full identity reconcile against the live canvas (gl_list): evict entries whose

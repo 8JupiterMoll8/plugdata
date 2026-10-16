@@ -184,12 +184,12 @@ protected:
     void grow_pod(size_t MinSize, size_t TSize)
     {
 #if defined(__GNUC__) && !defined(__clang__)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#    pragma GCC diagnostic push
+#    pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
 #endif
         Base::grow_pod(getFirstEl(), MinSize, TSize);
 #if defined(__GNUC__) && !defined(__clang__)
-#pragma GCC diagnostic pop
+#    pragma GCC diagnostic pop
 #endif
     }
 
@@ -1640,16 +1640,14 @@ namespace std {
 
 /// Implement std::swap in terms of SmallArray swap.
 template<typename T>
-void
-swap(SmallArrayImpl<T>& LHS, SmallArrayImpl<T>& RHS) noexcept
+void swap(SmallArrayImpl<T>& LHS, SmallArrayImpl<T>& RHS) noexcept
 {
     LHS.swap(RHS);
 }
 
 /// Implement std::swap in terms of SmallArray swap.
 template<typename T, unsigned N>
-void
-swap(SmallArray<T, N>& LHS, SmallArray<T, N>& RHS) noexcept
+void swap(SmallArray<T, N>& LHS, SmallArray<T, N>& RHS) noexcept
 {
     LHS.swap(RHS);
 }
@@ -1831,6 +1829,11 @@ public:
     {
     }
 
+    HeapArray(T const* start, T const* end)
+        : data_(start, end)
+    {
+    }
+
     HeapArray(HeapArray const& other)
         : data_(other.data_)
     {
@@ -1973,11 +1976,6 @@ public:
     }
 
     void sort(int (*sort_fn)(T, T))
-    {
-        std::sort(data_.begin(), data_.end(), sort_fn);
-    }
-
-    void sort(std::function<int(T const&, T const&)> sort_fn)
     {
         std::sort(data_.begin(), data_.end(), sort_fn);
     }
@@ -2239,7 +2237,7 @@ public:
     {
         return std::find(this->begin(), this->end(), to_find) != this->end();
     }
-    
+
     // Other necessary methods, simplified
     bool empty() const { return data_.empty(); }
     bool not_empty() const { return !data_.empty(); }
@@ -2465,7 +2463,6 @@ using UnorderedSet = ankerl::unordered_dense::set<Key>;
 
 template<typename Key>
 using UnorderedSegmentedSet = ankerl::unordered_dense::segmented_set<Key>;
-
 
 /// A traits type that is used to handle pointer types and things that are just
 /// wrappers for pointers as a uniform entity.
@@ -2953,9 +2950,9 @@ public:
 
     bool operator==(StackString const& other) const
     {
-        if(length() != other.length())
+        if (length() != other.length())
             return false;
-        
+
         return !std::strncmp(data_.data(), other.data_.data(), length());
     }
 
@@ -2970,7 +2967,7 @@ public:
     // Checks if the string is empty.
     bool isEmpty() const noexcept
     {
-        return data_.empty();
+        return data_.empty() || data_.front() == '\0';
     }
 
     // Returns the character at the given index.
@@ -2995,6 +2992,64 @@ public:
         return StackString(data_.data() + startIndex, endIndex - startIndex);
     }
 
+    // Returns the section after the first occurrence of a substring.
+    StackString fromFirstOccurrenceOf(StackString substringToStartFrom) const
+    {
+        auto const stringEnd = data_.begin() + length();
+        auto const substringEnd = substringToStartFrom.data_.begin() + substringToStartFrom.length();
+        auto const occurrence = std::search(data_.begin(), stringEnd, substringToStartFrom.data_.begin(), substringEnd);
+
+        if (occurrence == stringEnd && substringToStartFrom.length() != 0)
+            return StackString();
+
+        return StackString(occurrence + substringToStartFrom.length(), stringEnd);
+    }
+
+    // Returns the section after the last occurrence of a substring.
+    StackString fromLastOccurrenceOf(StackString substringToFind) const
+    {
+        if (substringToFind.length() == 0)
+            return *this;
+
+        auto const stringEnd = data_.begin() + length();
+        auto const substringEnd = substringToFind.data_.begin() + substringToFind.length();
+        auto const occurrence = std::find_end(data_.begin(), stringEnd, substringToFind.data_.begin(), substringEnd);
+
+        if (occurrence == stringEnd)
+            return *this;
+
+        return StackString(occurrence + substringToFind.length(), stringEnd);
+    }
+
+    // Returns the section before the first occurrence of a substring.
+    StackString upToFirstOccurrenceOf(StackString substringToEndWith) const
+    {
+        auto const stringEnd = data_.begin() + length();
+        auto const substringEnd = substringToEndWith.data_.begin() + substringToEndWith.length();
+        auto const occurrence = std::search(data_.begin(), stringEnd, substringToEndWith.data_.begin(), substringEnd);
+
+        if (occurrence == stringEnd && substringToEndWith.length() != 0)
+            return *this;
+
+        return StackString(data_.begin(), occurrence);
+    }
+
+    // Returns the section before the last occurrence of a substring.
+    StackString upToLastOccurrenceOf(StackString substringToFind) const
+    {
+        if (substringToFind.length() == 0)
+            return *this;
+
+        auto const stringEnd = data_.begin() + length();
+        auto const substringEnd = substringToFind.data_.begin() + substringToFind.length();
+        auto const occurrence = std::find_end(data_.begin(), stringEnd, substringToFind.data_.begin(), substringEnd);
+
+        if (occurrence == stringEnd)
+            return *this;
+
+        return StackString(data_.begin(), occurrence);
+    }
+
     // Converts the string to upper case.
     StackString toUpperCase() const
     {
@@ -3015,6 +3070,19 @@ public:
     void clear() noexcept
     {
         data_.clear();
+    }
+
+    // Returns true if the string contains a specific substring.
+    bool contains(StackString const& substringToFind) const noexcept
+    {
+        auto const stringEnd = data_.begin() + length();
+        auto const substringLength = substringToFind.length();
+
+        if (substringLength == 0)
+            return true;
+
+        auto const substringEnd = substringToFind.data_.begin() + substringLength;
+        return std::search(data_.begin(), stringEnd, substringToFind.data_.begin(), substringEnd) != stringEnd;
     }
 
     // Returns true if the string contains a specific character.

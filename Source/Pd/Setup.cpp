@@ -5,15 +5,22 @@
  */
 
 extern "C" {
+#include <string.h>
 #include <m_pd.h>
 #include <z_hooks.h>
 #include <s_net.h>
+#include <m_imp.h>
+#include <m_class_probe.h>
 }
 
 #include <clocale>
 #include <string>
 #include <cstring>
 #include "Setup.h"
+
+#if ENABLE_GEM
+#    include <Gem/src/Output/gemjucewindow.h>
+#endif
 
 static t_class* plugdata_receiver_class;
 
@@ -165,15 +172,11 @@ void Gem_setup(t_symbol* plugin_path);
 void gemcubeframebuffer_setup();
 void gemframebuffer_setup();
 void gemhead_setup();
-void gemkeyboard_setup();
-void gemkeyname_setup();
 void gemlist_setup();
 void gemlist_info_setup();
 void gemlist_matrix_setup();
 void gemmanager_setup();
-void gemmouse_setup();
 void gemreceive_setup();
-void gemwin_setup();
 void modelfiler_setup();
 void render_trigger_setup();
 void GemSplash_setup();
@@ -753,7 +756,7 @@ void borax_setup();
 void bucket_setup();
 void buddy_setup();
 void capture_setup();
-void cartopol_setup();
+void cyclone_cartopol_setup();
 void clip_setup();
 void coll_setup();
 void cosh_setup();
@@ -792,7 +795,7 @@ void onebang_setup();
 void pak_setup();
 void past_setup();
 void peak_setup();
-void poltocar_setup();
+void cyclone_poltocar_setup();
 void pong_setup();
 void prepend_setup();
 void prob_setup();
@@ -813,7 +816,6 @@ void substitute_setup();
 void sustain_setup();
 void switch_setup();
 void table_setup();
-void tanh_setup();
 void thresh_setup();
 void togedge_setup();
 void tosymbol_setup();
@@ -868,7 +870,7 @@ void allpass_tilde_setup();
 void asin_tilde_setup();
 void asinh_tilde_setup();
 void atan_tilde_setup();
-void atan2_tilde_setup();
+void cyclone_atan2_tilde_setup();
 void atanh_tilde_setup();
 void atodb_tilde_setup();
 void average_tilde_setup();
@@ -881,7 +883,7 @@ void bitshift_tilde_setup();
 void bitxor_tilde_setup();
 void buffir_tilde_setup();
 void capture_tilde_setup();
-void cartopol_tilde_setup();
+void cyclone_cartopol_tilde_setup();
 void change_tilde_setup();
 void click_tilde_setup();
 void clip_tilde_setup();
@@ -931,7 +933,7 @@ void phasewrap_tilde_setup();
 void play_tilde_setup();
 void plusequals_tilde_setup();
 void poke_tilde_setup();
-void poltocar_tilde_setup();
+void cyclone_poltocar_tilde_setup();
 void pong_tilde_setup();
 void pow_tilde_setup();
 void Pow_tilde_setup();
@@ -952,6 +954,7 @@ void slide_tilde_setup();
 void snapshot_tilde_setup();
 void spike_tilde_setup();
 void svf_tilde_setup();
+void cyclone_tanh_setup();
 void cyclone_tanh_tilde_setup();
 void tanx_tilde_setup();
 void teeth_tilde_setup();
@@ -968,8 +971,12 @@ void above_tilde_setup();
 void add_tilde_setup();
 void adsr_tilde_setup();
 void asr_tilde_setup();
+void atan2_tilde_setup();
 void setup_allpass0x2e2nd_tilde();
 void setup_allpass0x2erev_tilde();
+void setup_allpass0x2efilt_tilde();
+void setup_nlist0x2edefine();
+void nlist_setup();
 void args_setup();
 void autofade_tilde_setup();
 void autofade2_tilde_setup();
@@ -1028,7 +1035,6 @@ void setup_ctl0x2ein();
 void setup_ctl0x2eout();
 void cusp_tilde_setup();
 void datetime_setup();
-void dir_setup();
 void db2lin_tilde_setup();
 void decay_tilde_setup();
 void default_setup();
@@ -1045,6 +1051,7 @@ void eq_tilde_setup();
 void factor_setup();
 void fader_tilde_setup();
 void fbdelay_tilde_setup();
+void fbdelay2_tilde_setup();
 void fbsine_tilde_setup();
 void fbsine2_tilde_setup();
 void setup_fdn0x2erev_tilde();
@@ -1115,6 +1122,7 @@ void setup_note0x2ein();
 void setup_note0x2eout();
 void noteinfo_setup();
 void nyquist_tilde_setup();
+void op_setup();
 void op_tilde_setup();
 void openfile_setup();
 void scope_tilde_setup();
@@ -1202,6 +1210,7 @@ void svfilter_tilde_setup();
 void symbol2any_setup();
 void smooth_tilde_setup();
 void smooth2_tilde_setup();
+void tanh_setup();
 void tanh_tilde_setup();
 void tabplayer_tilde_setup();
 void tabreader_setup();
@@ -1238,7 +1247,6 @@ void zerocross_tilde_setup();
 void nchs_tilde_setup();
 void get_tilde_setup();
 void pick_tilde_setup();
-void sigs_tilde_setup();
 void select_tilde_setup();
 void setup_xselect0x2emc_tilde();
 void merge_tilde_setup();
@@ -1246,6 +1254,21 @@ void unmerge_tilde_setup();
 void phaseseq_tilde_setup();
 void pol2car_tilde_setup();
 void car2pol_tilde_setup();
+void cartopol_tilde_setup();
+void poltocar_tilde_setup();
+void car2pol_setup();
+void cartopol_setup();
+void pol2car_setup();
+void poltocar_setup();
+void sign_setup();
+void sign_tilde_setup();
+void setup_del0x2ein_tilde();
+void setup_del0x2eout_tilde();
+void fonts_setup();
+void listspread_setup();
+void messcoll_setup();
+void robin_setup();
+void shift_setup();
 void lin2db_tilde_setup();
 void sum_tilde_setup();
 void slice_tilde_setup();
@@ -1288,6 +1311,24 @@ void setup_mpe0x2ein();
 void velvet_tilde_setup();
 void popmenu_setup();
 void dropzone_setup();
+
+void elapsed_setup();
+void tempo_setup();
+void unique_setup();
+void closebang_setup();
+void follow_tilde_setup();
+void formant_tilde_setup();
+void formlet_tilde_setup();
+void group_tilde_setup();
+void mix_tilde_setup();
+void moog_tilde_setup();
+void paf_tilde_setup();
+void setup_pan0x2estereo_tilde();
+void pvretune_tilde_setup();
+void streamin_tilde_setup();
+void streamout_tilde_setup();
+void vosim_tilde_setup();
+void width_tilde_setup();
 
 #ifdef ENABLE_FFMPEG
 void setup_play0x2efile_tilde();
@@ -1341,15 +1382,6 @@ int Setup::initialisePd()
         plugdata_print_class = class_new(gensym("plugdata_print"), static_cast<t_newmethod>(nullptr), static_cast<t_method>(nullptr),
             sizeof(t_plugdata_print), CLASS_DEFAULT, A_NULL, 0);
 
-        t_atom zz[ndefaultfont + 2];
-        SETSYMBOL(zz, gensym("."));
-        SETFLOAT(zz + 1, 0);
-
-        for (int i = 0; i < ndefaultfont; i++) {
-            SETFLOAT(zz + i + 2, defaultfontshit[i]);
-        }
-        pd_typedmess(gensym("pd")->s_thing, gensym("init"), 2 + ndefaultfont, zz);
-
         socket_init();
 
         sys_getrealtime(); // Init realtime
@@ -1386,14 +1418,24 @@ void* Setup::createReceiver(void* ptr, char const* s,
 
 void Setup::initialisePdLua(char const* datadir, char* vers, int const vers_len, void (*register_class_callback)(char const*))
 {
+    set_plugdata_object_probe_enabled(1);
     pdlua_setup(datadir, vers, vers_len, register_class_callback);
-    iemguts_setup();
+    set_plugdata_object_probe_enabled(0);
 }
 
 void Setup::initialisePdInstance()
 {
     pdlua_instance_setup();
     fftw_instance_setup();
+
+    t_atom zz[ndefaultfont + 2];
+    SETSYMBOL(zz, gensym("."));
+    SETFLOAT(zz + 1, 0);
+
+    for (int i = 0; i < ndefaultfont; i++) {
+        SETFLOAT(zz + i + 2, defaultfontshit[i]);
+    }
+    pd_typedmess(gensym("pd")->s_thing, gensym("init"), 2 + ndefaultfont, zz);
 }
 
 void* Setup::createPrintHook(void* ptr, t_plugdata_printhook const hook_print)
@@ -1469,13 +1511,31 @@ void Setup::initialiseELSE()
     pdlink_setup();
     pdlink_tilde_setup();
 
+    set_plugdata_object_probe_enabled(1);
     knob_setup();
+    bicoeff_setup();
+    button_setup();
+    function_setup();
+    keyboard_setup();
+    messbox_setup();
+    pad_setup();
+    pic_setup();
+    popmenu_setup();
+    scope_tilde_setup();
+    setup_canvas0x2emouse();
+    note_setup();
+    set_plugdata_object_probe_enabled(0);
+
     above_tilde_setup();
     add_tilde_setup();
     adsr_tilde_setup();
     asr_tilde_setup();
+    atan2_tilde_setup();
     setup_allpass0x2e2nd_tilde();
     setup_allpass0x2erev_tilde();
+    setup_allpass0x2efilt_tilde();
+    setup_nlist0x2edefine();
+    nlist_setup();
     args_setup();
     autofade_tilde_setup();
     autofade2_tilde_setup();
@@ -1495,7 +1555,6 @@ void Setup::initialiseELSE()
     setup_osc0x2eparse();
     setup_osc0x2eroute();
     beat_tilde_setup();
-    bicoeff_setup();
     bicoeff2_setup();
     bitnormal_tilde_setup();
     biquads_tilde_setup();
@@ -1503,12 +1562,11 @@ void Setup::initialiseELSE()
     break_setup();
     brown_tilde_setup();
     buffer_setup();
-    button_setup();
+
     setup_canvas0x2eactive();
     setup_canvas0x2ebounds();
     setup_canvas0x2eedit();
     setup_canvas0x2egop();
-    setup_canvas0x2emouse();
     setup_canvas0x2ename();
     setup_canvas0x2epos();
     setup_canvas0x2esetname();
@@ -1535,7 +1593,6 @@ void Setup::initialiseELSE()
     setup_ctl0x2eout();
     cusp_tilde_setup();
     datetime_setup();
-    dir_setup();
     db2lin_tilde_setup();
     dbgain_tilde_setup();
     decay_tilde_setup();
@@ -1553,6 +1610,7 @@ void Setup::initialiseELSE()
     factor_setup();
     fader_tilde_setup();
     fbdelay_tilde_setup();
+    fbdelay2_tilde_setup();
     fbsine_tilde_setup();
     fbsine2_tilde_setup();
     setup_fdn0x2erev_tilde();
@@ -1566,7 +1624,6 @@ void Setup::initialiseELSE()
     format_setup();
     filterdelay_tilde_setup();
     setup_freq0x2eshift_tilde();
-    function_setup();
     function_tilde_setup();
     gate2imp_tilde_setup();
     gatedelay_tilde_setup();
@@ -1590,7 +1647,6 @@ void Setup::initialiseELSE()
     impulse_tilde_setup();
     impulse2_tilde_setup();
     initmess_setup();
-    keyboard_setup();
     keycode_setup();
     lag_tilde_setup();
     lag2_tilde_setup();
@@ -1611,23 +1667,20 @@ void Setup::initialiseELSE()
     median_tilde_setup();
     merge_setup();
     message_setup();
-    messbox_setup();
     metronome_setup();
     midi_setup();
     mouse_setup();
     setup_mov0x2eavg_tilde();
     setup_mov0x2erms_tilde();
     mtx_tilde_setup();
-    note_setup();
     setup_note0x2ein();
     setup_note0x2eout();
     noteinfo_setup();
     nyquist_tilde_setup();
+    op_setup();
     op_tilde_setup();
     openfile_setup();
-    scope_tilde_setup();
     pack2_setup();
-    pad_setup();
     particlepad_setup();
     ai_midi_setup();
     ai_voice_setup();
@@ -1638,7 +1691,6 @@ void Setup::initialiseELSE()
     peak_tilde_setup();
     setup_pgm0x2ein();
     setup_pgm0x2eout();
-    pic_setup();
     pimp_tilde_setup();
     pink_tilde_setup();
     pimpmul_tilde_setup();
@@ -1711,6 +1763,7 @@ void Setup::initialiseELSE()
     symbol2any_setup();
     smooth_tilde_setup();
     smooth2_tilde_setup();
+    tanh_setup();
     tanh_tilde_setup();
     tabplayer_tilde_setup();
     tabreader_setup();
@@ -1746,7 +1799,6 @@ void Setup::initialiseELSE()
     nchs_tilde_setup();
     get_tilde_setup();
     pick_tilde_setup();
-    sigs_tilde_setup();
     select_tilde_setup();
     setup_xselect0x2emc_tilde();
     merge_tilde_setup();
@@ -1754,6 +1806,21 @@ void Setup::initialiseELSE()
     phaseseq_tilde_setup();
     pol2car_tilde_setup();
     car2pol_tilde_setup();
+    cartopol_tilde_setup();
+    poltocar_tilde_setup();
+    car2pol_setup();
+    cartopol_setup();
+    pol2car_setup();
+    poltocar_setup();
+    sign_setup();
+    sign_tilde_setup();
+    setup_del0x2ein_tilde();
+    setup_del0x2eout_tilde();
+    fonts_setup();
+    listspread_setup();
+    messcoll_setup();
+    robin_setup();
+    shift_setup();
     lin2db_tilde_setup();
     sum_tilde_setup();
     slice_tilde_setup();
@@ -1761,9 +1828,6 @@ void Setup::initialiseELSE()
     repeat_tilde_setup();
     setup_xgate0x2emc_tilde();
     setup_xfade0x2emc_tilde();
-#ifdef ENABLE_SFIZZ
-    sfz_tilde_setup();
-#endif
     sender_setup();
     setup_ptouch0x2ein();
     setup_ptouch0x2eout();
@@ -1786,7 +1850,6 @@ void Setup::initialiseELSE()
     pm4_tilde_setup();
     pm6_tilde_setup();
     velvet_tilde_setup();
-    popmenu_setup();
     // dropzone_setup();
 
     delace_setup();
@@ -1800,10 +1863,33 @@ void Setup::initialiseELSE()
     conv_tilde_setup();
     fm_tilde_setup();
     setup_mpe0x2ein();
+
+    elapsed_setup();
+    tempo_setup();
+    unique_setup();
+    closebang_setup();
+    follow_tilde_setup();
+    formant_tilde_setup();
+    formlet_tilde_setup();
+    group_tilde_setup();
+    mix_tilde_setup();
+    moog_tilde_setup();
+    paf_tilde_setup();
+    setup_pan0x2estereo_tilde();
+    pvretune_tilde_setup();
+    vosim_tilde_setup();
+    width_tilde_setup();
+
+#ifdef ENABLE_SFIZZ
+    sfz_tilde_setup();
+#endif
+
 #if ENABLE_FFMPEG
     setup_play0x2efile_tilde();
     sfload_setup();
     sfinfo_setup();
+    streamin_tilde_setup();
+    streamout_tilde_setup();
 #endif
 }
 
@@ -1814,15 +1900,14 @@ void Setup::initialiseGem(std::string const& gemPluginPath)
     gemcubeframebuffer_setup();
     gemframebuffer_setup();
     gemhead_setup();
-    gemkeyboard_setup();
-    gemkeyname_setup();
     gemlist_setup();
     gemlist_info_setup();
     gemlist_matrix_setup();
     gemmanager_setup();
-    gemmouse_setup();
     gemreceive_setup();
-    gemwin_setup();
+    gemjucewindow_setup();
+    gemcanvas_setup();
+
     modelfiler_setup();
     render_trigger_setup();
     GemSplash_setup();
@@ -1907,17 +1992,6 @@ void Setup::initialiseGem(std::string const& gemPluginPath)
     light_setup();
     spot_light_setup();
     world_light_setup();
-
-    /*
-    gemmacwindow_setup();
-    gemglfw2window_setup();
-    gemglfw3window_setup();
-    gemglutwindow_setup();
-    gemglxwindow_setup();
-    gemsdl2window_setup();
-    gemsdlwindow_setup();
-    gemw32window_setup(); */
-
     part_color_setup();
     part_damp_setup();
     part_draw_setup();
@@ -1937,7 +2011,6 @@ void Setup::initialiseGem(std::string const& gemPluginPath)
     part_velocity_setup();
     part_velsphere_setup();
     part_vertex_setup();
-
     pix_2grey_setup();
     pix_a_2grey_setup();
     pix_add_setup();
@@ -2044,18 +2117,6 @@ void Setup::initialiseGem(std::string const& gemPluginPath)
     pix_writer_setup();
     pix_yuv_setup();
     pix_zoom_setup();
-    vertex_add_setup();
-    vertex_combine_setup();
-    vertex_draw_setup();
-    vertex_grid_setup();
-    vertex_info_setup();
-    // vertex_model_setup();
-    vertex_mul_setup();
-    vertex_offset_setup();
-    vertex_quad_setup();
-    vertex_scale_setup();
-    vertex_set_setup();
-    vertex_tabread_setup();
     GEMglAccum_setup();
     GEMglActiveTexture_setup();
     GEMglActiveTextureARB_setup();
@@ -2404,7 +2465,7 @@ void Setup::initialiseCyclone()
     bucket_setup();
     buddy_setup();
     capture_setup();
-    cartopol_setup();
+    cyclone_cartopol_setup();
     clip_setup();
     coll_setup();
     cosh_setup();
@@ -2435,7 +2496,11 @@ void Setup::initialiseCyclone()
     midiparse_setup();
     minimum_setup();
     mousefilter_setup();
+
+    set_plugdata_object_probe_enabled(1);
     mousestate_setup();
+    set_plugdata_object_probe_enabled(0);
+
     mtr_setup();
     next_setup();
     offer_setup();
@@ -2443,7 +2508,7 @@ void Setup::initialiseCyclone()
     pak_setup();
     past_setup();
     peak_setup();
-    poltocar_setup();
+    cyclone_poltocar_setup();
     pong_setup();
     prepend_setup();
     prob_setup();
@@ -2464,7 +2529,7 @@ void Setup::initialiseCyclone()
     sustain_setup();
     switch_setup();
     table_setup();
-    tanh_setup();
+    cyclone_tanh_setup();
     thresh_setup();
     togedge_setup();
     tosymbol_setup();
@@ -2518,7 +2583,7 @@ void Setup::initialiseCyclone()
     asin_tilde_setup();
     asinh_tilde_setup();
     atan_tilde_setup();
-    atan2_tilde_setup();
+    cyclone_atan2_tilde_setup();
     atanh_tilde_setup();
     atodb_tilde_setup();
     average_tilde_setup();
@@ -2531,7 +2596,7 @@ void Setup::initialiseCyclone()
     bitxor_tilde_setup();
     buffir_tilde_setup();
     capture_tilde_setup();
-    cartopol_tilde_setup();
+    cyclone_cartopol_tilde_setup();
     change_tilde_setup();
     click_tilde_setup();
     clip_tilde_setup();
@@ -2578,7 +2643,7 @@ void Setup::initialiseCyclone()
     play_tilde_setup();
     plusequals_tilde_setup();
     poke_tilde_setup();
-    poltocar_tilde_setup();
+    cyclone_poltocar_tilde_setup();
     pong_tilde_setup();
     pow_tilde_setup();
     Pow_tilde_setup();
