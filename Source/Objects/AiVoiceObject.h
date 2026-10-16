@@ -270,7 +270,7 @@ public:
         bool const hasWav = voice && (voice->x_wav[0] != '\0');
 
         auto const outlineColour = object->isSelected() && !cnv->isGraph
-            ? nvgColour(getThemeColours(*this).objectSelectedOutlineColour)
+            ? nvgColour(getThemeColours().objectSelectedOutlineColour)
             : (rec ? nanovg::nvgRGBA(255, 70, 70, 220) : (play ? nanovg::nvgRGBA(60, 220, 120, 220) : nanovg::nvgRGBA(180, 90, 255, 180)));
 
         // 1. Chassis — same family panel as the cassette.

@@ -273,7 +273,7 @@ public:
     void render(NVGcontext* nvg) override
     {
         auto const b = getLocalBounds().toFloat();
-        auto const outlineColour = object->isSelected() && !cnv->isGraph ? nvgColour(getThemeColours(*this).objectSelectedOutlineColour) : nvgColour(getThemeColours(*this).objectOutlineColour);
+        auto const outlineColour = object->isSelected() && !cnv->isGraph ? nvgColour(getThemeColours().objectSelectedOutlineColour) : nvgColour(getThemeColours().objectOutlineColour);
 
         // 1. Draw rounded background container
         nanovg::nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), fillColour, outlineColour, getPlugDataLook(*this).getObjectCornerRadius());

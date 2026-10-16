@@ -5234,9 +5234,9 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     auto centre = bbox.getCentre();
                     float targetX = centre.x - viewPatch.getWidth() * 0.5f;
                     float targetY = centre.y - viewPatch.getHeight() * 0.5f;
-                    cc->viewport->setViewPosition(
+                    cc->viewport->setViewPosition(juce::Point<int>(
                         (int) std::round(((float) origin.x + targetX) * z),
-                        (int) std::round(((float) origin.y + targetY) * z));
+                        (int) std::round(((float) origin.y + targetY) * z)).toFloat());
                 };
                 if (juce::MessageManager::getInstance()->isThisTheMessageThread()) {
                     frameIfCreateOffscreen();
