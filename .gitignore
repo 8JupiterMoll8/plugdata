@@ -11,3 +11,7 @@ cmake-build-release
 .cache/
 
 *.swp
+
+# Python bytecode
+__pycache__/
+*.pyc
