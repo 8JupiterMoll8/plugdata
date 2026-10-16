@@ -1,0 +1,332 @@
+From f3fceadb63d7c86373cd53085e1003b4491a73f1 Mon Sep 17 00:00:00 2001
+From: Alphi <alphi@starchaser.local>
+Date: Mon, 12 Oct 2026 21:12:53 +0200
+Subject: [PATCH 1/2] feat(control): add ai_midi Pure Data external
+
+---
+ Source/Control/ai_midi.c | 316 +++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 316 insertions(+)
+ create mode 100644 Source/Control/ai_midi.c
+
+diff --git a/Source/Control/ai_midi.c b/Source/Control/ai_midi.c
+new file mode 100644
+index 00000000..61e91f37
+--- /dev/null
++++ b/Source/Control/ai_midi.c
+@@ -0,0 +1,316 @@
++// ai_midi.c - Interactive AI MIDI Cassette object for Pure Data & PlugData
++// Copyright (c) 2026 Timothy Schoen & Jupiter Moll
++// For information on usage and redistribution, and for a DISCLAIMER OF ALL
++// WARRANTIES, see the file, "LICENSE.txt," in this distribution.
++
++#include <m_pd.h>
++#include <g_canvas.h>
++#include <stdlib.h>
++#include <stdio.h>
++#include <string.h>
++
++static t_class *aimidi_class;
++static t_widgetbehavior aimidi_widgetbehavior;
++static int aimidi_global_take_counter = 1;
++
++typedef struct _aimidi_note {
++    int   pitch;
++    int   vel;
++    float time_ms;
++    float dur_ms;
++} t_aimidi_note;
++
++typedef struct _aimidi {
++    t_object        x_obj;
++    t_glist        *x_glist;
++    t_symbol       *x_bindname;
++    int             x_w;
++    int             x_h;
++    int             x_zoom;
++    int             x_recording;
++    int             x_playing;
++    float           x_bpm;
++    int             x_note_count;
++    int             x_max_notes;
++    t_aimidi_note  *x_notes;
++    char            x_take_id[64];
++    double          x_rec_start_time;
++    t_outlet       *x_out_note;    // Outlet 1: list pitch vel
++    t_outlet       *x_out_bang;    // Outlet 2: bang on loop/end or transmit
++    t_outlet       *x_out_id;      // Outlet 3: symbol take_id
++} t_aimidi;
++
++static void aimidi_erase(t_aimidi *x, t_glist *glist) {
++    sys_vgui(".x%lx.c delete %lxALL\n", glist_getcanvas(glist), x);
++}
++
++static void aimidi_draw(t_aimidi *x, t_glist *glist) {
++    int xpos = text_xpix(&x->x_obj, glist);
++    int ypos = text_ypix(&x->x_obj, glist);
++    int w = x->x_w * x->x_zoom;
++    int h = x->x_h * x->x_zoom;
++
++    sys_vgui(".x%lx.c create rectangle %d %d %d %d -width %d -outline black -fill #1e1e28 -tags [list %lxBASE %lxALL]\n",
++        glist_getcanvas(glist), xpos, ypos, xpos + w, ypos + h,
++        x->x_zoom, x, x);
++    sys_vgui(".x%lx.c create text %d %d -text {AI MIDI CASSETTE} -fill #b45aff -anchor nw -tags [list %lxTEXT %lxALL]\n",
++        glist_getcanvas(glist), xpos + 8, ypos + 4, x, x);
++}
++
++static void aimidi_update(t_aimidi *x) {
++    if (glist_isvisible(x->x_glist) && gobj_shouldvis((t_gobj *)x, x->x_glist)) {
++        aimidi_erase(x, x->x_glist);
++        aimidi_draw(x, x->x_glist);
++        canvas_fixlinesfor(glist_getcanvas(x->x_glist), (t_text *)x);
++    }
++}
++
++static void aimidi_vis(t_gobj *z, t_glist *glist, int vis) {
++    t_aimidi *x = (t_aimidi *)z;
++    if (vis) {
++        aimidi_draw(x, glist);
++    } else {
++        aimidi_erase(x, glist);
++    }
++}
++
++static void aimidi_getrect(t_gobj *z, t_glist *glist, int *xp1, int *yp1, int *xp2, int *yp2) {
++    t_aimidi *x = (t_aimidi *)z;
++    *xp1 = text_xpix(&x->x_obj, glist);
++    *yp1 = text_ypix(&x->x_obj, glist);
++    *xp2 = *xp1 + x->x_w * x->x_zoom;
++    *yp2 = *yp1 + x->x_h * x->x_zoom;
++}
++
++static void aimidi_displace(t_gobj *z, t_glist *glist, int dx, int dy) {
++    t_aimidi *x = (t_aimidi *)z;
++    x->x_obj.te_xpix += dx;
++    x->x_obj.te_ypix += dy;
++    if (glist_isvisible(glist)) {
++        sys_vgui(".x%lx.c move %lxALL %d %d\n", glist_getcanvas(glist), x, dx * x->x_zoom, dy * x->x_zoom);
++        canvas_fixlinesfor(glist_getcanvas(glist), (t_text *)x);
++    }
++}
++
++static void aimidi_select(t_gobj *z, t_glist *glist, int state) {
++    t_aimidi *x = (t_aimidi *)z;
++    if (glist_isvisible(glist)) {
++        sys_vgui(".x%lx.c itemconfigure %lxBASE -outline %s\n",
++            glist_getcanvas(glist), x, state ? "blue" : "black");
++    }
++}
++
++static void aimidi_delete(t_gobj *z, t_glist *glist) {
++    canvas_deletelinesfor(glist_getcanvas(glist), (t_text *)z);
++}
++
++static void aimidi_save(t_gobj *z, t_binbuf *b) {
++    t_aimidi *x = (t_aimidi *)z;
++    binbuf_addv(b, "ssiisii", gensym("#X"), gensym("obj"),
++        (int)x->x_obj.te_xpix, (int)x->x_obj.te_ypix,
++        atom_getsymbol(binbuf_getvec(x->x_obj.te_binbuf)),
++        x->x_w, x->x_h);
++    binbuf_addv(b, ";");
++}
++
++static void aimidi_add_note(t_aimidi *x, int pitch, int vel) {
++    if (pitch < 0) pitch = 0;
++    if (pitch > 127) pitch = 127;
++    if (vel < 0) vel = 0;
++    if (vel > 127) vel = 127;
++
++    if (x->x_note_count >= x->x_max_notes) {
++        int new_max = x->x_max_notes * 2;
++        if (new_max < 256) new_max = 256;
++        t_aimidi_note *new_notes = (t_aimidi_note *)realloc(x->x_notes, new_max * sizeof(t_aimidi_note));
++        if (new_notes) {
++            x->x_notes = new_notes;
++            x->x_max_notes = new_max;
++        } else {
++            return;
++        }
++    }
++
++    double now = clock_getlogicaltime();
++    float elapsed_ms = (float)(now - x->x_rec_start_time);
++    if (elapsed_ms < 0.0f) elapsed_ms = 0.0f;
++
++    x->x_notes[x->x_note_count].pitch = pitch;
++    x->x_notes[x->x_note_count].vel = vel;
++    x->x_notes[x->x_note_count].time_ms = elapsed_ms;
++    x->x_notes[x->x_note_count].dur_ms = 200.0f;
++    x->x_note_count++;
++}
++
++static void aimidi_list(t_aimidi *x, t_symbol *s, int argc, t_atom *argv) {
++    (void)s;
++    if (argc >= 2 && argv[0].a_type == A_FLOAT && argv[1].a_type == A_FLOAT) {
++        int pitch = (int)argv[0].a_w.w_float;
++        int vel = (int)argv[1].a_w.w_float;
++
++        if (x->x_recording && vel > 0) {
++            aimidi_add_note(x, pitch, vel);
++        }
++
++        t_atom out_at[2];
++        SETFLOAT(&out_at[0], (t_float)pitch);
++        SETFLOAT(&out_at[1], (t_float)vel);
++        outlet_list(x->x_out_note, &s_list, 2, out_at);
++    }
++}
++
++static void aimidi_float(t_aimidi *x, t_float f) {
++    int pitch = (int)f;
++    int vel = 100;
++    if (x->x_recording) {
++        aimidi_add_note(x, pitch, vel);
++    }
++    t_atom out_at[2];
++    SETFLOAT(&out_at[0], (t_float)pitch);
++    SETFLOAT(&out_at[1], (t_float)vel);
++    outlet_list(x->x_out_note, &s_list, 2, out_at);
++}
++
++static void aimidi_record(t_aimidi *x, t_floatarg f) {
++    int rec = (f != 0.0f);
++    if (rec && !x->x_recording) {
++        x->x_recording = 1;
++        x->x_playing = 0;
++        x->x_note_count = 0;
++        x->x_rec_start_time = clock_getlogicaltime();
++        snprintf(x->x_take_id, sizeof(x->x_take_id), "take_%d", aimidi_global_take_counter++);
++    } else if (!rec && x->x_recording) {
++        x->x_recording = 0;
++        outlet_symbol(x->x_out_id, gensym(x->x_take_id));
++        outlet_bang(x->x_out_bang);
++    }
++}
++
++static void aimidi_play(t_aimidi *x) {
++    if (x->x_note_count <= 0) return;
++    x->x_playing = 1;
++    x->x_recording = 0;
++
++    t_atom out_at[2];
++    SETFLOAT(&out_at[0], (t_float)x->x_notes[0].pitch);
++    SETFLOAT(&out_at[1], (t_float)x->x_notes[0].vel);
++    outlet_list(x->x_out_note, &s_list, 2, out_at);
++    outlet_bang(x->x_out_bang);
++}
++
++static void aimidi_stop(t_aimidi *x) {
++    x->x_recording = 0;
++    x->x_playing = 0;
++}
++
++static void aimidi_clear(t_aimidi *x) {
++    x->x_note_count = 0;
++    x->x_recording = 0;
++    x->x_playing = 0;
++}
++
++static void aimidi_send(t_aimidi *x) {
++    outlet_symbol(x->x_out_id, gensym(x->x_take_id));
++    outlet_bang(x->x_out_bang);
++}
++
++static void aimidi_bpm(t_aimidi *x, t_floatarg bpm) {
++    if (bpm > 20.0f && bpm < 400.0f) {
++        x->x_bpm = bpm;
++    }
++}
++
++static void aimidi_dim(t_aimidi *x, t_floatarg w, t_floatarg h) {
++    int nw = (int)w;
++    int nh = (int)h;
++    if (nw < 120) nw = 120;
++    if (nh < 40) nh = 40;
++    if (nw != x->x_w || nh != x->x_h) {
++        x->x_w = nw;
++        x->x_h = nh;
++        aimidi_update(x);
++    }
++}
++
++static void aimidi_free(t_aimidi *x) {
++    if (x->x_notes) {
++        free(x->x_notes);
++        x->x_notes = NULL;
++    }
++    pd_unbind(&x->x_obj.ob_pd, x->x_bindname);
++    gfxstub_deleteforkey(x);
++}
++
++static void *aimidi_new(t_symbol *s, int ac, t_atom *av) {
++    (void)s;
++    t_aimidi *x = (t_aimidi *)pd_new(aimidi_class);
++    t_canvas *cv = canvas_getcurrent();
++    x->x_glist = (t_glist *)cv;
++    char buf[MAXPDSTRING];
++    sprintf(buf, "#%lx", (long)x);
++    pd_bind(&x->x_obj.ob_pd, x->x_bindname = gensym(buf));
++    x->x_zoom = x->x_glist ? x->x_glist->gl_zoom : 1;
++    x->x_w = 240;
++    x->x_h = 64;
++    x->x_recording = 0;
++    x->x_playing = 0;
++    x->x_bpm = 120.0f;
++    x->x_note_count = 0;
++    x->x_max_notes = 128;
++    x->x_notes = (t_aimidi_note *)malloc(x->x_max_notes * sizeof(t_aimidi_note));
++    x->x_rec_start_time = 0.0;
++    snprintf(x->x_take_id, sizeof(x->x_take_id), "take_%d", aimidi_global_take_counter++);
++
++    if (ac > 0 && av->a_type == A_FLOAT) {
++        x->x_w = (int)av->a_w.w_float;
++        ac--; av++;
++    }
++    if (ac > 0 && av->a_type == A_FLOAT) {
++        x->x_h = (int)av->a_w.w_float;
++        ac--; av++;
++    }
++    if (ac > 0 && av->a_type == A_FLOAT) {
++        x->x_bpm = av->a_w.w_float;
++        ac--; av++;
++    }
++
++    x->x_out_note = outlet_new(&x->x_obj, &s_list);
++    x->x_out_bang = outlet_new(&x->x_obj, &s_bang);
++    x->x_out_id   = outlet_new(&x->x_obj, &s_symbol);
++
++    return (void *)x;
++}
++
++void ai_midi_setup(void) {
++    aimidi_class = class_new(gensym("ai.midi"),
++        (t_newmethod)aimidi_new,
++        (t_method)aimidi_free,
++        sizeof(t_aimidi),
++        0, A_GIMME, 0);
++
++    class_addcreator((t_newmethod)aimidi_new, gensym("aimidi"), A_GIMME, 0);
++
++    class_addlist(aimidi_class, aimidi_list);
++    class_addfloat(aimidi_class, aimidi_float);
++    class_addbang(aimidi_class, aimidi_play);
++    class_addmethod(aimidi_class, (t_method)aimidi_record, gensym("record"), A_DEFFLOAT, 0);
++    class_addmethod(aimidi_class, (t_method)aimidi_record, gensym("rec"), A_DEFFLOAT, 0);
++    class_addmethod(aimidi_class, (t_method)aimidi_play, gensym("play"), 0);
++    class_addmethod(aimidi_class, (t_method)aimidi_stop, gensym("stop"), 0);
++    class_addmethod(aimidi_class, (t_method)aimidi_clear, gensym("clear"), 0);
++    class_addmethod(aimidi_class, (t_method)aimidi_send, gensym("send"), 0);
++    class_addmethod(aimidi_class, (t_method)aimidi_send, gensym("ai"), 0);
++    class_addmethod(aimidi_class, (t_method)aimidi_bpm, gensym("bpm"), A_FLOAT, 0);
++    class_addmethod(aimidi_class, (t_method)aimidi_dim, gensym("dim"), A_FLOAT, A_FLOAT, 0);
++
++    aimidi_widgetbehavior.w_getrectfn  = aimidi_getrect;
++    aimidi_widgetbehavior.w_displacefn = aimidi_displace;
++    aimidi_widgetbehavior.w_selectfn   = aimidi_select;
++    aimidi_widgetbehavior.w_activatefn = NULL;
++    aimidi_widgetbehavior.w_deletefn   = aimidi_delete;
++    aimidi_widgetbehavior.w_visfn      = aimidi_vis;
++    aimidi_widgetbehavior.w_clickfn    = NULL;
++
++    class_setsavefn(aimidi_class, aimidi_save);
++    class_setwidget(aimidi_class, &aimidi_widgetbehavior);
++}

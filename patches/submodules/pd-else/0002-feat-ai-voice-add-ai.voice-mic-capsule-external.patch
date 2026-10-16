@@ -1,0 +1,415 @@
+From df5b39b65694a6407a5ccf8755e371431f4a99a6 Mon Sep 17 00:00:00 2001
+From: Alphi <alphi@starchaser.local>
+Date: Mon, 12 Oct 2026 22:03:24 +0200
+Subject: [PATCH 2/2] feat(ai-voice): add [ai.voice] mic capsule external
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The voice twin of [ai.midi] — same family contract:
+- place from the Object Browser (AI category), lives in the patch
+- REC drives the bridge's startVoiceCapture/stopVoiceCaptureAndAnalyze
+- the finished take stages to the rail (voiceTakes[]) — WAV on disk
+- outlets: list pitch vel (transcription) | bang | symbol take_id
+
+Methods: record/rec · stop · play · clear · send/ai · mode <melody|beat>
+· bpm · dim · take <id> <dur> <bpm> (bridge callback) · wav <path>.
+---
+ Source/Control/ai_voice.c | 388 ++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 388 insertions(+)
+ create mode 100644 Source/Control/ai_voice.c
+
+diff --git a/Source/Control/ai_voice.c b/Source/Control/ai_voice.c
+new file mode 100644
+index 00000000..d2773283
+--- /dev/null
++++ b/Source/Control/ai_voice.c
+@@ -0,0 +1,388 @@
++// ai_voice.c - Interactive AI Voice Capsule object for Pure Data & PlugData
++// Copyright (c) 2026 Timothy Schoen & Jupiter Moll
++// For information on usage and redistribution, and for a DISCLAIMER OF ALL
++// WARRANTIES, see the file, "LICENSE.txt," in this distribution.
++//
++// The voice twin of [ai.midi]. Same family contract:
++//   - place it from the Object Browser (AI category) — it lives in the patch
++//   - the REC button (GUI) drives the bridge's audio recorder
++//   - the finished take parks in the moodboard rail (voiceTakes[])
++//   - outlets carry the transcription + the take id into the patch
++//
++// Signal contract (mirrors the cassette):
++//   inlet  : list pitch vel | float | record | stop | play | clear | send/ai
++//            | mode <melody|beat> | bpm <f> | dim <w> <h>
++//            | take <id> <duration> <bpm> | wav <path>  (bridge callbacks)
++//   outlet1: list pitch vel   (transcribed notes — fed by the bridge)
++//   outlet2: bang             (take ready / transmitted)
++//   outlet3: symbol take_id   (the take's identity, matches the rail id)
++
++#include <m_pd.h>
++#include <g_canvas.h>
++#include <stdlib.h>
++#include <stdio.h>
++#include <string.h>
++
++static t_class *aivoice_class;
++static t_widgetbehavior aivoice_widgetbehavior;
++static int aivoice_global_take_counter = 1;
++
++typedef struct _aivoice_note {
++    int   pitch;
++    int   vel;
++    float time_ms;
++    float dur_ms;
++} t_aivoice_note;
++
++typedef struct _aivoice {
++    t_object        x_obj;
++    t_glist        *x_glist;
++    t_symbol       *x_bindname;
++    int             x_w;
++    int             x_h;
++    int             x_zoom;
++    int             x_recording;
++    int             x_playing;
++    float           x_bpm;
++    int             x_mode;          // 0 = melody, 1 = beat
++    int             x_note_count;    // transcribed notes (bridge-fed)
++    int             x_max_notes;
++    t_aivoice_note *x_notes;
++    char            x_take_id[64];
++    char            x_wav[MAXPDSTRING];
++    float           x_duration;      // seconds, bridge-reported
++    double          x_rec_start_time;
++    t_outlet       *x_out_note;      // Outlet 1: list pitch vel
++    t_outlet       *x_out_bang;      // Outlet 2: bang on take-ready / transmit
++    t_outlet       *x_out_id;        // Outlet 3: symbol take_id
++} t_aivoice;
++
++static void aivoice_erase(t_aivoice *x, t_glist *glist) {
++    sys_vgui(".x%lx.c delete %lxALL\n", glist_getcanvas(glist), x);
++}
++
++static void aivoice_draw(t_aivoice *x, t_glist *glist) {
++    int xpos = text_xpix(&x->x_obj, glist);
++    int ypos = text_ypix(&x->x_obj, glist);
++    int w = x->x_w * x->x_zoom;
++    int h = x->x_h * x->x_zoom;
++
++    // Same family palette as the cassette: dark hardware panel, purple label.
++    sys_vgui(".x%lx.c create rectangle %d %d %d %d -width %d -outline black -fill #1e1e28 -tags [list %lxBASE %lxALL]\n",
++        glist_getcanvas(glist), xpos, ypos, xpos + w, ypos + h,
++        x->x_zoom, x, x);
++    sys_vgui(".x%lx.c create text %d %d -text {AI VOICE CAPSULE} -fill #b45aff -anchor nw -tags [list %lxTEXT %lxALL]\n",
++        glist_getcanvas(glist), xpos + 8, ypos + 4, x, x);
++}
++
++static void aivoice_update(t_aivoice *x) {
++    if (glist_isvisible(x->x_glist) && gobj_shouldvis((t_gobj *)x, x->x_glist)) {
++        aivoice_erase(x, x->x_glist);
++        aivoice_draw(x, x->x_glist);
++        canvas_fixlinesfor(glist_getcanvas(x->x_glist), (t_text *)x);
++    }
++}
++
++static void aivoice_vis(t_gobj *z, t_glist *glist, int vis) {
++    t_aivoice *x = (t_aivoice *)z;
++    if (vis) {
++        aivoice_draw(x, glist);
++    } else {
++        aivoice_erase(x, glist);
++    }
++}
++
++static void aivoice_getrect(t_gobj *z, t_glist *glist, int *xp1, int *yp1, int *xp2, int *yp2) {
++    t_aivoice *x = (t_aivoice *)z;
++    *xp1 = text_xpix(&x->x_obj, glist);
++    *yp1 = text_ypix(&x->x_obj, glist);
++    *xp2 = *xp1 + x->x_w * x->x_zoom;
++    *yp2 = *yp1 + x->x_h * x->x_zoom;
++}
++
++static void aivoice_displace(t_gobj *z, t_glist *glist, int dx, int dy) {
++    t_aivoice *x = (t_aivoice *)z;
++    x->x_obj.te_xpix += dx;
++    x->x_obj.te_ypix += dy;
++    if (glist_isvisible(glist)) {
++        sys_vgui(".x%lx.c move %lxALL %d %d\n", glist_getcanvas(glist), x, dx * x->x_zoom, dy * x->x_zoom);
++        canvas_fixlinesfor(glist_getcanvas(glist), (t_text *)x);
++    }
++}
++
++static void aivoice_select(t_gobj *z, t_glist *glist, int state) {
++    t_aivoice *x = (t_aivoice *)z;
++    if (glist_isvisible(glist)) {
++        sys_vgui(".x%lx.c itemconfigure %lxBASE -outline %s\n",
++            glist_getcanvas(glist), x, state ? "blue" : "black");
++    }
++}
++
++static void aivoice_delete(t_gobj *z, t_glist *glist) {
++    canvas_deletelinesfor(glist_getcanvas(glist), (t_text *)z);
++}
++
++static void aivoice_save(t_gobj *z, t_binbuf *b) {
++    t_aivoice *x = (t_aivoice *)z;
++    binbuf_addv(b, "ssiisii", gensym("#X"), gensym("obj"),
++        (int)x->x_obj.te_xpix, (int)x->x_obj.te_ypix,
++        atom_getsymbol(binbuf_getvec(x->x_obj.te_binbuf)),
++        x->x_w, x->x_h);
++    binbuf_addv(b, ";");
++}
++
++static void aivoice_add_note(t_aivoice *x, int pitch, int vel) {
++    if (pitch < 0) pitch = 0;
++    if (pitch > 127) pitch = 127;
++    if (vel < 0) vel = 0;
++    if (vel > 127) vel = 127;
++
++    if (x->x_note_count >= x->x_max_notes) {
++        int new_max = x->x_max_notes * 2;
++        if (new_max < 256) new_max = 256;
++        t_aivoice_note *new_notes = (t_aivoice_note *)realloc(x->x_notes, new_max * sizeof(t_aivoice_note));
++        if (new_notes) {
++            x->x_notes = new_notes;
++            x->x_max_notes = new_max;
++        } else {
++            return;
++        }
++    }
++
++    double now = clock_getlogicaltime();
++    float elapsed_ms = (float)(now - x->x_rec_start_time);
++    if (elapsed_ms < 0.0f) elapsed_ms = 0.0f;
++
++    x->x_notes[x->x_note_count].pitch = pitch;
++    x->x_notes[x->x_note_count].vel = vel;
++    x->x_notes[x->x_note_count].time_ms = elapsed_ms;
++    x->x_notes[x->x_note_count].dur_ms = 200.0f;
++    x->x_note_count++;
++}
++
++// Transcription arrives from the bridge as `list pitch vel` (same shape the
++// cassette accepts), so a voice take can drive a synth exactly like a MIDI one.
++static void aivoice_list(t_aivoice *x, t_symbol *s, int argc, t_atom *argv) {
++    (void)s;
++    if (argc >= 2 && argv[0].a_type == A_FLOAT && argv[1].a_type == A_FLOAT) {
++        int pitch = (int)argv[0].a_w.w_float;
++        int vel = (int)argv[1].a_w.w_float;
++
++        if (x->x_recording && vel > 0) {
++            aivoice_add_note(x, pitch, vel);
++        }
++
++        t_atom out_at[2];
++        SETFLOAT(&out_at[0], (t_float)pitch);
++        SETFLOAT(&out_at[1], (t_float)vel);
++        outlet_list(x->x_out_note, &s_list, 2, out_at);
++    }
++}
++
++static void aivoice_float(t_aivoice *x, t_float f) {
++    int pitch = (int)f;
++    int vel = 100;
++    if (x->x_recording) {
++        aivoice_add_note(x, pitch, vel);
++    }
++    t_atom out_at[2];
++    SETFLOAT(&out_at[0], (t_float)pitch);
++    SETFLOAT(&out_at[1], (t_float)vel);
++    outlet_list(x->x_out_note, &s_list, 2, out_at);
++}
++
++static void aivoice_record(t_aivoice *x, t_floatarg f) {
++    int rec = (f != 0.0f);
++    if (rec && !x->x_recording) {
++        x->x_recording = 1;
++        x->x_playing = 0;
++        x->x_note_count = 0;
++        x->x_duration = 0.0f;
++        x->x_wav[0] = '\0';
++        x->x_rec_start_time = clock_getlogicaltime();
++        // Provisional local id — the bridge's `take` callback overwrites it with
++        // the authoritative rail id (take_<epoch-ms>) once the WAV lands.
++        snprintf(x->x_take_id, sizeof(x->x_take_id), "take_%d", aivoice_global_take_counter++);
++        aivoice_update(x);
++    } else if (!rec && x->x_recording) {
++        x->x_recording = 0;
++        aivoice_update(x);
++    }
++}
++
++static void aivoice_take(t_aivoice *x, t_symbol *s, int argc, t_atom *argv) {
++    // Bridge callback: `take <id> <duration> <bpm>` — the WAV landed and the rail
++    // has it. Adopt the authoritative id so patch + rail agree.
++    if (argc >= 1 && argv[0].a_type == A_SYMBOL) {
++        snprintf(x->x_take_id, sizeof(x->x_take_id), "%s", argv[0].a_w.w_symbol->s_name);
++    }
++    if (argc >= 2 && argv[1].a_type == A_FLOAT) {
++        x->x_duration = argv[1].a_w.w_float;
++    }
++    if (argc >= 3 && argv[2].a_type == A_FLOAT) {
++        float bpm = argv[2].a_w.w_float;
++        if (bpm > 20.0f && bpm < 400.0f) x->x_bpm = bpm;
++    }
++    (void)s;
++    aivoice_update(x);
++    outlet_symbol(x->x_out_id, gensym(x->x_take_id));
++    outlet_bang(x->x_out_bang);
++}
++
++static void aivoice_wav(t_aivoice *x, t_symbol *s) {
++    // Bridge callback: `wav <path>` — the on-disk take (survives chip clears).
++    if (s && s->s_name) {
++        snprintf(x->x_wav, sizeof(x->x_wav), "%s", s->s_name);
++    }
++}
++
++static void aivoice_play(t_aivoice *x) {
++    if (x->x_note_count <= 0) return;
++    x->x_playing = 1;
++    x->x_recording = 0;
++
++    t_atom out_at[2];
++    SETFLOAT(&out_at[0], (t_float)x->x_notes[0].pitch);
++    SETFLOAT(&out_at[1], (t_float)x->x_notes[0].vel);
++    outlet_list(x->x_out_note, &s_list, 2, out_at);
++    outlet_bang(x->x_out_bang);
++}
++
++static void aivoice_stop(t_aivoice *x) {
++    x->x_recording = 0;
++    x->x_playing = 0;
++    aivoice_update(x);
++}
++
++static void aivoice_clear(t_aivoice *x) {
++    x->x_note_count = 0;
++    x->x_recording = 0;
++    x->x_playing = 0;
++    x->x_duration = 0.0f;
++    x->x_wav[0] = '\0';
++    aivoice_update(x);
++}
++
++static void aivoice_send(t_aivoice *x) {
++    outlet_symbol(x->x_out_id, gensym(x->x_take_id));
++    outlet_bang(x->x_out_bang);
++}
++
++static void aivoice_mode(t_aivoice *x, t_symbol *s) {
++    // `mode melody` (default) or `mode beat` — declared intent sharpens the
++    // bridge's analysis (precision transcription vs hit/BPM detection).
++    if (s && s->s_name) {
++        if (!strcmp(s->s_name, "beat") || !strcmp(s->s_name, "drum")) {
++            x->x_mode = 1;
++        } else if (!strcmp(s->s_name, "melody")) {
++            x->x_mode = 0;
++        }
++    }
++}
++
++static void aivoice_bpm(t_aivoice *x, t_floatarg bpm) {
++    if (bpm > 20.0f && bpm < 400.0f) {
++        x->x_bpm = bpm;
++    }
++}
++
++static void aivoice_dim(t_aivoice *x, t_floatarg w, t_floatarg h) {
++    int nw = (int)w;
++    int nh = (int)h;
++    if (nw < 120) nw = 120;
++    if (nh < 40) nh = 40;
++    if (nw != x->x_w || nh != x->x_h) {
++        x->x_w = nw;
++        x->x_h = nh;
++        aivoice_update(x);
++    }
++}
++
++static void aivoice_free(t_aivoice *x) {
++    if (x->x_notes) {
++        free(x->x_notes);
++        x->x_notes = NULL;
++    }
++    pd_unbind(&x->x_obj.ob_pd, x->x_bindname);
++    gfxstub_deleteforkey(x);
++}
++
++static void *aivoice_new(t_symbol *s, int ac, t_atom *av) {
++    (void)s;
++    t_aivoice *x = (t_aivoice *)pd_new(aivoice_class);
++    t_canvas *cv = canvas_getcurrent();
++    x->x_glist = (t_glist *)cv;
++    char buf[MAXPDSTRING];
++    sprintf(buf, "#%lx", (long)x);
++    pd_bind(&x->x_obj.ob_pd, x->x_bindname = gensym(buf));
++    x->x_zoom = x->x_glist ? x->x_glist->gl_zoom : 1;
++    x->x_w = 240;
++    x->x_h = 72;
++    x->x_recording = 0;
++    x->x_playing = 0;
++    x->x_bpm = 120.0f;
++    x->x_mode = 0;
++    x->x_note_count = 0;
++    x->x_max_notes = 128;
++    x->x_notes = (t_aivoice_note *)malloc(x->x_max_notes * sizeof(t_aivoice_note));
++    x->x_rec_start_time = 0.0;
++    x->x_duration = 0.0f;
++    x->x_wav[0] = '\0';
++    snprintf(x->x_take_id, sizeof(x->x_take_id), "take_%d", aivoice_global_take_counter++);
++
++    if (ac > 0 && av->a_type == A_FLOAT) {
++        x->x_w = (int)av->a_w.w_float;
++        ac--; av++;
++    }
++    if (ac > 0 && av->a_type == A_FLOAT) {
++        x->x_h = (int)av->a_w.w_float;
++        ac--; av++;
++    }
++    if (ac > 0 && av->a_type == A_FLOAT) {
++        x->x_bpm = av->a_w.w_float;
++        ac--; av++;
++    }
++
++    x->x_out_note = outlet_new(&x->x_obj, &s_list);
++    x->x_out_bang = outlet_new(&x->x_obj, &s_bang);
++    x->x_out_id   = outlet_new(&x->x_obj, &s_symbol);
++
++    return (void *)x;
++}
++
++void ai_voice_setup(void) {
++    aivoice_class = class_new(gensym("ai.voice"),
++        (t_newmethod)aivoice_new,
++        (t_method)aivoice_free,
++        sizeof(t_aivoice),
++        0, A_GIMME, 0);
++
++    class_addcreator((t_newmethod)aivoice_new, gensym("aivoice"), A_GIMME, 0);
++
++    class_addlist(aivoice_class, aivoice_list);
++    class_addfloat(aivoice_class, aivoice_float);
++    class_addbang(aivoice_class, aivoice_play);
++    class_addmethod(aivoice_class, (t_method)aivoice_record, gensym("record"), A_DEFFLOAT, 0);
++    class_addmethod(aivoice_class, (t_method)aivoice_record, gensym("rec"), A_DEFFLOAT, 0);
++    class_addmethod(aivoice_class, (t_method)aivoice_play, gensym("play"), 0);
++    class_addmethod(aivoice_class, (t_method)aivoice_stop, gensym("stop"), 0);
++    class_addmethod(aivoice_class, (t_method)aivoice_clear, gensym("clear"), 0);
++    class_addmethod(aivoice_class, (t_method)aivoice_send, gensym("send"), 0);
++    class_addmethod(aivoice_class, (t_method)aivoice_send, gensym("ai"), 0);
++    class_addmethod(aivoice_class, (t_method)aivoice_mode, gensym("mode"), A_SYMBOL, 0);
++    class_addmethod(aivoice_class, (t_method)aivoice_bpm, gensym("bpm"), A_FLOAT, 0);
++    class_addmethod(aivoice_class, (t_method)aivoice_take, gensym("take"), A_GIMME, 0);
++    class_addmethod(aivoice_class, (t_method)aivoice_wav, gensym("wav"), A_SYMBOL, 0);
++    class_addmethod(aivoice_class, (t_method)aivoice_dim, gensym("dim"), A_FLOAT, A_FLOAT, 0);
++
++    aivoice_widgetbehavior.w_getrectfn  = aivoice_getrect;
++    aivoice_widgetbehavior.w_displacefn = aivoice_displace;
++    aivoice_widgetbehavior.w_selectfn   = aivoice_select;
++    aivoice_widgetbehavior.w_activatefn = NULL;
++    aivoice_widgetbehavior.w_deletefn   = aivoice_delete;
++    aivoice_widgetbehavior.w_visfn      = aivoice_vis;
++    aivoice_widgetbehavior.w_clickfn    = NULL;
++
++    class_setsavefn(aivoice_class, aivoice_save);
++    class_setwidget(aivoice_class, &aivoice_widgetbehavior);
++}

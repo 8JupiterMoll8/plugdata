@@ -1,0 +1,237 @@
+From 1629488f74ed6765d1fd83eccfaae8d3219b89a0 Mon Sep 17 00:00:00 2001
+From: Alphi <alphi@starchaser.local>
+Date: Mon, 21 Sep 2026 11:20:32 +0200
+Subject: [PATCH 2/2] fix(core): harden rtext, canvas editor, and undo queue
+ against null-dereference crashes
+
+- g_rtext.c: add NULL checks to rtext_gettag/width/draw and dynamically instantiate rtext via rtext_new() if not yet registered in gl_editor. Prevents SIGSEGV when programmatically updating comments, text boxes, or overlays before GUI focus.
+- g_editor.c: guard canvas_displaceselection against NULL gl_editor during headless or subpatch object displacement.
+- g_undo.c: fix empty undo sequence memory corruption (freebytes on to_free), guard null pointer dereference at undo queue boundary (undo_action name), and properly zero out u_queue/u_last pointers in canvas_undo_free to prevent use-after-free.
+---
+ src/g_editor.c |  4 +++-
+ src/g_rtext.c  |  9 +++++++
+ src/g_undo.c   | 65 +++++++++++++++++++++++++++++++-------------------
+ 3 files changed, 52 insertions(+), 26 deletions(-)
+
+diff --git a/src/g_editor.c b/src/g_editor.c
+index b0516469..1d9d7056 100644
+--- a/src/g_editor.c
++++ b/src/g_editor.c
+@@ -2944,6 +2944,8 @@ static void canvas_displaceselection(t_canvas *x, int dx, int dy)
+ {
+     t_selection *y;
+     int resortin = 0, resortout = 0;
++    if (!x || !x->gl_editor)
++        return;
+     if (x->gl_editor->e_selection && !EDITOR->canvas_undo_already_set_move)
+     {
+         canvas_undo_add(x, UNDO_MOTION, "motion", canvas_undo_set_move(x, 1));
+@@ -2959,7 +2961,7 @@ static void canvas_displaceselection(t_canvas *x, int dx, int dy)
+     if (resortin) canvas_resortinlets(x);
+     if (resortout) canvas_resortoutlets(x);
+     pdgui_vmess("pdtk_canvas_getscroll", "c", x);
+-    if (x->gl_editor->e_selection)
++    if (x->gl_editor && x->gl_editor->e_selection)
+         canvas_dirty(x, 1);
+ }
+ 
+diff --git a/src/g_rtext.c b/src/g_rtext.c
+index 4859d8b6..fccf38d4 100644
+--- a/src/g_rtext.c
++++ b/src/g_rtext.c
+@@ -75,6 +75,7 @@ void rtext_free(t_rtext *x)
+ 
+ const char *rtext_gettag(t_rtext *x)
+ {
++    if (!x) return "";
+     return (x->x_tag);
+ }
+ 
+@@ -493,11 +494,14 @@ t_rtext *glist_findrtext(t_glist *gl, t_text *who)
+         canvas_create_editor(gl);
+     for (x = gl->gl_editor->e_rtext; x && x->x_text != who; x = x->x_next)
+         ;
++    if (!x && gl->gl_editor)
++        x = rtext_new(gl, who);
+     return (x);
+ }
+ 
+ int rtext_width(t_rtext *x)
+ {
++    if (!x) return 0;
+     int w = 0, h = 0, indx;
+     rtext_senditup(x, SEND_CHECK, &w, &h, &indx);
+     return (w);
+@@ -505,6 +509,7 @@ int rtext_width(t_rtext *x)
+ 
+ int rtext_height(t_rtext *x)
+ {
++    if (!x) return 0;
+     int w = 0, h = 0, indx;
+     rtext_senditup(x, SEND_CHECK, &w, &h, &indx);
+     return (h);
+@@ -512,23 +517,27 @@ int rtext_height(t_rtext *x)
+ 
+ void rtext_draw(t_rtext *x)
+ {
++    if (!x) return;
+     int w = 0, h = 0, indx;
+     rtext_senditup(x, SEND_FIRST, &w, &h, &indx);
+ }
+ 
+ void rtext_erase(t_rtext *x)
+ {
++    if (!x) return;
+     pdgui_vmess(0, "crs", glist_getcanvas(x->x_glist), "delete", x->x_tag);
+ }
+ 
+ void rtext_displace(t_rtext *x, int dx, int dy)
+ {
++    if (!x) return;
+     pdgui_vmess(0, "crs ii", glist_getcanvas(x->x_glist), "move", x->x_tag,
+         dx, dy);
+ }
+ 
+ void rtext_select(t_rtext *x, int state)
+ {
++    if (!x) return;
+     pdgui_vmess(0, "crs rr",
+         glist_getcanvas(x->x_glist), "itemconfigure", x->x_tag,
+         "-fill", (state? "blue" : "black"));
+diff --git a/src/g_undo.c b/src/g_undo.c
+index 31bafc5b..f65505b7 100644
+--- a/src/g_undo.c
++++ b/src/g_undo.c
+@@ -203,12 +203,19 @@ t_undo_action *canvas_undo_add(t_canvas *x, t_undo_type type, const char *name,
+        && udo && udo->u_last
+        && UNDO_SEQUENCE_START == udo->u_last->type)
+     {
+-             /* empty undo sequence...get rid of it */
+-         udo->u_last = udo->u_last->prev;
+-         freebytes(udo->u_last->next, sizeof(*udo->u_last->next));
+-         udo->u_last->next = 0;
+-         canvas_undo_set_name(udo->u_last->name);
+-         canvas_show_undomenu(x, udo->u_last->name, "no");
++         /* empty undo sequence...get rid of it */
++         t_undo_action *to_free = udo->u_last;
++         udo->u_last = to_free->prev;
++         if (udo->u_last) {
++             udo->u_last->next = 0;
++             canvas_undo_set_name(udo->u_last->name);
++             canvas_show_undomenu(x, udo->u_last->name, "no");
++         } else {
++             udo->u_queue = 0;
++             canvas_undo_set_name("no");
++             canvas_show_undomenu(x, "no", "no");
++         }
++         freebytes(to_free, sizeof(*to_free));
+          return 0;
+      }
+ 
+@@ -259,7 +266,7 @@ void canvas_undo_undo(t_canvas *x)
+     if (!udo) return;
+     dspwas = canvas_suspend_dsp();
+     DEBUG_UNDO(post("%s: %p != %p", __FUNCTION__, udo->u_queue, udo->u_last));
+-    if (udo->u_queue && udo->u_last != udo->u_queue)
++    if (udo->u_queue && udo->u_last && udo->u_last != udo->u_queue)
+     {
+         udo->u_doing = 1;
+         canvas_editmode(x, 1);
+@@ -269,7 +276,7 @@ void canvas_undo_undo(t_canvas *x)
+         if(UNDO_SEQUENCE_END == udo->u_last->type)
+         {
+             int sequence_depth = 1;
+-            while((udo->u_last = udo->u_last->prev)
++            while(udo->u_last && (udo->u_last = udo->u_last->prev)
+                   && (UNDO_INIT != udo->u_last->type))
+             {
+                 DEBUG_UNDO(post("%s:sequence[%d] %d", __FUNCTION__, sequence_depth, udo->u_last->type));
+@@ -293,12 +300,12 @@ void canvas_undo_undo(t_canvas *x)
+                 bug("undo sequence missing start");
+         }
+ 
+-        if(canvas_undo_doit(x, udo->u_last, UNDO_UNDO, __FUNCTION__))
++        if(udo->u_last && canvas_undo_doit(x, udo->u_last, UNDO_UNDO, __FUNCTION__))
+         {
+             char *undo_action, *redo_action;
+             udo->u_last = udo->u_last->prev;
+-            undo_action = udo->u_last->name;
+-            redo_action = udo->u_last->next->name;
++            undo_action = udo->u_last ? udo->u_last->name : "no";
++            redo_action = (udo->u_last && udo->u_last->next) ? udo->u_last->next->name : (udo->u_queue ? udo->u_queue->name : "no");
+ 
+             udo->u_doing = 0;
+                 /* here we call updating of all unpaired hubs and nodes since
+@@ -317,7 +324,7 @@ void canvas_undo_redo(t_canvas *x)
+     t_undo *udo = canvas_undo_get(x);
+     if (!udo) return;
+     dspwas = canvas_suspend_dsp();
+-    if (udo->u_queue && udo->u_last->next)
++    if (udo->u_queue && udo->u_last && udo->u_last->next)
+     {
+         char *undo_action, *redo_action;
+         udo->u_doing = 1;
+@@ -352,15 +359,18 @@ void canvas_undo_redo(t_canvas *x)
+                 bug("undo sequence start without end");
+         }
+ 
+-        canvas_undo_doit(x, udo->u_last, UNDO_REDO, __FUNCTION__);
+-        undo_action = udo->u_last->name;
+-        redo_action = (udo->u_last->next ? udo->u_last->next->name : "no");
+-        udo->u_doing = 0;
+-        /* here we call updating of all unpaired hubs and nodes since their
+-           regular call will fail in case their position needed to be updated
+-           by undo/redo first to reflect the old one */
+-        canvas_show_undomenu(x, undo_action, redo_action);
+-        canvas_dirty(x, canvas_undo_isdirty(x));
++        if(udo->u_last)
++        {
++            canvas_undo_doit(x, udo->u_last, UNDO_REDO, __FUNCTION__);
++            undo_action = udo->u_last->name;
++            redo_action = (udo->u_last->next ? udo->u_last->next->name : "no");
++            udo->u_doing = 0;
++            /* here we call updating of all unpaired hubs and nodes since their
++               regular call will fail in case their position needed to be updated
++               by undo/redo first to reflect the old one */
++            canvas_show_undomenu(x, undo_action, redo_action);
++            canvas_dirty(x, canvas_undo_isdirty(x));
++        }
+     }
+     canvas_resume_dsp(dspwas);
+ }
+@@ -370,7 +380,10 @@ void canvas_undo_rebranch(t_canvas *x)
+     int dspwas = canvas_suspend_dsp();
+     t_undo_action *a1, *a2;
+     t_undo *udo = canvas_undo_get(x);
+-    if (!udo) return;
++    if (!udo || !udo->u_last) {
++        canvas_resume_dsp(dspwas);
++        return;
++    }
+     if (udo->u_last->next)
+     {
+         a1 = udo->u_last->next;
+@@ -401,11 +414,9 @@ void canvas_undo_purge_abstraction_actions(t_canvas *x)
+ 
+ void canvas_undo_free(t_canvas *x)
+ {
+-    int dspwas;
+     t_undo_action *a1, *a2;
+     t_undo *udo = canvas_undo_get(x);
+     if (!udo) return;
+-    dspwas = canvas_suspend_dsp();
+     if (udo->u_queue)
+     {
+         a1 = udo->u_queue;
+@@ -416,6 +427,10 @@ void canvas_undo_free(t_canvas *x)
+             freebytes(a1, sizeof(*a1));
+             a1 = a2;
+         }
++        udo->u_queue = 0;
++        udo->u_last = 0;
++        udo->u_cleanstate = 0;
+     }
+-    canvas_resume_dsp(dspwas);
++    canvas_undo_set_name("no");
++    canvas_show_undomenu(x, "no", "no");
+ }
