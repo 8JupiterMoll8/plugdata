@@ -3,7 +3,7 @@
 **Date:** 2026-09-10 (live session)
 **Branch:** `feat/v4-zero-dropout-copilot`
 **Severity:** Medium — silent data loss of a requested edit (move) + misleading receipts. No crash.
-**Status:** OPEN (verified live, reproducible)
+**Status:** PARTLY FIXED, re-check needed (P1.2, 2026-10-16). Ghost red boxes: fixed in `1741d2d9e` (2026-09-10, roll back red-box ghosts on failed create). Receipts: the TS server now reports applied counts (`appliedMoves`/`appliedRenames` in transaction-v4.ts). NOT re-verified live: defect 1, move+rename of one object in a single call dropping the move. Was: OPEN (verified live, reproducible)
 **Verification method:** independent `analyze_patch(census)` read-back of the live Pd `gl_list` after each mutation (receipts alone are not trustworthy).
 
 ---

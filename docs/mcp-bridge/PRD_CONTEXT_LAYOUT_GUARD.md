@@ -1,6 +1,6 @@
 # PRD — Context-Aware Layout Guard (C++)
 
-**Status:** proposed
+**Status:** IMPLEMENTED — `/pd/layout_guard` handler in MCPBridge.cpp; code present, not re-verified live (P1.2, 2026-10-16). Was: proposed
 **Owner:** MCP bridge (C++) + TS glue
 **Depends on:** `8cf16e90d` (batch_atomic engine), the `/pd/layout` X-ray, the preflight/post-guard infrastructure
 **One-liner:** Make layout a **guarantee in C++** — after any mutation, compute object **clusters** (context) and auto-fix **collisions / wire-occlusions** inline. Fast, free, and impossible for the AI to forget.

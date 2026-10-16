@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-10
 **Branch:** `feat/v4-zero-dropout-copilot`
-**Status:** PROPOSED (design ready for implementation)
+**Status:** IMPLEMENTED — `_v2meta.health` in the TS server's transaction-v4.ts; code present, not re-verified live (P1.2, 2026-10-16). Was: PROPOSED (design ready for implementation)
 **Owner:** MCP bridge (C++) + MCP server (TS)
 **Related:** `mcp-server/PRD-truth-gated-memory-harness.md` (the existing syntax-truth memory
 harness this PRD extends with **structural** truth — see §4.4)

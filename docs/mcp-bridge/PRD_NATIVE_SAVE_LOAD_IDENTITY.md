@@ -4,7 +4,7 @@
 **Target Repos:** `plugdata-core` (C++ bridge) & `PlugData-MCP-Server` (TS)
 **Depends on:** Phase 1 (shipped) + Phase 2 (shipped, live-verified 2026-09-02)
 **Author:** Jupiter Moll & Antigravity
-**Status:** PROPOSED
+**Status:** IMPLEMENTED — `.mcpids.json` sidecar written in MCPBridge.cpp; code present, not re-verified live (P1.2, 2026-10-16). Was: PROPOSED
 
 ---
 

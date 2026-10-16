@@ -1,6 +1,6 @@
 # PRD — Native Sample-Accurate Sequencer, Transport, and Curve Engine
 
-**Status:** Spec (not yet implemented)
+**Status:** IMPLEMENTED (at least `/seq/start`) — `/seq/start` handler in MCPBridge.cpp; code present, not re-verified live (P1.2, 2026-10-16). Was: Spec (not yet implemented)
 **Owner:** MCP bridge (C++) + `trigger_musical_events` (TS)
 **Branch:** `feat/v4-zero-dropout-copilot`
 

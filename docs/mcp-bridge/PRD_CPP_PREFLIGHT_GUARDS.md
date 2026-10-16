@@ -4,7 +4,7 @@
 **Target Repos:** `plugdata-core` (C++ bridge) & `PlugData-MCP-Server` (TS mirror)
 **Depends on:** PHASE 0 auto-reconcile · Phase A batch-facts · Phase B fault-injection guards (2026-09-09, UNCOMMITTED) · Diagnostic Layer PRD §2.2
 **Author:** Jupiter Moll & opencode
-**Status:** PROPOSED
+**Status:** IMPLEMENTED — bridge advertises the `preflight-guards` capability; code present, not re-verified live (P1.2, 2026-10-16). Was: PROPOSED
 
 ---
 

@@ -4,7 +4,7 @@
 **Target Repos:** `plugdata-core` (C++ bridge) & `PlugData-MCP-Server` (TS)
 **Depends on:** Phases 1–3.1 (all shipped & live-verified 2026-09-02)
 **Author:** Jupiter Moll & Antigravity
-**Status:** PROPOSED
+**Status:** IMPLEMENTED — `/pd/diagnose` handler in MCPBridge.cpp; code present, not re-verified live (P1.2, 2026-10-16). Was: PROPOSED
 
 ---
 
