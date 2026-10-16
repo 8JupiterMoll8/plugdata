@@ -40,7 +40,13 @@ for dir in "$patch_root"/*/; do
       echo "skip    $label (already applied)"
       skipped=$((skipped + 1))
     elif git -C "$sub" apply --check "$patch" >/dev/null 2>&1; then
-      git -C "$sub" -c user.name="plugdata-fork" -c user.email="fork@localhost" am --quiet "$patch"
+      # --keep-cr: some submodule files (JUCE) are CRLF; `am` would otherwise
+      # strip the CR from the patch's context lines and fail to match.
+      if ! git -C "$sub" -c user.name="plugdata-fork" -c user.email="fork@localhost" am --quiet --keep-cr "$patch"; then
+        git -C "$sub" am --abort >/dev/null 2>&1 || true
+        echo "error: git am failed for $label (aborted, $name left unchanged)" >&2
+        exit 1
+      fi
       echo "applied $label"
       applied=$((applied + 1))
     else
