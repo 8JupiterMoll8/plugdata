@@ -298,7 +298,7 @@ struct Interface {
             if (auto* ob = pd_checkobject(&obj->g_pd)) {
                 canvas_deletelinesfor(targetCnv, ob);
                 if (targetCnv->gl_editor) {
-                    if (auto* rt = glist_findrtext(targetCnv, ob))
+                    if (auto* rt = glist_getrtext(targetCnv, ob, 0))
                         rtext_free(rt);
                 }
             }

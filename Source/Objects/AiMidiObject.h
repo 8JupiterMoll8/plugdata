@@ -298,7 +298,7 @@ public:
         juce::String const takeId = midi ? juce::String::fromUTF8(midi->x_take_id) : "take_1";
 
         auto const outlineColour = object->isSelected() && !cnv->isGraph
-            ? cnv->selectedOutlineCol
+            ? nvgColour(getThemeColours(*this).objectSelectedOutlineColour)
             : (rec ? nanovg::nvgRGBA(255, 70, 70, 220) : (play ? nanovg::nvgRGBA(60, 220, 120, 220) : nanovg::nvgRGBA(180, 90, 255, 180)));
 
         // 1. Chassis: Deep slate cassette background
@@ -306,7 +306,7 @@ public:
         NVGcolor bgGradBot = nanovg::nvgRGBA(16, 15, 24, 255);
         NVGpaint bgPaint = nanovg::nvgLinearGradient(nvg, b.getX(), b.getY(), b.getX(), b.getBottom(), bgGradTop, bgGradBot);
         nanovg::nvgBeginPath(nvg);
-        nanovg::nvgRoundedRect(nvg, b.getX(), b.getY(), w, h, Corners::objectCornerRadius);
+        nanovg::nvgRoundedRect(nvg, b.getX(), b.getY(), w, h, getPlugDataLook(*this).getObjectCornerRadius());
         nanovg::nvgFillPaint(nvg, bgPaint);
         nanovg::nvgFill(nvg);
         nanovg::nvgStrokeColor(nvg, outlineColour);

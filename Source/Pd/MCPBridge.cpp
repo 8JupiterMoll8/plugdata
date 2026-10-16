@@ -10,6 +10,7 @@
 #include "Toolbar.h" // ToolbarSource::getCPUUsage() for /pd/perf
 #include "Sidebar/Sidebar.h"
 #include "Canvas.h"
+#include "CanvasViewport.h"
 #include "TabComponent.h"
 #include "Object.h"
 #include "Connection.h" // Connection inobj/outobj + inIdx/outIdx (encapsulate_to_file rewire)
@@ -38,6 +39,16 @@
 #include <deque>
 #include <mutex>
 #include <map>
+
+// The bridge reads raw object text with the caller freeing the buffer (the old
+// pd::Interface::getObjectText contract). Upstream's version now returns a
+// SmallString; keep the raw form here so long message boxes stay intact.
+static void mcpGetObjectText(t_object const* ob, char** text, int* size)
+{
+    *text = nullptr;
+    *size = 0;
+    binbuf_gettext(ob->te_binbuf, text, size);
+}
 #include <algorithm>
 struct BatchDedupEntry {
   uint64_t ts = 0;
@@ -1139,7 +1150,7 @@ juce::String MCPBridge::computeDiagnoseFacts(PluginProcessor* processor, t_canva
 
         if (!ob) continue;
         char* tb = nullptr; int tsz = 0;
-        pd::Interface::getObjectText(ob, &tb, &tsz);
+        mcpGetObjectText(ob, &tb, &tsz);
         juce::String text = (tb && tsz > 0)
             ? juce::String::fromUTF8(tb, static_cast<size_t>(tsz)).trim()
             : juce::String();
@@ -1511,7 +1522,7 @@ juce::String MCPBridge::computeSignalTrace(PluginProcessor* processor, t_canvas*
         t_object* o = pd::Interface::checkObject(objs[i]);
         if (!o) return {};
         char* text = nullptr; int len = 0;
-        pd::Interface::getObjectText(o, &text, &len);
+        mcpGetObjectText(o, &text, &len);
         if (!text || len <= 0) return {};
         juce::String s = juce::String::fromUTF8(text, len);
         freebytes(text, len);
@@ -2051,8 +2062,7 @@ juce::String MCPBridge::computePerfFacts(PluginProcessor* processor, t_canvas* c
     // Compiled Mode (hvcc) — expose it so MCP tools can warn: heavy ELSE /
     // MERDA abstractions + a DSP recompile can crash in Compiled Mode.
     {
-        auto& st = SettingsFile::getInstance()->getValueTree();
-        bool compiled = st.hasProperty("hvcc_mode") && static_cast<bool>(st.getProperty("hvcc_mode"));
+        bool const compiled = SettingsFile::getInstance()->getProperty<bool>("hvcc_mode");
         root->setProperty("compiledMode", compiled);
     }
     root->setProperty("top", topArr);
@@ -2805,8 +2815,8 @@ static juce::DynamicObject* mcpBuildGuiProps(const juce::String& className, t_ob
         knob_get_rcv(reinterpret_cast<void*>(obj));
         knob_get_snd(reinterpret_cast<void*>(obj));
         auto* k = reinterpret_cast<t_fake_knob*>(obj);
-        props->setProperty("min", (double) k->x_min);
-        props->setProperty("max", (double) k->x_max);
+        props->setProperty("min", (double) k->x_lower);
+        props->setProperty("max", (double) k->x_upper);
         props->setProperty("value", (double) k->x_fval);
         props->setProperty("log", k->x_log != 0);
         if (k->x_snd_raw) props->setProperty("send", juce::String::fromUTF8(k->x_snd_raw->s_name));
@@ -2888,7 +2898,7 @@ static bool mcpGetGuiParam(const juce::String& className, t_object* obj, McpGuiP
         if (k->x_param && k->x_param != gensym("empty"))
             out.name = juce::String::fromUTF8(k->x_param->s_name);
         raw = k->x_snd_raw;
-        out.min = (double) k->x_min; out.max = (double) k->x_max; out.value = (double) k->x_fval;
+        out.min = (double) k->x_lower; out.max = (double) k->x_upper; out.value = (double) k->x_fval;
     } else if (cls == "hsl" || cls == "vsl") {
         auto* s = reinterpret_cast<t_slider*>(obj);
         raw = s->x_gui.x_snd_unexpanded;
@@ -2975,7 +2985,7 @@ static void mcpFillObjectJson(t_gobj* gobj, juce::DynamicObject* out)
     t_object* obj = pd::Interface::checkObject(gobj);
     if (obj) {
         char* text = nullptr; int len = 0;
-        pd::Interface::getObjectText(obj, &text, &len);
+        mcpGetObjectText(obj, &text, &len);
         if (text && len > 0) { objectText = juce::String::fromUTF8(text, len); freebytes(text, len); }
     }
     out->setProperty("type", className);
@@ -3024,152 +3034,110 @@ static bool mcpGobjIsLive(t_canvas* cnv, t_gobj* g)
  *  truth shared by /pd/doc_get and the paginated /pd/doc_dump. */
 static juce::String buildObjectDocJson(pd::Library* library, const juce::String& objectNameIn, const juce::String& creationArgs)
 {
-        auto objectName = objectNameIn;
+    auto const& objectName = objectNameIn;
+    if (library == nullptr)
+        return "{}";
 
+    // Upstream's docs database is a typed table now; an unknown name returns an
+    // empty table (no title).
+    auto const* doc = &library->getObjectInfo(objectName);
+    if (doc->title.isEmpty()) {
+        doc = objectName.contains("/")
+            ? &library->getObjectInfo(objectName.fromLastOccurrenceOf("/", false, false))
+            : &library->getObjectInfo("ELSE/" + objectName);
+    }
+    if (doc->title.isEmpty())
+        return "{}";
 
-            if (library == nullptr) return "{}";
+    auto* root = new juce::DynamicObject();
+    root->setProperty("name", doc->title.isNotEmpty() ? doc->title : objectName);
+    root->setProperty("description", doc->description);
 
-            auto tree = library->getObjectInfo(objectName);
-            if (!tree.isValid()) {
-                if (objectName.contains("/")) {
-                    tree = library->getObjectInfo(objectName.fromLastOccurrenceOf("/", false, false));
-                } else {
-                    tree = library->getObjectInfo("ELSE/" + objectName);
-                }
-            }
+    // Categories & origin
+    juce::Array<juce::var> cats;
+    juce::String origin = doc->origin;
+    for (auto const& c : doc->categories) {
+        cats.add(c);
+        if (origin.isEmpty() && pd::Library::objectOrigins.contains(c))
+            origin = c;
+    }
+    root->setProperty("categories", cats);
+    root->setProperty("origin", origin);
 
-            if (!tree.isValid()) {
-                return "{}";
-            }
+    // Inlets & outlets, with dynamic arity when creation args were passed
+    auto const numIn = static_cast<int>(doc->inlets.size());
+    auto const numOut = static_cast<int>(doc->outlets.size());
+    juce::Array<juce::var> inletsArr;
+    juce::Array<juce::var> outletsArr;
 
-            auto* root = new juce::DynamicObject();
-            auto name = tree.getProperty("name").toString();
-            auto desc = tree.getProperty("description").toString();
-            root->setProperty("name", name.isNotEmpty() ? name : objectName);
-            root->setProperty("description", desc);
+    auto addIolet = [&objectName](juce::Array<juce::var>& arr, int index, juce::String const& tooltip, bool variable) {
+        auto* io = new juce::DynamicObject();
+        io->setProperty("index", index);
+        io->setProperty("description", tooltip);
+        io->setProperty("signalRate", tooltip.containsIgnoreCase("signal") || objectName.endsWith("~"));
+        io->setProperty("variable", variable);
+        arr.add(juce::var(io));
+    };
 
-            // Categories & origin
-            auto categoriesTree = tree.getChildWithName("categories");
-            juce::Array<juce::var> cats;
-            juce::String origin = "";
-            for (auto cat : categoriesTree) {
-                auto c = cat.getProperty("name").toString();
-                cats.add(c);
-                if (pd::Library::objectOrigins.contains(c)) {
-                    origin = c;
-                }
-            }
-            root->setProperty("categories", cats);
-            root->setProperty("origin", origin);
+    StackArray<juce::StringArray, 2> parsed;
+    if (creationArgs.isNotEmpty() || numIn > 0 || numOut > 0) {
+        auto const fullObjText = objectName + (creationArgs.isNotEmpty() ? " " + creationArgs : "");
+        parsed = pd::Library::parseIoletTooltips(doc->inlets, doc->outlets, fullObjText, numIn, numOut);
+    }
 
-            // Inlets & Outlets
-            auto iolets = tree.getChildWithName("iolets");
-            int numIn = 0;
-            int numOut = 0;
-            for (auto iolet : iolets) {
-                if (iolet.getType() == juce::Identifier("inlet")) numIn++;
-                else if (iolet.getType() == juce::Identifier("outlet")) numOut++;
-            }
+    if (parsed[0].size() > 0 || parsed[1].size() > 0) {
+        for (int i = 0; i < parsed[0].size(); ++i)
+            addIolet(inletsArr, i, parsed[0][i], false);
+        for (int i = 0; i < parsed[1].size(); ++i)
+            addIolet(outletsArr, i, parsed[1][i], false);
+    } else {
+        for (int i = 0; i < numIn; ++i)
+            addIolet(inletsArr, i, doc->inlets[i].tooltip, doc->inlets[i].repeating);
+        for (int i = 0; i < numOut; ++i)
+            addIolet(outletsArr, i, doc->outlets[i].tooltip, doc->outlets[i].repeating);
+    }
 
-            // Dynamic arity resolution if creation args were passed
-            StackArray<juce::StringArray, 2> parsedTooltips;
-            bool hasParsedTooltips = false;
-            if (creationArgs.isNotEmpty() || numIn > 0 || numOut > 0) {
-                auto fullObjText = objectName + (creationArgs.isNotEmpty() ? " " + creationArgs : "");
-                parsedTooltips = pd::Library::parseIoletTooltips(iolets, fullObjText, numIn, numOut);
-                hasParsedTooltips = true;
-            }
+    root->setProperty("numInlets", inletsArr.size());
+    root->setProperty("numOutlets", outletsArr.size());
+    root->setProperty("inlets", inletsArr);
+    root->setProperty("outlets", outletsArr);
 
-            juce::Array<juce::var> inletsArr;
-            juce::Array<juce::var> outletsArr;
-            int inIdx = 0;
-            int outIdx = 0;
+    // Arguments
+    juce::Array<juce::var> argsArr;
+    int argIdx = 0;
+    for (auto const& arg : doc->arguments) {
+        auto* argObj = new juce::DynamicObject();
+        argObj->setProperty("index", argIdx++);
+        argObj->setProperty("type", arg.type);
+        argObj->setProperty("description", arg.description);
+        argsArr.add(juce::var(argObj));
+    }
+    root->setProperty("arguments", argsArr);
 
-            if (hasParsedTooltips && (parsedTooltips[0].size() > 0 || parsedTooltips[1].size() > 0)) {
-                for (int i = 0; i < parsedTooltips[0].size(); ++i) {
-                    auto* inObj = new juce::DynamicObject();
-                    inObj->setProperty("index", i);
-                    auto ttip = parsedTooltips[0][i];
-                    inObj->setProperty("description", ttip);
-                    bool isSig = ttip.containsIgnoreCase("signal") || objectName.endsWith("~");
-                    inObj->setProperty("signalRate", isSig);
-                    inletsArr.add(juce::var(inObj));
-                }
-                for (int i = 0; i < parsedTooltips[1].size(); ++i) {
-                    auto* outObj = new juce::DynamicObject();
-                    outObj->setProperty("index", i);
-                    auto ttip = parsedTooltips[1][i];
-                    outObj->setProperty("description", ttip);
-                    bool isSig = ttip.containsIgnoreCase("signal") || objectName.endsWith("~");
-                    outObj->setProperty("signalRate", isSig);
-                    outletsArr.add(juce::var(outObj));
-                }
-            } else {
-                for (auto iolet : iolets) {
-                    auto* ioObj = new juce::DynamicObject();
-                    auto ttip = iolet.getProperty("tooltip").toString();
-                    auto isVar = iolet.getProperty("variable").toString() == "1";
-                    bool isSig = ttip.containsIgnoreCase("signal") || objectName.endsWith("~");
-                    ioObj->setProperty("description", ttip);
-                    ioObj->setProperty("signalRate", isSig);
-                    ioObj->setProperty("variable", isVar);
+    // Methods
+    juce::Array<juce::var> methodsArr;
+    for (auto const& method : doc->methods) {
+        auto* mObj = new juce::DynamicObject();
+        mObj->setProperty("signature", method.type);
+        mObj->setProperty("description", method.description);
+        methodsArr.add(juce::var(mObj));
+    }
+    root->setProperty("methods", methodsArr);
 
-                    if (iolet.getType() == juce::Identifier("inlet")) {
-                        ioObj->setProperty("index", inIdx++);
-                        inletsArr.add(juce::var(ioObj));
-                    } else {
-                        ioObj->setProperty("index", outIdx++);
-                        outletsArr.add(juce::var(ioObj));
-                    }
-                }
-            }
+    // Flags
+    juce::Array<juce::var> flagsArr;
+    for (auto const& flag : doc->flags) {
+        auto* fObj = new juce::DynamicObject();
+        auto fName = flag.type.trim();
+        if (!fName.startsWith("-"))
+            fName = "-" + fName;
+        fObj->setProperty("name", fName);
+        fObj->setProperty("description", flag.description);
+        flagsArr.add(juce::var(fObj));
+    }
+    root->setProperty("flags", flagsArr);
 
-            root->setProperty("numInlets", inletsArr.size());
-            root->setProperty("numOutlets", outletsArr.size());
-            root->setProperty("inlets", inletsArr);
-            root->setProperty("outlets", outletsArr);
-
-            // Arguments
-            auto argsTree = tree.getChildWithName("arguments");
-            juce::Array<juce::var> argsArr;
-            int argIdx = 0;
-            for (auto arg : argsTree) {
-                auto* argObj = new juce::DynamicObject();
-                argObj->setProperty("index", argIdx++);
-                argObj->setProperty("type", arg.getProperty("type").toString());
-                argObj->setProperty("description", arg.getProperty("description").toString());
-                if (arg.hasProperty("default")) argObj->setProperty("default", arg.getProperty("default").toString());
-                argsArr.add(juce::var(argObj));
-            }
-            root->setProperty("arguments", argsArr);
-
-            // Methods
-            auto methodsTree = tree.getChildWithName("methods");
-            juce::Array<juce::var> methodsArr;
-            for (auto method : methodsTree) {
-                auto* mObj = new juce::DynamicObject();
-                mObj->setProperty("signature", method.getProperty("type").toString());
-                mObj->setProperty("description", method.getProperty("description").toString());
-                methodsArr.add(juce::var(mObj));
-            }
-            root->setProperty("methods", methodsArr);
-
-            // Flags
-            auto flagsTree = tree.getChildWithName("flags");
-            juce::Array<juce::var> flagsArr;
-            for (auto flag : flagsTree) {
-                auto* fObj = new juce::DynamicObject();
-                auto fName = flag.getProperty("name").toString().trim();
-                if (!fName.startsWith("-")) fName = "-" + fName;
-                fObj->setProperty("name", fName);
-                fObj->setProperty("description", flag.getProperty("description").toString());
-                if (flag.hasProperty("default")) fObj->setProperty("default", flag.getProperty("default").toString());
-                flagsArr.add(juce::var(fObj));
-            }
-            root->setProperty("flags", flagsArr);
-
-                        return juce::JSON::toString(juce::var(root));
-
+    return juce::JSON::toString(juce::var(root));
 }
 
 void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessage& msg)
@@ -3414,7 +3382,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 sendReply("/pd/doc_get/reply/" + correlationId, "{}");
                 return;
             }
-            processor->objectLibrary->waitForInitialisationToFinish();
+            processor->objectLibrary->ensureDatabaseInitialised();
             sendReply("/pd/doc_get/reply/" + correlationId,
                       buildObjectDocJson(processor->objectLibrary.get(), objectName, creationArgs));
         }
@@ -3433,7 +3401,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             if (limit > 50) limit = 50;
             juce::Array<juce::var> results;
             if (processor->objectLibrary) {
-                processor->objectLibrary->waitForInitialisationToFinish();
+                processor->objectLibrary->ensureDatabaseInitialised();
                 auto names = processor->objectLibrary->searchObjectDocumentation(query);
                 for (int i = 0; i < names.size() && i < limit; ++i) results.add(names[i]);
             }
@@ -3457,7 +3425,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             juce::Array<juce::var> items;
             int total = 0;
             if (processor->objectLibrary) {
-                processor->objectLibrary->waitForInitialisationToFinish();
+                processor->objectLibrary->ensureDatabaseInitialised();
                 auto names = processor->objectLibrary->getAllObjects();
                 total = names.size();
                 for (int i = offset; i < names.size() && i < offset + limit; ++i) {
@@ -3482,7 +3450,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             auto correlationId = getArgString(msg[0]);
             int count = 0;
             if (processor->objectLibrary) {
-                processor->objectLibrary->waitForInitialisationToFinish();
+                processor->objectLibrary->ensureDatabaseInitialised();
                 count = processor->objectLibrary->getAllObjects().size();
             }
             auto* root = new juce::DynamicObject();
@@ -3950,7 +3918,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             if (obj) {
                 char* text = nullptr;
                 int len = 0;
-                pd::Interface::getObjectText(obj, &text, &len);
+                mcpGetObjectText(obj, &text, &len);
                 if (text && len > 0) {
                     objectText = juce::String::fromUTF8(text, len);
                     freebytes(text, len);
@@ -4121,7 +4089,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 if (obj) {
                     char* text = nullptr;
                     int len = 0;
-                    pd::Interface::getObjectText(obj, &text, &len);
+                    mcpGetObjectText(obj, &text, &len);
                     if (text && len > 0) {
                         entry->setProperty("text", juce::String::fromUTF8(text, len));
                         freebytes(text, len);
@@ -4611,7 +4579,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                             else if (cls == "msg" || cls == "message") ds.kind = "msg";
                             if (auto* tobj = pd::Interface::checkObject(obj)) {
                                 char* tb = nullptr; int tsz = 0;
-                                pd::Interface::getObjectText(tobj, &tb, &tsz);
+                                mcpGetObjectText(tobj, &tb, &tsz);
                                 juce::String full = (tb && tsz) ? juce::String::fromUTF8(tb, tsz) : juce::String();
                                 if (tb) freebytes(tb, static_cast<size_t>(tsz) * sizeof(char));
                                 juce::StringArray toks; toks.addTokens(full, " ", "");
@@ -4673,7 +4641,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                                 // Capture old creation text so undo can edit it back.
                                 {
                                     char* tb = nullptr; int tsz = 0;
-                                    pd::Interface::getObjectText(o, &tb, &tsz);
+                                    mcpGetObjectText(o, &tb, &tsz);
                                     juce::String oldT = (tb && tsz) ? juce::String::fromUTF8(tb, tsz) : juce::String();
                                     if (tb) freebytes(tb, static_cast<size_t>(tsz) * sizeof(char));
                                     juce::StringArray toks; toks.addTokens(oldT, " ", "");
@@ -5024,7 +4992,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                                         juce::String dclsStr(dcls ? dcls : "");
                                         if (dclsStr == "*~" || dclsStr == "+~" || dclsStr == "-~" || dclsStr == "/~") {
                                             char* otext = nullptr; int olen = 0;
-                                            pd::Interface::getObjectText(d_o, &otext, &olen);
+                                            mcpGetObjectText(d_o, &otext, &olen);
                                             juce::String objTxt = (otext && olen > 0)
                                                 ? juce::String::fromUTF8(otext, olen) : dclsStr;
                                             if (otext && olen > 0) freebytes(otext, olen);
@@ -7986,7 +7954,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         r.cls = juce::String::fromUTF8(class_getname(pd_class(&g->g_pd)));
                         if (auto* ob = pd_checkobject(&g->g_pd)) {
                             char* tb = nullptr; int ts = 0;
-                            pd::Interface::getObjectText(ob, &tb, &ts);
+                            mcpGetObjectText(ob, &tb, &ts);
                             if (tb && ts > 0) { r.text = juce::String::fromUTF8(tb, ts).trim(); freebytes(tb, ts); }
                         }
                         encRecs.push_back(r);
@@ -8043,7 +8011,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                             juce::String txt;
                             if (auto* ob = pd_checkobject(&y->g_pd)) {
                                 char* tb = nullptr; int ts = 0;
-                                pd::Interface::getObjectText(ob, &tb, &ts);
+                                mcpGetObjectText(ob, &tb, &ts);
                                 if (tb && ts > 0) { txt = juce::String::fromUTF8(tb, ts).trim(); freebytes(tb, ts); }
                             }
                             for (auto& r : encRecs) {
@@ -8527,17 +8495,17 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             auto replyAddr     = "/pd/measure_text/reply/" + correlationId;
 
             juce::var parsed = juce::JSON::parse(jsonArrayStr);
-            juce::Font font = Fonts::getCurrentFont().withHeight(fontSize);
+            juce::Font font = Fonts::getDefaultFont().withHeight(fontSize);
             auto* resultObj = new juce::DynamicObject();
 
             if (auto* arr = parsed.getArray()) {
                 for (const auto& item : *arr) {
                     auto str = item.toString();
-                    resultObj->setProperty(str, font.getStringWidth(str));
+                    resultObj->setProperty(str, juce::roundToInt(juce::GlyphArrangement().getStringWidth(font, str)));
                 }
             } else if (parsed.isString()) {
                 auto str = parsed.toString();
-                resultObj->setProperty(str, font.getStringWidth(str));
+                resultObj->setProperty(str, juce::roundToInt(juce::GlyphArrangement().getStringWidth(font, str)));
             }
 
             juce::String jsonResult = juce::JSON::toString(juce::var(resultObj));
@@ -8931,7 +8899,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     auto const canvasOrigin = canvasComp->canvasOrigin;
 
                     juce::Graphics g(img);
-                    juce::Font labelFont = Fonts::getCurrentFont()
+                    juce::Font labelFont = Fonts::getDefaultFont()
                         .withHeight(juce::jlimit(9.0f, 16.0f, 12.0f * scale));
                     g.setFont(labelFont);
 
@@ -8944,7 +8912,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         float imgY = vpY * scale;
                         float objHImg = static_cast<float>(lbl.h) * zoom * scale;
 
-                        float tw = labelFont.getStringWidthFloat(lbl.text);
+                        float tw = juce::GlyphArrangement().getStringWidth(labelFont, lbl.text);
                         float th = labelFont.getHeight();
                         float pad = 2.0f * scale;
                         float chipH = th + 2.0f * pad;

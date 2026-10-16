@@ -1119,7 +1119,7 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
         nanovg::nvgTranslate(nvg, static_cast<float>(nb.getX()), static_cast<float>(nb.getY()));
         nanovg::nvgDrawRoundedRect(nvg, 0, 0, static_cast<float>(nb.getWidth()), static_cast<float>(nb.getHeight()),
                            nanovg::nvgRGBA(22, 22, 28, 255), nanovg::nvgRGBA(74, 158, 255, 255), 4.0f);
-        mcpNoteRenderer.renderJUCEComponent(nvg, *mcpNoteEditor, zoom * editor->getRenderScale());
+        editor->getNanoLLGC()->renderComponent(*mcpNoteEditor);
     }
 
     // PRD Copilot: the floating selection prompt pill — glass panel drawn in NVG,
@@ -1589,7 +1589,7 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
             NVGScopedState scopedField(nvg);
             auto const fb = mcpSelectionPill->getBounds();
             nanovg::nvgTranslate(nvg, static_cast<float>(fb.getX()), static_cast<float>(fb.getY()));
-            mcpSelectionPillRenderer.renderJUCEComponent(nvg, *mcpSelectionPill, zoom * editor->getRenderScale());
+            editor->getNanoLLGC()->renderComponent(*mcpSelectionPill);
         }
 
         // Native Horizontal Card Drawer or Smart Command Palette
@@ -1839,7 +1839,7 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
                 float const gw = g.w > 0 ? g.w : 120.0f;
                 float const gh = g.h > 0 ? g.h : 22.0f;
                 nanovg::nvgBeginPath(nvg);
-                nanovg::nvgRoundedRect(nvg, gx, gy, gw, gh, Corners::objectCornerRadius);
+                nanovg::nvgRoundedRect(nvg, gx, gy, gw, gh, getPlugDataLook(*this).getObjectCornerRadius());
                 nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(74, 158, 255, 55));
                 nanovg::nvgFill(nvg);
                 nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(74, 158, 255, 220));
@@ -3298,10 +3298,10 @@ bool Canvas::shouldShowConnectionActivity() const
 
 void Canvas::setOverlayMask(int mask)
 {
-    auto overlaysTree = SettingsFile::getInstance()->getValueTree().getChildWithName("Overlays");
-    if (overlaysTree.isValid()) {
+    if (auto overlays = SettingsFile::getInstance()->getProperty<DynamicObject>("overlays")) {
         auto const key = (locked.getValue() || commandLocked.getValue()) ? "lock" : "edit";
-        overlaysTree.setProperty(key, mask, nullptr);
+        overlays->setProperty(key, mask);
+        SettingsFile::getInstance()->triggerSettingsChange("overlays");
     }
     updateOverlays();
 }

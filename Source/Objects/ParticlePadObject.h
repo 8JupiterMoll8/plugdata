@@ -273,10 +273,10 @@ public:
     void render(NVGcontext* nvg) override
     {
         auto const b = getLocalBounds().toFloat();
-        auto const outlineColour = object->isSelected() && !cnv->isGraph ? cnv->selectedOutlineCol : cnv->objectOutlineCol;
+        auto const outlineColour = object->isSelected() && !cnv->isGraph ? nvgColour(getThemeColours(*this).objectSelectedOutlineColour) : nvgColour(getThemeColours(*this).objectOutlineColour);
 
         // 1. Draw rounded background container
-        nanovg::nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), fillColour, outlineColour, Corners::objectCornerRadius);
+        nanovg::nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), fillColour, outlineColour, getPlugDataLook(*this).getObjectCornerRadius());
 
         // 2. Draw proximity web/network lines between nearby particles
         size_t const n = particles.size();
@@ -381,7 +381,7 @@ public:
     {
         if (auto pad = ptr.get<t_fake_particlepad>()) {
             sizeProperty = VarArray { var(pad->x_w), var(pad->x_h) };
-            fillColour = NVGComponent::convertColour(Colour(pad->x_color[0], pad->x_color[1], pad->x_color[2]));
+            fillColour = nvgColour(Colour(pad->x_color[0], pad->x_color[1], pad->x_color[2]));
             if (pad->x_count > 0 && pad->x_count != particleCount) {
                 particleCount = pad->x_count;
                 initParticles(particleCount);

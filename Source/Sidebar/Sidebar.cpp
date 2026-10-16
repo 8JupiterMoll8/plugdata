@@ -867,7 +867,7 @@ void Sidebar::showParameters(SmallArray<Component*>& objects, SmallArray<ObjectP
                 atoms.add(pd::Atom(static_cast<float>(bounds.getY())));
                 
                 pd->sendSelectionTelemetry("selected_object", atoms);
-                pd->logMessage("MCP_TELEMETRY: Pushed " + object->getType(false) + " [" + String(object->cnv->objects.index_of(object)) + "] at " + String(bounds.getX()) + "," + String(bounds.getY()));
+                pd->logMessage("MCP_TELEMETRY: Pushed " + object->getType(false).toString() + " [" + String(object->cnv->objects.index_of(object)) + "] at " + String(bounds.getX()) + "," + String(bounds.getY()));
             }
         } else {
             // Multi-Selection: selection_count [subpatch] [count]

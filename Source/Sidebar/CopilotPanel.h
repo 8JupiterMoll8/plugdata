@@ -33,14 +33,23 @@ public:
         juce::Time time;
     };
 
-    class DraggableWidgetCard final : public ObjectDragAndDrop {
+    // Drag a ready-made widget onto the canvas. Upstream's ObjectDragAndDrop is a
+    // final singleton now, started with attachToMouse (same idiom as AddObjectMenu).
+    class DraggableWidgetCard final : public Component {
     public:
         DraggableWidgetCard(PluginEditor* e, const juce::String& name, const juce::String& sub, juce::Colour dotCol, const juce::String& patchText)
-            : ObjectDragAndDrop(e), widgetName(name), subText(sub), accentDot(dotCol), patchString(patchText)
+            : editor(e), widgetName(name), subText(sub), accentDot(dotCol), patchString(patchText)
         {}
 
-        juce::String getObjectString() override { return patchString; }
-        juce::String getPatchStringName() override { return widgetName; }
+        void mouseDown(const MouseEvent&) override { dragStarted = false; }
+
+        void mouseDrag(const MouseEvent& e) override
+        {
+            if (!dragStarted && e.getDistanceFromDragStart() > 3) {
+                dragStarted = true;
+                ObjectDragAndDrop::attachToMouse(editor, patchString);
+            }
+        }
 
         void paint(Graphics& g) override
         {
@@ -82,6 +91,8 @@ public:
         void mouseExit(const MouseEvent&) override { repaint(); }
 
     private:
+        PluginEditor* editor;
+        bool dragStarted = false;
         juce::String widgetName;
         juce::String subText;
         juce::Colour accentDot;

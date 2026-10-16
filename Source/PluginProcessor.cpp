@@ -817,6 +817,11 @@ bool PluginProcessor::isBusesLayoutSupported(BusesLayout const& layouts) const
 
 void PluginProcessor::settingsChanged(String const& name, var const& value)
 {
+    if (name.startsWith("mcp_bridge_")) {
+        mcpSettingsChanged(name, value);
+        return;
+    }
+
     if (settingsFile) {
         if (name == "theme") {
             setTheme(value.toString());
@@ -858,7 +863,7 @@ juce::String PluginProcessor::getMcpBridgeStatus() const
     return mcpBridge ? mcpBridge->getStatus() : juce::String("unavailable");
 }
 
-void PluginProcessor::settingsChanged(String const& name, var const& value)
+void PluginProcessor::mcpSettingsChanged(String const& name, var const& value)
 {
     if (!mcpBridge) return;
 

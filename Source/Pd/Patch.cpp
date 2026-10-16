@@ -388,7 +388,10 @@ t_gobj* Patch::createObjectFast(int const x, int const y, String const& name)
     }
 
     if (auto patch = ptr.get<t_glist>()) {
-        setCurrent();
+        // Upstream dropped Patch::setCurrent(); the fast path still needs an
+        // editor on the canvas (and gl_havewindow) before creating objects.
+        patch->gl_havewindow = true;
+        canvas_create_editor(patch.get());
         return pd::Interface::createObjectFast(patch.get(), typesymbol, argc, argv.data());
     }
 

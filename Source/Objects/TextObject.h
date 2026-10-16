@@ -177,7 +177,7 @@ public:
     {
         if (editor)
             return false;
-        String const live = getText();
+        String const live = getText().toString();
         if (live.isEmpty() || live == objectText)
             return false;
         objectText = live;

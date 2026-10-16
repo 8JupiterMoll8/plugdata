@@ -162,8 +162,8 @@ public:
     }
 
     void settingsChanged(String const& name, var const& value) override;
+    void mcpSettingsChanged(String const& name, var const& value);
     void settingsFileReloaded() override;
-    void settingsChanged(String const& name, var const& value) override;
     t_canvas* getCanvasBySymbol(const String& canvas_symbol);
     // Strict variant for mutations: resolves ONLY 'main'/'pd-main'/'' (focused
     // root) and genuinely registered canvas symbols. Returns nullptr for
