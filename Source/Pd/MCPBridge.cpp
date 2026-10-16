@@ -4187,7 +4187,11 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         //   Edits: [tempId, newType, nargs, arg1..argN] * editCount
         //   Creates: [tempId, x, y, kind, type, nargs, arg1..argN] * createCount
         //   Connects: [srcId, srcOut, destId, destIn] * connectCount
-        // Reply: /pd/batch_atomic/reply/<corrId> <deletedCount> <disconnectedCount> <editedCount> <createdCount> <connectedCount> [inline mappings...]
+        // Reply: /pd/batch_atomic/reply/<corrId> <created> <connected> <edited> <deleted> <disconnected>
+        //        <reconcileEvicted> <reconcileAdopted> [(tempId, index)* mappings] <detectedConnectionsJson "[...]">
+        //        then failure/advisory tail facts, each appended in a fixed order. The full layout (and the TS decoder
+        //        that must match it) is in mcp-server docs/protocol/v1-wire-schema.json; the reply writer is below.
+        // NOTE: the counts are NOT in request order (the request is delete, disconnect, edit, create, connect).
         if (msg.size() >= 5 && processor) {
             auto canvasName = normalizeCanvas(getArgString(msg[0]));
             auto correlationId = getArgString(msg[1]);
