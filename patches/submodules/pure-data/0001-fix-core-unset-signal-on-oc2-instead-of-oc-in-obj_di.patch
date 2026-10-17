@@ -1,37 +1,27 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Alphi <alphi@starchaser.local>
 Date: Fri, 4 Sep 2026 10:25:22 +0200
-Subject: [PATCH 1/2] fix(core): unset signal on oc2 instead of oc in
- obj_disconnect to prevent dangling weak reference heap corruption
+Subject: [PATCH 1/3] fix(core): unset signal on oc2 instead of oc in
+ obj_disconnect
 
+obj_disconnect found the connection to remove (oc2, the one after oc in the
+list) but released the signal of oc, the previous element. The freed oc2 kept
+a weak reference in its signal: a dangling pointer and heap corruption on the
+next DSP update. This is a plain upstream bug that the pinned plugdata-pd
+(2002d63) still has.
+
+Depended on by: every wire removal on a signal outlet (the bridge's
+disconnect and the batch_atomic delete/disconnect phases,
+MCPBridge.cpp batch_atomic). Drop this patch only when upstream releases oc2.
 ---
- src/m_obj.c | 9 ++++++---
- 1 file changed, 6 insertions(+), 3 deletions(-)
+ src/m_obj.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
 
 diff --git a/src/m_obj.c b/src/m_obj.c
-index ebd23dc..3e6d3f4 100644
+index ebd23dc..97b9bd7 100644
 --- a/src/m_obj.c
 +++ b/src/m_obj.c
-@@ -27,6 +27,9 @@ int is_reference_valid(void* ptr);
- int plugdata_debugging_or_activity_enabled();
- void signal_makereusable(t_signal *sig);
- 
-+/* MCP hot-patching: when > 0, defer per-wire canvas_update_dsp() calls */
-+int dsp_update_deferred = 0;
-+
- union inletunion
- {
-     t_symbol *iu_symto;
-@@ -730,7 +733,7 @@ doit:
-         oc2->oc_next = oc;
-     }
-     else *ochead = oc;
--    if (o->o_sym == &s_signal) canvas_update_dsp();
-+    if (o->o_sym == &s_signal && !dsp_update_deferred) canvas_update_dsp();
- 
-     return (oc);
- }
-@@ -774,7 +777,7 @@ doit:
+@@ -774,7 +774,7 @@ doit:
          {
              oc->oc_next = oc2->oc_next;
              if(oc2->oc_signal)  {
@@ -40,12 +30,6 @@ index ebd23dc..3e6d3f4 100644
              }
              freebytes(oc2, sizeof(*oc2));
              goto done;
-@@ -782,7 +785,7 @@ doit:
-         oc = oc2;
-     }
- done:
--    if (o->o_sym == &s_signal) canvas_update_dsp();
-+    if (o->o_sym == &s_signal && !dsp_update_deferred) canvas_update_dsp();
- }
- 
- /* ------ traversal routines for code that can't see our structures ------ */
+-- 
+2.34.1
+

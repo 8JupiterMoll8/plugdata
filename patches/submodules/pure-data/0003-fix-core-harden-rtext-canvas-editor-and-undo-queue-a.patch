@@ -1,10 +1,21 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Alphi <alphi@starchaser.local>
 Date: Fri, 16 Oct 2026 23:04:37 +0200
-Subject: [PATCH 2/2] fix(core): harden rtext, canvas editor, and undo queue
+Subject: [PATCH 3/3] fix(core): harden rtext, canvas editor, and undo queue
  against null-dereference crashes
 
 Rebased onto plugdata-pd 2002d63: upstream glist_getrtext now creates the rtext on demand, so the old glist_findrtext create-if-missing hunk and the rtext_width/height guards (functions removed upstream) are dropped. Null guards kept for rtext_gettag/draw/erase/displace/select, canvas_displaceselection, and the undo queue.
+
+Hunk by hunk (checked in P3.2 S2 against the unpatched pin 2002d63, where every hunk still applies, so upstream has not fixed any of them):
+
+- g_editor.c canvas_displaceselection (2 hunks): dereferences x->gl_editor and x->gl_editor->e_selection with no check. Guard: return when the canvas or its editor is null.
+- g_rtext.c rtext_gettag/draw/erase/displace/select: dereference x->x_tag / x->x_glist with no check. glist_getrtext(gl, obj, 0) returns 0 for an object gobj_shouldvis() rejects (a GOP child outside the visible area): `really == 0` means "create only if visible", not "do not create". The bridge's hand-rolled delete (Source/Pd/Interface.h) passes that result on.
+- g_undo.c canvas_undo_add (empty sequence): after `u_last = u_last->prev` it reads u_last->next and ->name; null when the sequence start has no earlier entry. Guard plus a reset of u_queue.
+- g_undo.c canvas_undo_undo / canvas_undo_redo: read u_last->prev / ->next on a null u_last (emptied queue).
+- g_undo.c canvas_undo_rebranch: same null u_last; its early `return` also skipped canvas_resume_dsp() after canvas_suspend_dsp(), leaving DSP suspended (a plain upstream bug).
+- g_undo.c canvas_undo_free: left u_queue / u_last / u_cleanstate pointing at the freed list, so a later undo or a second free walks freed memory (the console line "canvas_undo_free: unsupported undo command <garbage>" in docs/mcp-bridge/BUG-batch_atomic-delete-dsp-segfault.md). It also drops the dsp suspend/resume around the free; the original commit does not say why, so that part is kept as it was.
+
+Depended on by: every path that resets or clears a canvas's undo queue from the bridge (resetCanvasUndo, clear, load, batch_atomic) and the object delete in Source/Pd/Interface.h. Drop a hunk only when a test shows the state it guards can no longer occur.
 ---
  src/g_editor.c |  4 +++-
  src/g_rtext.c  |  5 ++++
@@ -212,3 +223,6 @@ index 31bafc5..f65505b 100644
 +    canvas_undo_set_name("no");
 +    canvas_show_undomenu(x, "no", "no");
  }
+-- 
+2.34.1
+

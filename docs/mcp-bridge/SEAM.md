@@ -31,6 +31,20 @@ Upstream-file hunks that stay as they are, with the reason. Empty until P3.2 S9;
 | File | Why it cannot be a hook |
 |---|---|
 
+## Submodule patches (`patches/submodules/`)
+
+Not part of the hunk count above (that measures `Source/`). Applied by `scripts/apply-submodule-patches.sh` on top of the pinned upstream submodules; the reason and the dependants of each patch are in its commit message.
+
+| Patch | What | Why it is carried |
+|---|---|---|
+| `pure-data/0001` | `obj_disconnect` releases the signal of `oc2` instead of `oc` | Upstream bug still present at the pin (2002d63): dangling weak reference, heap corruption. Needed by every wire removal on a signal outlet |
+| `pure-data/0002` | `dsp_update_deferred` global and its two guards in `obj_connect`/`obj_disconnect` | Fork feature, no upstream equivalent: the bridge's `batch_atomic` defers the per-wire DSP recompile. Dropping it breaks the link |
+| `pure-data/0003` | null guards in `g_rtext.c`, `canvas_displaceselection`, and the undo queue (`g_undo.c`) | Not fixed upstream at the pin (every hunk applies to the unpatched pin). Per hunk reasons are in the patch message; includes a plain upstream bug (`canvas_undo_rebranch` leaves DSP suspended). Note: `glist_getrtext(gl, obj, 0)` means "create only if visible" and returns 0 otherwise, it does not mean "do not create" |
+| `pd-else/0001-0003` | `ai_midi`, `ai.voice`, `particlepad` externals | Fork-only objects (new files) |
+| `pd-iemguts/0001` | `iemguts_setup()` aggregator | Build glue for plugdata |
+| `pd-lua/0001` | sequential array indexing for atom tables | Fork fix |
+| `JUCE/0001` | nullptr check for `XGetImage` in `createSnapshotOfNativeWindow` | Fork fix (GEM capture) |
+
 ## Baseline (P3.2 S0, fork `060f3383c`, base `5c6587314`)
 
 215 hunks in 35 upstream-owned files, +7,351 / -83 lines, 0 tagged (`Canvas.cpp` 47, `PluginProcessor.cpp` 18, `OverlayDisplaySettings.h` 17, `LuaObject.h` 15, `Interface.h` 11, `Sidebar.cpp` 11, `Instance.cpp` 11, then 28 files with 1 to 8). The gate is expected to fail until P3.2 S9. Target at the end: at most 60 hunks, `Canvas.cpp` at most 12.
