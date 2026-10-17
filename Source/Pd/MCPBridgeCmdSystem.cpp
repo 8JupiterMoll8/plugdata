@@ -1,0 +1,212 @@
+/*
+ // Copyright (c) 2026 PlugData MCP Team
+ // For information on usage and redistribution, and for a DISCLAIMER OF ALL
+ // WARRANTIES, see the file, "LICENSE.txt," in this distribution.
+*/
+
+// Bridge commands: system (ping, DSP, clear, undo/redo) (Plan 3 P3.3): handlers moved unchanged out of MCPBridge::handlePdDomain.
+
+#include "MCPBridgeCmdCommon.h"
+
+void MCPBridge::pdPing(const juce::String& action, const juce::OSCMessage& msg)
+{
+    sendRawReply("/pd/pong");
+    return;
+}
+
+void MCPBridge::pdClearConsole(const juce::String& action, const juce::OSCMessage& msg)
+{
+    if (processor) {
+        juce::MessageManager::callAsync([proc = processor] {
+            proc->getConsoleMessages().clear();
+            proc->getMcp()->gui().clearConsole();
+        });
+        auto correlationId = msg.size() > 0 ? getArgString(msg[0]) : "0";
+        sendReply("/pd/clear_console/reply/" + correlationId, 1.0f);
+    }
+    return;
+}
+
+void MCPBridge::pdMcpReloadLua(const juce::String& action, const juce::OSCMessage& msg)
+{
+    auto correlationId = msg.size() >= 2 ? getArgString(msg[1]) : (msg.size() > 0 ? getArgString(msg[0]) : "0");
+    sendReply("/pd/mcp_reload_lua/reply/" + correlationId, 1.0f);
+    return;
+}
+
+void MCPBridge::pdDsp(const juce::String& action, const juce::OSCMessage& msg)
+{
+    if (msg.size() > 0) {
+        float val = getArgFloat(msg[0]);
+        if (processor) {
+            if (val > 0.5f) processor->startDSP();
+            else processor->releaseDSP();
+        }
+    }
+    return;
+}
+
+void MCPBridge::pdUpdateDsp(const juce::String& action, const juce::OSCMessage& msg)
+{
+    // Full DSP graph recompile (stop+start). Needed after bulk
+    // reconstruct operations (load/undo/redo) which create/connect
+    // objects while the graph was compiled against an empty canvas.
+    sys_lock();
+    canvas_update_dsp();
+    sys_unlock();
+    return;
+}
+
+void MCPBridge::pdVis(const juce::String& action, const juce::OSCMessage& msg)
+{
+    if (msg.size() >= 2) {
+        auto canvasName = normalizeCanvas(getArgString(msg[0]));
+        float vis = getArgFloat(msg[1]);
+        sys_lock();
+        t_canvas* cnv = reinterpret_cast<t_canvas*>(pd_findbyclass(gensym(canvasName.toRawUTF8()), canvas_class));
+        if (cnv) {
+            t_atom a;
+            SETFLOAT(&a, vis);
+            pd_typedmess(reinterpret_cast<t_pd*>(cnv), gensym("vis"), 1, &a);
+        }
+        sys_unlock();
+    }
+    return;
+}
+
+void MCPBridge::pdClear(const juce::String& action, const juce::OSCMessage& msg)
+{
+    if (msg.size() >= 1 && processor) {
+        auto canvasName = normalizeCanvas(getArgString(msg[0]));
+        auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : "0";
+
+        // Clear on the JUCE message thread. Deleting GUI/abstraction/GOP
+        // objects off the message thread crashes (same class as the load
+        // bug). clearCanvas() deselects the editor + glist_delete.
+        juce::MessageManager::callAsync(
+            [proc = processor, canvasName, correlationId, bridge = this]() {
+                sys_lock();
+                t_canvas* cnv = proc->getMcp()->getCanvasBySymbol(canvasName);
+                if (cnv) {
+                    mcp::PdOps::clearCanvas(cnv);
+                }
+                sys_unlock();
+
+                // Clearing freed every object while Pd's index-based undo
+                // entries still point at them — drop the stale queue.
+                resetCanvasUndo(proc, canvasName);
+                // Drop MCP transactions too — their inverses reference the
+                // objects we just freed.
+                if (cnv) proc->getMcp()->clearMcpTransactions(cnv);
+
+                SmallArray<pd::Atom> atoms;
+                atoms.add(pd::Atom(proc->generateSymbol(canvasName)));
+                atoms.add(pd::Atom(proc->generateSymbol("0")));
+                proc->receiveSysMessage("mcp_clear_ids", atoms);
+
+                proc->getMcp()->synchroniseCanvases();
+
+                bridge->sendRawReply("/pd/cleared");
+                if (correlationId != "0") {
+                    juce::Array<juce::var> clearReplyArgs;
+                    clearReplyArgs.add(1.0);
+                    clearReplyArgs.add(1.0);
+                    bridge->sendReply("/pd/clear/reply/" + correlationId, clearReplyArgs);
+                }
+            });
+    }
+    return;
+}
+
+void MCPBridge::pdClearUndo(const juce::String& action, const juce::OSCMessage& msg)
+{
+    // /pd/clear_undo <canvasName>
+    // Routes through receiveSysMessage → mcp_clear_undo case which runs
+    // on the Pd scheduler thread — the only thread where canvas_undo_free
+    // (calls canvas_suspend_dsp internally) is safe to call.
+    if (msg.size() >= 1 && processor) {
+        auto canvasName = normalizeCanvas(getArgString(msg[0]));
+        SmallArray<pd::Atom> atoms;
+        atoms.add(pd::Atom(processor->generateSymbol(canvasName)));
+        processor->receiveSysMessage("mcp_clear_undo", atoms);
+        sendRawReply("/pd/clear_undo/reply");
+    }
+    return;
+}
+
+void MCPBridge::pdClearSelection(const juce::String& action, const juce::OSCMessage& msg)
+{
+    if (processor) {
+        SmallArray<pd::Atom> atoms;
+        processor->receiveSysMessage("mcp_clear_selection", atoms);
+    }
+    return;
+}
+
+void MCPBridge::pdUndo(const juce::String& action, const juce::OSCMessage& msg)
+{
+    if (msg.size() >= 1 && processor) {
+        auto canvasName = normalizeCanvas(getArgString(msg[0]));
+        auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : "0";
+
+        t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
+        if (!cnv && (canvasName == "pd-main" || canvasName == "main" || canvasName.isEmpty())) cnv = pd_this->pd_canvaslist;
+
+        if (cnv) {
+            juce::MessageManager::callAsync([proc = processor, cnv, correlationId, bridge = this]() {
+                if (proc->getMcp()->hasMcpTransaction(cnv)) {
+                    proc->getMcp()->undoMcpTransaction(cnv);
+                    proc->getMcp()->synchroniseCanvases();
+                    bridge->sendReply("/pd/undo/reply/" + correlationId, 1.0f);
+                    return;
+                }
+                auto const viewUndo = proc->getMcp()->gui().undo(cnv);
+                if (viewUndo == McpGuiHost::UndoResult::Done) {
+                    bridge->sendReply("/pd/undo/reply/" + correlationId, 1.0f);
+                } else if (viewUndo == McpGuiHost::UndoResult::NoView) {
+                    pd::Interface::undo(cnv);
+                    proc->getMcp()->synchroniseCanvases();
+                    bridge->sendReply("/pd/undo/reply/" + correlationId, 1.0f);
+                } else {
+                    // Canvas present but the undo stack is EMPTY (e.g. after a
+                    // GOP/refactor/encapsulate flush) — report the truth so the
+                    // server stops claiming "undo succeeded" on a no-op.
+                    bridge->sendReply("/pd/undo/reply/" + correlationId, 0.0f);
+                }
+            });
+        } else {
+            sendReply("/pd/undo/reply/" + correlationId, 0.0f);
+        }
+    }
+    return;
+}
+
+void MCPBridge::pdRedo(const juce::String& action, const juce::OSCMessage& msg)
+{
+    if (msg.size() >= 1 && processor) {
+        auto canvasName = normalizeCanvas(getArgString(msg[0]));
+        auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : "0";
+
+        t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
+        if (!cnv && (canvasName == "pd-main" || canvasName == "main" || canvasName.isEmpty())) cnv = pd_this->pd_canvaslist;
+
+        if (cnv) {
+            juce::MessageManager::callAsync([proc = processor, cnv, correlationId, bridge = this]() {
+                if (proc->getMcp()->hasMcpRedoTransaction(cnv)) {
+                    proc->getMcp()->redoMcpTransaction(cnv);
+                    proc->getMcp()->synchroniseCanvases();
+                    bridge->sendReply("/pd/redo/reply/" + correlationId, 1.0f);
+                } else if (proc->getMcp()->gui().redo(cnv)) {
+                    bridge->sendReply("/pd/redo/reply/" + correlationId, 1.0f);
+                } else {
+                    pd::Interface::redo(cnv);
+                    proc->getMcp()->synchroniseCanvases();
+                    bridge->sendReply("/pd/redo/reply/" + correlationId, 1.0f);
+                }
+            });
+        } else {
+            sendReply("/pd/redo/reply/" + correlationId, 0.0f);
+        }
+    }
+    return;
+}

@@ -44,7 +44,45 @@ MCP_SOURCE(transport, PathOrArg0)
 MCP_SOURCE(seq, PathOrArg0)
 MCP_SOURCE(chat, PathOrArg0)
 
-// ── Verbs: empty until S2 ──
+// ── Verbs (rows move in per domain, P3.3 S2-S7) ──
+
+// ── pd: system ──
+MCP_VERB(pd, "ping", pdPing)
+MCP_VERB(pd, "clear_console", pdClearConsole)
+MCP_VERB(pd, "mcp_reload_lua", pdMcpReloadLua)
+MCP_VERB(pd, "dsp", pdDsp)
+MCP_VERB(pd, "update_dsp", pdUpdateDsp)
+MCP_VERB(pd, "vis", pdVis)
+MCP_VERB(pd, "clear", pdClear)
+MCP_VERB(pd, "clear_undo", pdClearUndo)
+MCP_VERB(pd, "clear_selection", pdClearSelection)
+MCP_VERB(pd, "undo", pdUndo)
+MCP_VERB(pd, "redo", pdRedo)
+
+// ── pd: objects ──
+MCP_VERB(pd, "obj_set", pdObjSet)
+MCP_VERB(pd, "obj_relabel", pdObjRelabel)
+MCP_VERB(pd, "obj_set_batch", pdObjSetBatch)
+MCP_VERB(pd, "param_get", pdParamGet)
+MCP_VERB(pd, "params", pdParams)
+MCP_VERB(pd, "param_set_name", pdParamSetName)
+MCP_VERB(pd, "obj_get_batch", pdObjGetBatch)
+MCP_VERB(pd, "obj_get", pdObjGet)
+MCP_VERB(pd, "census", pdCensus)
+MCP_VERB(pd, "typeof", pdTypeof)
+MCP_VERB(pd, "ports", pdPorts)
+MCP_VERB(pd, "connections", pdConnections)
+MCP_VERB(pd, "dump", pdDump)
+
+// ── pd: docs ──
+MCP_VERB(pd, "doc_get", pdDocGet)
+MCP_ALIAS(pd, "doc", pdDocGet)
+MCP_VERB(pd, "doc_search", pdDocSearch)
+MCP_VERB(pd, "doc_dump", pdDocDump)
+MCP_VERB(pd, "library_info", pdLibraryInfo)
+MCP_VERB(pd, "ui_open_reference", pdUiOpenReference)
+MCP_VERB(pd, "ui_open_help", pdUiOpenHelp)
+MCP_VERB(pd, "viewport", pdViewport)
 
 #undef MCP_SOURCE
 #undef MCP_VERB
