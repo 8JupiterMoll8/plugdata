@@ -42,3 +42,10 @@ bool MCPBridge::dispatchRegistered(const juce::String& domain, const juce::Strin
     (this->**handler)(juce::String::fromUTF8(verb.c_str()), msg);
     return true;
 }
+
+// Verbs with a table row run from the table; the rest still live in handlePdDomain.
+void MCPBridge::replayPd(const juce::String& action, const juce::OSCMessage& msg)
+{
+    if (!dispatchRegistered("pd", action, msg))
+        handlePdDomain(action, msg);
+}

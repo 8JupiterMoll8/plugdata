@@ -101,3 +101,131 @@ inline void resetCanvasUndo(PluginProcessor* proc, juce::String const& canvasNam
 // Written by the /param domain, read by /pd/param_get.
 inline std::mutex s_paramShadowMutex;
 inline std::unordered_map<std::string, std::vector<t_atom>> s_paramShadow;
+
+// =========================================================================
+// Zero-Dropout Paste Helpers
+// =========================================================================
+
+// Direct binbuf_eval paste — bypasses canvas_dopaste entirely.
+// Skips: undo serialization, object selection, editmode switch,
+// and the inner canvas_suspend_dsp/canvas_resume_dsp cycle.
+inline void pasteDirect(t_canvas* cnv, char const* buf)
+{
+    // Sanitise the paste buffer: drop top-level "#A" (array) lines.
+    //
+    // pasteDirect nulls sym_A->s_thing (below) because pasted object lines
+    // never carry array data — but binbuf_eval still DISPATCHES any "#A" line
+    // to that symbol. With s_thing == nullptr that is a null dereference →
+    // segfault. GOP-module saves leak stray "#A saved" lines (ELSE savestate
+    // objects inside the abstraction), so loading ANY patch that references a
+    // GOP module crashed. Arrays are recreated by their "#X obj table/array"
+    // lines, so dropping the stray "#A" rows is safe.
+    juce::String filtered;
+    {
+        juce::StringArray lines;
+        lines.addLines(juce::String(buf));
+        for (auto& ln : lines) {
+            if (ln.trimStart().startsWith("#A ")) continue;
+            filtered += ln;
+            filtered += "\n";
+        }
+    }
+
+    size_t const len = filtered.getNumBytesAsUTF8();
+    t_binbuf* b = binbuf_new();
+    binbuf_text(b, filtered.toRawUTF8(), len);
+
+    t_symbol* sym_X = gensym("#X");
+    t_symbol* sym_N = gensym("#N");
+    t_symbol* sym_A = gensym("#A");
+
+    t_pd* saved_X = sym_X->s_thing;
+    t_pd* saved_N = sym_N->s_thing;
+    t_pd* saved_A = sym_A->s_thing;
+
+    sym_A->s_thing = nullptr;
+    sym_X->s_thing = &cnv->gl_pd;
+    sym_N->s_thing = &pd_canvasmaker;
+
+    binbuf_eval(b, 0, 0, 0);
+
+    sym_A->s_thing = saved_A;
+    sym_X->s_thing = saved_X;
+    sym_N->s_thing = saved_N;
+
+    binbuf_free(b);
+}
+
+// ── /pd/clusters — context grouping for layout ──────────────────────────
+// Connected components of the wire graph (signal + control), classified by
+// kind. One union-find pass over gl_list connections — read-only, fast.
+// Feeds context-aware layout (see PRD_CONTEXT_LAYOUT_GUARD.md).
+// Shared: the live object bounds of the JUCE Canvas showing a Pd canvas
+// (message thread; nullptr when no view shows it). Was mcpFindGuiCanvasFor.
+inline std::unique_ptr<McpGuiHost::LiveBounds> mcpLiveBounds(PluginProcessor* proc, t_canvas* c)
+{
+    if (!proc || !c) return nullptr;
+    return proc->getMcp()->gui().liveObjectBounds(c);
+}
+
+// Shared true-rect bounds (GUI-aware). MUST run on the JUCE message thread
+// (reads Canvas object components). Used by the layout X-ray AND the inline
+// layout guard so both agree on geometry.
+inline void mcpGetTrueObjectBounds(t_canvas* c, t_gobj* y, McpGuiHost::LiveBounds const* guiCanvas, int* x, int* yy, int* w, int* h)
+{
+    *x = 0; *yy = 0; *w = 0; *h = 0;
+    pd::Interface::getObjectBounds(c, y, x, yy, w, h);
+
+    if (guiCanvas) {
+        auto it = guiCanvas->find(y);
+        if (it != guiCanvas->end()) {
+            auto b = it->second;
+            if (b.getWidth() > 0 && b.getHeight() > 0) {
+                *w = b.getWidth();
+                *h = b.getHeight();
+                return;
+            }
+        }
+    }
+
+    if (pd::Interface::isTextObject(y) && (*w <= 10 || *h <= 10)) {
+        t_text* textObj = reinterpret_cast<t_text*>(y);
+        if (textObj && textObj->te_binbuf) {
+            char* textBuf = nullptr;
+            int textSize = 0;
+            binbuf_gettext(textObj->te_binbuf, &textBuf, &textSize);
+            if (textBuf && textSize > 0) {
+                int fontWidth = glist_fontwidth(c);
+                int fontHeight = glist_fontheight(c);
+                if (fontWidth <= 0) fontWidth = 7;
+                if (fontHeight <= 0) fontHeight = 14;
+                juce::String fullText = juce::String::fromUTF8(textBuf, textSize).trim();
+                auto lines = juce::StringArray::fromLines(fullText);
+                int maxLineLen = 0;
+                for (const auto& line : lines) maxLineLen = std::max(maxLineLen, line.length());
+                int textW = maxLineLen * fontWidth + 12;
+                int textH = std::max(1, lines.size()) * fontHeight + 7;
+                if (*w <= 10) *w = textW;
+                if (*h <= 10) *h = textH;
+                freebytes(textBuf, textSize);
+            }
+        }
+    }
+
+    if (*w <= 0) *w = 60;
+    if (*h <= 0) *h = 20;
+}
+
+// Decorative/background objects are NEVER collision sources: a faceplate [pic]
+// intentionally overlaps every widget placed on it, and [cnv] boxes/lines are
+// the same category. Including them shoved a console's whole GUI off its
+// background image on every layout pass.
+inline bool mcpIsDecorativeBackground(t_gobj* g)
+{
+    if (!g) return false;
+    t_class* cl = pd_class(&g->g_pd);
+    if (!cl) return false;
+    juce::String name = juce::String::fromUTF8(class_getname(cl));
+    return name == "pic" || name.endsWithIgnoreCase("/pic")
+        || name == "cnv" || name.endsWithIgnoreCase("/cnv");
+}

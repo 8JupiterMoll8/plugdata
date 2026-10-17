@@ -324,7 +324,7 @@ public:
     static juce::String canonicalCanvasKey(t_canvas* cnv);
 
     friend class ProbeManager;
-    friend class McpHost; // replays undo/redo transactions through handlePdDomain
+    friend class McpHost; // replays undo/redo transactions through replayPd
 
 private:
     // Verb table (MCPBridgeVerbs.inc): one private member function per row, built
@@ -334,6 +334,8 @@ private:
     using VerbTable = mcp::CommandTable<VerbHandler>;
     static VerbTable const& commandTable();
     bool dispatchRegistered(const juce::String& domain, const juce::String& pathVerb, const juce::OSCMessage& msg);
+    // McpHost undo/redo replays a recorded /pd transaction (batch_atomic, move_batch_id) by its verb.
+    void replayPd(const juce::String& action, const juce::OSCMessage& msg);
 
 #define MCP_VERB(domain, verb, handler) void handler(const juce::String& action, const juce::OSCMessage& msg);
 #define MCP_DOMAIN(domain, handler) void handler(const juce::String& action, const juce::OSCMessage& msg);

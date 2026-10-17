@@ -480,7 +480,7 @@ void McpHost::undoMcpTransaction(t_canvas* cnv)
     // stack map while we hold mcpUndoLock.
     if (mcpBridge && tx) {
         session.isExecutingMcpUndoRedo = true;
-        mcpBridge->handlePdDomain(tx->replayAction, tx->inverse);
+        mcpBridge->replayPd(tx->replayAction, tx->inverse);
         session.isExecutingMcpUndoRedo = false;
     }
     juce::MessageManager::callAsync([this] {
@@ -505,7 +505,7 @@ void McpHost::redoMcpTransaction(t_canvas* cnv)
 
     if (mcpBridge && tx) {
         session.isExecutingMcpUndoRedo = true;
-        mcpBridge->handlePdDomain(tx->replayAction, tx->forward);
+        mcpBridge->replayPd(tx->replayAction, tx->forward);
         session.isExecutingMcpUndoRedo = false;
     }
     juce::MessageManager::callAsync([this] {

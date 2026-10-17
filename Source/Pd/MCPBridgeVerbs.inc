@@ -84,6 +84,9 @@ MCP_VERB(pd, "ui_open_reference", pdUiOpenReference)
 MCP_VERB(pd, "ui_open_help", pdUiOpenHelp)
 MCP_VERB(pd, "viewport", pdViewport)
 
+// ── pd: batch ──
+MCP_VERB(pd, "batch_atomic", pdBatchAtomic)
+
 #undef MCP_SOURCE
 #undef MCP_VERB
 #undef MCP_ALIAS

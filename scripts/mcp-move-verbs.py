@@ -156,14 +156,17 @@ def cmd_move(a):
 
 
 def cmd_check(a):
-    """Line multisets (whitespace-normalized) of MCPBridge.cpp at --ref against the working copies of
-    MCPBridge.cpp plus --files. Prints old-minus-new and new-minus-old: for a pure move the first holds only
+    """Line multisets (whitespace-normalized) of MCPBridge.cpp plus those --files that existed at --ref, against
+    the working copies of MCPBridge.cpp plus --files. Prints old-minus-new and new-minus-old: for a pure move the first holds only
     the cut `if (action == ...) {` lines and the second only function headers, braces and includes."""
     import subprocess
     old = subprocess.check_output(["git", "show", f"{a.ref}:Source/Pd/MCPBridge.cpp"], cwd=ROOT).decode().split("\n")
     new = SRC.read_text().split("\n")
     for f in (a.files or "").split(","):
-        if f: new += (ROOT / f).read_text().split("\n")
+        if not f: continue
+        new += (ROOT / f).read_text().split("\n")
+        shown = subprocess.run(["git", "show", f"{a.ref}:{f}"], cwd=ROOT, capture_output=True)
+        if shown.returncode == 0: old += shown.stdout.decode().split("\n")  # a file that already existed at --ref
     norm = lambda l: " ".join(l.split())
     co = collections.Counter(norm(l) for l in old if l.strip())
     cn = collections.Counter(norm(l) for l in new if l.strip())
