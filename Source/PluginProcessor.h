@@ -49,7 +49,6 @@ public:
 
     McpHost* getMcp() const { return mcp.get(); } // MCP-HOOK(host)
     bool getIsProcessingAudio() const noexcept { return isProcessingAudio.load(std::memory_order_relaxed); }
-    void onSelectionChanged(String const& selector, SmallArray<pd::Atom> const& list) override;
     void onConsoleMessage(String const& message, bool isError) override;
 
     static AudioProcessor::BusesProperties buildBusesProperties();

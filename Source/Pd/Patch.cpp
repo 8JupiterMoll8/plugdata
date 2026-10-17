@@ -137,10 +137,7 @@ void Patch::savePatch(URL const& locationURL)
         pd::Interface::saveToFile(patch.get(), file, dir);
 #endif
 
-        // Persist the MCP identity sidecar atomically with the .pd (see
-        // Instance::onCanvasSaved) — so a manual Save-As keeps tempIds too.
-        if (instance->onCanvasSaved)
-            instance->onCanvasSaved(patch.get(), location.getFullPathName());
+        if (instance->onCanvasSaved) instance->onCanvasSaved(patch.get(), location.getFullPathName()); // MCP-HOOK(save)
 
         currentFile = location;
         currentURL = url;
@@ -195,10 +192,7 @@ void Patch::savePatch()
 
         pd::Interface::saveToFile(patch.get(), file, dir);
 
-        // Persist the MCP identity sidecar atomically with the .pd (see
-        // Instance::onCanvasSaved) — so a plain Ctrl+S keeps tempIds too.
-        if (instance->onCanvasSaved)
-            instance->onCanvasSaved(patch.get(), currentFile.getFullPathName());
+        if (instance->onCanvasSaved) instance->onCanvasSaved(patch.get(), currentFile.getFullPathName()); // MCP-HOOK(save)
     }
 
     MessageManager::callAsync([instance = juce::WeakReference(this->instance), file = this->currentFile, ptr = this->ptr] {

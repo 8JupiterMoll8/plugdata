@@ -30,6 +30,7 @@ Upstream-file hunks that stay as they are, with the reason. Empty until P3.2 S9;
 
 | File | Why it cannot be a hook |
 |---|---|
+| `Source/Pd/Instance.cpp` | 5 hunks in the console handler (`processPrint`) are the fork's error classification for the ARTIST console: lines containing "couldn't create", "error:" or "canvas: ..." show as errors, and an "error " prefix strips 6 characters, not 7 (upstream drops a letter). A plugdata console fix, not MCP code; the MCP part of that handler is the one tagged hook line. The other 4 hunks are tagged (`mcp_host` receiver: create, free, dispatch case; console hook) plus `pd::Setup::initialiseIemguts()` (pd-iemguts, untagged, carried here too) |
 
 ## Submodule patches (`patches/submodules/`)
 
@@ -58,6 +59,8 @@ Not part of the hunk count above (that measures `Source/`). Applied by `scripts/
 
 - **S4 (MCP state out of the processor).** `PluginProcessor` holds one `std::unique_ptr<McpHost>` (`getMcp()`), 3 hunks in `PluginProcessor.h`. State in `Source/Mcp/McpSession.h`, bridge-only functions and the bridge itself in `Source/Mcp/McpHost.h/.cpp`. No friendship between `PluginProcessor` and `MCPBridge`; `MCPBridge` befriends `McpHost` (both fork-only) so transactions replay through `handlePdDomain`. Seam: 203 -> 197 hunks.
   - **Overlay goldens and launches:** within one launch the recorder is pixel-identical; between two launches of the SAME binary, object and note TEXT glyphs differ in antialiasing (shapes are equal). A golden compare across builds (S7) must therefore tolerate text-glyph pixels, or compare two binaries in a way that cancels launch noise.
+
+- **S5 (processor and Pd hooks).** Every remaining `PluginProcessor.cpp` hunk is one tagged hook line (13: host x2, settings, sysCommand, telemetry, audio x8 at the exact old positions: prepare, block start, MIDI tick, block tail, per-Pd-block x2, recorder tap x2; the plan's limit of 8 assumed fewer audio sites). Moved: the 22 `mcp_*` sys cases + `getObjectIndex` -> `Source/Mcp/McpSysCommands.cpp` (`McpHost::handleSysMessage` checks the label set, `dispatchSysMessage` runs the verbatim switch); audio blocks -> `McpAudio.cpp`; console forwarding, selection telemetry (from `Instance` and `Sidebar::forceShowParameters`) -> `McpTelemetry.cpp`; settings -> `McpHost::settingsChanged`. `Instance.h` lost `sendSelectionTelemetry`/`onSelectionChanged`; `Sidebar.cpp` has one telemetry hook line. Behaviour change: the `MCP_TELEMETRY: Pushed ...` console line on every selection is gone. `Patch.cpp` has 5 hunks, all tagged (S3 undo state x3, save x2; the limit of 2 assumed S3 restored upstream undo).
 
 ## Known upstream behaviour
 

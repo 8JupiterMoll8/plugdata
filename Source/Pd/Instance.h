@@ -210,9 +210,7 @@ public:
     virtual void clearTextEditor(uint64_t ptr) = 0;
     virtual bool isTextEditorDialogShown(uint64_t ptr) = 0;
     
-    void sendSelectionTelemetry(String const& selector, SmallArray<pd::Atom> const& list);
-    virtual void onSelectionChanged(String const& selector, SmallArray<pd::Atom> const& list) {}
-    virtual void onConsoleMessage(String const& message, bool isError) {}
+    virtual void onConsoleMessage(String const& message, bool isError) {} // MCP-HOOK(telemetry)
 
     virtual void receiveSysMessage(SmallString const& selector, SmallArray<pd::Atom> const& list) = 0;
 
@@ -269,7 +267,7 @@ public:
     // separately it would drift and map tempIds onto the WRONG objects. Without
     // this hook a manual save left the sidecar stale, and on reload every
     // object added since the last MCP save lost its semantic tempId.
-    std::function<void(t_glist*, juce::String const&)> onCanvasSaved;
+    std::function<void(t_glist*, juce::String const&)> onCanvasSaved; // MCP-HOOK(save)
 
     // Enqueue a message to an pd::WeakReference
     // This will first check if the weakreference is valid before triggering the callback
@@ -322,7 +320,7 @@ public:
     static bool loadLibrary(String const& library);
 
     void* instance = nullptr;
-    void* mcpReceiver = nullptr;
+    void* mcpReceiver = nullptr; // MCP-HOOK(sysCommand): the "mcp_host" receiver
     void* messageReceiver = nullptr;
     void* parameterReceiver = nullptr;
     void* pluginLatencyReceiver = nullptr;

@@ -36,6 +36,16 @@ juce::String McpHost::getMcpBridgeStatus() const
     return mcpBridge ? mcpBridge->getStatus() : juce::String("unavailable");
 }
 
+// PluginProcessor::settingsChanged, first: the mcp_bridge_* settings are the host's.
+bool McpHost::settingsChanged(String const& name, var const& value)
+{
+    if (name.startsWith("mcp_bridge_")) {
+        mcpSettingsChanged(name, value);
+        return true;
+    }
+    return false;
+}
+
 void McpHost::mcpSettingsChanged(String const& name, var const& value)
 {
     if (!mcpBridge) return;
@@ -154,6 +164,9 @@ void McpHost::mcpCloseRecorder()
     finished.reset(); // flushes the FIFO and closes the file, off the audio thread
 }
 
+// MCP zero-dropout recorder tap, called at the end of processConstant (the full
+// constant-path output block) and processVariable (after output is ready). Taps the
+// final output buffer directly, no canvas objects needed.
 void McpHost::writeRecorderTap(dsp::AudioBlock<float> const& buffer)
 {
     if (!session.mcpRecording.load(std::memory_order_acquire))

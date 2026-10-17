@@ -103,16 +103,7 @@ public:
                     }
                 }
 
-                // Forward to PlugData receiver for MCP bridge
-                libpd_set_instance(static_cast<t_pdinstance*>(this->instance->instance));
-                auto* s = gensym("#plugdata_mcp_console");
-                if (s && s->s_thing) {
-                    t_atom atoms[2];
-                    SETFLOAT(&atoms[0], isError ? 1.0f : 0.0f);
-                    SETSYMBOL(&atoms[1], gensym(content.data()));
-                    pd_typedmess(s->s_thing, gensym("list"), 2, atoms);
-                }
-                this->instance->onConsoleMessage(String::fromUTF8(content.data()), isError);
+                this->instance->onConsoleMessage(String::fromUTF8(content.data()), isError); // MCP-HOOK(telemetry)
             };
 
         printConcatBuffer[messageLength] = '\0';
@@ -142,25 +133,6 @@ public:
 
             messageLength = 0;
         }
-    }
-
-    void processSelection(String const& selector, SmallArray<pd::Atom> const& list)
-    {
-        libpd_set_instance(static_cast<t_pdinstance*>(this->instance->instance));
-        t_symbol* s = gensym("#plugdata_mcp_ui");
-        if (s && s->s_thing) {
-            std::vector<t_atom> atoms(list.size());
-            for (int i = 0; i < list.size(); ++i) {
-                if (list[i].isFloat()) {
-                    SETFLOAT(&atoms[i], list[i].getFloat());
-                } else if (list[i].isSymbol()) {
-                    SETSYMBOL(&atoms[i], list[i].getSymbol());
-                }
-            }
-            // Send as a typed message (selector first) so [route] works natively
-            pd_typedmess(s->s_thing, gensym(selector.toRawUTF8()), static_cast<int>(atoms.size()), atoms.data());
-        }
-        this->instance->onSelectionChanged(selector, list);
     }
 
     std::deque<std::tuple<void*, String, int, int, int>> consoleMessages;
@@ -316,7 +288,7 @@ Instance::~Instance()
     objectImplementations.reset(nullptr); // Make sure it gets deallocated before pd instance gets deleted
 
     libpd_set_instance(static_cast<t_pdinstance*>(instance));
-    pd_free(static_cast<t_pd*>(mcpReceiver));
+    pd_free(static_cast<t_pd*>(mcpReceiver)); // MCP-HOOK(sysCommand)
     pd_free(static_cast<t_pd*>(messageReceiver));
     pd_free(static_cast<t_pd*>(midiReceiver));
     gensym("#plugdata_print")->s_thing = nullptr; // In case any object tries to print during shutdown
@@ -366,6 +338,7 @@ void Instance::initialisePd(String& pdlua_version)
         reinterpret_cast<t_plugdata_pitchbendhook>(internal::instance_multi_pitchbend), reinterpret_cast<t_plugdata_aftertouchhook>(internal::instance_multi_aftertouch), reinterpret_cast<t_plugdata_polyaftertouchhook>(internal::instance_multi_polyaftertouch),
         reinterpret_cast<t_plugdata_midibytehook>(internal::instance_multi_midibyte));
 
+    // MCP-HOOK(sysCommand): messages to [s mcp_host] reach McpHost::handleSysMessage
     mcpReceiver = pd::Setup::createReceiver(this, "mcp_host", reinterpret_cast<t_plugdata_banghook>(internal::instance_multi_bang), reinterpret_cast<t_plugdata_floathook>(internal::instance_multi_float), reinterpret_cast<t_plugdata_symbolhook>(internal::instance_multi_symbol),
         reinterpret_cast<t_plugdata_listhook>(internal::instance_multi_list), reinterpret_cast<t_plugdata_messagehook>(internal::instance_multi_message));
 
@@ -1075,7 +1048,7 @@ void Instance::handleAsyncUpdate()
 
         switch (hash(mess.destination)) {
         case hash("pd"):
-        case hash("mcp_host"):
+        case hash("mcp_host"): // MCP-HOOK(sysCommand)
             receiveSysMessage(mess.selector, mess.list);
             break;
         case hash("__latency_compensation"):
@@ -1474,11 +1447,6 @@ void Instance::registerLuaClass(char const* className)
 bool Instance::isLuaClass(hash32 const objectNameHash)
 {
     return luaClasses.contains(objectNameHash);
-}
-
-void Instance::sendSelectionTelemetry(String const& selector, SmallArray<pd::Atom> const& list)
-{
-    consoleMessageHandler->processSelection(selector, list);
 }
 
 } // namespace pd

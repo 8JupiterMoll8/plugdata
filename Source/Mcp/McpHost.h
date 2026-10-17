@@ -37,6 +37,7 @@ public:
     void undoMcpTransaction(t_canvas* cnv);
     void redoMcpTransaction(t_canvas* cnv);
     void clearMcpTransactions(t_canvas* cnv);
+    bool settingsChanged(String const& name, var const& value);
     void mcpSettingsChanged(String const& name, var const& value);
     t_canvas* getCanvasBySymbol(const String& canvas_symbol);
     // Strict variant for mutations: resolves ONLY 'main'/'pd-main'/'' (focused
@@ -63,6 +64,23 @@ public:
     // (audio thread; runs per sub-block so it works for any JUCE block size).
     // No-op when no tap is active. Non-destructive: the patch is untouched.
     void applyMonitorTap(float* out, int numSamples, int numChannels);
+
+    // Audio hooks (Source/Mcp/McpAudio.cpp); each runs where its block used to be.
+    void prepare(double sampleRate, int samplesPerBlock);
+    void audioBlockStarted();
+    void midiTick(MidiBuffer& midiInputHistory, AudioBuffer<float>& buffer, double sampleRate);
+    void audioBlockFinished(AudioBuffer<float>& buffer);
+    void pdBlock(float* audioVectorIn, float* audioVectorOut, int pdBlockSize, int numChannels);
+
+    // Telemetry hooks (Source/Mcp/McpTelemetry.cpp).
+    void selectionChanged(SmallArray<juce::Component*>& objects);
+    void sendSelectionTelemetry(String const& selector, SmallArray<pd::Atom> const& list);
+    void consoleMessage(String const& message, bool isError);
+
+    // The mcp_* Pd system messages (Source/Mcp/McpSysCommands.cpp). Returns false for
+    // every other selector, which PluginProcessor::receiveSysMessage then handles.
+    bool handleSysMessage(SmallString const& selector, SmallArray<pd::Atom> const& list);
+    void dispatchSysMessage(SmallString const& selector, SmallArray<pd::Atom> const& list);
 
     PluginProcessor& processor;
     McpSession session;

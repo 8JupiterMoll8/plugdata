@@ -12,7 +12,6 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 #include "Canvas.h"
-#include "Object.h"
 
 #include "Components/SearchEditor.h"
 #include "Components/WelcomePanel.h"
@@ -848,45 +847,7 @@ void Sidebar::forceShowParameters(SmallArray<Component*>& objects, SmallArray<Ob
 
 void Sidebar::showParameters(SmallArray<Component*>& objects, SmallArray<ObjectParameters, 6>& params, bool const showOnSelect)
 {
-    // MCP: report the canvas selection to the bridge (get_selection / "this").
-    auto* pd = editor ? editor->pd : nullptr;
-    if (pd && !objects.empty()) {
-        auto const subpatch = (objects.size() > 0) ? (dynamic_cast<Object*>(objects[0]) ? dynamic_cast<Object*>(objects[0])->cnv->patch.getTitle() : "main") : "main";
-
-        if (objects.size() == 1) {
-            // Single Selection: selected_object [subpatch] [class] [index] [x] [y]
-            if (auto* object = dynamic_cast<Object*>(objects[0])) {
-                SmallArray<pd::Atom> atoms;
-                atoms.add(pd::Atom(pd->generateSymbol(subpatch)));
-                atoms.add(pd::Atom(pd->generateSymbol(object->getType(false))));
-                atoms.add(pd::Atom(static_cast<float>(object->cnv->objects.index_of(object))));
-                
-                // Use Object Bounds for patch-relative coordinates
-                auto bounds = object->getObjectBounds();
-                atoms.add(pd::Atom(static_cast<float>(bounds.getX())));
-                atoms.add(pd::Atom(static_cast<float>(bounds.getY())));
-                
-                pd->sendSelectionTelemetry("selected_object", atoms);
-                pd->logMessage("MCP_TELEMETRY: Pushed " + object->getType(false).toString() + " [" + String(object->cnv->objects.index_of(object)) + "] at " + String(bounds.getX()) + "," + String(bounds.getY()));
-            }
-        } else {
-            // Multi-Selection: selection_count [subpatch] [count]
-            SmallArray<pd::Atom> countAtoms;
-            countAtoms.add(pd::Atom(pd->generateSymbol(subpatch)));
-            countAtoms.add(pd::Atom(static_cast<float>(objects.size())));
-            pd->sendSelectionTelemetry("selection_count", countAtoms);
-
-            // selection_indices [subpatch] [idx1] [idx2] ...
-            SmallArray<pd::Atom> indexAtoms;
-            indexAtoms.add(pd::Atom(pd->generateSymbol(subpatch)));
-            for (auto const objComp : objects) {
-                if (auto const obj = dynamic_cast<Object*>(objComp)) {
-                    indexAtoms.add(pd::Atom(static_cast<float>(obj->cnv->objects.index_of(obj))));
-                }
-            }
-            pd->sendSelectionTelemetry("selection_indices", indexAtoms);
-        }
-    }
+    if (auto* pd = editor ? editor->pd : nullptr) pd->getMcp()->selectionChanged(objects); // MCP-HOOK(telemetry)
 
     lastObjects.clear();
     for (auto const obj : objects)
