@@ -76,12 +76,55 @@ Not part of the hunk count above (that measures `Source/`). Applied by `scripts/
 
 215 hunks in 35 upstream-owned files, +7,351 / -83 lines, 0 tagged (`Canvas.cpp` 47, `PluginProcessor.cpp` 18, `OverlayDisplaySettings.h` 17, `LuaObject.h` 15, `Interface.h` 11, `Sidebar.cpp` 11, `Instance.cpp` 11, then 28 files with 1 to 8). The gate is expected to fail until P3.2 S9. Target at the end: at most 60 hunks, `Canvas.cpp` at most 12.
 
+## Final (P3.2 S9, fork `bd509cb56`)
+
+`scripts/check-seam.sh --gate`: OK. Hook calls and carried hunks are tagged (`MCP-HOOK` / `MCP-CARRIED`); `Source/Pd/Instance.cpp` (5 console-classification hunks) and `NVGGraphicsContext` stay whole-file carried rows.
+
+```
+FILE                                            HUNKS   +LINES  -LINES TAGGED
+Source/Canvas.cpp                                  34       77      10     34
+Source/Dialogs/OverlayDisplaySettings.h            17       36      14     17
+Source/Objects/LuaObject.h                         15       24       8     15
+Source/PluginProcessor.cpp                         13       25       0     13
+Source/Sidebar/Sidebar.cpp                         10       19       1     10
+Source/Pd/Instance.cpp                              9       26       5      4
+Source/PluginEditor.cpp                             6        8       5      6
+Source/Object.cpp                                   5       12       2      5
+Source/Pd/Patch.cpp                                 5       11       0      5
+Source/Sidebar/Sidebar.h                            5        5       1      5
+Source/Canvas.h                                     4       11       1      4
+Source/Connection.cpp                               4        4       3      4
+Source/Pd/Setup.cpp                                 4       12       0      4
+Source/Utility/SettingsFile.cpp                     4       20       3      4
+Source/Dialogs/AdvancedSettingsPanel.h              3       57       0      3
+Source/Objects/TextObject.h                         3       38       0      3
+Source/Pd/Instance.h                                3       14       0      3
+Source/PluginEditor.h                               3        3       0      3
+Source/PluginProcessor.h                            3        9       0      3
+Source/Sidebar/CommandInput.h                       3       21       0      3
+Source/Dialogs/Dialogs.cpp                          2        5       0      2
+Source/Objects/FloatAtomObject.h                    2        2       2      2
+Source/Objects/ObjectBase.cpp                       2        3       0      2
+Source/TabComponent.cpp                             2        8       0      2
+Source/Utility/SettingsFile.h                       2        5       0      2
+Source/Constants.h                                  1        8       1      1
+Source/Dialogs/AddObjectMenu.h                      1        6       0      1
+Source/Objects/ArrayObject.h                        1        9       0      1
+Source/Pd/Setup.h                                   1        1       0      1
+Source/Toolbar.h                                    1        3       0      1
+Source/Utility/NVGGraphicsContext.cpp               1       15       0      0
+Source/Utility/NVGGraphicsContext.h                 1        5       0      0
+TOTAL                                             170      502      56    163   (32 files)
+gate: OK
+```
+
 ## Progress
 
 - **S3 (`Interface.h` back to upstream).** `Source/Pd/Interface.h` and `Source/Pd/Patch.h` match the base byte for byte. The fork's Pd operations live in `Source/Mcp/PdOps.h` (`mcp::PdOps`): `findOwnerCanvas`, `unlinkGobj`, `removeObjectsAudioThread`, `clearCanvasAudioThread`, `clearCanvas`, `canUndo`, `canRedo`, the `garray_getname` extern, plus two wrappers that keep the old guards for the bridge's callers only: `removeObjects` (a canvas without an editor goes to the audio-thread delete) and `renameObject` (no editor or no rtext: skip). `createObjectFast` (Interface and Patch) had no caller and is deleted. `Patch::canUndo/canRedo` keep the fork's live read of Pd's undo queue (tagged `MCP-HOOK(undoState)`; an unlocked read from the message thread, P3.4).
   - **`setConnectionPath` is upstream again**, so a path edit is undoable. The fork's in-place version (`1f0c7bd0f`, "live curved connection segfault") is NOT carried: every object drag runs the path updater (remove + reconnect of each of its wires), and with DSP on a file-loaded voice did 10 drag + undo cycles, undo restoring the position each time; the bridge repro (`mcp-server/scripts/live/s3-path-update-repro.ts`) ran 20 drag + `batch_atomic` delete races and 20 bridge `tidy` runs, all alive. The likely cause of the old segfault is the `oc2` disconnect bug, fixed by `pure-data/0001`.
   - **Finding L6 (pre-existing, not S3):** on objects built by `batch_atomic`, GUI drag, undo, drag segfaults in `canvas_undo_init` (from `Patch::startUndoSequence` in `Object::mouseDrag`). Same crash on the S2 build (in-place `setConnectionPath`) and with no wires at all. For P3.4/P3.5 (the fork's dual undo stack and the bridge's undo-queue handling).
   - **Finding L6, extended in S8:** on a `batch_atomic`-built patch, GUI drag, toolbar undo, then ANY undoable GUI action (also a new object box from a double-click) segfaults in `canvas_undo_init` (`Patch::createObject` -> `canvas_undo_add`), 2 of 2 runs; the same patch without the drag+undo survives the new box (`scripts/live/s8-undo-crash-repro.ts` A/B/C in the TS repo). On such a patch the toolbar undo first undoes the bridge's transaction (fork semantics), so the drag itself may stay.
+  - **Finding L10 (pre-existing, seen in S9):** opening the selection pill's palette logs `juce_String.cpp:327` (non-ASCII text such as the German palette labels passed as `char*` literals) and `juce_Fonts_freetype.cpp:511` assertions (144 in one input-check run). Cosmetic in a release build; fix by `juce::String::fromUTF8`/`CharPointer_UTF8` at the literals (P3.4/P3.5).
   - **Finding L7 (pre-existing):** `screenshot_canvas` crops at the viewport's offset inside the editor but grabs the whole X window, which has a client-side shadow margin, so the image starts ~20 logical px up and left of the viewport (it shows a strip of the tab bar).
 
 - **S4 (MCP state out of the processor).** `PluginProcessor` holds one `std::unique_ptr<McpHost>` (`getMcp()`), 3 hunks in `PluginProcessor.h`. State in `Source/Mcp/McpSession.h`, bridge-only functions and the bridge itself in `Source/Mcp/McpHost.h/.cpp`. No friendship between `PluginProcessor` and `MCPBridge`; `MCPBridge` befriends `McpHost` (both fork-only) so transactions replay through `handlePdDomain`. Seam: 203 -> 197 hunks.
