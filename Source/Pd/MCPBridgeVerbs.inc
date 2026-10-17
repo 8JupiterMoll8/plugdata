@@ -87,6 +87,31 @@ MCP_VERB(pd, "viewport", pdViewport)
 // ── pd: batch ──
 MCP_VERB(pd, "batch_atomic", pdBatchAtomic)
 
+// ── pd: files ──
+MCP_VERB(pd, "load", pdLoad)
+MCP_VERB(pd, "save_content", pdSaveContent)
+MCP_VERB(pd, "load_content", pdLoadContent)
+MCP_VERB(pd, "save_patch", pdSavePatch)
+MCP_VERB(pd, "load_patch", pdLoadPatch)
+MCP_VERB(pd, "open_patch", pdOpenPatch)
+MCP_VERB(pd, "list_tabs", pdListTabs)
+MCP_VERB(pd, "focus_tab", pdFocusTab)
+MCP_VERB(pd, "close_tab", pdCloseTab)
+
+// ── pd: record and render ──
+MCP_VERB(pd, "record_start", pdRecordStart)
+MCP_VERB(pd, "record_stop", pdRecordStop)
+MCP_VERB(pd, "render", pdRender)
+
+// ── pd: analysis ──
+MCP_VERB(pd, "diagnose", pdDiagnose)
+MCP_VERB(pd, "clusters", pdClusters)
+MCP_VERB(pd, "perf", pdPerf)
+MCP_VERB(pd, "bounds", pdBounds)
+MCP_VERB(pd, "collisions", pdCollisions)
+MCP_VERB(pd, "wire_occlusions", pdWireOcclusions)
+MCP_VERB(pd, "measure_text", pdMeasureText)
+
 #undef MCP_SOURCE
 #undef MCP_VERB
 #undef MCP_ALIAS

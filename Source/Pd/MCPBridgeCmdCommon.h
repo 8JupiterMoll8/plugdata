@@ -229,3 +229,31 @@ inline bool mcpIsDecorativeBackground(t_gobj* g)
     return name == "pic" || name.endsWithIgnoreCase("/pic")
         || name == "cnv" || name.endsWithIgnoreCase("/cnv");
 }
+
+// ── Spectral analysis (MCPBridgeSpectral.cpp), shared by the render, the /meter/spectral probe and the armed capture ──
+juce::var spectralVarFromSamples(float const* samples, int N, double sampleRate);
+juce::String spectralJsonFromSamples(float const* samples, int N, double sampleRate);
+juce::String renderSpectralJson(float const* data, int n, double sampleRate);
+juce::String armedSpectralJson(float const* data, int n, double sampleRate);
+float estimateFrequency(const float* buf, int n, float sampleRate); // defined near ProbeManager (MCPBridge.cpp)
+
+// ── mcpIoletX — true Pd iolet anchor X ──────────────────────────────────
+// Ports sit at  objX + (objW - IOWIDTH) * index / (count-1) + IOMIDDLE  (see
+// pure-data g_canvas.c drawline / Interface.h), i.e. a single-port object's
+// port is at its LEFT edge — NOT its centre. Modelling a cord as centre→centre
+// therefore MISSES occlusions whenever the real port is off-centre (most
+// objects) and could also report false ones — the "C++ says 0 occlusions but
+// the wire clearly runs through the box" false negative.
+inline double mcpIoletX(int objX, int objW, int index, int count)
+{
+    int plus = (count <= 1 ? 1 : count - 1);
+    return static_cast<double>(objX)
+         + (static_cast<double>(objW - IOWIDTH) * index) / plus
+         + IOMIDDLE;
+}
+
+// The layout verbs measure through this name; one definition for all of them.
+inline void getTrueObjectBounds(t_canvas* c, t_gobj* y, McpGuiHost::LiveBounds const* guiCanvas, int* x, int* yy, int* w, int* h)
+{
+    mcpGetTrueObjectBounds(c, y, guiCanvas, x, yy, w, h);
+}
