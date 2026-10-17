@@ -6,17 +6,10 @@
 
 #include "MCPBridge.h"
 #include "PluginProcessor.h"
-#include "PluginEditor.h"
-#include "Toolbar.h" // ToolbarSource::getCPUUsage() for /pd/perf
-#include "Sidebar/Sidebar.h"
-#include "Canvas.h"
-#include "CanvasViewport.h"
-#include "TabComponent.h"
-#include "Object.h"
-#include "Connection.h" // Connection inobj/outobj + inIdx/outIdx (encapsulate_to_file rewire)
-#include "Objects/ObjectBase.h"
-#include "AllGuis.h" // t_fake_knob raw snd/rcv fields for screenshot labels
-#include "Objects/GemCapture.h" // PRD 1.4: native GEM window capture
+#include "Mcp/McpHost.h"
+#include "Mcp/McpGuiHost.h" // all GUI work (Plan 3 P3.2 S6): no plugdata GUI header here
+#include "Mcp/McpGuiFields.h" // t_fake_knob & co. reads (generated AllGuis.h)
+#include "Constants.h" // overlay bits (Origin ... AIHud)
 #include <g_all_guis.h>       // t_slider live fields (x_min/x_max/x_fval) for obj_get
 #include "Pd/Interface.h"
 #include "Mcp/PdOps.h" // fork Pd ops (removeObjects routing, audio-thread delete, clear)
@@ -25,11 +18,9 @@
 #include "MCPBridgeHandoff.h" // safe timed waits on queued lambdas (Report F3)
 #include "MCPIdentity.h" // renameStableId (finding C6)
 #include "MCPJson.h" // jsonEscape for hand-built JSON (finding C6)
-#include "Utility/Fonts.h"
 #include "Utility/SettingsFile.h" // compiledMode (hvcc_mode) in /pd/perf
 #include "Utility/Config.h"
 #include "../../Libraries/fftw3/api/fftw3.h"
-#include "Dialogs/Dialogs.h"
 #include "Pd/Library.h"
 
 #include <set>
@@ -108,11 +99,6 @@ static juce::String resolveMcpOutputPath(juce::String const& requested)
 
 
 extern t_class *text_class;
-
-// pd-else knob: snd/rcv are lazily parsed from the binbuf — the GUI calls these
-// before reading x_snd_raw/x_rcv_raw (KnobObject.h); screenshot labels do the same.
-extern "C" void knob_get_snd(void* x);
-extern "C" void knob_get_rcv(void* x);
 
 struct _outlet
 {
@@ -1708,37 +1694,30 @@ juce::String MCPBridge::computeSignalTrace(PluginProcessor* processor, t_canvas*
 // Connected components of the wire graph (signal + control), classified by
 // kind. One union-find pass over gl_list connections — read-only, fast.
 // Feeds context-aware layout (see PRD_CONTEXT_LAYOUT_GUARD.md).
-// Shared: find the JUCE Canvas component for a Pd canvas (message thread).
-static Canvas* mcpFindGuiCanvasFor(PluginProcessor* proc, t_canvas* c)
+// Shared: the live object bounds of the JUCE Canvas showing a Pd canvas
+// (message thread; nullptr when no view shows it). Was mcpFindGuiCanvasFor.
+static std::unique_ptr<McpGuiHost::LiveBounds> mcpLiveBounds(PluginProcessor* proc, t_canvas* c)
 {
     if (!proc || !c) return nullptr;
-    for (auto* editor : proc->getEditors()) {
-        if (!editor) continue;
-        for (auto* cnvItem : editor->getCanvases()) {
-            if (cnvItem && cnvItem->patch.getPointer().get() == c) return cnvItem;
-        }
-    }
-    return nullptr;
+    return proc->getMcp()->gui().liveObjectBounds(c);
 }
 
 // Shared true-rect bounds (GUI-aware). MUST run on the JUCE message thread
 // (reads Canvas object components). Used by the layout X-ray AND the inline
 // layout guard so both agree on geometry.
-static void mcpGetTrueObjectBounds(t_canvas* c, t_gobj* y, Canvas* guiCanvas, int* x, int* yy, int* w, int* h)
+static void mcpGetTrueObjectBounds(t_canvas* c, t_gobj* y, McpGuiHost::LiveBounds const* guiCanvas, int* x, int* yy, int* w, int* h)
 {
     *x = 0; *yy = 0; *w = 0; *h = 0;
     pd::Interface::getObjectBounds(c, y, x, yy, w, h);
 
     if (guiCanvas) {
-        for (auto* obj : guiCanvas->objects) {
-            if (obj && obj->getPointer() == y) {
-                auto b = obj->getSelectableBounds();
-                if (b.getWidth() > 0 && b.getHeight() > 0) {
-                    *w = b.getWidth();
-                    *h = b.getHeight();
-                    return;
-                }
-                break;
+        auto it = guiCanvas->find(y);
+        if (it != guiCanvas->end()) {
+            auto b = it->second;
+            if (b.getWidth() > 0 && b.getHeight() > 0) {
+                *w = b.getWidth();
+                *h = b.getHeight();
+                return;
             }
         }
     }
@@ -1790,14 +1769,14 @@ static bool mcpIsDecorativeBackground(t_gobj* g)
 static bool mcpHasCollisions(PluginProcessor* processor, t_canvas* cnv, int pad)
 {
     if (!processor || !cnv) return false;
-    Canvas* gui = mcpFindGuiCanvasFor(processor, cnv);
+    auto gui = mcpLiveBounds(processor, cnv);
     std::vector<t_gobj*> objs;
     for (t_gobj* y = cnv->gl_list; y; y = y->g_next) { if (mcpIsDecorativeBackground(y)) continue; objs.push_back(y); }
     struct R { int x, y, w, h; };
     std::vector<R> rects(objs.size());
     for (size_t i = 0; i < objs.size(); ++i) {
         int x = 0, y = 0, w = 0, h = 0;
-        mcpGetTrueObjectBounds(cnv, objs[i], gui, &x, &y, &w, &h);
+        mcpGetTrueObjectBounds(cnv, objs[i], gui.get(), &x, &y, &w, &h);
         rects[i] = { x, y, w, h };
     }
     for (size_t i = 0; i < rects.size(); ++i)
@@ -2045,7 +2024,7 @@ juce::String MCPBridge::computePerfFacts(PluginProcessor* processor, t_canvas* c
         topArr.add(juce::var(o));
     }
 
-    float cpu = (processor && processor->toolbarSource) ? processor->toolbarSource->getCPUUsage() : 0.0f;
+    float cpu = processor ? processor->getMcp()->gui().cpuUsage() : 0.0f;
 
     auto* root = new juce::DynamicObject();
     root->setProperty("dsp", pd_getdspstate() != 0);
@@ -2667,30 +2646,6 @@ static bool varToBool(const juce::var& v, bool def)
     return (double)v != 0.0;
 }
 
-static Canvas* getOrCreateCanvasComponent(PluginProcessor* proc, t_canvas* cnv)
-{
-    if (!proc || !cnv) return nullptr;
-    Canvas* canvasComp = nullptr;
-    for (auto* editor : proc->getEditors()) {
-        if (!editor) continue;
-        for (auto* c : editor->getCanvases()) {
-            if (c && (c->patch.getUncheckedPointer() == cnv || c->patch.getRawPointer() == cnv || (c->patch.getPointer().get() == cnv))) {
-                canvasComp = c;
-                break;
-            }
-        }
-        if (!canvasComp && editor->getCurrentCanvas()) {
-            if (editor->getCurrentCanvas()->patch.getUncheckedPointer() == cnv || editor->getCurrentCanvas()->patch.getRawPointer() == cnv)
-                canvasComp = editor->getCurrentCanvas();
-        }
-        if (!canvasComp) {
-            canvasComp = editor->getTabComponent().openPatch(new pd::Patch(pd::WeakReference(cnv, proc), proc, false));
-        }
-        if (canvasComp) break;
-    }
-    return canvasComp;
-}
-
 // Prefix-only mirror of Pd's private struct _inlet (m_obj.c:42) — we read
 // i_next only. Needed to address a specific physical inlet (>=1) without
 // pulling in m_obj internals. Inlet 0 is the object itself (not in ob_inlet).
@@ -2796,140 +2751,6 @@ static juce::String mcpObjSetCore(t_gobj* g, const juce::String& tempId, int inl
     pd_typedmess(dest, gensym(selector.toRawUTF8()), static_cast<int>(atoms.size()),
                  atoms.empty() ? nullptr : atoms.data());
     return {};
-}
-
-// Live `props` for a GUI object (shared by obj_get / obj_get_batch).
-static juce::DynamicObject* mcpBuildGuiProps(const juce::String& className, t_object* obj)
-{
-    auto* props = new juce::DynamicObject();
-    if (!obj) return props;
-    juce::String cls = className.toLowerCase();
-
-    if (cls == "knob" || cls == "else/knob") {
-        knob_get_rcv(reinterpret_cast<void*>(obj));
-        knob_get_snd(reinterpret_cast<void*>(obj));
-        auto* k = reinterpret_cast<t_fake_knob*>(obj);
-        props->setProperty("min", (double) k->x_lower);
-        props->setProperty("max", (double) k->x_upper);
-        props->setProperty("value", (double) k->x_fval);
-        props->setProperty("log", k->x_log != 0);
-        if (k->x_snd_raw) props->setProperty("send", juce::String::fromUTF8(k->x_snd_raw->s_name));
-        if (k->x_rcv_raw) props->setProperty("receive", juce::String::fromUTF8(k->x_rcv_raw->s_name));
-        if (k->x_param && k->x_param != gensym("empty"))
-            props->setProperty("param", juce::String::fromUTF8(k->x_param->s_name));
-    } else if (cls == "floatatom" || cls == "numbox") {
-        auto* g = reinterpret_cast<t_fake_gatom*>(obj);
-        props->setProperty("min", (double) g->a_draglo);
-        props->setProperty("max", (double) g->a_draghi);
-        if (g->a_symto) props->setProperty("send", juce::String::fromUTF8(g->a_symto->s_name));
-        if (g->a_symfrom) props->setProperty("receive", juce::String::fromUTF8(g->a_symfrom->s_name));
-    } else if (cls == "hsl" || cls == "vsl") {
-        auto* s = reinterpret_cast<t_slider*>(obj);
-        props->setProperty("min", (double) s->x_min);
-        props->setProperty("max", (double) s->x_max);
-        props->setProperty("value", (double) s->x_fval);
-        props->setProperty("log", s->x_lin0_log1 != 0);
-        props->setProperty("orientation", (int) s->x_orientation);
-        if (s->x_gui.x_snd && s->x_gui.x_snd != gensym("empty")) props->setProperty("send", juce::String::fromUTF8(s->x_gui.x_snd->s_name));
-        if (s->x_gui.x_rcv && s->x_gui.x_rcv != gensym("empty")) props->setProperty("receive", juce::String::fromUTF8(s->x_gui.x_rcv->s_name));
-    } else if (cls == "tgl") {
-        auto* t = reinterpret_cast<t_toggle*>(obj);
-        props->setProperty("value", (double) t->x_on);
-        props->setProperty("nonzero", t->x_nonzero != 0);
-    } else if (cls == "hradio" || cls == "vradio") {
-        auto* r = reinterpret_cast<t_radio*>(obj);
-        props->setProperty("index", r->x_on);
-        props->setProperty("value", (double) r->x_fval);
-    } else if (cls == "nbx") {
-        auto* n = reinterpret_cast<t_my_numbox*>(obj);
-        props->setProperty("value", (double) n->x_val);
-        props->setProperty("min", (double) n->x_min);
-        props->setProperty("max", (double) n->x_max);
-        props->setProperty("log", n->x_lin0_log1 != 0);
-    } else if (cls == "vu") {
-        auto* v = reinterpret_cast<t_vu*>(obj);
-        props->setProperty("rms", (double) v->x_fr);
-        props->setProperty("peak", (double) v->x_fp);
-    } else if (cls == "button") {
-        auto* b = reinterpret_cast<t_fake_button*>(obj);
-        props->setProperty("value", b->x_state);
-        props->setProperty("mode", b->x_mode);
-    } else if (cls == "function") {
-        auto* f = reinterpret_cast<t_fake_function*>(obj);
-        props->setProperty("min", (double) f->x_min);
-        props->setProperty("max", (double) f->x_max);
-        props->setProperty("n_states", f->x_n_states);
-    } else if (cls == "scope~") {
-        auto* sc = reinterpret_cast<t_fake_scope*>(obj);
-        props->setProperty("min", (double) sc->x_min);
-        props->setProperty("max", (double) sc->x_max);
-        props->setProperty("frozen", sc->x_frozen != 0);
-    } else if (cls == "keyboard") {
-        auto* kb = reinterpret_cast<t_fake_keyboard*>(obj);
-        props->setProperty("octaves", kb->x_octaves);
-        props->setProperty("first_c", kb->x_first_c);
-        props->setProperty("velocity", kb->x_velocity);
-    }
-    return props;
-}
-
-// A named, float-settable GUI parameter.
-struct McpGuiParam { juce::String name; double min = 0, max = 1, value = 0; };
-
-// Derive a named param from ANY scalar GUI widget — not just knobs. The NAME
-// comes from the widget's MERDA `$0-<sym>` send (else/knob also honors
-// @param/x_param); a resolved "1003-freq" send is stripped of its instance id.
-// Used by /pd/params + param_set_name so props params / set[param] cover
-// hsl/vsl/tgl/bng/button/hradio/vradio/nbx, not only else/knob.
-static bool mcpGetGuiParam(const juce::String& className, t_object* obj, McpGuiParam& out)
-{
-    if (!obj) return false;
-    juce::String cls = className.toLowerCase();
-    t_symbol* raw = nullptr;
-    if (cls == "knob" || cls == "else/knob") {
-        knob_get_snd(reinterpret_cast<void*>(obj));
-        auto* k = reinterpret_cast<t_fake_knob*>(obj);
-        if (k->x_param && k->x_param != gensym("empty"))
-            out.name = juce::String::fromUTF8(k->x_param->s_name);
-        raw = k->x_snd_raw;
-        out.min = (double) k->x_lower; out.max = (double) k->x_upper; out.value = (double) k->x_fval;
-    } else if (cls == "hsl" || cls == "vsl") {
-        auto* s = reinterpret_cast<t_slider*>(obj);
-        raw = s->x_gui.x_snd_unexpanded;
-        out.min = (double) s->x_min; out.max = (double) s->x_max; out.value = (double) s->x_fval;
-    } else if (cls == "tgl") {
-        auto* t = reinterpret_cast<t_toggle*>(obj);
-        raw = t->x_gui.x_snd_unexpanded;
-        out.min = 0; out.max = 1; out.value = (double) t->x_on;
-    } else if (cls == "hradio" || cls == "vradio") {
-        auto* r = reinterpret_cast<t_radio*>(obj);
-        raw = r->x_gui.x_snd_unexpanded;
-        out.max = (double) (r->x_number > 0 ? r->x_number - 1 : 1); out.value = (double) r->x_fval;
-    } else if (cls == "nbx") {
-        // numbox is t_my_numbox (NOT t_fake_gatom — mis-casting crashed).
-        auto* n = reinterpret_cast<t_my_numbox*>(obj);
-        raw = n->x_gui.x_snd_unexpanded;
-        out.min = n->x_min; out.max = n->x_max; out.value = n->x_val;
-    } else if (cls == "floatatom" || cls == "numbox") {
-        auto* g = reinterpret_cast<t_fake_gatom*>(obj);
-        raw = g->a_symto;
-        out.min = (double) g->a_draglo; out.max = (double) g->a_draghi;
-    } else {
-        return false;
-    }
-    if (out.name.isEmpty() && raw && raw->s_name && raw->s_name[0]) {
-        juce::String s = juce::String::fromUTF8(raw->s_name);
-        if (s.startsWith("\\$0-")) s = s.substring(4);
-        else if (s.startsWith("$0-")) s = s.substring(3);
-        else {
-            int dash = s.indexOfChar('-');
-            if (dash > 0 && s.substring(0, dash).containsOnly("0123456789")) s = s.substring(dash + 1);
-            else return false;
-        }
-        if (s.startsWith("set-")) s = s.substring(4);
-        out.name = s;
-    }
-    return out.name.isNotEmpty();
 }
 
 // ── Tier-2 value read ──────────────────────────────────────────────────
@@ -3145,10 +2966,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         if (processor) {
             juce::MessageManager::callAsync([proc = processor] {
                 proc->getConsoleMessages().clear();
-                for (auto* editor : proc->getEditors()) {
-                    if (auto* consoleSidebar = editor ? editor->getSidebarForPanel(Sidebar::ConsolePanel) : nullptr)
-                        consoleSidebar->clearConsole();
-                }
+                proc->getMcp()->gui().clearConsole();
             });
             auto correlationId = msg.size() > 0 ? getArgString(msg[0]) : "0";
             sendReply("/pd/clear_console/reply/" + correlationId, 1.0f);
@@ -3283,7 +3101,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         // TextBase::render()/updateTextLayout() via syncTextFromPd() — never
         // poke gui objects from the bridge (see 61c0c12f0 crash, reverted in
         // 0b75486d6). cc->repaint() (thread-safe) is enough to trigger it.
-        if (auto* cc = getOrCreateCanvasComponent(processor, cnv)) cc->repaint();
+        processor->getMcp()->gui().repaintView(cnv);
         sendReply("/pd/obj_relabel/reply/" + correlationId, static_cast<float>(ok));
         return;
     }
@@ -3461,13 +3279,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : juce::String("0");
 
             juce::MessageManager::callAsync([proc = processor, objectName, correlationId, this] {
-                PluginEditor* editor = nullptr;
-                for (auto* ed : proc->getEditors()) {
-                    if (ed) { editor = ed; break; }
-                }
-                if (!editor) editor = dynamic_cast<PluginEditor*>(proc->getActiveEditor());
-                if (editor) {
-                    Dialogs::showObjectReferenceDialog(&editor->openedDialog, editor, objectName);
+                if (proc->getMcp()->gui().showObjectReference(objectName)) {
                     sendReply("/pd/ui_open_reference/reply/" + correlationId, 1.0f);
                 } else {
                     sendReply("/pd/ui_open_reference/reply/" + correlationId, 0.0f);
@@ -3486,13 +3298,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             juce::MessageManager::callAsync([proc = processor, objectName, correlationId, this] {
                 auto helpFile = pd::Library::findHelpfile(objectName);
                 if (helpFile.existsAsFile()) {
-                    PluginEditor* editor = nullptr;
-                    for (auto* ed : proc->getEditors()) {
-                        if (ed) { editor = ed; break; }
-                    }
-                    if (!editor) editor = dynamic_cast<PluginEditor*>(proc->getActiveEditor());
-                    if (editor) {
-                        editor->getTabComponent().openHelpPatch(juce::URL(helpFile));
+                    if (proc->getMcp()->gui().openHelpPatch(helpFile)) {
                         sendReply("/pd/ui_open_help/reply/" + correlationId, 1.0f);
                         return;
                     }
@@ -3509,34 +3315,16 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : juce::String("0");
 
         juce::MessageManager::callAsync([proc = processor, canvasName, correlationId, this] {
-            PluginEditor* editor = nullptr;
-            for (auto* ed : proc->getEditors()) {
-                if (ed) { editor = ed; break; }
-            }
-            if (!editor) editor = dynamic_cast<PluginEditor*>(proc->getActiveEditor());
-            if (editor) {
-                auto* canvas = editor->getCurrentCanvas();
-                if (canvas) {
-                    auto* vp = canvas->viewport.get();
-                    float zoom = getValue<float>(canvas->zoomScale);
-                    float viewX = vp ? static_cast<float>(vp->getViewPositionX()) : 0.0f;
-                    float viewY = vp ? static_cast<float>(vp->getViewPositionY()) : 0.0f;
-                    float panX = (viewX / zoom) - static_cast<float>(canvas->canvasOrigin.x);
-                    float panY = (viewY / zoom) - static_cast<float>(canvas->canvasOrigin.y);
-                    float vpW = vp ? static_cast<float>(vp->getViewArea().getWidth()) : static_cast<float>(canvas->getWidth());
-                    float vpH = vp ? static_cast<float>(vp->getViewArea().getHeight()) : static_cast<float>(canvas->getHeight());
-                    float scaleFactor = editor->getRenderScale();
-
-                    juce::OSCMessage reply(juce::OSCAddressPattern("/pd/viewport/reply/" + correlationId));
-                    reply.addArgument(zoom);
-                    reply.addArgument(panX);
-                    reply.addArgument(panY);
-                    reply.addArgument(vpW);
-                    reply.addArgument(vpH);
-                    reply.addArgument(scaleFactor);
-                    sender.send(reply);
-                    return;
-                }
+            if (auto info = proc->getMcp()->gui().focusedViewport()) {
+                juce::OSCMessage reply(juce::OSCAddressPattern("/pd/viewport/reply/" + correlationId));
+                reply.addArgument(info->zoom);
+                reply.addArgument(info->panX);
+                reply.addArgument(info->panY);
+                reply.addArgument(info->width);
+                reply.addArgument(info->height);
+                reply.addArgument(info->renderScale);
+                sender.send(reply);
+                return;
             }
             juce::OSCMessage reply(juce::OSCAddressPattern("/pd/viewport/reply/" + correlationId));
             reply.addArgument(1.0f);
@@ -3607,29 +3395,19 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     midiTakesArr.add(juce::var(o));
                 }
 
-                PluginEditor* editor = nullptr;
-                for (auto* ed : proc->getEditors()) {
-                    if (ed) {
-                        editor = ed;
-                        break;
+                if (auto sketch = proc->getMcp()->gui().focusedSketch()) {
+                    strokesJson = sketch->strokesJson;
+                    auto const sb = sketch->bounds;
+                    if (!sb.isEmpty()) {
+                        auto* b = new juce::DynamicObject();
+                        b->setProperty("x", sb.getX());
+                        b->setProperty("y", sb.getY());
+                        b->setProperty("w", sb.getWidth());
+                        b->setProperty("h", sb.getHeight());
+                        bboxJson = juce::JSON::toString(juce::var(b), true);
                     }
-                }
-                if (!editor) editor = dynamic_cast<PluginEditor*>(proc->getActiveEditor());
-                if (editor) {
-                    if (auto* canvas = editor->getCurrentCanvas()) {
-                        strokesJson = canvas->buildSketchJson();
-                        auto const sb = canvas->getSketchBoundsInCanvas();
-                        if (!sb.isEmpty()) {
-                            auto* b = new juce::DynamicObject();
-                            b->setProperty("x", sb.getX() - static_cast<float>(canvas->canvasOrigin.x));
-                            b->setProperty("y", sb.getY() - static_cast<float>(canvas->canvasOrigin.y));
-                            b->setProperty("w", sb.getWidth());
-                            b->setProperty("h", sb.getHeight());
-                            bboxJson = juce::JSON::toString(juce::var(b), true);
-                        }
-                        for (auto const& tid : canvas->getSelectionStableIds()) {
-                            selArr.add(tid);
-                        }
+                    for (auto const& tid : sketch->selection) {
+                        selArr.add(tid);
                     }
                 }
             }
@@ -5193,44 +4971,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             // creation inside the view never moves the camera.
             if (cnv && created > 0 && !canvasNotFound) {
                 auto frameIfCreateOffscreen = [p = processor, cnv, ptrs = createdPtrs]() {
-                    auto* cc = mcpFindGuiCanvasFor(p, cnv);
-                    if (!cc || !cc->viewport) return;
-                    float z = std::sqrt(std::abs(cc->getTransform().getDeterminant()));
-                    if (z <= 0.0f) z = 1.0f;
-                    auto const origin = cc->canvasOrigin;
-                    auto area = cc->viewport->getViewArea().toFloat();
-                    juce::Rectangle<float> viewPatch(
-                        area.getX() / z - (float) origin.x,
-                        area.getY() / z - (float) origin.y,
-                        area.getWidth() / z,
-                        area.getHeight() / z);
-
-                    bool offscreen = false;
-                    bool any = false;
-                    juce::Rectangle<float> bbox;
-                    sys_lock();
-                    for (auto* g : ptrs) {
-                        if (!g) continue;
-                        int x = 0, y = 0, w = 0, h = 0;
-                        pd::Interface::getObjectBounds(cnv, g, &x, &y, &w, &h);
-                        juce::Rectangle<float> r((float) x, (float) y, (float) w, (float) h);
-                        bbox = any ? bbox.getUnion(r) : r;
-                        any = true;
-                        if (!viewPatch.contains(r.getCentre())) {
-                            offscreen = true;
-                            break;
-                        }
-                    }
-                    sys_unlock();
-                    if (!offscreen || !any) return;
-
-                    // Keep zoom, center the new objects.
-                    auto centre = bbox.getCentre();
-                    float targetX = centre.x - viewPatch.getWidth() * 0.5f;
-                    float targetY = centre.y - viewPatch.getHeight() * 0.5f;
-                    cc->viewport->setViewPosition(juce::Point<int>(
-                        (int) std::round(((float) origin.x + targetX) * z),
-                        (int) std::round(((float) origin.y + targetY) * z)).toFloat());
+                    p->getMcp()->gui().frameCreatedObjects(cnv, ptrs);
                 };
                 if (juce::MessageManager::getInstance()->isThisTheMessageThread()) {
                     frameIfCreateOffscreen();
@@ -5952,16 +5693,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     p->getMcp()->session.mcpStableObjectMap[newKey] = std::move(p->getMcp()->session.mcpStableObjectMap[oldKey]);
                     p->getMcp()->session.mcpStableObjectMap.erase(oldKey);
                 }
-                for (auto* editor : p->getEditors()) {
-                    if (!editor) continue;
-                    for (auto* canvas : editor->getCanvases()) {
-                        if (canvas && canvas->patch.getPointer().get() == cnv) {
-                            canvas->patch.setCurrentFile(URL(f));
-                            canvas->patch.setTitle(f.getFileName());
-                            return;
-                        }
-                    }
-                }
+                p->getMcp()->gui().setPatchFile(cnv, f);
             });
 
             sendReply(replyAddr, destFilePath);
@@ -6133,15 +5865,11 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             bool alreadyOpen = false;
             {
                 sys_lock();
-                for (auto* editor : processor->getEditors()) {
-                    if (!editor) continue;
-                    for (auto* canvas : editor->getCanvases()) {
-                        if (canvas && canvas->patch.getCurrentFile() == srcFile) {
-                            alreadyOpen = true;
-                            break;
-                        }
+                for (auto const& tab : processor->getMcp()->gui().listTabs()) {
+                    if (tab.file == srcFile) {
+                        alreadyOpen = true;
+                        break;
                     }
-                    if (alreadyOpen) break;
                 }
                 sys_unlock();
             }
@@ -6167,13 +5895,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
             juce::MessageManager::callAsync(
                 [p = processor, fileStr = srcFile.getFullPathName(), sidecar]() {
-                bool opened = false;
-                for (auto* editor : p->getEditors()) {
-                    if (!editor) continue;
-                    editor->getTabComponent().openPatch(juce::URL(juce::File(fileStr)));
-                    opened = true;
-                    break;
-                }
+                bool opened = p->getMcp()->gui().openPatch(juce::File(fileStr));
                 if (!opened) {
                     p->logMessage("MCP open_patch: no editor");
                     return;
@@ -6182,16 +5904,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 // Phase 3.1 bugfix: belt-and-suspenders dedup — if more than
                 // one tab for this file exists, keep the first and close extras.
                 juce::File f(fileStr);
-                bool keptFirst = false;
-                for (auto* editor : p->getEditors()) {
-                    if (!editor) continue;
-                    for (auto* canvas : editor->getCanvases()) {
-                        if (!canvas || canvas->patch.getCurrentFile() != f) continue;
-                        if (!keptFirst) { keptFirst = true; continue; }
-                        editor->getTabComponent().closeTab(canvas);
-                        p->logMessage("MCP open_patch: closed duplicate tab for " + fileStr);
-                    }
-                }
+                p->getMcp()->gui().closeDuplicateTabs(f);
 
                 // PRD Phase 3 §2.5: sidecar registration via the proven async
                 // mcp_register_id path — NO sys_lock in this lambda (lock
@@ -6223,29 +5936,21 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     };
 
                     juce::File f(fileStr);
-                    for (auto* editor : p->getEditors()) {
-                        if (!editor) continue;
-                        for (auto* canvas : editor->getCanvases()) {
-                            if (!canvas || canvas->patch.getCurrentFile() != f) continue;
-                            if (auto* cnv = canvas->patch.getPointer().get()) {
-                                juce::String canonKey = MCPBridge::canonicalCanvasKey(cnv);
-                                queueRegisters(sidecarObj->getProperty("root"), canonKey, cnv);
-                                // named subcanvases
-                                if (auto* subObj = sidecarObj->getProperty("sub").getDynamicObject()) {
-                                    for (t_gobj* g = cnv->gl_list; g; g = g->g_next) {
-                                        if (pd_class(&g->g_pd) != canvas_class) continue;
-                                        auto* child = reinterpret_cast<t_canvas*>(g);
-                                        if (!child->gl_name) continue;
-                                        juce::String childName = juce::String::fromUTF8(child->gl_name->s_name);
-                                        auto childIds = subObj->getProperty(juce::Identifier(childName));
-                                        if (childIds.getArray() != nullptr && childIds.getArray()->size() > 0)
-                                            queueRegisters(childIds, MCPBridge::canonicalCanvasKey(child), child);
-                                    }
-                                }
+                    if (auto* cnv = p->getMcp()->gui().findOpenPatch(f)) {
+                        juce::String canonKey = MCPBridge::canonicalCanvasKey(cnv);
+                        queueRegisters(sidecarObj->getProperty("root"), canonKey, cnv);
+                        // named subcanvases
+                        if (auto* subObj = sidecarObj->getProperty("sub").getDynamicObject()) {
+                            for (t_gobj* g = cnv->gl_list; g; g = g->g_next) {
+                                if (pd_class(&g->g_pd) != canvas_class) continue;
+                                auto* child = reinterpret_cast<t_canvas*>(g);
+                                if (!child->gl_name) continue;
+                                juce::String childName = juce::String::fromUTF8(child->gl_name->s_name);
+                                auto childIds = subObj->getProperty(juce::Identifier(childName));
+                                if (childIds.getArray() != nullptr && childIds.getArray()->size() > 0)
+                                    queueRegisters(childIds, MCPBridge::canonicalCanvasKey(child), child);
                             }
-                            break;
                         }
-                        break;
                     }
                 }
 
@@ -6267,29 +5972,24 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
         juce::MessageManager::callAsync([p = processor, bridge = this, replyAddr]() {
             juce::Array<juce::var> list;
-            for (auto* editor : p->getEditors()) {
-                if (!editor) continue;
-                auto* focused = editor->getCurrentCanvas();
-                for (auto* canvas : editor->getCanvases()) {
-                    if (!canvas) continue;
-                    auto* o = new juce::DynamicObject();
-                    o->setProperty("title", canvas->patch.getTitle());
-                    o->setProperty("file", canvas->patch.getCurrentFile().getFullPathName());
-                    o->setProperty("focused", canvas == focused);
-                    // C++ TRUTH: the canonical canvas key (the same key the
-                    // identity map uses). TS derives receiver-namespace suffixes
-                    // from THIS so creation and triggering agree by construction.
-                    if (auto* cnvp = canvas->patch.getPointer().get())
-                        o->setProperty("key", canonicalCanvasKey(cnvp));
-                    int count = 0;
-                    sys_lock();
-                    if (auto* cnv = canvas->patch.getPointer().get()) {
-                        for (t_gobj* g = cnv->gl_list; g; g = g->g_next) count++;
-                    }
-                    sys_unlock();
-                    o->setProperty("objects", count);
-                    list.add(juce::var(o));
+            for (auto const& tab : p->getMcp()->gui().listTabs()) {
+                auto* o = new juce::DynamicObject();
+                o->setProperty("title", tab.title);
+                o->setProperty("file", tab.file.getFullPathName());
+                o->setProperty("focused", tab.focused);
+                // C++ TRUTH: the canonical canvas key (the same key the
+                // identity map uses). TS derives receiver-namespace suffixes
+                // from THIS so creation and triggering agree by construction.
+                if (auto* cnvp = tab.patch)
+                    o->setProperty("key", canonicalCanvasKey(cnvp));
+                int count = 0;
+                sys_lock();
+                if (auto* cnv = tab.patch) {
+                    for (t_gobj* g = cnv->gl_list; g; g = g->g_next) count++;
                 }
+                sys_unlock();
+                o->setProperty("objects", count);
+                list.add(juce::var(o));
             }
             auto* root = new juce::DynamicObject();
             root->setProperty("tabs", list);
@@ -6308,22 +6008,9 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         juce::String replyAddr = "/pd/focus_tab/reply/" + correlationId;
 
         juce::MessageManager::callAsync([p = processor, bridge = this, target, replyAddr]() {
-            juce::File f(target);
-            for (auto* editor : p->getEditors()) {
-                if (!editor) continue;
-                for (auto* canvas : editor->getCanvases()) {
-                    if (!canvas) continue;
-                    bool match = canvas->patch.getCurrentFile() == f
-                        || canvas->patch.getCurrentFile().getFileName() == target
-                        || canvas->patch.getTitle() == target
-                        || canvas->patch.getTitle().equalsIgnoreCase(target);
-                    if (match) {
-                        editor->getTabComponent().showTab(canvas, canvas->patch.splitViewIndex);
-                        editor->getTabComponent().setActiveSplit(canvas);
-                        bridge->sendReply(replyAddr, juce::String("focused: ") + canvas->patch.getTitle());
-                        return;
-                    }
-                }
+            if (auto title = p->getMcp()->gui().focusTab(target)) {
+                bridge->sendReply(replyAddr, juce::String("focused: ") + *title);
+                return;
             }
             bridge->sendReply(replyAddr, juce::String("error: tab not found: " + target));
         });
@@ -6341,27 +6028,15 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         juce::String replyAddr = "/pd/close_tab/reply/" + correlationId;
 
         juce::MessageManager::callAsync([p = processor, bridge = this, target, force, replyAddr]() {
-            juce::File f(target);
-            for (auto* editor : p->getEditors()) {
-                if (!editor) continue;
-                for (auto* canvas : editor->getCanvases()) {
-                    if (!canvas) continue;
-                    bool match = canvas->patch.getCurrentFile() == f
-                        || canvas->patch.getCurrentFile().getFileName() == target
-                        || canvas->patch.getTitle() == target
-                        || canvas->patch.getTitle().equalsIgnoreCase(target);
-                    if (match) {
-                        if (canvas->patch.isDirty() && force < 0.5f) {
-                            bridge->sendReply(replyAddr, juce::String(
-                                "error: '" + canvas->patch.getTitle() + "' has unsaved changes — save first or pass force=1"));
-                            return;
-                        }
-                        juce::String title = canvas->patch.getTitle();
-                        editor->getTabComponent().closeTab(canvas);
-                        bridge->sendReply(replyAddr, juce::String("closed: " + title));
-                        return;
-                    }
-                }
+            auto const closed = p->getMcp()->gui().closeTab(target, force >= 0.5f);
+            if (closed.status == McpGuiHost::CloseResult::Dirty) {
+                bridge->sendReply(replyAddr, juce::String(
+                    "error: '" + closed.title + "' has unsaved changes — save first or pass force=1"));
+                return;
+            }
+            if (closed.status == McpGuiHost::CloseResult::Closed) {
+                bridge->sendReply(replyAddr, juce::String("closed: " + closed.title));
+                return;
             }
             bridge->sendReply(replyAddr, juce::String("error: tab not found: " + target));
         });
@@ -6418,11 +6093,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
     //                        Connection components — Phase B queries those).
     // All read-only under sys_lock, zero DSP touch, zero dropout.
 
-    auto findGuiCanvasFor = [](PluginProcessor* proc, t_canvas* c) -> Canvas* {
-        return mcpFindGuiCanvasFor(proc, c);
-    };
-
-    auto getTrueObjectBounds = [](t_canvas* c, t_gobj* y, Canvas* guiCanvas, int* x, int* yy, int* w, int* h) {
+    auto getTrueObjectBounds = [](t_canvas* c, t_gobj* y, McpGuiHost::LiveBounds const* guiCanvas, int* x, int* yy, int* w, int* h) {
         mcpGetTrueObjectBounds(c, y, guiCanvas, x, yy, w, h);
     };
 
@@ -6486,15 +6157,16 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 for (auto& [tid, ptr] : mapIt->second)
                     if (ptr) ptrToId[ptr] = juce::String(tid);
 
-            Canvas* guiCanvas = mcpFindGuiCanvasFor(processor, cnv);
+            auto guiCanvas = mcpLiveBounds(processor, cnv);
+            auto guiView = processor->getMcp()->gui().viewState(cnv);
 
             float zoom = 1.0f;
             int vx = 0, vy = 0, vw = 1000, vh = 800;
-            if (guiCanvas) {
-                zoom = getValue<float>(guiCanvas->zoomScale);
+            if (guiView) {
+                zoom = guiView->zoom;
                 if (zoom <= 0.001f) zoom = 1.0f;
-                if (guiCanvas->viewport) {
-                    auto va = guiCanvas->viewport->getViewArea();
+                if (guiView->hasViewport) {
+                    auto va = guiView->viewArea;
                     vx = static_cast<int>(std::round(va.getX() / zoom));
                     vy = static_cast<int>(std::round(va.getY() / zoom));
                     vw = static_cast<int>(std::round(va.getWidth() / zoom));
@@ -6513,7 +6185,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             int idx = 0;
             for (t_gobj* y = cnv->gl_list; y; y = y->g_next, ++idx) {
                 int x = 0, yy = 0, w = 0, h = 0;
-                getTrueObjectBounds(cnv, y, guiCanvas, &x, &yy, &w, &h);
+                getTrueObjectBounds(cnv, y, guiCanvas.get(), &x, &yy, &w, &h);
                 juce::String tid = ptrToId.count(y)
                     ? ptrToId[y]
                     : (juce::String(class_getname(pd_class(&y->g_pd))) + "#" + juce::String(idx));
@@ -6600,11 +6272,11 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 for (auto& [tid, ptr] : mapIt->second)
                     if (ptr) ptrToId[ptr] = juce::String(tid);
 
-            Canvas* guiCanvas = mcpFindGuiCanvasFor(processor, cnv);
+            auto guiCanvas = mcpLiveBounds(processor, cnv);
             int idx = 0;
             for (t_gobj* y = cnv->gl_list; y; y = y->g_next, ++idx) {
                 int x = 0, yy = 0, w = 0, h = 0;
-                getTrueObjectBounds(cnv, y, guiCanvas, &x, &yy, &w, &h);
+                getTrueObjectBounds(cnv, y, guiCanvas.get(), &x, &yy, &w, &h);
                 juce::String tid = ptrToId.count(y)
                     ? ptrToId[y]
                     : (juce::String(class_getname(pd_class(&y->g_pd))) + "#" + juce::String(idx));
@@ -6687,12 +6359,12 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     : (juce::String(class_getname(pd_class(&y->g_pd))) + "#" + juce::String(idx)));
             }
 
-            Canvas* guiCanvas = mcpFindGuiCanvasFor(processor, cnv);
+            auto guiCanvas = mcpLiveBounds(processor, cnv);
             struct R { int x, y, w, h; };
             std::vector<R> rects(objs.size());
             for (size_t i = 0; i < objs.size(); ++i) {
                 int x = 0, yy = 0, w = 0, h = 0;
-                getTrueObjectBounds(cnv, objs[i], guiCanvas, &x, &yy, &w, &h);
+                getTrueObjectBounds(cnv, objs[i], guiCanvas.get(), &x, &yy, &w, &h);
                 rects[i] = { x, yy, w, h };
             }
 
@@ -6844,33 +6516,26 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         if (!cnv) { sendReply("/pd/select/reply/" + correlationId, 0.0f); return; }
 
         juce::MessageManager::callAsync([proc = processor, cnv, canvasName, ids, correlationId, bridge = this]() {
-            Canvas* canvasComp = getOrCreateCanvasComponent(proc, cnv);
-            if (!canvasComp) { bridge->sendReply("/pd/select/reply/" + correlationId, 0.0f); return; }
-
-            canvasComp->patch.deselectAll();
-            std::vector<Object*> chosen;
+            std::vector<t_gobj*> targets;
             for (const auto& id : ids) {
                 t_gobj* g = proc->getMcp()->resolveStableId(canvasName, id);
                 if (!g) continue;
-                for (auto* objComp : canvasComp->objects) {
-                    if (objComp && objComp->getPointer() == g) {
-                        canvasComp->setSelected(objComp, true);
-                        chosen.push_back(objComp);
-                        break;
-                    }
-                }
+                targets.push_back(g);
             }
+            auto selection = proc->getMcp()->gui().select(cnv, targets);
+            if (!selection) { bridge->sendReply("/pd/select/reply/" + correlationId, 0.0f); return; }
+            auto const& chosen = selection->objects;
 
             // Two-way sync: report the programmatic selection to the MCP so
             // get_selection() reflects it (mirrors Sidebar::showParameters).
             if (!chosen.empty()) {
-                auto subpatchSym = proc->generateSymbol(canvasComp->patch.getTitle());
+                auto subpatchSym = proc->generateSymbol(selection->title);
                 if (chosen.size() == 1) {
                     SmallArray<pd::Atom> atoms;
                     atoms.add(pd::Atom(subpatchSym));
-                    atoms.add(pd::Atom(proc->generateSymbol(chosen[0]->getType(false))));
-                    atoms.add(pd::Atom(static_cast<float>(chosen[0]->cnv->objects.index_of(chosen[0]))));
-                    auto b = chosen[0]->getObjectBounds();
+                    atoms.add(pd::Atom(proc->generateSymbol(chosen[0].type)));
+                    atoms.add(pd::Atom(static_cast<float>(chosen[0].index)));
+                    auto b = chosen[0].bounds;
                     atoms.add(pd::Atom(static_cast<float>(b.getX())));
                     atoms.add(pd::Atom(static_cast<float>(b.getY())));
                     bridge->sendSelectionTelemetry("selected_object", atoms);
@@ -6882,8 +6547,8 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
                     SmallArray<pd::Atom> indexAtoms;
                     indexAtoms.add(pd::Atom(subpatchSym));
-                    for (auto* o : chosen)
-                        indexAtoms.add(pd::Atom(static_cast<float>(o->cnv->objects.index_of(o))));
+                    for (auto const& o : chosen)
+                        indexAtoms.add(pd::Atom(static_cast<float>(o.index)));
                     bridge->sendSelectionTelemetry("selection_indices", indexAtoms);
                 }
             }
@@ -6940,7 +6605,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         proc->getMcp()->session.mcpAiOverlay[g] = McpSession::AiMark { state, transient };
                 }
             }
-            if (auto* cc = getOrCreateCanvasComponent(proc, cnv)) cc->repaint();
+            proc->getMcp()->gui().repaintView(cnv);
             bridge->sendReply("/pd/ai_overlay/reply/" + correlationId, static_cast<float>(proc->getMcp()->session.mcpAiOverlay.size()));
         });
         return;
@@ -6994,7 +6659,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 }
                 sys_unlock();
             }
-            if (auto* cc = getOrCreateCanvasComponent(proc, cnv)) cc->repaint();
+            proc->getMcp()->gui().repaintView(cnv);
             bridge->sendReply("/pd/ai_ghost/reply/" + correlationId, static_cast<float>(proc->getMcp()->session.mcpGhosts.size()));
         });
         return;
@@ -7083,7 +6748,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 }
                 sys_unlock();
             }
-            if (auto* cc = getOrCreateCanvasComponent(proc, cnv)) cc->repaint();
+            proc->getMcp()->gui().repaintView(cnv);
             juce::var details = juce::Array<juce::var>();
             for (auto const& an : proc->getMcp()->session.mcpAnnotations) {
                 auto* d = new juce::DynamicObject();
@@ -7173,7 +6838,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 juce::ScopedLock overlaySl(proc->getMcp()->session.mcpOverlayLock);
                 proc->getMcp()->session.mcpRegions = std::move(built);
             }
-            if (auto* cc = getOrCreateCanvasComponent(proc, cnv)) cc->repaint();
+            proc->getMcp()->gui().repaintView(cnv);
             bridge->sendReply("/pd/ai_region/reply/" + correlationId, static_cast<float>(proc->getMcp()->session.mcpRegions.size()));
         });
         return;
@@ -7209,7 +6874,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 proc->getMcp()->session.mcpHud.telemetry = o->getProperty("telemetry").toString();
             }
             if (cnv) {
-                if (auto* cc = getOrCreateCanvasComponent(proc, cnv)) cc->repaint();
+                proc->getMcp()->gui().repaintView(cnv);
             }
             bridge->sendReply("/pd/ai_hud/reply/" + correlationId, proc->getMcp()->session.mcpHud.active ? 1.0f : 0.0f);
         });
@@ -7226,8 +6891,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
 
         juce::MessageManager::callAsync([proc = processor, cnv, correlationId, bridge = this]() {
-            auto* cc = getOrCreateCanvasComponent(proc, cnv);
-            int mask = cc ? cc->getOverlays() : 0;
+            int mask = proc ? proc->getMcp()->gui().overlayMask(cnv).value_or(0) : 0;
             juce::DynamicObject::Ptr obj = new juce::DynamicObject();
             obj->setProperty("mask", mask);
             obj->setProperty("origin", static_cast<bool>(mask & Origin));
@@ -7264,12 +6928,12 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
 
         juce::MessageManager::callAsync([proc = processor, cnv, canvasName, argStr, correlationId, bridge = this]() {
-            auto* cc = getOrCreateCanvasComponent(proc, cnv);
-            if (!cc) {
+            auto const viewMask = proc ? proc->getMcp()->gui().overlayMask(cnv) : std::nullopt;
+            if (!viewMask) {
                 bridge->sendReply("/pd/set_overlays/reply/" + correlationId, juce::String("{}"));
                 return;
             }
-            int currentMask = cc->getOverlays();
+            int currentMask = *viewMask;
             auto parsed = juce::JSON::parse(argStr);
             if (parsed.isObject()) {
                 auto* o = parsed.getDynamicObject();
@@ -7317,7 +6981,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 currentMask = static_cast<int>(parsed);
             }
 
-            cc->setOverlayMask(currentMask);
+            proc->getMcp()->gui().setOverlayMask(cnv, currentMask);
 
             juce::DynamicObject::Ptr obj = new juce::DynamicObject();
             obj->setProperty("mask", currentMask);
@@ -7893,9 +7557,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
             if (cnv) {
                 juce::MessageManager::callAsync([proc = processor, cnv, canvasName, subpatchName, targetIds, correlationId, bridge = this]() {
-                    Canvas* canvasComp = getOrCreateCanvasComponent(proc, cnv);
-
-                    if (!canvasComp) {
+                    if (!proc->getMcp()->gui().ensureView(cnv)) {
                         bridge->sendReply("/pd/encapsulate/reply/" + correlationId, 0.0f);
                         return;
                     }
@@ -7908,24 +7570,13 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     // explicit list to the native encapsulate. The GUI selection is
                     // never touched — so a leftover selection cannot ride along, and
                     // no read-back guard is needed. Fail closed on the first miss.
-                    SmallArray<Object*> toEncapsulate;
-                    for (auto const& id : targetIds) {
-                        t_gobj* g = proc->getMcp()->resolveStableId(canvasName, id);
-                        bool found = false;
-                        if (g) {
-                            for (auto* objComp : canvasComp->objects) {
-                                if (objComp && objComp->getPointer() == g) {
-                                    if (!toEncapsulate.contains(objComp))
-                                        toEncapsulate.add(objComp);
-                                    found = true;
-                                    break;
-                                }
-                            }
-                        }
-                        if (!found) {
-                            bridge->sendReply("/pd/encapsulate/reply/" + correlationId, 0.0f);
-                            return;
-                        }
+                    std::vector<t_gobj*> toEncapsulate;
+                    for (auto const& id : targetIds)
+                        toEncapsulate.push_back(proc->getMcp()->resolveStableId(canvasName, id));
+                    int const encapsulateCount = proc->getMcp()->gui().countViewObjects(cnv, toEncapsulate);
+                    if (encapsulateCount < 0) {
+                        bridge->sendReply("/pd/encapsulate/reply/" + correlationId, 0.0f);
+                        return;
                     }
 
                     // Capture (tempId → class+text) BEFORE encapsulation so we can
@@ -7956,7 +7607,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     for (t_gobj* y = cnv->gl_list; y; y = y->g_next)
                         parentCountBefore++;
 
-                    canvasComp->encapsulateSelection(subpatchName, toEncapsulate);
+                    proc->getMcp()->gui().encapsulate(cnv, subpatchName, toEncapsulate);
 
                     // ── PHASE 2: POST-OP VERIFICATION + ROLLBACK ─────────────
                     // Confirm the op applied: a canvas-class [pd] now exists, the parent
@@ -7974,7 +7625,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         auto* subCnv = reinterpret_cast<t_canvas*>(newestObj);
                         for (t_gobj* y = subCnv->gl_list; y; y = y->g_next)
                             subCount++;
-                            int const n = static_cast<int>(toEncapsulate.size());
+                            int const n = encapsulateCount;
                         verified = (parentCountAfter == parentCountBefore - n + 1) && (subCount >= n);
                     }
 
@@ -8047,8 +7698,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
             if (cnv) {
                 juce::MessageManager::callAsync([proc = processor, cnv, canvasName, abstrName, filePath, targetIds, correlationId, bridge = this]() {
-                    Canvas* canvasComp = getOrCreateCanvasComponent(proc, cnv);
-                    if (!canvasComp) {
+                    if (!proc->getMcp()->gui().ensureView(cnv)) {
                         bridge->sendReply("/pd/encapsulate_to_file/reply/" + correlationId, 0.0f);
                         return;
                     }
@@ -8059,31 +7709,20 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     // the explicit list to the native encapsulate. No GUI selection.
                     proc->getMcp()->reconcileIdentity(canvasName);
 
-                    SmallArray<Object*> toEncapsulate;
-                    for (const auto& id : targetIds) {
-                        t_gobj* g = proc->getMcp()->resolveStableId(canvasName, id);
-                        bool found = false;
-                        if (g) {
-                            for (auto* objComp : canvasComp->objects) {
-                                if (objComp && objComp->getPointer() == g) {
-                                    if (!toEncapsulate.contains(objComp))
-                                        toEncapsulate.add(objComp);
-                                    found = true;
-                                    break;
-                                }
-                            }
-                        }
-                        if (!found) {
-                            bridge->sendReply("/pd/encapsulate_to_file/reply/" + correlationId, 0.0f);
-                            return;
-                        }
+                    std::vector<t_gobj*> toEncapsulate;
+                    for (const auto& id : targetIds)
+                        toEncapsulate.push_back(proc->getMcp()->resolveStableId(canvasName, id));
+                    int const encapsulateCount = proc->getMcp()->gui().countViewObjects(cnv, toEncapsulate);
+                    if (encapsulateCount < 0) {
+                        bridge->sendReply("/pd/encapsulate_to_file/reply/" + correlationId, 0.0f);
+                        return;
                     }
 
                     int parentCountBefore = 0;
                     for (t_gobj* y = cnv->gl_list; y; y = y->g_next)
                         parentCountBefore++;
 
-                    canvasComp->encapsulateSelection(abstrName, toEncapsulate);
+                    proc->getMcp()->gui().encapsulate(cnv, abstrName, toEncapsulate);
 
                     // ── PHASE 2: POST-OP VERIFICATION + ROLLBACK ─────────────
                     // Same guarantee as /pd/encapsulate: verify by COUNT (encapsulation
@@ -8100,7 +7739,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                             auto* sub = reinterpret_cast<t_canvas*>(npd);
                             for (t_gobj* y = sub->gl_list; y; y = y->g_next)
                                 subCount++;
-                        int const n = static_cast<int>(toEncapsulate.size());
+                        int const n = encapsulateCount;
                             ok = (parentCountAfter == parentCountBefore - n + 1) && (subCount >= n);
                         }
                         if (!ok) {
@@ -8181,26 +7820,15 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     struct BoundaryWire { t_gobj* far; int farPort; int boxPort; };
                     std::vector<BoundaryWire> inWires, outWires;
                     {
-                        Object* subComp = nullptr;
-                        for (auto* o : canvasComp->objects) {
-                            if (o && o->getPointer() == newestObj) { subComp = o; break; }
-                        }
-                        if (subComp) {
-                            for (auto* c : canvasComp->connections) {
-                                if (!c) continue;
-                                if (c->inobj.get() == subComp) {
-                                    // far -> box (inbound): far's outlet -> box inlet
-                                    if (auto* farO = c->outobj.get()) {
-                                        if (t_gobj* fg = farO->getPointer())
-                                            inWires.push_back({ fg, c->outIdx, c->inIdx });
-                                    }
-                                } else if (c->outobj.get() == subComp) {
-                                    // box -> far (outbound): box outlet -> far's inlet
-                                    if (auto* farO = c->inobj.get()) {
-                                        if (t_gobj* fg = farO->getPointer())
-                                            outWires.push_back({ fg, c->inIdx, c->outIdx });
-                                    }
-                                }
+                        for (auto const& c : proc->getMcp()->gui().viewWiresOf(cnv, newestObj)) {
+                            if (c.dst == newestObj) {
+                                // far -> box (inbound): far's outlet -> box inlet
+                                if (t_gobj* fg = c.src)
+                                    inWires.push_back({ fg, c.outlet, c.inlet });
+                            } else if (c.src == newestObj) {
+                                // box -> far (outbound): box outlet -> far's inlet
+                                if (t_gobj* fg = c.dst)
+                                    outWires.push_back({ fg, c.inlet, c.outlet });
                             }
                         }
                     }
@@ -8484,7 +8112,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             auto replyAddr     = "/pd/measure_text/reply/" + correlationId;
 
             juce::var parsed = juce::JSON::parse(jsonArrayStr);
-            juce::Font font = Fonts::getDefaultFont().withHeight(fontSize);
+            juce::Font font = processor->getMcp()->gui().defaultFont().withHeight(fontSize);
             auto* resultObj = new juce::DynamicObject();
 
             if (auto* arr = parsed.getArray()) {
@@ -8559,38 +8187,17 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
             if (cnv) {
                 juce::MessageManager::callAsync([proc = processor, cnv, canvasName, alignStr, targetIds, correlationId, bridge = this]() {
-                    Canvas* canvasComp = getOrCreateCanvasComponent(proc, cnv);
+                    std::vector<t_gobj*> targets;
+                    for (const auto& id : targetIds) {
+                        t_gobj* g = proc->getMcp()->resolveStableId(canvasName, id);
+                        if (g) targets.push_back(g);
+                    }
 
-                    if (!canvasComp) {
+                    if (!proc->getMcp()->gui().alignObjects(cnv, targetIds.empty() ? nullptr : &targets, alignStr)) {
                         bridge->sendReply("/pd/align/reply/" + correlationId, 0.0f);
                         return;
                     }
 
-                    if (!targetIds.empty()) {
-                        canvasComp->patch.deselectAll();
-                        for (const auto& id : targetIds) {
-                            t_gobj* g = proc->getMcp()->resolveStableId(canvasName, id);
-                            if (g) {
-                                for (auto* objComp : canvasComp->objects) {
-                                    if (objComp && objComp->getPointer() == g) {
-                                        canvasComp->setSelected(objComp, true);
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    Align alignMode = Align::Left;
-                    if (alignStr == "right") alignMode = Align::Right;
-                    else if (alignStr == "hcentre" || alignStr == "hcenter") alignMode = Align::HCentre;
-                    else if (alignStr == "hdistribute") alignMode = Align::HDistribute;
-                    else if (alignStr == "top") alignMode = Align::Top;
-                    else if (alignStr == "bottom") alignMode = Align::Bottom;
-                    else if (alignStr == "vcentre" || alignStr == "vcenter") alignMode = Align::VCentre;
-                    else if (alignStr == "vdistribute") alignMode = Align::VDistribute;
-
-                    canvasComp->alignObjects(alignMode);
                     resetCanvasUndo(proc, canvasName);
                     bridge->sendReply("/pd/align/reply/" + correlationId, 1.0f);
                 });
@@ -8610,10 +8217,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
 
             juce::MessageManager::callAsync([proc = processor, cnv, correlationId, bridge = this]() {
-                Canvas* canvasComp = getOrCreateCanvasComponent(proc, cnv);
-
-                if (canvasComp) {
-                    canvasComp->zoomToFitAll();
+                if (proc->getMcp()->gui().zoomToFit(cnv)) {
                     bridge->sendReply("/pd/zoom_to_fit/reply/" + correlationId, 1.0f);
                 } else {
                     bridge->sendReply("/pd/zoom_to_fit/reply/" + correlationId, 0.0f);
@@ -8646,146 +8250,20 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             // Resolve t_canvas — null is fine, we fall back to focused editor canvas
             t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
 
-            // ScreenshotLabel struct; collection happens inside callAsync after
-            // canvasComp is resolved to avoid the null-cnv race (guard 'cnv' here
-            // may be null when the named canvas falls back to focused editor).
-            struct ScreenshotLabel {
-                int x, y, w, h;       // pd coords
-                juce::String text;    // "name · class" or "class"
-            };
-
+            // Label collection runs inside the GUI host's capture (Message Thread),
+            // after the view is resolved, so it always walks the exact canvas that
+            // was rendered — never a stale/null pre-resolved cnv. sys_lock from the
+            // Message Thread is safe (same pattern as /pd/diagnose).
             juce::MessageManager::callAsync([proc = processor, cnv, scale, correlationId, bridge = this,
                                              wantLabels, canvasName]() {
-                // Prefer named canvas; fall back to focused canvas in any open editor
-                Canvas* canvasComp = cnv ? getOrCreateCanvasComponent(proc, cnv) : nullptr;
-                if (!canvasComp && proc) {
-                    for (auto* editor : proc->getEditors()) {
-                        if (editor && editor->getCurrentCanvas()) {
-                            canvasComp = editor->getCurrentCanvas();
-                            break;
-                        }
-                    }
-                }
-
-                if (!canvasComp) {
-                    bridge->sendReply("/pd/screenshot_canvas/reply/" + correlationId, juce::String("error:no_canvas"));
-                    return;
-                }
-
-                // ── NVG surface capture ──
-                // PlugData's Canvas is an NVGComponent: its JUCE paint() path is EMPTY
-                // and all rendering goes to the GPU via PluginEditor::nvgSurface.
-                // createComponentSnapshot therefore returns a blank image — verified
-                // (3KB all-black PNGs). Correct path: force-render the target region
-                // into the surface FBO, then pull pixels with renderFrameToImage.
-                PluginEditor* editor = nullptr;
-                for (auto* ed : proc->getEditors()) {
-                    if (ed && ed->getCurrentCanvas() == canvasComp) { editor = ed; break; }
-                }
-                if (!editor) {
-                    bridge->sendReply("/pd/screenshot_canvas/reply/" + correlationId, juce::String("error:no_editor"));
-                    return;
-                }
-
-                // ── Native window capture (createSnapshotOfNativeWindow) ──
-                // PlugData's Canvas is NVGComponent: JUCE paint() is empty, GPU-side
-                // rendering. createSnapshotOfNativeWindow uses XGetImage on the X11
-                // display connection JUCE already holds — no shell, no env issues.
-                // It returns a juce::Image of the WHOLE editor window at native pixels.
-                auto* peer = editor->getPeer();
-                if (!peer) {
-                    bridge->sendReply("/pd/screenshot_canvas/reply/" + correlationId, juce::String("error:no_peer"));
-                    return;
-                }
-
-                // Canvas viewport + editor bounds in SCREEN coordinates.
-                juce::Rectangle<int> viewportScreen;
-                if (canvasComp->viewport != nullptr)
-                    viewportScreen = canvasComp->viewport->getScreenBounds();
-                else
-                    viewportScreen = canvasComp->getScreenBounds();
-                auto editorScreen = editor->getScreenBounds();
-
-                // Grab the whole editor window via XGetImage (JUCE public API).
-                // getNativeHandle() returns ::Window (XID) on Linux — same value
-                // xwd -id uses, but via the existing X11 connection (no shell needed).
-                auto img = juce::createSnapshotOfNativeWindow(peer->getNativeHandle());
-                if (!img.isValid()) {
-                    bridge->sendReply("/pd/screenshot_canvas/reply/" + correlationId, juce::String("error:snapshot_failed"));
-                    return;
-                }
-                DBG("[screenshot_canvas] snapshot " + juce::String(img.getWidth()) + "x" + juce::String(img.getHeight())
-                    + " editorScreen=" + editorScreen.toString()
-                    + " viewportScreen=" + viewportScreen.toString());
-
-                // createSnapshotOfNativeWindow returns the image at the display's
-                // physical pixel scale (already divided by desktop scale inside JUCE).
-                // editorScreen + viewportScreen are in logical pixels; no extra scale needed.
-                // Crop to the viewport sub-rect within the window.
-                juce::Rectangle<int> crop;
-                crop.setX(viewportScreen.getX() - editorScreen.getX());
-                crop.setY(viewportScreen.getY() - editorScreen.getY());
-                crop.setWidth(viewportScreen.getWidth());
-                crop.setHeight(viewportScreen.getHeight());
-                crop = crop.getIntersection(img.getBounds());
-                if (crop.isEmpty()) {
-                    bridge->sendReply("/pd/screenshot_canvas/reply/" + correlationId,
-                        juce::String("error:empty_crop w=") + juce::String(img.getWidth())
-                        + " h=" + juce::String(img.getHeight())
-                        + " crop=" + crop.toString());
-                    return;
-                }
-
-                // Guard: at least 1% pixel variance (catches blank/hidden windows)
-                {
-                    juce::Image::BitmapData bd(img, juce::Image::BitmapData::readOnly);
-                    long varying = 0, total = 0;
-                    juce::uint8 firstR = 0, firstG = 0, firstB = 0;
-                    bool haveFirst = false;
-                    for (int row = crop.getY(); row < crop.getBottom(); row += 6) {
-                        for (int col = crop.getX(); col < crop.getRight(); col += 6) {
-                            auto px = img.getPixelAt(col, row);
-                            if (!haveFirst) { firstR = px.getRed(); firstG = px.getGreen(); firstB = px.getBlue(); haveFirst = true; }
-                            if (px.getRed() != firstR || px.getGreen() != firstG || px.getBlue() != firstB) varying++;
-                            total++;
-                        }
-                    }
-                    if (total > 0 && varying * 100 / total < 1) {
-                        bridge->sendReply("/pd/screenshot_canvas/reply/" + correlationId,
-                            juce::String("error:blank_window (uniform canvas — hidden or off-screen?)"));
-                        return;
-                    }
-                }
-
-                img = img.getClippedImage(crop);
-
-                // Apply requested scale
-                if (std::abs(scale - 1.0f) > 0.01f && img.getWidth() > 0 && img.getHeight() > 0) {
-                    int targetW = juce::roundToInt(img.getWidth() * scale);
-                    int targetH = juce::roundToInt(img.getHeight() * scale);
-                    if (targetW > 0 && targetH > 0) {
-                        juce::Image resized(juce::Image::ARGB, targetW, targetH, true);
-                        juce::Graphics rg(resized);
-                        rg.setImageResamplingQuality(juce::Graphics::highResamplingQuality);
-                        rg.drawImage(img, juce::Rectangle<float>(0, 0, (float)targetW, (float)targetH),
-                            juce::RectanglePlacement::stretchToFit);
-                        img = resized;
-                    }
-                }
-
-                // ── Label collection (inside callAsync, on Message Thread) ──
-                // Collect here after canvasComp is resolved so we always walk the
-                // exact canvas that was rendered — never a stale/null pre-resolved cnv.
-                // sys_lock from Message Thread is safe (same pattern as /pd/diagnose).
-                std::vector<ScreenshotLabel> labels;
-                if (wantLabels) {
+                McpGuiHost::LabelSource labelSource = [proc, canvasName](t_canvas* liveCnv) {
+                    std::vector<McpGuiHost::ScreenshotLabel> labels;
                     static const std::unordered_set<juce::String> guiClasses = {
                         "knob", "vsl", "hsl", "vu", "tgl", "bng", "nbx",
                         "hradio", "vradio", "cnv"
                     };
 
-                    // t_canvas* from resolved canvasComp; walk to root for pd-main
-                    t_canvas* liveCnv = canvasComp->patch.getRawPointer();
+                    // liveCnv: the t_canvas* of the captured view; walk to root for pd-main
                     if (canvasName == "pd-main" || canvasName == "main") {
                         auto* g = reinterpret_cast<t_glist*>(liveCnv);
                         while (g && g->gl_owner) g = g->gl_owner;
@@ -8812,15 +8290,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
                             juce::String semantic;
                             if (className == "knob") {
-                                auto* knb = reinterpret_cast<t_fake_knob*>(y);
-                                knob_get_rcv(knb);
-                                knob_get_snd(knb);
-                                auto valid = [](t_symbol* s) -> bool {
-                                    return s && s->s_name && s->s_name[0]
-                                        && juce::String::fromUTF8(s->s_name) != "empty";
-                                };
-                                if (valid(knb->x_rcv_raw))      semantic = juce::String::fromUTF8(knb->x_rcv_raw->s_name);
-                                else if (valid(knb->x_snd_raw)) semantic = juce::String::fromUTF8(knb->x_snd_raw->s_name);
+                                semantic = mcpKnobLabelName(y);
                             } else {
                                 auto* iem = reinterpret_cast<t_iemgui*>(y);
                                 auto valid = [](t_symbol* s) -> bool {
@@ -8842,7 +8312,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                             if (w <= 0) w = 60;
                             if (h <= 0) h = 20;
 
-                            ScreenshotLabel lbl;
+                            McpGuiHost::ScreenshotLabel lbl;
                             lbl.x = x; lbl.y = yy; lbl.w = w; lbl.h = h;
                             lbl.text = semantic.isNotEmpty()
                                 ? semantic + " · " + className
@@ -8851,98 +8321,10 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         }
                     }
                     sys_unlock();
-
-                    // Diagnostic: label count + first label coords -> stderr (DBG)
-                    DBG("[screenshot_labels] collected=" + juce::String((int)labels.size())
-                        + " liveCnv=" + juce::String(liveCnv ? "ok" : "NULL")
-                        + " img=" + juce::String(img.getWidth()) + "x" + juce::String(img.getHeight()));
-                    if (!labels.empty()) {
-                        float zoom0 = getValue<float>(canvasComp->zoomScale);
-                        if (zoom0 <= 0.001f) zoom0 = 1.0f;
-                        int vx0 = canvasComp->viewport ? canvasComp->viewport->getViewArea().getX() : 0;
-                        int vy0 = canvasComp->viewport ? canvasComp->viewport->getViewArea().getY() : 0;
-                        DBG("[screenshot_labels] first=" + labels[0].text
-                            + " pd(" + juce::String(labels[0].x) + "," + juce::String(labels[0].y) + ")"
-                            + " zoom=" + juce::String(zoom0, 2)
-                            + " view=(" + juce::String(vx0) + "," + juce::String(vy0) + ")"
-                            + " imgX=" + juce::String((labels[0].x * zoom0 - vx0) * scale, 1)
-                            + " imgY=" + juce::String((labels[0].y * zoom0 - vy0) * scale, 1));
-                    }
-                }
-
-                // ── Paint labels onto the captured bitmap (never the canvas) ──
-                // Coordinate model (Object::updateBounds + Canvas transform):
-                //   object in canvas-component px = canvasOrigin + pdPos
-                //   viewport shows canvas at viewPos; zoom via component transform
-                //   object in viewport px = zoom × (canvasOrigin + pdPos − viewPos)
-                //   image px = (viewport-relative) × scale, since img IS the viewport
-                if (!labels.empty()) {
-                    float zoom = 1.0f;
-                    int viewX = 0, viewY = 0;
-                    if (canvasComp->viewport) {
-                        zoom = getValue<float>(canvasComp->zoomScale);
-                        if (zoom <= 0.001f) zoom = 1.0f;
-                        viewX = canvasComp->viewport->getViewPositionX();
-                        viewY = canvasComp->viewport->getViewPositionY();
-                    }
-                    auto const canvasOrigin = canvasComp->canvasOrigin;
-
-                    juce::Graphics g(img);
-                    juce::Font labelFont = Fonts::getDefaultFont()
-                        .withHeight(juce::jlimit(9.0f, 16.0f, 12.0f * scale));
-                    g.setFont(labelFont);
-
-                    for (auto const& lbl : labels) {
-                        // object top-left in viewport px
-                        float vpX = zoom * static_cast<float>(canvasOrigin.x + lbl.x - viewX);
-                        float vpY = zoom * static_cast<float>(canvasOrigin.y + lbl.y - viewY);
-                        // → image coords (image = viewport × scale)
-                        float imgX = vpX * scale;
-                        float imgY = vpY * scale;
-                        float objHImg = static_cast<float>(lbl.h) * zoom * scale;
-
-                        float tw = juce::GlyphArrangement().getStringWidth(labelFont, lbl.text);
-                        float th = labelFont.getHeight();
-                        float pad = 2.0f * scale;
-                        float chipH = th + 2.0f * pad;
-                        float chipW = tw + 3.0f * pad;
-
-                        // Place chip above the object; flip below when clipped at top
-                        float chipY = imgY - chipH - 1.0f;
-                        if (chipY < 0.0f) chipY = imgY + objHImg + 1.0f;
-
-                        // Skip labels fully outside the capture
-                        if (imgX + chipW < 0.0f || imgX > static_cast<float>(img.getWidth())
-                            || chipY + chipH < 0.0f || chipY > static_cast<float>(img.getHeight()))
-                            continue;
-
-                        g.setColour(juce::Colours::black.withAlpha(0.72f));
-                        g.fillRoundedRectangle(juce::Rectangle<float>(imgX, chipY, chipW, chipH), 3.0f * scale);
-                        g.setColour(juce::Colours::white.withAlpha(0.92f));
-                        g.drawText(lbl.text, juce::Rectangle<float>(imgX + pad, chipY + pad, tw, th),
-                            juce::Justification::centredLeft);
-                    }
-                }
-
-                // Write PNG to a temp file — TS reads it synchronously (same machine)
-                auto tmpFile = juce::File::getSpecialLocation(juce::File::tempDirectory)
-                    .getChildFile("plugdata_canvas_" + correlationId + ".png");
-
-                juce::FileOutputStream fos(tmpFile);
-                if (!fos.openedOk()) {
-                    bridge->sendReply("/pd/screenshot_canvas/reply/" + correlationId, juce::String("error:file_open"));
-                    return;
-                }
-
-                juce::PNGImageFormat png;
-                if (!png.writeImageToStream(img, fos)) {
-                    bridge->sendReply("/pd/screenshot_canvas/reply/" + correlationId, juce::String("error:png_encode"));
-                    return;
-                }
-                fos.flush();
-
-                bridge->sendReply("/pd/screenshot_canvas/reply/" + correlationId,
-                    tmpFile.getFullPathName());
+                    return labels;
+                };
+                auto const result = proc->getMcp()->gui().screenshot(cnv, scale, wantLabels ? &labelSource : nullptr, correlationId);
+                bridge->sendReply("/pd/screenshot_canvas/reply/" + correlationId, result);
             });
         }
         return;
@@ -8960,9 +8342,9 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         float scale         = msg.size() >= 2 ? static_cast<float>(getArgFloat(msg[1])) : 0.75f;
         scale = juce::jlimit(0.1f, 2.0f, scale);
 
-        juce::MessageManager::callAsync([scale, correlationId, bridge = this]() {
+        juce::MessageManager::callAsync([proc = processor, scale, correlationId, bridge = this]() {
 #if ENABLE_GEM
-            auto img = captureGemWindowImage();
+            auto img = proc->getMcp()->gui().captureGemWindow();
             if (!img.isValid()) {
                 bridge->sendReply("/pd/gem_capture/reply/" + correlationId, juce::String("error:no_gem_window"));
                 return;
@@ -9043,13 +8425,13 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 return;
             }
 
-            Canvas* guiCanvas = mcpFindGuiCanvasFor(processor, cnv);
+            auto guiCanvas = mcpLiveBounds(processor, cnv);
             struct DR { t_gobj* g; int x, y, w, h; };
             std::vector<DR> rects;
             rects.reserve(objs.size());
             for (auto* g : objs) {
                 int x = 0, yy = 0, w = 0, h = 0;
-                getTrueObjectBounds(cnv, g, guiCanvas, &x, &yy, &w, &h);
+                getTrueObjectBounds(cnv, g, guiCanvas.get(), &x, &yy, &w, &h);
                 rects.push_back({ g, x, yy, w, h });
             }
 
@@ -9224,13 +8606,13 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 return;
             }
 
-            Canvas* guiCanvas = mcpFindGuiCanvasFor(processor, cnv);
+            auto guiCanvas = mcpLiveBounds(processor, cnv);
             struct PR { t_gobj* g; int x, y, w, h; int pillar; };
             std::vector<PR> rects;
             rects.reserve(objs.size());
             for (auto* g : objs) {
                 int x = 0, yy = 0, w = 0, h = 0;
-                getTrueObjectBounds(cnv, g, guiCanvas, &x, &yy, &w, &h);
+                getTrueObjectBounds(cnv, g, guiCanvas.get(), &x, &yy, &w, &h);
                 int p = std::max(0, (x + 100) / 300);
                 rects.push_back({ g, x, yy, w, h, p });
             }
@@ -9351,10 +8733,10 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             std::vector<FR> rects;
             rects.reserve(objs.size());
 
-            Canvas* guiCanvas = mcpFindGuiCanvasFor(processor, cnv);
+            auto guiCanvas = mcpLiveBounds(processor, cnv);
             for (auto* g : objs) {
                 int x = 0, yy = 0, w = 0, h = 0;
-                getTrueObjectBounds(cnv, g, guiCanvas, &x, &yy, &w, &h);
+                getTrueObjectBounds(cnv, g, guiCanvas.get(), &x, &yy, &w, &h);
 
                 t_class* cl = pd_class(&g->g_pd);
                 const char* clName = class_getname(cl);
@@ -9507,26 +8889,16 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
             if (cnv) {
                 juce::MessageManager::callAsync([proc = processor, cnv, correlationId, bridge = this]() {
-                    Canvas* canvasComp = nullptr;
-                    for (auto* editor : proc->getEditors()) {
-                        if (!editor) continue;
-                        for (auto* c : editor->getCanvases()) {
-                            if (c && c->patch.getUncheckedPointer() == cnv) {
-                                canvasComp = c;
-                                break;
-                            }
-                        }
-                        if (canvasComp) break;
-                    }
-
                     if (proc->getMcp()->hasMcpTransaction(cnv)) {
                         proc->getMcp()->undoMcpTransaction(cnv);
                         proc->getMcp()->synchroniseCanvases();
                         bridge->sendReply("/pd/undo/reply/" + correlationId, 1.0f);
-                    } else if (canvasComp && canvasComp->canUndo()) {
-                        canvasComp->undo();
+                        return;
+                    }
+                    auto const viewUndo = proc->getMcp()->gui().undo(cnv);
+                    if (viewUndo == McpGuiHost::UndoResult::Done) {
                         bridge->sendReply("/pd/undo/reply/" + correlationId, 1.0f);
-                    } else if (!canvasComp) {
+                    } else if (viewUndo == McpGuiHost::UndoResult::NoView) {
                         pd::Interface::undo(cnv);
                         proc->getMcp()->synchroniseCanvases();
                         bridge->sendReply("/pd/undo/reply/" + correlationId, 1.0f);
@@ -9554,24 +8926,11 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
             if (cnv) {
                 juce::MessageManager::callAsync([proc = processor, cnv, correlationId, bridge = this]() {
-                    Canvas* canvasComp = nullptr;
-                    for (auto* editor : proc->getEditors()) {
-                        if (!editor) continue;
-                        for (auto* c : editor->getCanvases()) {
-                            if (c && c->patch.getUncheckedPointer() == cnv) {
-                                canvasComp = c;
-                                break;
-                            }
-                        }
-                        if (canvasComp) break;
-                    }
-
                     if (proc->getMcp()->hasMcpRedoTransaction(cnv)) {
                         proc->getMcp()->redoMcpTransaction(cnv);
                         proc->getMcp()->synchroniseCanvases();
                         bridge->sendReply("/pd/redo/reply/" + correlationId, 1.0f);
-                    } else if (canvasComp) {
-                        canvasComp->redo();
+                    } else if (proc->getMcp()->gui().redo(cnv)) {
                         bridge->sendReply("/pd/redo/reply/" + correlationId, 1.0f);
                     } else {
                         pd::Interface::redo(cnv);
@@ -11154,14 +10513,7 @@ void MCPBridge::stopMidiTake()
     }
 
     if (processor) {
-        for (auto* ed : processor->getEditors()) {
-            if (auto* pe = dynamic_cast<PluginEditor*>(ed)) {
-                for (auto* c : pe->getCanvases()) {
-                    if (c) c->repaint();
-                }
-                pe->nvgSurface.invalidateAll();
-            }
-        }
+        processor->getMcp()->gui().repaintAll();
     }
 }
 

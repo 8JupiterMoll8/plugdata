@@ -15,6 +15,7 @@
 
 McpHost::McpHost(PluginProcessor& p)
     : processor(p)
+    , guiHost(createMcpGuiHost(p))
 {
 }
 

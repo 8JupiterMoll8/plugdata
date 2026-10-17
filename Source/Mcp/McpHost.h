@@ -7,6 +7,7 @@
 #pragma once
 
 #include "Mcp/McpSession.h"
+#include "Mcp/McpGuiHost.h"
 #include <juce_dsp/juce_dsp.h>
 
 #include "Pd/Instance.h"
@@ -82,8 +83,13 @@ public:
     bool handleSysMessage(SmallString const& selector, SmallArray<pd::Atom> const& list);
     void dispatchSysMessage(SmallString const& selector, SmallArray<pd::Atom> const& list);
 
+    // The bridge's only way to the GUI (Source/Mcp/GuiHost.cpp, S6).
+    McpGuiHost& gui() { return *guiHost; }
+
     PluginProcessor& processor;
     McpSession session;
+    // Declared before the bridge, so it outlives it.
+    std::unique_ptr<McpGuiHost> guiHost;
     // Declared after the session, so it is destroyed first: its threads stop
     // before the state they touch goes away.
     std::unique_ptr<MCPBridge> mcpBridge;
