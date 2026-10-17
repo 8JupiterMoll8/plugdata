@@ -18,7 +18,7 @@ class DocumentationBrowser;
 class AutomationPanel;
 class SearchPanel;
 class ReferencePanel;
-class CopilotPanel;
+class CopilotPanel; // MCP-CARRIED(copilot-panel)
 class PluginProcessor;
 class CommandInput;
 class Palettes;
@@ -113,7 +113,7 @@ public:
         PatchSearchPanel,
         PalettePanel,
         ObjectReferencePanel,
-        CopilotChatPanel,
+        CopilotChatPanel, // MCP-CARRIED(copilot-panel)
         InspectorPanel,
         NumSidePanels
     };
@@ -128,7 +128,7 @@ public:
         SearchPanel* searchPanel,
         Palettes* palettePanel,
         ReferencePanel* referencePanel,
-        CopilotPanel* copilotPanel,
+        CopilotPanel* copilotPanel, // MCP-CARRIED(copilot-panel)
         Inspector* inspector,
         CommandInput* commandInput);
 
@@ -219,7 +219,7 @@ private:
     SearchPanel* searchPanelPtr = nullptr;
     Palettes* palettePanelPtr = nullptr;
     ReferencePanel* referencePanelPtr = nullptr;
-    CopilotPanel* copilotPanelPtr = nullptr;
+    CopilotPanel* copilotPanelPtr = nullptr; // MCP-CARRIED(copilot-panel)
     Inspector* inspectorPtr = nullptr;
     CommandInput* commandInputPtr = nullptr;
 
@@ -233,7 +233,7 @@ private:
     std::unique_ptr<Component> resetInspectorButton;
 
     StringArray panelDisplayNames {
-        "Console", "Documentation Browser", "Automation Parameters", "Search", "Palettes", "Object Reference", "Copilot", "Inspector"
+        "Console", "Documentation Browser", "Automation Parameters", "Search", "Palettes", "Object Reference", "Copilot", "Inspector" // MCP-CARRIED(copilot-panel)
     };
 
     struct PanelEntry {

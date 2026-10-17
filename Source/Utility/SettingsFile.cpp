@@ -505,12 +505,12 @@ void SettingsFile::initialiseThemesTree()
 
 void SettingsFile::initialiseOverlayTree()
 {
-    int const aiDefaultFlags = AIState | AIRegions | AIAnnotations | AIGhosts | AIHud | AISketch | AIReferences;
+    int const aiDefaultFlags = AIState | AIRegions | AIAnnotations | AIGhosts | AIHud | AISketch | AIReferences; // MCP-CARRIED(mcp-settings)
     UnorderedMap<String, int> defaults = {
-        { "edit", Origin | ActivationState | aiDefaultFlags },
+        { "edit", Origin | ActivationState | aiDefaultFlags }, // MCP-CARRIED(mcp-settings)
         { "lock", Behind | aiDefaultFlags },
         { "run", None },
-        { "alt", Origin | Border | ActivationState | Index | Coordinate | Order | Direction | aiDefaultFlags }
+        { "alt", Origin | Border | ActivationState | Index | Coordinate | Order | Direction | aiDefaultFlags } // MCP-CARRIED(mcp-settings)
     };
 
     auto overlays = getProperty<DynamicObject>("overlays");
@@ -518,7 +518,7 @@ void SettingsFile::initialiseOverlayTree()
         for (auto& [name, settings] : defaults) {
             overlays->setProperty(name, settings);
         }
-    } else if (!overlays->hasProperty("ai_granular_seeded")) {
+    } else if (!overlays->hasProperty("ai_granular_seeded")) { // MCP-CARRIED(mcp-settings)
         // Seed granular AI overlay flags ON once for existing installs
         for (auto const& mode : { String("edit"), String("lock"), String("alt") }) {
             overlays->setProperty(mode, static_cast<int>(overlays->getProperty(mode)) | aiDefaultFlags);

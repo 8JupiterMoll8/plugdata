@@ -45,7 +45,7 @@
 #include "Sidebar/SearchPanel.h"
 #include "Sidebar/Palettes.h"
 #include "Sidebar/ReferencePanel.h"
-#include "Sidebar/CopilotPanel.h"
+#include "Sidebar/CopilotPanel.h" // MCP-CARRIED(copilot-panel)
 
 #if ENABLE_TESTING
 void runTests(PluginEditor* editor);
@@ -264,14 +264,14 @@ PluginEditor::PluginEditor(PluginProcessor& p)
     searchPanel = std::make_unique<SearchPanel>(this);
     palettePanel = std::make_unique<Palettes>(this);
     referencePanel = std::make_unique<ReferencePanel>(this);
-    copilotPanel = std::make_unique<CopilotPanel>(&p, this);
+    copilotPanel = std::make_unique<CopilotPanel>(&p, this); // MCP-CARRIED(copilot-panel)
     inspectorPanel = std::make_unique<Inspector>();
     commandInput = std::make_unique<CommandInput>(this);
 
     auto makeSidebar = [&](Sidebar::Side s) {
         return std::make_unique<Sidebar>(s, &p, this,
             consolePanel.get(), browserPanel.get(), automationPanel.get(),
-            searchPanel.get(), palettePanel.get(), referencePanel.get(), copilotPanel.get(),
+            searchPanel.get(), palettePanel.get(), referencePanel.get(), copilotPanel.get(), // MCP-CARRIED(copilot-panel)
             inspectorPanel.get(), commandInput.get());
     };
     leftSidebar = makeSidebar(Sidebar::Side::Left);
@@ -296,7 +296,7 @@ PluginEditor::PluginEditor(PluginProcessor& p)
     loadAssignment(Sidebar::PatchSearchPanel, Sidebar::Side::Right);
     loadAssignment(Sidebar::PalettePanel, Sidebar::Side::Right);
     loadAssignment(Sidebar::ObjectReferencePanel, Sidebar::Side::Right);
-    loadAssignment(Sidebar::CopilotChatPanel, Sidebar::Side::Right);
+    loadAssignment(Sidebar::CopilotChatPanel, Sidebar::Side::Right); // MCP-CARRIED(copilot-panel)
     loadAssignment(Sidebar::InspectorPanel, Sidebar::Side::Right);
 
     int const leftW = settings->getProperty<int> ("left_sidebar_width");
@@ -1133,8 +1133,8 @@ void PluginEditor::handleAsyncUpdate()
             statusbar->setEditButtonState(false);
         }
 
-        auto const currentUndoState = (cnv->patch.canUndo() || (pd && pd->getMcp()->hasMcpTransaction(cnv->patch.getUncheckedPointer()))) && !isDragging && !locked;
-        auto const currentRedoState = (cnv->patch.canRedo() || (pd && pd->getMcp()->hasMcpRedoTransaction(cnv->patch.getUncheckedPointer()))) && !isDragging && !locked;
+        auto const currentUndoState = cnv->getMcpLayer().canUndo() && !isDragging && !locked; // MCP-HOOK(canvasLifecycle)
+        auto const currentRedoState = cnv->getMcpLayer().canRedo() && !isDragging && !locked; // MCP-HOOK(canvasLifecycle)
 
         undoButton.setEnabled(currentUndoState);
         redoButton.setEnabled(currentRedoState);
@@ -1256,8 +1256,8 @@ void PluginEditor::getCommandInfo(CommandID const commandID, ApplicationCommandI
         isDragging = cnv->dragState.didStartDragging && !cnv->isDraggingLasso && cnv->locked == var(false);
         hasCanvas = true;
 
-        canUndo = (cnv->patch.canUndo() || (pd && pd->getMcp()->hasMcpTransaction(cnv->patch.getUncheckedPointer()))) && !isDragging;
-        canRedo = (cnv->patch.canRedo() || (pd && pd->getMcp()->hasMcpRedoTransaction(cnv->patch.getUncheckedPointer()))) && !isDragging;
+        canUndo = cnv->getMcpLayer().canUndo() && !isDragging; // MCP-HOOK(canvasLifecycle)
+        canRedo = cnv->getMcpLayer().canRedo() && !isDragging; // MCP-HOOK(canvasLifecycle)
 
         canZoomOut = cnv && getValue<float>(cnv->zoomScale) > 0.25f;
         canZoomIn = cnv && getValue<float>(cnv->zoomScale) < 3.f;

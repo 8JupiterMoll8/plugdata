@@ -126,7 +126,7 @@ public:
         connectionLabel.setFont(Fonts::getSemiBoldFont().withHeight(14));
         addAndMakeVisible(connectionLabel);
 
-        aiLabel.setText("AI Copilot", dontSendNotification);
+        aiLabel.setText("AI Copilot", dontSendNotification); // MCP-CARRIED(overlay-ai-toggles)
         aiLabel.setFont(Fonts::getSemiBoldFont().withHeight(14));
         addAndMakeVisible(aiLabel);
 
@@ -141,7 +141,7 @@ public:
         connection.add(new OverlaySelector(overlayTree, Order, "order", "Order", "Trigger order of multiple outlets"));
         connection.add(new OverlaySelector(overlayTree, Behind, "behind", "Behind", "Connection cables behind objects"));
 
-        aiGroup.add(new OverlaySelector(overlayTree, AIState, "ai_state", "Markers", "AI change breadcrumbs: light up what changed, then fade (changed / proposed / error)"));
+        aiGroup.add(new OverlaySelector(overlayTree, AIState, "ai_state", "Markers", "AI change breadcrumbs: light up what changed, then fade (changed / proposed / error)")); // MCP-CARRIED(overlay-ai-toggles)
         aiGroup.add(new OverlaySelector(overlayTree, AIRegions, "ai_regions", "Regions", "Titled modular bay backplates"));
         aiGroup.add(new OverlaySelector(overlayTree, AIAnnotations, "ai_annotations", "Notes", "In-canvas explanation tags"));
         aiGroup.add(new OverlaySelector(overlayTree, AIGhosts, "ai_ghosts", "Ghosts", "Proposed uncommitted changes"));
@@ -158,14 +158,14 @@ public:
         groups[0] = &canvas;
         groups[1] = &object;
         groups[2] = &connection;
-        groups[3] = &aiGroup;
+        groups[3] = &aiGroup; // MCP-CARRIED(overlay-ai-toggles)
 
         for (auto const& group : groups) {
             for (auto const& item : *group) {
                 addAndMakeVisible(item);
             }
         }
-        setSize(500, 260);
+        setSize(500, 260); // MCP-CARRIED(overlay-ai-toggles)
     }
 
     void valueChanged(Value& v) override
@@ -177,33 +177,33 @@ public:
 
     void resized() override
     {
-        auto bounds = getLocalBounds().reduced(6, 0).withTrimmedTop(24);
+        auto bounds = getLocalBounds().reduced(6, 0).withTrimmedTop(24); // MCP-CARRIED(overlay-ai-toggles)
 
         constexpr auto labelHeight = 26;
         constexpr auto itemHeight = 28;
 
-        auto colWidth = bounds.getWidth() / 3;
+        auto colWidth = bounds.getWidth() / 3; // MCP-CARRIED(overlay-ai-toggles)
         auto col1 = bounds.removeFromLeft(colWidth).withTrimmedRight(4);
         auto col2 = bounds.removeFromLeft(colWidth).withTrimmedLeft(2).withTrimmedRight(2);
         auto col3 = bounds.withTrimmedLeft(4);
 
-        canvasLabel.setBounds(col1.removeFromTop(labelHeight));
+        canvasLabel.setBounds(col1.removeFromTop(labelHeight)); // MCP-CARRIED(overlay-ai-toggles)
         for (auto const& item : canvas) {
-            item->setBounds(col1.removeFromTop(itemHeight));
+            item->setBounds(col1.removeFromTop(itemHeight)); // MCP-CARRIED(overlay-ai-toggles)
         }
 
-        col1.removeFromTop(2);
+        col1.removeFromTop(2); // MCP-CARRIED(overlay-ai-toggles)
         objectLabel.setBounds(col1.removeFromTop(labelHeight));
         for (auto const& item : object) {
-            item->setBounds(col1.removeFromTop(itemHeight));
+            item->setBounds(col1.removeFromTop(itemHeight)); // MCP-CARRIED(overlay-ai-toggles)
         }
 
-        connectionLabel.setBounds(col2.removeFromTop(labelHeight));
+        connectionLabel.setBounds(col2.removeFromTop(labelHeight)); // MCP-CARRIED(overlay-ai-toggles)
         for (auto const& item : connection) {
-            item->setBounds(col2.removeFromTop(itemHeight));
+            item->setBounds(col2.removeFromTop(itemHeight)); // MCP-CARRIED(overlay-ai-toggles)
         }
 
-        connectionDebugToggle->setBounds(col2.removeFromTop(itemHeight));
+        connectionDebugToggle->setBounds(col2.removeFromTop(itemHeight)); // MCP-CARRIED(overlay-ai-toggles)
 
         aiLabel.setBounds(col3.removeFromTop(labelHeight));
         for (auto const& item : aiGroup) {
@@ -223,7 +223,7 @@ public:
         g.drawLine(4, 24, getWidth() - 8, 24);
 
         for (auto const& group : groups) {
-            if (group->isEmpty()) continue;
+            if (group->isEmpty()) continue; // MCP-CARRIED(overlay-ai-toggles)
             auto groupBounds = group->getFirst()->getBounds().getUnion(group->getLast()->getBounds());
 
             bool const isConnectionGroup = group == &connection;
@@ -266,14 +266,14 @@ public:
 private:
     static inline bool isShowing = false;
 
-    Label canvasLabel, objectLabel, connectionLabel, aiLabel;
+    Label canvasLabel, objectLabel, connectionLabel, aiLabel; // MCP-CARRIED(overlay-ai-toggles)
 
-    StackArray<OwnedArray<OverlaySelector>*, 4> groups;
+    StackArray<OwnedArray<OverlaySelector>*, 4> groups; // MCP-CARRIED(overlay-ai-toggles)
 
     OwnedArray<OverlaySelector> canvas;
     OwnedArray<OverlaySelector> object;
     OwnedArray<OverlaySelector> connection;
-    OwnedArray<OverlaySelector> aiGroup;
+    OwnedArray<OverlaySelector> aiGroup; // MCP-CARRIED(overlay-ai-toggles)
 
     Value debugModeValue;
     std::unique_ptr<PropertiesPanel::BoolComponent> connectionDebugToggle;

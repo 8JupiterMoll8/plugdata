@@ -439,7 +439,7 @@ public:
                 { Icons::GlyphScope3D, "#X obj 0 0 scope3d~", "3D oscilloscope", "Scope 3D", OtherObject },
                 { Icons::GlyphPlaylist, "#X obj 0 0 playlist~", "Sound file playlist", "Playlist", OtherObject }
             } },
-        { "AI",
+        { "AI", // MCP-CARRIED(fork-objects-menu)
             {
                 { Icons::GlyphKeyboard, "#X obj 0 0 ai.midi 240 64", "AI MIDI Cassette - record & audition takes", "AI MIDI", OtherObject },
                 { Icons::GlyphAdc, "#X obj 0 0 ai.voice 240 72", "AI Voice Capsule - mic takes (melody/beat) staged to the rail", "AI Voice", OtherObject },

@@ -40,6 +40,7 @@ void canvas_click(t_canvas* x, t_floatarg xpos, t_floatarg ypos, t_floatarg shif
 #include "Pd/Patch.h"
 #include "Sidebar/Sidebar.h"
 #include "Utility/CachedStringWidth.h"
+#include "Mcp/ForkObjects.h" // MCP-HOOK(forkObjects)
 
 #include "Dialogs/Dialogs.h"
 
@@ -59,9 +60,6 @@ void canvas_click(t_canvas* x, t_floatarg xpos, t_floatarg ypos, t_floatarg shif
 #include "KeyboardObject.h"
 #include "MessboxObject.h"
 #include "MousePadObject.h"
-#include "ParticlePadObject.h"
-#include "AiMidiObject.h"
-#include "AiVoiceObject.h"
 #include "NumberObject.h"
 #include "NumboxTildeObject.h"
 #include "CanvasObject.h"
@@ -574,6 +572,8 @@ ObjectBase* ObjectBase::createGui(pd::WeakReference ptr, Object* parent)
     if (isNonPatchable && name != hash("scalar")) {
         return new NonPatchable(ptr, parent);
     } else {
+        if (auto* forkGui = createForkObjectGui(name, ptr, parent)) // MCP-HOOK(forkObjects)
+            return forkGui;
         switch (name) {
         case hash("bng"):
             return new BangObject(ptr, parent);
@@ -620,15 +620,6 @@ ObjectBase* ObjectBase::createGui(pd::WeakReference ptr, Object* parent)
         }
         case hash("pad"):
             return new MousePadObject(ptr, parent);
-        case hash("particlepad"):
-        case hash("particles"):
-            return new ParticlePadObject(ptr, parent);
-        case hash("ai.midi"):
-        case hash("aimidi"):
-            return new AiMidiObject(ptr, parent);
-        case hash("ai.voice"):
-        case hash("aivoice"):
-            return new AiVoiceObject(ptr, parent);
         case hash("keyboard"):
             return new KeyboardObject(ptr, parent);
         case hash("pic"):

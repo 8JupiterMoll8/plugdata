@@ -172,7 +172,7 @@ enum Overlay {
     ConnectionActivity = 1 << 5,
     Order = 1 << 6,
     Direction = 1 << 7,
-    Behind = 1 << 8,
+    Behind = 1 << 8, // MCP-CARRIED(overlay-ai-bits)
     AIState = 1 << 9,
     AIRegions = 1 << 10,
     AIAnnotations = 1 << 11,

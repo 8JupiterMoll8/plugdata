@@ -217,9 +217,9 @@ public:
     {
         if (auto pdlua = ptr.get<t_pdlua>()) {
             pdlua->gfx.plugdata_draw_callback = &drawCallback;
-            pd->lockAudioThread();
+            pd->lockAudioThread(); // MCP-CARRIED(lua-gfx-guards)
             allDrawTargets[pdlua.get()].add(this);
-            pd->unlockAudioThread();
+            pd->unlockAudioThread(); // MCP-CARRIED(lua-gfx-guards)
 
             libpd_set_instance(&pd_maininstance);
             pdluaxSymbol = gensym("pdluax");
@@ -233,11 +233,11 @@ public:
     ~LuaObject() override
     {
         pd->lockAudioThread();
-        auto const it = allDrawTargets.find(ptr.getRawUnchecked<t_pdlua>());
+        auto const it = allDrawTargets.find(ptr.getRawUnchecked<t_pdlua>()); // MCP-CARRIED(lua-gfx-guards)
         if (it != allDrawTargets.end()) {
             auto& listeners = it->second;
             listeners.erase(std::ranges::remove(listeners, this).begin(), listeners.end());
-            if (listeners.empty())
+            if (listeners.empty()) // MCP-CARRIED(lua-gfx-guards)
                 allDrawTargets.erase(it);
         }
         pd->unlockAudioThread();
@@ -585,7 +585,7 @@ public:
             break;
         }
         case hash("lua_stroke_line"): {
-            if (argc >= 5) {
+            if (argc >= 5) { // MCP-CARRIED(lua-gfx-guards)
                 float const x1 = atom_getfloat(argv);
                 float const y1 = atom_getfloat(argv + 1);
                 float const x2 = atom_getfloat(argv + 2);
@@ -601,7 +601,7 @@ public:
             break;
         }
         case hash("lua_fill_ellipse"): {
-            if (argc >= 4) {
+            if (argc >= 4) { // MCP-CARRIED(lua-gfx-guards)
                 float const x = atom_getfloat(argv);
                 float const y = atom_getfloat(argv + 1);
                 float const w = atom_getfloat(argv + 2);
@@ -614,7 +614,7 @@ public:
             break;
         }
         case hash("lua_stroke_ellipse"): {
-            if (argc >= 5) {
+            if (argc >= 5) { // MCP-CARRIED(lua-gfx-guards)
                 float const x = atom_getfloat(argv);
                 float const y = atom_getfloat(argv + 1);
                 float const w = atom_getfloat(argv + 2);
@@ -653,7 +653,7 @@ public:
             break;
         }
         case hash("lua_fill_rounded_rect"): {
-            if (argc >= 5) {
+            if (argc >= 5) { // MCP-CARRIED(lua-gfx-guards)
                 float const x = atom_getfloat(argv);
                 float const y = atom_getfloat(argv + 1);
                 float const w = atom_getfloat(argv + 2);
@@ -682,7 +682,7 @@ public:
             break;
         }
         case hash("lua_draw_line"): {
-            if (argc >= 5) {
+            if (argc >= 5) { // MCP-CARRIED(lua-gfx-guards)
                 float const x1 = atom_getfloat(argv);
                 float const y1 = atom_getfloat(argv + 1);
                 float const x2 = atom_getfloat(argv + 2);
@@ -698,7 +698,7 @@ public:
             break;
         }
         case hash("lua_draw_text"): {
-            if (argc >= 6) {
+            if (argc >= 6) { // MCP-CARRIED(lua-gfx-guards)
                 float const x = atom_getfloat(argv + 1);
                 float const y = atom_getfloat(argv + 2);
                 float const w = atom_getfloat(argv + 3);
@@ -754,7 +754,7 @@ public:
             break;
         }
         case hash("lua_fill_path"): {
-            if (argc >= 2) {
+            if (argc >= 2) { // MCP-CARRIED(lua-gfx-guards)
                 nanovg::nvgBeginPath(nvg);
                 nanovg::nvgMoveTo(nvg, atom_getfloat(argv), atom_getfloat(argv + 1));
                 for (int i = 1; i < argc / 2; i++) {
@@ -765,11 +765,11 @@ public:
 
                 nanovg::nvgClosePath(nvg);
                 nanovg::nvgFill(nvg);
-            }
+            } // MCP-CARRIED(lua-gfx-guards)
             break;
         }
         case hash("lua_stroke_path"): {
-            if (argc >= 3) {
+            if (argc >= 3) { // MCP-CARRIED(lua-gfx-guards)
                 nanovg::nvgBeginPath(nvg);
                 auto const strokeWidth = atom_getfloat(argv);
 
@@ -783,7 +783,7 @@ public:
 
                 nanovg::nvgStrokeWidth(nvg, strokeWidth);
                 nanovg::nvgStroke(nvg);
-            }
+            } // MCP-CARRIED(lua-gfx-guards)
             break;
         }
         case hash("lua_fill_all"): {
@@ -877,7 +877,7 @@ public:
 
     static void drawCallback(void* target, int const layer, t_symbol* sym, int argc, t_atom* argv)
     {
-        if (!target)
+        if (!target) // MCP-CARRIED(lua-gfx-guards)
             return;
         auto const it = allDrawTargets.find(static_cast<t_pdlua*>(target));
         if (it == allDrawTargets.end())

@@ -25,7 +25,7 @@
 #include "SearchPanel.h"
 #include "Palettes.h"
 #include "ReferencePanel.h"
-#include "CopilotPanel.h"
+#include "CopilotPanel.h" // MCP-CARRIED(copilot-panel)
 
 String Sidebar::panelIdToString(SidePanel id)
 {
@@ -42,7 +42,7 @@ String Sidebar::panelIdToString(SidePanel id)
         return "palette";
     case ObjectReferencePanel:
         return "reference";
-    case CopilotChatPanel:
+    case CopilotChatPanel: // MCP-CARRIED(copilot-panel)
         return "copilot";
     case InspectorPanel:
         return "inspector";
@@ -65,7 +65,7 @@ Sidebar::SidePanel Sidebar::panelFromString(String const& s, SidePanel fallback)
         return PalettePanel;
     if (s == "reference")
         return ObjectReferencePanel;
-    if (s == "copilot")
+    if (s == "copilot") // MCP-CARRIED(copilot-panel)
         return CopilotChatPanel;
     if (s == "inspector")
         return InspectorPanel;
@@ -93,7 +93,7 @@ Sidebar::Sidebar(Side sideIn, PluginProcessor* instance, PluginEditor* parent,
     SearchPanel* search,
     Palettes* palette,
     ReferencePanel* reference,
-    CopilotPanel* copilot,
+    CopilotPanel* copilot, // MCP-CARRIED(copilot-panel)
     Inspector* insp,
     CommandInput* cmdInput)
     : side(sideIn)
@@ -104,7 +104,7 @@ Sidebar::Sidebar(Side sideIn, PluginProcessor* instance, PluginEditor* parent,
     , searchPanelPtr(search)
     , palettePanelPtr(palette)
     , referencePanelPtr(reference)
-    , copilotPanelPtr(copilot)
+    , copilotPanelPtr(copilot) // MCP-CARRIED(copilot-panel)
     , inspectorPtr(insp)
     , commandInputPtr(cmdInput)
 {
@@ -162,7 +162,7 @@ void Sidebar::addPanel(SidePanel panel)
     case ObjectReferencePanel:
         icon = Icons::Help;
         break;
-    case CopilotChatPanel:
+    case CopilotChatPanel: // MCP-CARRIED(copilot-panel)
         icon = Icons::Message;
         break;
     case InspectorPanel:
@@ -558,7 +558,7 @@ bool Sidebar::isShowingInspector() const
 bool Sidebar::canAutoShowInspector() const
 {
     // Search and reference panels use object selection for their own purpose, so don't cover them with the inspector
-    return inspectorAutoShow && !(hasCurrentPanel && (currentPanel == PatchSearchPanel || currentPanel == ObjectReferencePanel || currentPanel == CopilotChatPanel));
+    return inspectorAutoShow && !(hasCurrentPanel && (currentPanel == PatchSearchPanel || currentPanel == ObjectReferencePanel || currentPanel == CopilotChatPanel)); // MCP-CARRIED(copilot-panel)
 }
 
 bool Sidebar::refreshInspectorVisibility(bool const allowManualShow)
@@ -708,7 +708,7 @@ void Sidebar::showPanel(SidePanel const panelToShow)
         if (hasPanel(ObjectReferencePanel) && referencePanelPtr)
             setPanelVis(referencePanelPtr, ObjectReferencePanel);
         break;
-    case CopilotChatPanel:
+    case CopilotChatPanel: // MCP-CARRIED(copilot-panel)
         if (hasPanel(CopilotChatPanel) && copilotPanelPtr)
             setPanelVis(copilotPanelPtr, CopilotChatPanel);
         break;
@@ -1009,7 +1009,7 @@ Component* Sidebar::getPanelComponent(SidePanel id) const
         return palettePanelPtr;
     case ObjectReferencePanel:
         return referencePanelPtr;
-    case CopilotChatPanel:
+    case CopilotChatPanel: // MCP-CARRIED(copilot-panel)
         return copilotPanelPtr;
     case InspectorPanel:
         return inspectorPtr;

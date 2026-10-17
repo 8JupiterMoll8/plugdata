@@ -43,7 +43,7 @@ class DocumentationBrowser;
 class AutomationPanel;
 class SearchPanel;
 class ReferencePanel;
-class CopilotPanel;
+class CopilotPanel; // MCP-CARRIED(copilot-panel)
 class Palettes;
 class Inspector;
 class CommandInput;
@@ -144,7 +144,7 @@ public:
     Sidebar* getRightSidebar() const { return rightSidebar.get(); }
 
     Sidebar* getSidebarForPanel(Sidebar::SidePanel panel) const;
-    CopilotPanel* getCopilotPanel() const { return copilotPanel.get(); }
+    CopilotPanel* getCopilotPanel() const { return copilotPanel.get(); } // MCP-CARRIED(copilot-panel)
 
     void movePanelToSide(Sidebar::SidePanel panel, Sidebar::Side targetSide);
 
@@ -166,7 +166,7 @@ public:
     std::unique_ptr<SearchPanel> searchPanel;
     std::unique_ptr<Palettes> palettePanel;
     std::unique_ptr<ReferencePanel> referencePanel;
-    std::unique_ptr<CopilotPanel> copilotPanel;
+    std::unique_ptr<CopilotPanel> copilotPanel; // MCP-CARRIED(copilot-panel)
     std::unique_ptr<Inspector> inspectorPanel;
     std::unique_ptr<CommandInput> commandInput;
 

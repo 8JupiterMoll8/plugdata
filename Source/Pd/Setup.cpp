@@ -739,7 +739,7 @@ void stdout_setup();
 
 // cyclone objects functions declaration
 void cyclone_setup();
-void iemguts_setup();
+void iemguts_setup(); // MCP-CARRIED(fork-externals)
 void accum_setup();
 void acos_setup();
 void acosh_setup();
@@ -1128,7 +1128,7 @@ void openfile_setup();
 void scope_tilde_setup();
 void pack2_setup();
 void pad_setup();
-void particlepad_setup();
+void particlepad_setup(); // MCP-CARRIED(fork-externals)
 void ai_midi_setup();
 void ai_voice_setup();
 void pan2_tilde_setup();
@@ -1501,7 +1501,7 @@ void Setup::parseArguments(char const** argv, size_t const argc, t_namelist** sy
     sys_unlock();
 }
 
-void Setup::initialiseIemguts()
+void Setup::initialiseIemguts() // MCP-CARRIED(fork-externals)
 {
     iemguts_setup();
 }
@@ -1681,7 +1681,7 @@ void Setup::initialiseELSE()
     op_tilde_setup();
     openfile_setup();
     pack2_setup();
-    particlepad_setup();
+    particlepad_setup(); // MCP-CARRIED(fork-externals)
     ai_midi_setup();
     ai_voice_setup();
     pan2_tilde_setup();

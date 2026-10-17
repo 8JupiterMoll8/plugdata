@@ -199,7 +199,7 @@ private:
         { "sidebar_panel_search", var("right") },
         { "sidebar_panel_palette", var("right") },
         { "sidebar_panel_reference", var("right") },
-        { "sidebar_panel_copilot", var("right") },
+        { "sidebar_panel_copilot", var("right") }, // MCP-CARRIED(mcp-settings)
         { "sidebar_panel_inspector", var("right") },
         { "left_sidebar_width", var(250) },
         { "right_sidebar_width", var(250) },
@@ -208,7 +208,7 @@ private:
         { "inspector_auto_show", var(true) },
         { "version", var("") },
         // MCP bridge (native C++ in-process bridge)
-        { "mcp_bridge_enabled", var(true) },
+        { "mcp_bridge_enabled", var(true) }, // MCP-CARRIED(mcp-settings)
         { "mcp_bridge_listen_port", var(9000) },
         { "mcp_bridge_send_port", var(19010) },
     };

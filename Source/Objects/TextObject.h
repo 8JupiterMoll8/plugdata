@@ -173,7 +173,7 @@ public:
     // Returns true when the cache changed. Never touches the cache while the
     // user is typing (editor open). Runs on the message thread only (render /
     // layout paths) — never call this from the bridge/OSC thread.
-    bool syncTextFromPd()
+    bool syncTextFromPd() // MCP-CARRIED(textobject-live-relabel)
     {
         if (editor)
             return false;
@@ -215,7 +215,7 @@ public:
         // recreate) shows on screen on the next repaint. The bridge already
         // calls cc->repaint() after a relabel — no cross-thread GUI calls.
         // Same precedent as ScalarObject::render() which reads getText() live.
-        if (syncTextFromPd())
+        if (syncTextFromPd()) // MCP-CARRIED(textobject-live-relabel)
             updateTextLayout();
 
         auto const& colours = getThemeColours();
@@ -403,7 +403,7 @@ public:
 
         // Keep the cache truthful for layout/bounds callers too (getPdBounds()
         // routes through here, so wider relabels also resize correctly).
-        syncTextFromPd();
+        syncTextFromPd(); // MCP-CARRIED(textobject-live-relabel)
 
         auto objText = editor ? editor->getText() : objectText;
         if (editor && cnv->suggestor && cnv->suggestor->getText().isNotEmpty()) {

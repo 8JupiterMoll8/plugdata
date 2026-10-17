@@ -138,7 +138,7 @@ public:
         patchDownwardsOnly = settingsFile->getPropertyAsValue("patch_downwards_only");
         otherProperties.add(new PropertiesPanel::BoolComponent("Patch downwards only", patchDownwardsOnly, { "No", "Yes" }));
 
-        class McpStatusComponent final : public PropertiesPanelProperty
+        class McpStatusComponent final : public PropertiesPanelProperty // MCP-CARRIED(mcp-settings-panel)
             , public Timer {
         public:
             McpStatusComponent(String const& name, PluginProcessor* proc)
@@ -193,7 +193,7 @@ public:
         propertiesPanel.addSection("Interface", interfaceProperties);
         propertiesPanel.addSection("Autosave", autosaveProperties);
         propertiesPanel.addSection("Other", otherProperties);
-        propertiesPanel.addSection("MCP bridge", mcpProperties);
+        propertiesPanel.addSection("MCP bridge", mcpProperties); // MCP-CARRIED(mcp-settings-panel)
 
         addAndMakeVisible(propertiesPanel);
     }
@@ -257,7 +257,7 @@ public:
 
     Value patchDownwardsOnly;
 
-    Value mcpBridgeEnabled;
+    Value mcpBridgeEnabled; // MCP-CARRIED(mcp-settings-panel)
     Value mcpListenPort;
     Value mcpSendPort;
 

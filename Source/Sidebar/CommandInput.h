@@ -18,7 +18,7 @@ extern "C" {
 #include "PluginEditor.h"
 #include "Objects/ObjectBase.h"
 #include "Sidebar/Sidebar.h"
-#include "Pd/MCPBridge.h"
+#include "Pd/MCPBridge.h" // MCP-CARRIED(console-ai-command)
 #include "Components/MarkupDisplay.h"
 #include "Utility/CachedStringWidth.h"
 
@@ -618,7 +618,7 @@ public:
                 }
                 break;
             }
-            case hash("ai"): {
+            case hash("ai"): { // MCP-CARRIED(console-ai-command)
                 if (argv.size() < 2) {
                     pd->logError("ai: No prompt provided. Usage: ai <prompt>");
                     break;
@@ -653,7 +653,7 @@ public:
                     pd->logMessage(argv[1] + ": Send a message to pd. Usage: " + argv[1] + " <message>");
                     break;
 
-                case hash("ai"):
+                case hash("ai"): // MCP-CARRIED(console-ai-command)
                     pd->logMessage(argv[2] + ": Send a prompt to the Embedded Agent. Usage: " + argv[2] + " <prompt>");
                     break;
 

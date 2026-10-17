@@ -7,7 +7,7 @@ The fork's AI bridge (`Source/Pd/MCPBridge*`, the overlay layer, the moodboard) 
 ## Rules
 
 1. **New fork changes to upstream files go through the seam.** A change in an upstream-owned file is one hook call, tagged `// MCP-HOOK(<name>)` on the added line, into code under `Source/Mcp/`. No new logic inline.
-2. **Every hunk is accounted for.** A hunk in an upstream file either carries an `MCP-HOOK(` tag or its file is listed under "Carried patches" below with the reason it cannot be a hook.
+2. **Every hunk is accounted for.** A hunk in an upstream file either carries an `MCP-HOOK(` tag, or an `MCP-CARRIED(<key>)` tag whose key is explained under "Carried hunks" below, or its whole file is listed under "Carried patches" with the reason it cannot be a hook. Prefer the per-hunk tag: a whole carried file hides new untagged hunks in it. `scripts/check-seam.sh --gate [--worktree]` checks all of this.
 3. **The bridge sees no GUI.** `Source/Pd/MCPBridge*` includes none of the 13 plugdata GUI headers (PluginEditor, Toolbar, Sidebar, Canvas, CanvasViewport, TabComponent, Object, Connection, ObjectBase, AllGuis, GemCapture, Fonts, Dialogs). GUI work goes through `McpGuiHost`, implemented in `Source/Mcp/GuiHost.cpp`.
 4. **Hooks are no-ops without a host.** With no MCP host attached, every hook returns at once and changes nothing.
 5. **Pure moves stay pure.** Moved code is checked with a line-multiset comparison: old minus new is only hook lines; new minus old is only wrappers, includes and prefix rewrites.
@@ -33,6 +33,30 @@ Upstream-file hunks that stay as they are, with the reason. Empty until P3.2 S9;
 | `Source/Pd/Instance.cpp` | 5 hunks in the console handler (`processPrint`) are the fork's error classification for the ARTIST console: lines containing "couldn't create", "error:" or "canvas: ..." show as errors, and an "error " prefix strips 6 characters, not 7 (upstream drops a letter). A plugdata console fix, not MCP code; the MCP part of that handler is the one tagged hook line. The other 4 hunks are tagged (`mcp_host` receiver: create, free, dispatch case; console hook) plus `pd::Setup::initialiseIemguts()` (pd-iemguts, untagged, carried here too) |
 | `Source/Utility/NVGGraphicsContext.cpp` | `enqueueBaselineText` (1 hunk, a new static function): records one line of nanovg-style text for the MCP overlays (`Utility/NVGTextShim.h`). It builds a `DeferredTextPayload` and calls `enqueueDeferredText`, both file-static in this file, so it cannot move into the shim without exposing upstream internals (P3.2 S7) |
 | `Source/Utility/NVGGraphicsContext.h` | the declaration of `enqueueBaselineText` (1 hunk), see the row above |
+
+## Carried hunks
+
+Single hunks in an otherwise hooked file that stay as they are. The hunk carries `// MCP-CARRIED(<key>)` on an added line; the gate fails on a key that is not in this table.
+
+| Tag | File | Why it cannot be a hook |
+|---|---|---|
+| `MCP-CARRIED(sync-flush-while-audio)` | `Source/Canvas.cpp` (`performSynchronise`, 2 hunks) | While audio is processing, the canvas flushes the Pd message queue once instead of twice (fork `4d3b81511`, zero-dropout batching: the bridge's `batch_atomic` triggers a synchronise mid-audio, and the second flush stalled the block). It changes upstream control flow in place, so it cannot sit behind a hook without moving upstream code |
+| `MCP-CARRIED(encapsulate-named)` | `Source/Canvas.cpp`, `Source/Canvas.h` | `encapsulateSelection` takes the subpatch name and, in a second overload, an explicit object list (the bridge's selection-free `/pd/encapsulate`). This is a signature change of upstream API plus the `nameToken` line inside the upstream body |
+| `MCP-CARRIED(encapsulate-control-inlets)` | `Source/Canvas.cpp` (3 hunks) | Bug fix in upstream code: an inlet fed only by control-rate wires from outside became `[inlet~]`; it now becomes `[inlet]` (signal-ness taken from the external iolets). Not fixed at the base |
+| `MCP-CARRIED(connection-initial-path)` | `Source/Connection.cpp` | `updatePath()` at the end of the constructor: a wire built by the bridge has no path until the path updater runs, so it was drawn with an empty path; the pre-merge fork had the call, the P3.1 merge kept it |
+| `MCP-CARRIED(overlay-ai-bits)` | `Source/Constants.h` | Seven AI overlay bits (`AIState` .. `AIReferences`) appended to upstream's `Overlay` enum: the overlay mask is upstream's settings value, so the bits must live in its enum |
+| `MCP-CARRIED(overlay-ai-toggles)` | `Source/Dialogs/OverlayDisplaySettings.h` (17 hunks) | The "AI Copilot" column of the overlay popup: seven toggles for those bits, and the popup's layout widened from two columns to three |
+| `MCP-CARRIED(mcp-settings)` | `Source/Utility/SettingsFile.cpp/.h` | Settings schema: `mcp_bridge_*` defaults, the Copilot panel's sidebar slot, AI overlay bits ON by default plus two one-time migrations (`ai_granular_seeded`, `ai_references_seeded`) for existing installs |
+| `MCP-CARRIED(mcp-settings-panel)` | `Source/Dialogs/AdvancedSettingsPanel.h` | The "MCP bridge" section of the settings (enable, ports, live status). Candidate for a hook in a later plan: it needs three `Value` members of the panel |
+| `MCP-CARRIED(copilot-panel)` | `Source/Sidebar/Sidebar.cpp/.h`, `Source/PluginEditor.cpp/.h` | The Copilot chat panel is a regular sidebar panel: a new `SidePanel` id, its name/icon/string, the constructor parameter, and the editor that owns it |
+| `MCP-CARRIED(console-ai-command)` | `Source/Sidebar/CommandInput.h` | The console's `ai <prompt>` command and its help line |
+| `MCP-CARRIED(fork-externals)` | `Source/Pd/Setup.cpp/.h` | Registers the fork's externals (`particlepad`, `ai_midi`, `ai_voice` in ELSE; `iemguts`), whose sources come from `patches/submodules/` |
+| `MCP-CARRIED(fork-objects-menu)` | `Source/Dialogs/AddObjectMenu.h` | The "AI" category of the add-object menu (the three fork objects) |
+| `MCP-CARRIED(textobject-live-relabel)` | `Source/Objects/TextObject.h` (3 hunks) | `syncTextFromPd`: the bridge's `/pd/obj_relabel` rewrites `te_binbuf` in place, and the box shows the new text on the next repaint without recreating the object (fix for the 61c0c12f0 crash) |
+| `MCP-CARRIED(array-redraw)` | `Source/Objects/ArrayObject.h` | A `redraw` message re-reads the array and its path (the bridge writes arrays straight into Pd) |
+| `MCP-CARRIED(floatatom-send-receive)` | `Source/Objects/FloatAtomObject.h` (2 hunks) | Upstream bug: `send`/`receive` messages with an argument were ignored (`atoms.size() <= 0` instead of `>= 1`). Not fixed at the base |
+| `MCP-CARRIED(lua-gfx-guards)` | `Source/Objects/LuaObject.h` (15 hunks) | Crash fixes in the Lua graphics path: the draw-target map is changed under the audio lock and looked up with `find` (no default-insert from the callback), and every `lua_*` draw message checks `argc` before reading its atoms |
+| `MCP-CARRIED(toolbar-cpu)` | `Source/Toolbar.h` | `getCPUUsage()` accessor for `/pd/perf` (`McpGuiHost::cpuUsage`) |
 
 ## Submodule patches (`patches/submodules/`)
 
@@ -73,6 +97,12 @@ Not part of the hunk count above (that measures `Source/`). Applied by `scripts/
   - What stays in `Canvas.cpp` for S8: the note/pill/palette/approval/take/image INPUT code and its state (it uses `CanvasMcpLayer::getAnnotationPivotChips`/`getChipWidth`), the tools and studio mode, `getSketchBoundsInCanvas`/`buildSketchJson`.
   - `NVGGraphicsContext::enqueueBaselineText` is carried (table above): it needs the file-static deferred-text internals.
   - Overlay goldens: compared with `scripts/live/compare-pngs-tolerant.py` in the TS repo (no pixel off by more than 31 per channel, top 12 rows skipped for the L7 tab strip); all 6 pass against the P3.1 goldens. Noticed: `06-spotlight` equals `05-state` in the goldens themselves, so the recorder's spotlight frame proves nothing yet (pre-existing).
+
+- **S8 (canvas input and lifecycle; remaining UI patches).**
+  - All of the fork's Canvas state and functions (AI notes, sketch/eraser/type tools, studio mode, selection pill and palette, reference images, voice/MIDI takes, approvals) moved into `CanvasMcpLayer`, split by topic into `Source/Mcp/CanvasMcp{Tools,Notes,Pill,Input}.cpp` (each under 800 lines). The fork blocks inside upstream handlers became one tagged call each at the same position: `mouseDownEarly/Left/OnGlass/Right`, `mouseDrag`, `mouseUp`, `keyPressedEarly` (returns the value keyPressed returns), `keyPressedForCanvas`, `objectCreatedByDoubleClick`, the pill refresh points, `canvasDestroyed`, `canvasSynchronised`, `undo/redo` (an MCP transaction first, then the native stack; false = nothing to do, the upstream sync tail stays in Canvas). `Canvas::mouseMove/mouseExit` are one-line forwards. Object.cpp's three mouse forwards and the context menu's "Ask AI" entry (now an id owned by the layer, so Dialogs' enum is upstream again) are hooks too.
+  - Fork object GUIs (`particlepad`, `ai.midi`, `ai.voice`) come from `Source/Mcp/ForkObjects.cpp` through one hook ahead of the factory switch; the GEM window capture moved to `Source/Mcp/McpGemCapture.cpp` (`ImplementationBase.cpp` equals upstream).
+  - New gate rule: per-hunk `MCP-CARRIED(<key>)` tags explained in "Carried hunks" (the gate fails on an unexplained key); `--worktree` measures uncommitted edits.
+  - Result: `check-seam --gate` passes. 170 hunks, +502 lines in 32 upstream files (start: 215 hunks, +7,351). The plan's targets (at most 60 hunks, `Canvas.cpp` at most 12) are not met: `Canvas.cpp` has 34 hunks / +77 lines, nearly all one tagged line each at a distinct position inside an upstream function (merging them would mean moving upstream code). The larger counts left are carried per hunk: the overlay toggles UI (17), the Lua graphics guards (15), the Copilot panel hosting (Sidebar 15, PluginEditor 6).
 
 ## Known upstream behaviour
 

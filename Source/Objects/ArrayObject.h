@@ -321,7 +321,7 @@ public:
             repaint();
             break;
         }
-        case hash("redraw"): {
+        case hash("redraw"): { // MCP-CARRIED(array-redraw)
             MessageManager::callAsync([_this = SafePointer(this)] {
                 if (_this) {
                     _this->read(_this->vec);

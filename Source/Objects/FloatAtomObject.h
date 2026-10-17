@@ -255,13 +255,13 @@ public:
             break;
         }
         case hash("send"): {
-            if (atoms.size() >= 1)
+            if (atoms.size() >= 1) // MCP-CARRIED(floatatom-send-receive)
                 setParameterExcludingListener(atomHelper.sendSymbol, atoms[0].toString());
             object->updateIolets();
             break;
         }
         case hash("receive"): {
-            if (atoms.size() >= 1)
+            if (atoms.size() >= 1) // MCP-CARRIED(floatatom-send-receive)
                 setParameterExcludingListener(atomHelper.receiveSymbol, atoms[0].toString());
             object->updateIolets();
             break;
