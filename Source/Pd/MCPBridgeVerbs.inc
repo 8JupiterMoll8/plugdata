@@ -171,6 +171,61 @@ MCP_VERB(pd, "delete_id", pdDeleteId)
 MCP_VERB(pd, "delete_batch_id", pdDeleteBatchId)
 MCP_VERB(pd, "edit_id", pdEditId)
 
+// ── meter ──
+MCP_VERB(meter, "start", meterStart)
+MCP_VERB(meter, "stop", meterStop)
+MCP_VERB(meter, "stop_all", meterStopAll)
+MCP_VERB(meter, "tap", meterTap)
+MCP_VERB(meter, "query", meterQuery)
+MCP_VERB(meter, "spectral", meterSpectral)
+MCP_VERB(meter, "status", meterStatus)
+MCP_VERB(meter, "arm", meterArm)
+MCP_VERB(meter, "read", meterRead)
+MCP_VERB(meter, "arm_control", meterArmControl)
+MCP_VERB(meter, "read_control", meterReadControl)
+MCP_VERB(meter, "arm_spectral", meterArmSpectral)
+MCP_VERB(meter, "read_spectral", meterReadSpectral)
+MCP_VERB(meter, "master", meterMaster)
+MCP_VERB(meter, "trace", meterTrace)
+
+// ── transport ──
+MCP_VERB(transport, "set_bpm", transportSetBpm)
+MCP_VERB(transport, "set_subdivision", transportSetSubdivision)
+MCP_VERB(transport, "set_mode", transportSetMode)
+MCP_VERB(transport, "start", transportStart)
+MCP_VERB(transport, "pause", transportPause)
+MCP_VERB(transport, "status", transportStatus)
+
+// ── seq ──
+MCP_VERB(seq, "start", seqStart)
+MCP_VERB(seq, "stop", seqStop)
+
+// ── param, trigger, chat: the handler takes every verb (param: the bus name is argument 0; trigger: an unknown verb bangs argument 0; chat ignores it) ──
+MCP_DOMAIN(param, handleParamDomain)
+MCP_DOMAIN(trigger, handleTriggerDomain)
+MCP_DOMAIN(chat, handleChatDomain)
+
+// ── telemetry: one handler reads its action from argument 0 ──
+MCP_VERB(telemetry, "dsp", handleTelemetryDomain)
+MCP_ALIAS(telemetry, "delete", handleTelemetryDomain)
+MCP_ALIAS(telemetry, "delete_on", handleTelemetryDomain)
+
+// ── array: one handler for the seven verbs (a shared prelude holds sys_lock across stages; splitting it is P3.4) ──
+MCP_VERB(array, "load", handleArrayDomain)
+MCP_ALIAS(array, "write", handleArrayDomain)
+MCP_ALIAS(array, "read", handleArrayDomain)
+MCP_ALIAS(array, "write_bulk", handleArrayDomain)
+MCP_ALIAS(array, "read_bulk", handleArrayDomain)
+MCP_ALIAS(array, "mutate", handleArrayDomain)
+MCP_ALIAS(array, "stats", handleArrayDomain)
+
+// ── bridge: connect and capabilities share one handler ──
+MCP_VERB(bridge, "connect", handleBridgeDomain)
+MCP_ALIAS(bridge, "capabilities", handleBridgeDomain)
+
+// ── morph ──
+MCP_VERB(morph, "run", handleMorphDomain)
+
 #undef MCP_SOURCE
 #undef MCP_VERB
 #undef MCP_ALIAS

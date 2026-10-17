@@ -55,7 +55,7 @@ def branches(lines, start, end):
     code = strip_code("\n".join(lines)).split("\n")
     depth, found = 0, []
     for i in range(start, end + 1):
-        m = re.match(r'^    (?:\} else )?if \((action == "[^"]+"(?: \|\| action == "[^"]+")*)\) \{\s*$', lines[i])
+        m = re.match(r'^    (?:\} else )?if \(((?:\w*[aA]ction) == "[^"]+"(?: \|\| (?:\w*[aA]ction) == "[^"]+")*)\) \{\s*$', lines[i])
         if m and depth == 1:
             labels = re.findall(r'"([^"]+)"', m.group(1))
             d, j = 0, i
@@ -137,7 +137,8 @@ def cmd_move(a):
         h = camel(a.domain, labels[0])
         body = [l[4:] if l.startswith("    ") else l for l in lines[i + 1:j]]
         lead = [l for l in lines[f:i]]
-        out_funcs.append("\n".join(lead + [f"void MCPBridge::{h}(const juce::String& action, const juce::OSCMessage& msg)", "{"] + body + ["}"]))
+        pre = [f"    {a.preamble}"] if a.preamble else []
+        out_funcs.append("\n".join(lead + [f"void MCPBridge::{h}(const juce::String& {a.var or 'action'}, const juce::OSCMessage& msg)", "{"] + pre + body + ["}"]))
         rows.append(f'MCP_VERB({a.domain}, "{labels[0]}", {h})')
         for extra in labels[1:]:
             rows.append(f'MCP_ALIAS({a.domain}, "{extra}", {h})')
@@ -180,7 +181,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("cmd", choices=["deps", "move", "check"])
     p.add_argument("--func"); p.add_argument("--ref", default="HEAD"); p.add_argument("--files")
-    p.add_argument("--verbs")
+    p.add_argument("--verbs"); p.add_argument("--var"); p.add_argument("--preamble")
     p.add_argument("--domain"); p.add_argument("--out"); p.add_argument("--title"); p.add_argument("--alias")
     a = p.parse_args()
     if a.cmd != "check" and not (a.func and a.verbs): p.error("--func and --verbs are required")

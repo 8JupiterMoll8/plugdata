@@ -329,7 +329,7 @@ public:
 private:
     // Verb table (MCPBridgeVerbs.inc): one private member function per row, built
     // into a command table at startup. A verb with a row is served from there;
-    // the other domains still reach their handle<Domain>Domain function (P3.3 S6).
+    // every handler is declared from the table.
     using VerbHandler = void (MCPBridge::*)(const juce::String& action, const juce::OSCMessage& msg);
     using VerbTable = mcp::CommandTable<VerbHandler>;
     static VerbTable const& commandTable();
@@ -341,16 +341,6 @@ private:
 #define MCP_DOMAIN(domain, handler) void handler(const juce::String& action, const juce::OSCMessage& msg);
 #include "Pd/MCPBridgeVerbs.inc"
 
-    void handleParamDomain(const juce::String& paramName, const juce::OSCMessage& msg);
-    void handleTriggerDomain(const juce::String& triggerAction, const juce::OSCMessage& msg);
-    void handleTelemetryDomain(const juce::String& telAction, const juce::OSCMessage& msg);
-    void handleArrayDomain(const juce::String& arrayAction, const juce::OSCMessage& msg);
-    void handleBridgeDomain(const juce::String& bridgeAction, const juce::OSCMessage& msg);
-    void handleMorphDomain(const juce::String& morphAction, const juce::OSCMessage& msg);
-    void handleMeterDomain(const juce::String& meterAction, const juce::OSCMessage& msg);
-    void handleTransportDomain(const juce::String& action, const juce::OSCMessage& msg);
-    void handleSeqDomain(const juce::String& action, const juce::OSCMessage& msg);
-    void handleChatDomain(const juce::String& action, const juce::OSCMessage& msg);
     void advanceSequencer(int blockSize);
     void enqueueSeqFire(bool isBang, const juce::String& name, float value);
 

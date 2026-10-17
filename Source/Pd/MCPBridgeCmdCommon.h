@@ -257,3 +257,5 @@ inline void getTrueObjectBounds(t_canvas* c, t_gobj* y, McpGuiHost::LiveBounds c
 {
     mcpGetTrueObjectBounds(c, y, guiCanvas, x, yy, w, h);
 }
+
+#include "MCPBridgeControlWindow.h"
