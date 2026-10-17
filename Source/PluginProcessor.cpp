@@ -97,6 +97,7 @@ PluginProcessor::PluginProcessor()
     : AudioProcessor(buildBusesProperties())
     , internalSynth(std::make_unique<InternalSynth>())
     , hostInfoUpdater(this)
+    , mcp(std::make_unique<McpHost>(*this)) // MCP-HOOK(host)
 {
 #if PERFETTO
     MelatoninPerfetto::get().beginSession();
@@ -198,13 +199,7 @@ PluginProcessor::PluginProcessor()
 
     objectLibrary = std::make_unique<pd::Library>(this);
 
-    auto const mcpEnabled = settingsFile->getProperty<bool>("mcp_bridge_enabled");
-    auto const mcpListen = settingsFile->getProperty<int>("mcp_bridge_listen_port");
-    auto const mcpSend = settingsFile->getProperty<int>("mcp_bridge_send_port");
-    mcpBridge = std::make_unique<MCPBridge>(this, mcpListen, mcpSend);
-    if (!mcpEnabled) {
-        mcpBridge->stop();
-    }
+    mcp->createBridge(); // MCP-HOOK(host)
 
     setLatencySamples(pd::Instance::getBlockSize());
     settingsFile->startChangeListener();
@@ -767,11 +762,11 @@ void PluginProcessor::prepareToPlay(double const sampleRate, int const samplesPe
     {
         int const cap = static_cast<int>(std::ceil(sampleRate * 2.0));
         if (cap > 0) {
-            mcpSpecBuffer.assign(static_cast<size_t>(cap), 0.0f);
-            mcpSpecCapacity.store(cap, std::memory_order_relaxed);
-            mcpSpecWritePos.store(0, std::memory_order_relaxed);
-            mcpSpecLimit.store(0, std::memory_order_relaxed);
-            mcpSpecArmed.store(false, std::memory_order_relaxed);
+            mcp->session.mcpSpecBuffer.assign(static_cast<size_t>(cap), 0.0f);
+            mcp->session.mcpSpecCapacity.store(cap, std::memory_order_relaxed);
+            mcp->session.mcpSpecWritePos.store(0, std::memory_order_relaxed);
+            mcp->session.mcpSpecLimit.store(0, std::memory_order_relaxed);
+            mcp->session.mcpSpecArmed.store(false, std::memory_order_relaxed);
         }
     }
 }
@@ -819,7 +814,7 @@ bool PluginProcessor::isBusesLayoutSupported(BusesLayout const& layouts) const
 void PluginProcessor::settingsChanged(String const& name, var const& value)
 {
     if (name.startsWith("mcp_bridge_")) {
-        mcpSettingsChanged(name, value);
+        mcp->mcpSettingsChanged(name, value);
         return;
     }
 
@@ -859,34 +854,6 @@ void PluginProcessor::settingsFileReloaded()
         objectLibrary->updateLibrary();
 }
 
-juce::String PluginProcessor::getMcpBridgeStatus() const
-{
-    return mcpBridge ? mcpBridge->getStatus() : juce::String("unavailable");
-}
-
-void PluginProcessor::mcpSettingsChanged(String const& name, var const& value)
-{
-    if (!mcpBridge) return;
-
-    if (name == "mcp_bridge_enabled") {
-        if (static_cast<bool>(value)) {
-            mcpBridge->start();
-        } else {
-            mcpBridge->stop();
-        }
-    } else if (name == "mcp_bridge_listen_port" || name == "mcp_bridge_send_port") {
-        // Recreate the bridge socket with the new ports. Applies immediately;
-        // the MCP server must be configured to match the listen port.
-        auto const enabled = settingsFile->getProperty<bool>("mcp_bridge_enabled");
-        auto const listen = settingsFile->getProperty<int>("mcp_bridge_listen_port");
-        auto const send = settingsFile->getProperty<int>("mcp_bridge_send_port");
-        mcpBridge->stop();
-        mcpBridge.reset(new MCPBridge(this, listen, send));
-        if (!enabled) mcpBridge->stop();
-        logMessage("MCP bridge ports updated (listen " + String(listen) + ", send " + String(send) + ")");
-    }
-}
-
 void PluginProcessor::processBlockBypassed(AudioBuffer<float>& buffer, MidiBuffer& midiBuffer)
 {
     bypassBuffer.makeCopyOf(buffer);
@@ -901,7 +868,7 @@ void PluginProcessor::processBlockBypassed(AudioBuffer<float>& buffer, MidiBuffe
 void PluginProcessor::processBlock(AudioBuffer<float>& buffer, MidiBuffer& midiBuffer)
 {
     isProcessingAudio = true;
-    mcpAudioBlocks.fetch_add(1, std::memory_order_relaxed); // #83 audio-thread liveness
+    mcp->session.mcpAudioBlocks.fetch_add(1, std::memory_order_relaxed); // #83 audio-thread liveness
     
     ScopedNoDenormals noDenormals;
     AudioProcessLoadMeasurer::ScopedTimer cpuTimer(cpuLoadMeasurer, buffer.getNumSamples());
@@ -986,8 +953,8 @@ void PluginProcessor::processBlock(AudioBuffer<float>& buffer, MidiBuffer& midiB
 
     midiInputHistory.addEvents(midiDeviceManager.getInputHistory(), 0, buffer.getNumSamples(), 0);
     // MIDI melodic-intent capture & playback tap
-    if (mcpBridge && (mcpBridge->isMidiCapturing() || mcpBridge->isMidiPlaying()))
-        mcpBridge->midiInputTick(midiInputHistory, buffer.getNumSamples(), &buffer, getSampleRate());
+    if (mcp->mcpBridge && (mcp->mcpBridge->isMidiCapturing() || mcp->mcpBridge->isMidiPlaying()))
+        mcp->mcpBridge->midiInputTick(midiInputHistory, buffer.getNumSamples(), &buffer, getSampleRate());
     toolbarSource->process(midiInputHistory, midiDeviceManager.getOutputHistory());
     midiDeviceManager.clearMidiOutputBuffers(blockOut.getNumSamples());
 
@@ -1027,8 +994,8 @@ void PluginProcessor::processBlock(AudioBuffer<float>& buffer, MidiBuffer& midiB
     // processBlock so it runs for BOTH constant and variable block sizes. The window
     // opens BEFORE the trigger (arm) and is read AFTER it, so a one-shot can never
     // fall outside it. No-op when not armed.
-    if (mcpArmActive.load(std::memory_order_relaxed)) {
-        mcpArmedTailRuns.fetch_add(1, std::memory_order_relaxed); // #83 diagnostics
+    if (mcp->session.mcpArmActive.load(std::memory_order_relaxed)) {
+        mcp->session.mcpArmedTailRuns.fetch_add(1, std::memory_order_relaxed); // #83 diagnostics
         float p = 0.0f;
         for (int ch = 0; ch < buffer.getNumChannels(); ++ch) {
             auto* d = buffer.getReadPointer(ch);
@@ -1037,10 +1004,10 @@ void PluginProcessor::processBlock(AudioBuffer<float>& buffer, MidiBuffer& midiB
                 if (a > p) p = a;
             }
         }
-        float prevTail = mcpArmedTailPeak.load(std::memory_order_relaxed);
-        while (p > prevTail && !mcpArmedTailPeak.compare_exchange_weak(prevTail, p, std::memory_order_relaxed)) {}
-        float prev = mcpArmPeak.load(std::memory_order_relaxed);
-        while (p > prev && !mcpArmPeak.compare_exchange_weak(prev, p, std::memory_order_relaxed)) {}
+        float prevTail = mcp->session.mcpArmedTailPeak.load(std::memory_order_relaxed);
+        while (p > prevTail && !mcp->session.mcpArmedTailPeak.compare_exchange_weak(prevTail, p, std::memory_order_relaxed)) {}
+        float prev = mcp->session.mcpArmPeak.load(std::memory_order_relaxed);
+        while (p > prev && !mcp->session.mcpArmPeak.compare_exchange_weak(prev, p, std::memory_order_relaxed)) {}
     }
 
     // Armed spectral capture (Phase 5): append the FINAL output into the mono
@@ -1048,15 +1015,15 @@ void PluginProcessor::processBlock(AudioBuffer<float>& buffer, MidiBuffer& midiB
     // the analysis window. Same common end-of-processBlock placement as the
     // peak-hold (runs for constant AND variable block sizes). `mcpSpecBusy`
     // brackets the write so the reader never copies a half-written tail.
-    if (mcpSpecArmed.load(std::memory_order_relaxed)) {
-        mcpSpecBusy.store(true, std::memory_order_release);
-        int pos = mcpSpecWritePos.load(std::memory_order_relaxed);
-        int const stop = std::min(mcpSpecLimit.load(std::memory_order_relaxed),
-                                  mcpSpecCapacity.load(std::memory_order_relaxed));
-        if (!mcpSpecBuffer.empty() && pos < stop) {
+    if (mcp->session.mcpSpecArmed.load(std::memory_order_relaxed)) {
+        mcp->session.mcpSpecBusy.store(true, std::memory_order_release);
+        int pos = mcp->session.mcpSpecWritePos.load(std::memory_order_relaxed);
+        int const stop = std::min(mcp->session.mcpSpecLimit.load(std::memory_order_relaxed),
+                                  mcp->session.mcpSpecCapacity.load(std::memory_order_relaxed));
+        if (!mcp->session.mcpSpecBuffer.empty() && pos < stop) {
             int const numSamples = buffer.getNumSamples();
             int const numCh = buffer.getNumChannels();
-            auto* dst = mcpSpecBuffer.data();
+            auto* dst = mcp->session.mcpSpecBuffer.data();
             if (numCh > 0) {
                 for (int i = 0; i < numSamples && pos < stop; ++i) {
                     float s = 0.0f;
@@ -1064,10 +1031,10 @@ void PluginProcessor::processBlock(AudioBuffer<float>& buffer, MidiBuffer& midiB
                     dst[pos++] = s / static_cast<float>(numCh);
                 }
             }
-            mcpSpecWritePos.store(pos, std::memory_order_release);
-            if (pos >= stop) mcpSpecArmed.store(false, std::memory_order_relaxed);
+            mcp->session.mcpSpecWritePos.store(pos, std::memory_order_release);
+            if (pos >= stop) mcp->session.mcpSpecArmed.store(false, std::memory_order_relaxed);
         }
-        mcpSpecBusy.store(false, std::memory_order_release);
+        mcp->session.mcpSpecBusy.store(false, std::memory_order_release);
     }
 
     isProcessingAudio = false;
@@ -1077,45 +1044,6 @@ void PluginProcessor::processBlock(AudioBuffer<float>& buffer, MidiBuffer& midiB
 }
 
 // only used for standalone, and if blocksize if a multiple of 64
-// ── Monitor tap: solo / mute (NON-DESTRUCTIVE) ──────────────────────────────
-// Runs per Pd SUB-BLOCK right after performDSP, so it works for any JUCE block
-// size (Pd runs pdBlockSize sub-blocks inside a larger buffer) and the soloed
-// signal goes through the master gain/limiter exactly like it does in the mix.
-// The patch is never touched; the tap EXPIRES and a dead signal turns it off.
-void PluginProcessor::applyMonitorTap(float* out, int numSamples, int numChannels)
-{
-    if (mcpTapMode.load(std::memory_order_relaxed) == mcpTapOff) return;
-    auto const nowMs = juce::Time::getMillisecondCounter();
-    if (nowMs > mcpTapUntilMs.load(std::memory_order_relaxed)) {
-        mcpTapMode.store(mcpTapOff, std::memory_order_relaxed);
-        mcpTapSig.store(nullptr, std::memory_order_relaxed);
-        return;
-    }
-    // Re-read s_vec EVERY sub-block: Pd swaps outlet buffers per DSP tick, so a
-    // captured vector goes stale after one block.
-    auto* sig = static_cast<t_signal*>(mcpTapSig.load(std::memory_order_relaxed));
-    float* vec = (sig != nullptr && sig->s_vec != nullptr) ? sig->s_vec : nullptr;
-    int const n = (vec != nullptr) ? sig->s_n : 0;
-    if (vec == nullptr || n <= 0) {
-        mcpTapMode.store(mcpTapOff, std::memory_order_relaxed);
-        return;
-    }
-    int const mode = mcpTapMode.load(std::memory_order_relaxed);
-    float const g = mcpTapGain.load(std::memory_order_relaxed);
-    int const copy = juce::jmin(n, numSamples);
-    for (int ch = 0; ch < numChannels; ++ch) {
-        float* d = out + static_cast<size_t>(ch) * static_cast<size_t>(numSamples);
-        if (mode == mcpTapSolo) {
-            for (int i = 0; i < copy; ++i) d[i] = vec[i] * g;
-            for (int i = copy; i < numSamples; ++i) d[i] = 0.0f;
-        } else {
-            // mute: subtract the node's contribution at unity — exact on the
-            // pre-limiter path (downstream of the target, linear mixing).
-            for (int i = 0; i < copy; ++i) d[i] -= vec[i];
-        }
-    }
-}
-
 void PluginProcessor::processConstant(dsp::AudioBlock<float> buffer)
 {
     int const pdBlockSize = Instance::getBlockSize();
@@ -1152,14 +1080,14 @@ void PluginProcessor::processConstant(dsp::AudioBlock<float> buffer)
         if (connectionListener && plugdata_debugging_enabled())
             connectionListener.load()->updateSignalData();
 
-        if (mcpBridge) {
-            mcpBridge->audioTick();
-            mcpBridge->voiceInputTick(audioVectorIn.data(), pdBlockSize);
+        if (mcp->mcpBridge) {
+            mcp->mcpBridge->audioTick();
+            mcp->mcpBridge->voiceInputTick(audioVectorIn.data(), pdBlockSize);
         }
 
         // Monitor tap (solo/mute) — per Pd sub-block, before it lands in the
         // JUCE buffer, so it also goes through the master gain/limiter.
-        applyMonitorTap(audioVectorOut.data(), pdBlockSize, buffer.getNumChannels());
+        mcp->applyMonitorTap(audioVectorOut.data(), pdBlockSize, buffer.getNumChannels());
 
         for (int ch = 0; ch < buffer.getNumChannels(); ch++) {
             // Use FloatVectorOperations to copy the vector data into the audioBuffer
@@ -1175,7 +1103,7 @@ void PluginProcessor::processConstant(dsp::AudioBlock<float> buffer)
     audioAdvancement = 0;
 
     // MCP zero-dropout recorder tap — capture the full constant-path output block.
-    writeRecorderTap(buffer);
+    mcp->writeRecorderTap(buffer);
 }
 
 void PluginProcessor::processVariable(dsp::AudioBlock<float> buffer, MidiBuffer& midiBuffer)
@@ -1226,14 +1154,14 @@ void PluginProcessor::processVariable(dsp::AudioBlock<float> buffer, MidiBuffer&
         if (connectionListener && plugdata_debugging_enabled())
             connectionListener.load()->updateSignalData();
 
-        if (mcpBridge) {
-            mcpBridge->audioTick();
-            mcpBridge->voiceInputTick(audioVectorIn.data(), pdBlockSize);
+        if (mcp->mcpBridge) {
+            mcp->mcpBridge->audioTick();
+            mcp->mcpBridge->voiceInputTick(audioVectorIn.data(), pdBlockSize);
         }
 
         // Monitor tap (solo/mute) — per Pd sub-block, before it lands in the
         // JUCE buffer, so it also goes through the master gain/limiter.
-        applyMonitorTap(audioVectorOut.data(), pdBlockSize, numChannels);
+        mcp->applyMonitorTap(audioVectorOut.data(), pdBlockSize, numChannels);
 
         for (int channel = 0; channel < numChannels; channel++) {
             // Use FloatVectorOperations to copy the vector data into the audioBuffer
@@ -1252,81 +1180,7 @@ void PluginProcessor::processVariable(dsp::AudioBlock<float> buffer, MidiBuffer&
 
     // MCP zero-dropout recorder tap — runs after output is ready.
     // Taps the final output buffer directly, no canvas objects needed.
-    writeRecorderTap(buffer);
-}
-
-bool PluginProcessor::mcpOpenRecorder(juce::String const& path)
-{
-    juce::File const destFile(path);
-    auto outStream = std::unique_ptr<juce::FileOutputStream>(destFile.createOutputStream());
-    if (!outStream || outStream->failedToOpen()) {
-        post("MCP record: could not create output stream for %s", path.toRawUTF8());
-        return false;
-    }
-    // FileOutputStream appends to an existing file; a take must start empty.
-    outStream->setPosition(0);
-    outStream->truncate();
-
-    double sampleRate = getSampleRate();
-    if (sampleRate <= 0)
-        sampleRate = 44100.0;
-    // Cap at stereo so the file plays everywhere; the audible mix is on 0-1.
-    int const numCh = jlimit(1, 2, getTotalNumOutputChannels());
-
-    // 16-bit PCM = maximum player compatibility.
-    juce::WavAudioFormat wavFormat;
-    std::unique_ptr<juce::AudioFormatWriter> writer(
-        wavFormat.createWriterFor(outStream.get(), sampleRate, static_cast<unsigned int>(numCh), 16, {}, 0));
-    if (!writer) {
-        post("MCP record: createWriterFor failed (sr=%.0f ch=%d)", sampleRate, numCh);
-        return false;
-    }
-    outStream.release(); // the writer owns the stream now
-
-    if (!mcpRecorderThread.isThreadRunning())
-        mcpRecorderThread.startThread();
-    // ~3 s of FIFO at 44.1 kHz between the audio thread and the disk.
-    auto threaded = std::make_unique<juce::AudioFormatWriter::ThreadedWriter>(writer.release(), mcpRecorderThread, 1 << 17);
-
-    std::unique_ptr<juce::AudioFormatWriter::ThreadedWriter> previous;
-    {
-        const ScopedLock sl(mcpRecorderLock);
-        previous = std::move(mcpThreadedWriter);
-        mcpThreadedWriter = std::move(threaded);
-        mcpRecorderPath = path;
-    }
-    previous.reset(); // flush any stale take outside the lock
-    post("MCP record: writer created sr=%.0f ch=%d path=%s", sampleRate, numCh, path.toRawUTF8());
-    return true;
-}
-
-void PluginProcessor::mcpCloseRecorder()
-{
-    mcpRecording.store(false, std::memory_order_release);
-    std::unique_ptr<juce::AudioFormatWriter::ThreadedWriter> finished;
-    {
-        const ScopedLock sl(mcpRecorderLock);
-        finished = std::move(mcpThreadedWriter);
-    }
-    finished.reset(); // flushes the FIFO and closes the file, off the audio thread
-}
-
-void PluginProcessor::writeRecorderTap(dsp::AudioBlock<float> const& buffer)
-{
-    if (!mcpRecording.load(std::memory_order_acquire))
-        return;
-
-    const ScopedTryLock sl(mcpRecorderLock);
-    if (!sl.isLocked() || !mcpThreadedWriter)
-        return;
-
-    // Audio thread: no allocation, no file I/O. ThreadedWriter::write only
-    // copies into its FIFO; a full FIFO drops this block instead of blocking.
-    int const available = static_cast<int>(buffer.getNumChannels());
-    if (available <= 0)
-        return;
-    float const* channels[2] = { buffer.getChannelPointer(0), buffer.getChannelPointer(available > 1 ? 1 : 0) };
-    mcpThreadedWriter->write(channels, static_cast<int>(buffer.getNumSamples()));
+    mcp->writeRecorderTap(buffer);
 }
 
 void PluginProcessor::sendPlayhead()
@@ -2089,242 +1943,6 @@ static int getObjectIndex(t_canvas* canvas, t_gobj* obj) {
     return -1;
 }
 
-t_canvas* PluginProcessor::getCanvasBySymbol(const String& canvas_symbol)
-{
-    if (canvas_symbol == "pd-main" || canvas_symbol == "main" || canvas_symbol.isEmpty()) {
-        // "main" must ALWAYS resolve to the true top-level patch. The editor's
-        // current canvas can be a subpatch OR an abstraction tab the artist has
-        // navigated into — automating against that would silently target the
-        // voice's internals instead of the patch (phantom "receive->canvas
-        // connection failed", census listing internals as top-level, silent
-        // recalls). Walk gl_owner all the way up (past abstractions too, unlike
-        // canvas_getrootfor which stops at them) so MCP operations always land
-        // on the actual root patch.
-        for (auto* editor : getEditors()) {
-            if (editor) {
-                if (auto* cnv = editor->getCurrentCanvas()) {
-                    auto* glist = reinterpret_cast<t_glist*>(cnv->patch.getRawPointer());
-                    while (glist && glist->gl_owner) glist = glist->gl_owner;
-                    if (glist) return reinterpret_cast<t_canvas*>(glist);
-                }
-            }
-        }
-    }
-
-    t_canvas* canvas = (t_canvas*)pd_findbyclass(gensym(canvas_symbol.toRawUTF8()), canvas_class);
-    if (!canvas && !canvas_symbol.startsWith("pd-")) {
-        canvas = (t_canvas*)pd_findbyclass(gensym(String("pd-" + canvas_symbol).toRawUTF8()), canvas_class);
-    }
-    if (!canvas) {
-        canvas = pd_this->pd_canvaslist;
-    }
-    return canvas;
-}
-
-t_canvas* PluginProcessor::getCanvasBySymbolStrict(const String& canvas_symbol)
-{
-    // 'main' / 'pd-main' / empty resolve exactly like the legacy path (true
-    // top-level patch of the focused editor) — those aliases stay valid.
-    if (canvas_symbol == "pd-main" || canvas_symbol == "main" || canvas_symbol.isEmpty()) {
-        return getCanvasBySymbol(canvas_symbol);
-    }
-    t_canvas* canvas = (t_canvas*)pd_findbyclass(gensym(canvas_symbol.toRawUTF8()), canvas_class);
-    if (!canvas && !canvas_symbol.startsWith("pd-")) {
-        canvas = (t_canvas*)pd_findbyclass(gensym(String("pd-" + canvas_symbol).toRawUTF8()), canvas_class);
-    }
-    if (!canvas && pd_this) {
-        for (t_canvas* c = pd_this->pd_canvaslist; c; c = c->gl_next) {
-            if (c->gl_name) {
-                juce::String glName(c->gl_name->s_name);
-                if (glName == canvas_symbol || ("pd-" + glName) == canvas_symbol || glName == ("pd-" + canvas_symbol)) {
-                    canvas = c;
-                    break;
-                }
-            }
-        }
-    }
-    // NO fallback: unknown names return nullptr so the caller can name the
-    // failure instead of mutating the focused/root canvas by accident.
-    return canvas;
-}
-
-void PluginProcessor::synchroniseCanvases()
-{
-    if (auto* mm = juce::MessageManager::getInstanceWithoutCreating()) {
-        if (!mm->isThisTheMessageThread()) {
-            mm->callAsync([this] { synchroniseCanvases(); });
-            return;
-        }
-    } else {
-        return;
-    }
-
-    for (auto* editor : getEditors()) {
-        if (!editor) continue;
-        SmallArray<Component::SafePointer<Canvas>> canvases;
-        for (auto* canvas : editor->getCanvases()) {
-            if (canvas) canvases.add(canvas);
-        }
-        for (auto& cnv : canvases) {
-            if (cnv.getComponent()) {
-                cnv->synchronise();
-            }
-        }
-    }
-}
-
-juce::String PluginProcessor::getStableId(t_gobj* g) const
-{
-    if (!g) return {};
-    for (auto const& [canvasKey, canvasMap] : mcpStableObjectMap) {
-        for (auto const& [id, ptr] : canvasMap) {
-            if (ptr == g) return juce::String(id);
-        }
-    }
-    return {};
-}
-
-juce::String PluginProcessor::getOrAdoptStableId(t_canvas* canvas, t_gobj* g)
-{
-    if (!g) return {};
-    auto const existing = getStableId(g);
-    if (existing.isNotEmpty()) return existing;
-    if (!canvas) return {};
-
-    juce::String canonKey = MCPBridge::canonicalCanvasKey(canvas);
-    auto canonStr = canonKey.toStdString();
-
-    int objectIndex = 0;
-    for (t_gobj* y_obj = canvas->gl_list; y_obj; y_obj = y_obj->g_next, ++objectIndex) {
-        if (y_obj == g) {
-            t_class* cl = pd_class(&y_obj->g_pd);
-            const char* clName = class_getname(cl);
-            juce::String className = clName ? juce::String::fromUTF8(clName) : juce::String("unknown");
-            juce::String type = className;
-            juce::String abstractName;
-            if (cl == canvas_class) {
-                type = "pd";
-                pd::getAbstractionFileName(y_obj, abstractName);
-            } else if (cl == garray_class) {
-                type = "table";
-            }
-            juce::String classSrc = abstractName.isNotEmpty() ? abstractName : type;
-            juce::String canvasKeySymbol = canonKey;
-            if (canvasKeySymbol.startsWith("pd-"))
-                canvasKeySymbol = canvasKeySymbol.substring(3);
-            juce::String canvasKey;
-            for (auto ch : canvasKeySymbol)
-                canvasKey << (juce::CharacterFunctions::isLetterOrDigit(ch) || ch == '_'
-                                   ? juce::String::charToString(ch)
-                                   : juce::String("_"));
-            juce::String minted = pd::sanitizeClassNameForTempId(classSrc)
-                                      + "_" + canvasKey + "_" + juce::String(objectIndex);
-
-            auto& canvasIdMap = mcpStableObjectMap[canonStr];
-            canvasIdMap[minted.toStdString()] = y_obj;
-            if (mcpStableSerialMap.find(y_obj) == mcpStableSerialMap.end()) {
-                mcpStableSerialMap[y_obj] = mcpSerialCounter++;
-            }
-            mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
-            return minted;
-        }
-    }
-    return {};
-}
-
-t_gobj* PluginProcessor::resolveStableId(const String& canvasName, const String& objectId)
-{
-    // Identity is keyed by the canvas's CANONICAL key. "main" is a
-    // focus-dependent ALIAS, never a stored key — resolve the canvas first and
-    // derive its canonical key so both sides of the map agree.
-    t_canvas* canvas = getCanvasBySymbol(canvasName);
-    auto canvasStr = (canvas ? MCPBridge::canonicalCanvasKey(canvas) : canvasName).toStdString();
-    auto idStr = objectId.toStdString();
-    
-    auto& canvasMap = mcpStableObjectMap[canvasStr];
-    auto it = canvasMap.find(idStr);
-    if (it != canvasMap.end()) {
-        if (canvas) {
-            // KNOWN GAP (Report F3): this cannot detect a freed object whose
-            // address Pd's allocator recycled for a new object on the same
-            // canvas. The old "serial" check compared mcpStableSerialMap[ptr]
-            // with itself (y_obj == it->second), so it never fired and was
-            // removed. A real check needs a serial recorded per stable ID at
-            // registration (14 sites); that belongs to the identity service
-            // (Plan 3 Phase 5), not a local patch.
-            for (t_gobj* y_obj = canvas->gl_list; y_obj; y_obj = y_obj->g_next) {
-                if (y_obj == it->second)
-                    return it->second;
-            }
-        }
-        canvasMap.erase(it);
-        // Clean up orphaned serial on eviction
-        if (it->second) {
-            mcpStableSerialMap.erase(it->second);
-        }
-    }
-
-    // Index-based fallback: "0", "1", "obj_0", "obj_1", etc.
-    if (objectId.startsWith("obj_") || objectId.containsOnly("0123456789")) {
-        int idx = objectId.startsWith("obj_") ? objectId.substring(4).getIntValue() : objectId.getIntValue();
-        if (!canvas && canvasName == "pd-main") canvas = pd_this->pd_canvaslist;
-        if (canvas) {
-            int cur = 0;
-            for (t_gobj* y_obj = canvas->gl_list; y_obj; y_obj = y_obj->g_next, cur++) {
-                if (cur == idx) return y_obj;
-            }
-        }
-    }
-
-    return nullptr;
-}
-
-void PluginProcessor::reconcileIdentity(const String& canvasName)
-{
-    t_canvas* canvas = getCanvasBySymbol(canvasName);
-    if (!canvas && (canvasName == "pd-main" || canvasName == "main" || canvasName.isEmpty()))
-        canvas = pd_this->pd_canvaslist;
-    if (!canvas)
-        return;
-
-    auto canvasStr = MCPBridge::canonicalCanvasKey(canvas).toStdString();
-    auto& canvasMap = mcpStableObjectMap[canvasStr];
-
-    // Step A: live pointer set from gl_list (the ground truth).
-    std::unordered_set<t_gobj*> livePointers;
-    for (t_gobj* y = canvas->gl_list; y; y = y->g_next)
-        livePointers.insert(y);
-
-    // Step B: evict entries whose gobj no longer exists on the canvas.
-    for (auto it = canvasMap.begin(); it != canvasMap.end();) {
-        if (livePointers.find(it->second) == livePointers.end()) {
-            mcpStableSerialMap.erase(it->second);
-            it = canvasMap.erase(it);
-            mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
-        } else {
-            ++it;
-        }
-    }
-
-    // Step C: adopt objects the identity map doesn't track yet (GUI-created).
-    std::unordered_set<t_gobj*> trackedPointers;
-    for (auto& [_, ptr] : canvasMap)
-        trackedPointers.insert(ptr);
-
-    int adoptIdx = 0;
-    for (t_gobj* y = canvas->gl_list; y; y = y->g_next) {
-        if (trackedPointers.find(y) == trackedPointers.end()) {
-            juce::String className = juce::String::fromUTF8(class_getname(pd_class(&y->g_pd))).replace("~", "_t");
-            std::string autoId = ("gui_" + className + "_" + juce::String(adoptIdx++)).toStdString();
-            while (canvasMap.count(autoId))
-                autoId = ("gui_" + className + "_" + juce::String(adoptIdx++)).toStdString();
-            canvasMap[autoId] = y;
-            mcpStableSerialMap[y] = mcpSerialCounter++;
-            mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
-        }
-    }
-}
-
 void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<pd::Atom> const& list)
 {
     switch (hash(selector)) {
@@ -2523,7 +2141,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
             int y = (int)list[3].getFloat();
 
             sys_lock();
-            t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
+            t_canvas* canvas = mcp->getCanvasBySymbol(canvas_symbol);
             if (canvas) {
                 t_gobj* targetObj = nullptr;
                 int currentIndex = 0;
@@ -2561,7 +2179,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
 
             int movedCount = 0;
             sys_lock();
-            t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
+            t_canvas* canvas = mcp->getCanvasBySymbol(canvas_symbol);
             if (canvas) {
                 std::vector<t_gobj*> objects;
                 for (t_gobj* y_obj = canvas->gl_list; y_obj; y_obj = y_obj->g_next) {
@@ -2588,7 +2206,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
 
             SmallArray<pd::Atom> atoms;
             atoms.add(pd::Atom((float)movedCount));
-            sendMCPReply(String("/pd/move_batch/reply/" + correlation_id), atoms);
+            mcp->sendMCPReply(String("/pd/move_batch/reply/" + correlation_id), atoms);
             sendMessagesFromQueue();
         }
         break;
@@ -2598,21 +2216,21 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
             auto canvas_symbol = list[0].toString();
             auto correlation_id = list[1].toString();
 
-            t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
+            t_canvas* canvas = mcp->getCanvasBySymbol(canvas_symbol);
             auto canvasStr = (canvas ? MCPBridge::canonicalCanvasKey(canvas) : canvas_symbol).toStdString();
             // Purge serials for this canvas entries before erasing the map
-            auto it = mcpStableObjectMap.find(canvasStr);
-            if (it != mcpStableObjectMap.end()) {
+            auto it = mcp->session.mcpStableObjectMap.find(canvasStr);
+            if (it != mcp->session.mcpStableObjectMap.end()) {
                 for (auto& kv : it->second) {
-                    mcpStableSerialMap.erase(kv.second);
+                    mcp->session.mcpStableSerialMap.erase(kv.second);
                 }
-                mcpStableObjectMap.erase(it);
-                mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+                mcp->session.mcpStableObjectMap.erase(it);
+                mcp->session.mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
             }
 
             SmallArray<pd::Atom> atoms;
             atoms.add(pd::Atom(1.0f));
-            sendMCPReply(String("/pd/mcp_clear_ids/reply/" + correlation_id), atoms);
+            mcp->sendMCPReply(String("/pd/mcp_clear_ids/reply/" + correlation_id), atoms);
             sendMessagesFromQueue();
         }
         break;
@@ -2641,11 +2259,11 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
         // undo is honest — empty → reply 0.0 — instead of a false success.
         if (list.size() >= 1) {
             auto canvas_symbol = list[0].toString();
-            t_canvas* cnv = getCanvasBySymbol(canvas_symbol);
+            t_canvas* cnv = mcp->getCanvasBySymbol(canvas_symbol);
             if (!cnv && (canvas_symbol == "pd-main")) cnv = pd_this->pd_canvaslist;
             if (cnv) {
                 wipeCanvasUndo(cnv);
-                clearMcpTransactions(cnv);
+                mcp->clearMcpTransactions(cnv);
             }
         }
 
@@ -2653,19 +2271,19 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
         // so subpatch mutations never leave armed undo actions on the parent canvas.
         for (t_canvas* root = pd_this->pd_canvaslist; root; root = root->gl_next) {
             wipeCanvasUndo(root);
-            clearMcpTransactions(root);
+            mcp->clearMcpTransactions(root);
         }
         break;
     }
     case hash("mcp_suspend_dsp"): {
         sys_lock();
-        mcpSuspendedDspState = canvas_suspend_dsp();
+        mcp->session.mcpSuspendedDspState = canvas_suspend_dsp();
         sys_unlock();
         break;
     }
     case hash("mcp_resume_dsp"): {
         sys_lock();
-        canvas_resume_dsp(mcpSuspendedDspState);
+        canvas_resume_dsp(mcp->session.mcpSuspendedDspState);
         sys_unlock();
         break;
     }
@@ -2681,7 +2299,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
             std::vector<t_gobj*> createdPtrs;
 
             sys_lock();
-            t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
+            t_canvas* canvas = mcp->getCanvasBySymbol(canvas_symbol);
             if (canvas) {
                 auto canonStr = MCPBridge::canonicalCanvasKey(canvas).toStdString();
                 int const dspstate = canvas_suspend_dsp();
@@ -2724,9 +2342,9 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
 
                     t_gobj* targetObj = patchWrapper.createObject(x, y, objectText);
                     if (targetObj) {
-                        mcpStableObjectMap[canonStr][object_id.toStdString()] = targetObj;
-                        mcpStableSerialMap[targetObj] = mcpSerialCounter++;
-                        mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+                        mcp->session.mcpStableObjectMap[canonStr][object_id.toStdString()] = targetObj;
+                        mcp->session.mcpStableSerialMap[targetObj] = mcp->session.mcpSerialCounter++;
+                        mcp->session.mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
                         createdIds.push_back(object_id.toStdString());
                         createdPtrs.push_back(targetObj);
                         created++;
@@ -2759,9 +2377,9 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
             }
             sys_unlock();
 
-            sendMCPReply(String("/pd/create_batch_id/reply/" + correlation_id), atoms);
+            mcp->sendMCPReply(String("/pd/create_batch_id/reply/" + correlation_id), atoms);
             sendMessagesFromQueue();
-            enqueueFunctionAsync([this] { synchroniseCanvases(); });
+            enqueueFunctionAsync([this] { mcp->synchroniseCanvases(); });
         }
         break;
     }
@@ -2800,16 +2418,16 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
             }
 
             sys_lock();
-            t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
+            t_canvas* canvas = mcp->getCanvasBySymbol(canvas_symbol);
             bool success = false;
             if (canvas) {
                 auto canonStr = MCPBridge::canonicalCanvasKey(canvas).toStdString();
                 pd::Patch patchWrapper(pd::WeakReference(canvas, this), this, false);
                 t_gobj* targetObj = patchWrapper.createObject(x, y, objectText);
                 if (targetObj) {
-                    mcpStableObjectMap[canonStr][object_id.toStdString()] = targetObj;
-                    mcpStableSerialMap[targetObj] = mcpSerialCounter++;
-                    mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+                    mcp->session.mcpStableObjectMap[canonStr][object_id.toStdString()] = targetObj;
+                    mcp->session.mcpStableSerialMap[targetObj] = mcp->session.mcpSerialCounter++;
+                    mcp->session.mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
                     success = true;
                     canvas_dirty(canvas, 1);
                     if (pd_class(&targetObj->g_pd) == canvas_class) {
@@ -2825,9 +2443,9 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
 
             SmallArray<pd::Atom> atoms;
             atoms.add(pd::Atom(success ? 1.0f : 0.0f));
-            sendMCPReply(String("/pd/mcp_create_id/reply/" + correlation_id), atoms);
+            mcp->sendMCPReply(String("/pd/mcp_create_id/reply/" + correlation_id), atoms);
             sendMessagesFromQueue();
-            enqueueFunctionAsync([this] { synchroniseCanvases(); });
+            enqueueFunctionAsync([this] { mcp->synchroniseCanvases(); });
         }
         break;
     }
@@ -2839,7 +2457,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
             auto object_id = list[3].toString();
 
             sys_lock();
-            t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
+            t_canvas* canvas = mcp->getCanvasBySymbol(canvas_symbol);
             bool success = false;
             if (canvas) {
                 auto canonStr = MCPBridge::canonicalCanvasKey(canvas).toStdString();
@@ -2858,9 +2476,9 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
                 }
 
                 if (targetObj) {
-                    mcpStableObjectMap[canonStr][object_id.toStdString()] = targetObj;
-                    mcpStableSerialMap[targetObj] = mcpSerialCounter++;
-                    mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+                    mcp->session.mcpStableObjectMap[canonStr][object_id.toStdString()] = targetObj;
+                    mcp->session.mcpStableSerialMap[targetObj] = mcp->session.mcpSerialCounter++;
+                    mcp->session.mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
                     success = true;
                 }
             }
@@ -2868,7 +2486,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
 
             SmallArray<pd::Atom> atoms;
             atoms.add(pd::Atom(success ? 1.0f : 0.0f));
-            sendMCPReply(String("/pd/mcp_register_id/reply/" + correlation_id), atoms);
+            mcp->sendMCPReply(String("/pd/mcp_register_id/reply/" + correlation_id), atoms);
             sendMessagesFromQueue();
         }
         break;
@@ -2883,11 +2501,11 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
             int dest_in = (int)list[5].getFloat();
 
             sys_lock();
-            t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
+            t_canvas* canvas = mcp->getCanvasBySymbol(canvas_symbol);
             bool success = false;
             if (canvas) {
-                t_gobj* srcObj = resolveStableId(canvas_symbol, src_id);
-                t_gobj* destObj = resolveStableId(canvas_symbol, dest_id);
+                t_gobj* srcObj = mcp->resolveStableId(canvas_symbol, src_id);
+                t_gobj* destObj = mcp->resolveStableId(canvas_symbol, dest_id);
                 t_object* srcText = pd::Interface::checkObject(srcObj);
                 t_object* destText = pd::Interface::checkObject(destObj);
 
@@ -2910,9 +2528,9 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
 
             SmallArray<pd::Atom> atoms;
             atoms.add(pd::Atom(success ? 1.0f : 0.0f));
-            sendMCPReply(String("/pd/mcp_connect_id/reply/" + correlation_id), atoms);
+            mcp->sendMCPReply(String("/pd/mcp_connect_id/reply/" + correlation_id), atoms);
             sendMessagesFromQueue();
-            enqueueFunctionAsync([this] { synchroniseCanvases(); });
+            enqueueFunctionAsync([this] { mcp->synchroniseCanvases(); });
         }
         break;
     }
@@ -2926,11 +2544,11 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
             int dest_in = (int)list[5].getFloat();
 
             sys_lock();
-            t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
+            t_canvas* canvas = mcp->getCanvasBySymbol(canvas_symbol);
             bool success = false;
             if (canvas) {
-                t_gobj* srcObj = resolveStableId(canvas_symbol, src_id);
-                t_gobj* destObj = resolveStableId(canvas_symbol, dest_id);
+                t_gobj* srcObj = mcp->resolveStableId(canvas_symbol, src_id);
+                t_gobj* destObj = mcp->resolveStableId(canvas_symbol, dest_id);
                 t_object* srcText = pd::Interface::checkObject(srcObj);
                 t_object* destText = pd::Interface::checkObject(destObj);
 
@@ -2944,9 +2562,9 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
 
             SmallArray<pd::Atom> atoms;
             atoms.add(pd::Atom(success ? 1.0f : 0.0f));
-            sendMCPReply(String("/pd/mcp_disconnect_id/reply/" + correlation_id), atoms);
+            mcp->sendMCPReply(String("/pd/mcp_disconnect_id/reply/" + correlation_id), atoms);
             sendMessagesFromQueue();
-            enqueueFunctionAsync([this] { synchroniseCanvases(); });
+            enqueueFunctionAsync([this] { mcp->synchroniseCanvases(); });
         }
         break;
     }
@@ -2957,18 +2575,18 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
             auto object_id = list[2].toString();
 
             sys_lock();
-            t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
+            t_canvas* canvas = mcp->getCanvasBySymbol(canvas_symbol);
             bool success = false;
             if (canvas) {
                 auto canonStr = MCPBridge::canonicalCanvasKey(canvas).toStdString();
-                t_gobj* targetObj = resolveStableId(canvas_symbol, object_id);
+                t_gobj* targetObj = mcp->resolveStableId(canvas_symbol, object_id);
                 if (targetObj) {
                     SmallArray<t_gobj*> objectsToDelete;
                     objectsToDelete.add(targetObj);
                     mcp::PdOps::removeObjects(canvas, objectsToDelete);
-                    mcpStableObjectMap[canonStr].erase(object_id.toStdString());
-                    mcpStableSerialMap.erase(targetObj);
-                    mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+                    mcp->session.mcpStableObjectMap[canonStr].erase(object_id.toStdString());
+                    mcp->session.mcpStableSerialMap.erase(targetObj);
+                    mcp->session.mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
                     success = true;
                     canvas_dirty(canvas, 1);
                 }
@@ -2987,9 +2605,9 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
 
             SmallArray<pd::Atom> atoms;
             atoms.add(pd::Atom(success ? 1.0f : 0.0f));
-            sendMCPReply(String("/pd/mcp_delete_id/reply/" + correlation_id), atoms);
+            mcp->sendMCPReply(String("/pd/mcp_delete_id/reply/" + correlation_id), atoms);
             sendMessagesFromQueue();
-            enqueueFunctionAsync([this] { synchroniseCanvases(); });
+            enqueueFunctionAsync([this] { mcp->synchroniseCanvases(); });
         }
         break;
     }
@@ -3002,18 +2620,18 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
 
             sys_lock();
             bool success = false;
-            t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
+            t_canvas* canvas = mcp->getCanvasBySymbol(canvas_symbol);
             auto canvasStr = (canvas ? MCPBridge::canonicalCanvasKey(canvas) : canvas_symbol).toStdString();
-            auto& map = mcpStableObjectMap[canvasStr];
+            auto& map = mcp->session.mcpStableObjectMap[canvasStr];
             auto const renamed = mcp::identity::renameStableId(map, old_id.toStdString(), new_id.toStdString());
             if (renamed == mcp::identity::RenameResult::Applied)
-                mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+                mcp->session.mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
             success = renamed != mcp::identity::RenameResult::Missing;
             sys_unlock();
 
             SmallArray<pd::Atom> atoms;
             atoms.add(pd::Atom(success ? 1.0f : 0.0f));
-            sendMCPReply(String("/pd/mcp_rename_id/reply/" + correlation_id), atoms);
+            mcp->sendMCPReply(String("/pd/mcp_rename_id/reply/" + correlation_id), atoms);
             sendMessagesFromQueue();
         }
         break;
@@ -3027,10 +2645,10 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
             int y = (int)list[4].getFloat();
 
             sys_lock();
-            t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
+            t_canvas* canvas = mcp->getCanvasBySymbol(canvas_symbol);
             bool success = false;
             if (canvas) {
-                t_gobj* targetObj = resolveStableId(canvas_symbol, object_id);
+                t_gobj* targetObj = mcp->resolveStableId(canvas_symbol, object_id);
                 if (targetObj) {
                     pd::Interface::moveObject(canvas, targetObj, x, y);
                     canvas_dirty(canvas, 1);
@@ -3042,7 +2660,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
 
             SmallArray<pd::Atom> atoms;
             atoms.add(pd::Atom(success ? 1.0f : 0.0f));
-            sendMCPReply(String("/pd/mcp_move_id/reply/" + correlation_id), atoms);
+            mcp->sendMCPReply(String("/pd/mcp_move_id/reply/" + correlation_id), atoms);
             sendMessagesFromQueue();
         }
         break;
@@ -3063,11 +2681,11 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
             }
 
             sys_lock();
-            t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
+            t_canvas* canvas = mcp->getCanvasBySymbol(canvas_symbol);
             bool success = false;
             if (canvas) {
                 auto canonStr = MCPBridge::canonicalCanvasKey(canvas).toStdString();
-                t_gobj* targetObj = resolveStableId(canvas_symbol, object_id);
+                t_gobj* targetObj = mcp->resolveStableId(canvas_symbol, object_id);
                 if (targetObj) {
                     mcp::PdOps::renameObject(canvas, targetObj, new_text.toRawUTF8(), new_text.getNumBytesAsUTF8());
                     
@@ -3088,12 +2706,12 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
                     }
                     
                     if (newObj) {
-                        mcpStableObjectMap[canonStr][object_id.toStdString()] = newObj;
+                        mcp->session.mcpStableObjectMap[canonStr][object_id.toStdString()] = newObj;
                         if (newObj != targetObj) {
-                            mcpStableSerialMap.erase(targetObj);
+                            mcp->session.mcpStableSerialMap.erase(targetObj);
                         }
-                        mcpStableSerialMap[newObj] = mcpSerialCounter++;
-                        mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+                        mcp->session.mcpStableSerialMap[newObj] = mcp->session.mcpSerialCounter++;
+                        mcp->session.mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
                         success = true;
                     }
                 }
@@ -3103,7 +2721,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
 
             SmallArray<pd::Atom> atoms;
             atoms.add(pd::Atom(success ? 1.0f : 0.0f));
-            sendMCPReply(String("/pd/mcp_edit_id/reply/" + correlation_id), atoms);
+            mcp->sendMCPReply(String("/pd/mcp_edit_id/reply/" + correlation_id), atoms);
             sendMessagesFromQueue();
         }
         break;
@@ -3114,11 +2732,11 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
             auto correlation_id = list[1].toString();
 
             sys_lock();
-            t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
+            t_canvas* canvas = mcp->getCanvasBySymbol(canvas_symbol);
             SmallArray<pd::Atom> atoms;
             if (canvas) {
                 auto canonStr = MCPBridge::canonicalCanvasKey(canvas).toStdString();
-                auto& canvasMap = mcpStableObjectMap[canonStr];
+                auto& canvasMap = mcp->session.mcpStableObjectMap[canonStr];
                 
                 // For each ID in the map, find its current index in gl_list
                 for (auto it = canvasMap.begin(); it != canvasMap.end();) {
@@ -3137,7 +2755,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
             }
             sys_unlock();
 
-            sendMCPReply(String("/pd/mcp_get_mappings/reply/" + correlation_id), atoms);
+            mcp->sendMCPReply(String("/pd/mcp_get_mappings/reply/" + correlation_id), atoms);
             sendMessagesFromQueue();
         }
         break;
@@ -3153,7 +2771,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
             // root canvas (that returned the root's objects under a bogus
             // subpatch label with re-minted tempIds, e.g.
             // osc_sig_pd_<typo>_0). 'main'/'pd-main'/'' aliases still resolve.
-            t_canvas* canvas = getCanvasBySymbolStrict(canvas_symbol);
+            t_canvas* canvas = mcp->getCanvasBySymbolStrict(canvas_symbol);
 
             if (canvas) {
                 // One canonical key for this canvas — the SAME key every
@@ -3168,8 +2786,8 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
 
                 // Build reverse map of gobj* -> tempId
                 std::unordered_map<t_gobj*, String> ptrToId;
-                if (mcpStableObjectMap.count(canonStr)) {
-                    for (auto const& [id, ptr] : mcpStableObjectMap[canonStr]) {
+                if (mcp->session.mcpStableObjectMap.count(canonStr)) {
+                    for (auto const& [id, ptr] : mcp->session.mcpStableObjectMap[canonStr]) {
                         if (ptr) ptrToId[ptr] = String(id);
                     }
                 }
@@ -3362,12 +2980,12 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
                         juce::String minted = pd::sanitizeClassNameForTempId(classSrc)
                                                   + "_" + canvasKey + "_" + String(objectIndex);
 
-                        auto& canvasIdMap = mcpStableObjectMap[canonStr];
+                        auto& canvasIdMap = mcp->session.mcpStableObjectMap[canonStr];
                         auto existing = canvasIdMap.find(minted.toStdString());
                         if (existing == canvasIdMap.end()) {
                             canvasIdMap[minted.toStdString()] = y_obj;
-                            if (mcpStableSerialMap.find(y_obj) == mcpStableSerialMap.end()) {
-                                mcpStableSerialMap[y_obj] = mcpSerialCounter++;
+                            if (mcp->session.mcpStableSerialMap.find(y_obj) == mcp->session.mcpStableSerialMap.end()) {
+                                mcp->session.mcpStableSerialMap[y_obj] = mcp->session.mcpSerialCounter++;
                             }
                             tempId = minted;
                             adoptedAny = true;
@@ -3385,7 +3003,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
                 // One version bump per census that adopted anything — the
                 // identity map changed, so identity_snapshot consumers resync.
                 if (adoptedAny) {
-                    mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+                    mcp->session.mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
                 }
                 rootObj->setProperty("objectCount", objectIndex);
                 rootObj->setProperty("objects", objArray);
@@ -3429,7 +3047,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
 
             SmallArray<pd::Atom> atoms;
             atoms.add(pd::Atom(gensym(jsonString.toRawUTF8())));
-            sendMCPReply(String("/pd/census/reply/" + correlation_id), atoms);
+            mcp->sendMCPReply(String("/pd/census/reply/" + correlation_id), atoms);
             sendMessagesFromQueue();
         }
         break;
@@ -3443,14 +3061,14 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
             struct MoveUndo { juce::String id; int oldX, oldY, newX, newY; };
             std::vector<MoveUndo> moveUndo;
             sys_lock();
-            t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
+            t_canvas* canvas = mcp->getCanvasBySymbol(canvas_symbol);
             if (canvas) {
                 for (int i = 2; i + 2 < list.size(); i += 3) {
                     auto object_id = list[i].toString();
                     int x = (int)list[i+1].getFloat();
                     int y = (int)list[i+2].getFloat();
 
-                    t_gobj* targetObj = resolveStableId(canvas_symbol, object_id);
+                    t_gobj* targetObj = mcp->resolveStableId(canvas_symbol, object_id);
                     if (targetObj) {
                         int ox = 0, oy = 0, ow = 0, oh = 0;
                         pd::Interface::getObjectBounds(canvas, targetObj, &ox, &oy, &ow, &oh);
@@ -3474,7 +3092,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
 
             // Register an undoable move (message-delta, replayed via move_batch_id).
             // Skipped while an undo/redo is replaying so we never push recursively.
-            if (canvas && !moveUndo.empty() && !isExecutingMcpUndoRedo) {
+            if (canvas && !moveUndo.empty() && !mcp->session.isExecutingMcpUndoRedo) {
                 juce::OSCMessage fwd { juce::OSCAddressPattern("/pd/move_batch_id") };
                 juce::OSCMessage inv { juce::OSCAddressPattern("/pd/move_batch_id") };
                 fwd.addArgument(canvas_symbol);
@@ -3485,14 +3103,14 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
                     fwd.addArgument(m.id); fwd.addArgument(static_cast<float>(m.newX)); fwd.addArgument(static_cast<float>(m.newY));
                     inv.addArgument(m.id); inv.addArgument(static_cast<float>(m.oldX)); inv.addArgument(static_cast<float>(m.oldY));
                 }
-                pushMcpTransaction(canvas, canvas_symbol, fwd, inv, "move_batch_id");
+                mcp->pushMcpTransaction(canvas, canvas_symbol, fwd, inv, "move_batch_id");
             }
 
             SmallArray<pd::Atom> atoms;
             atoms.add(pd::Atom((float)movedCount));
-            sendMCPReply(String("/pd/mcp_move_batch_id/reply/" + correlation_id), atoms);
+            mcp->sendMCPReply(String("/pd/mcp_move_batch_id/reply/" + correlation_id), atoms);
             sendMessagesFromQueue();
-            enqueueFunctionAsync([this] { synchroniseCanvases(); });
+            enqueueFunctionAsync([this] { mcp->synchroniseCanvases(); });
         }
         break;
     }
@@ -3503,7 +3121,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
 
             int connectedCount = 0;
             sys_lock();
-            t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
+            t_canvas* canvas = mcp->getCanvasBySymbol(canvas_symbol);
             if (canvas) {
                 for (int i = 2; i + 3 < list.size(); i += 4) {
                     auto src_id = list[i].toString();
@@ -3511,8 +3129,8 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
                     auto dest_id = list[i+2].toString();
                     int dest_in = (int)list[i+3].getFloat();
 
-                    t_gobj* srcObj = resolveStableId(canvas_symbol, src_id);
-                    t_gobj* destObj = resolveStableId(canvas_symbol, dest_id);
+                    t_gobj* srcObj = mcp->resolveStableId(canvas_symbol, src_id);
+                    t_gobj* destObj = mcp->resolveStableId(canvas_symbol, dest_id);
                     t_object* srcText = pd::Interface::checkObject(srcObj);
                     t_object* destText = pd::Interface::checkObject(destObj);
 
@@ -3538,9 +3156,9 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
 
             SmallArray<pd::Atom> atoms;
             atoms.add(pd::Atom((float)connectedCount));
-            sendMCPReply(String("/pd/mcp_connect_batch_id/reply/" + correlation_id), atoms);
+            mcp->sendMCPReply(String("/pd/mcp_connect_batch_id/reply/" + correlation_id), atoms);
             sendMessagesFromQueue();
-            enqueueFunctionAsync([this] { synchroniseCanvases(); });
+            enqueueFunctionAsync([this] { mcp->synchroniseCanvases(); });
         }
         break;
     }
@@ -3551,7 +3169,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
 
             int disconnectedCount = 0;
             sys_lock();
-            t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
+            t_canvas* canvas = mcp->getCanvasBySymbol(canvas_symbol);
             if (canvas) {
                 for (int i = 2; i + 3 < list.size(); i += 4) {
                     auto src_id = list[i].toString();
@@ -3559,8 +3177,8 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
                     auto dest_id = list[i+2].toString();
                     int dest_in = (int)list[i+3].getFloat();
 
-                    t_gobj* srcObj = resolveStableId(canvas_symbol, src_id);
-                    t_gobj* destObj = resolveStableId(canvas_symbol, dest_id);
+                    t_gobj* srcObj = mcp->resolveStableId(canvas_symbol, src_id);
+                    t_gobj* destObj = mcp->resolveStableId(canvas_symbol, dest_id);
                     t_object* srcText = pd::Interface::checkObject(srcObj);
                     t_object* destText = pd::Interface::checkObject(destObj);
 
@@ -3577,9 +3195,9 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
 
             SmallArray<pd::Atom> atoms;
             atoms.add(pd::Atom((float)disconnectedCount));
-            sendMCPReply(String("/pd/mcp_disconnect_batch_id/reply/" + correlation_id), atoms);
+            mcp->sendMCPReply(String("/pd/mcp_disconnect_batch_id/reply/" + correlation_id), atoms);
             sendMessagesFromQueue();
-            enqueueFunctionAsync([this] { synchroniseCanvases(); });
+            enqueueFunctionAsync([this] { mcp->synchroniseCanvases(); });
         }
         break;
     }
@@ -3989,123 +3607,16 @@ void PluginProcessor::titleChanged()
 
 void PluginProcessor::onSelectionChanged(String const& selector, SmallArray<pd::Atom> const& list)
 {
-    if (mcpBridge) {
-        mcpBridge->sendSelectionTelemetry(selector, list);
+    if (mcp->mcpBridge) {
+        mcp->mcpBridge->sendSelectionTelemetry(selector, list);
     }
 }
 
 void PluginProcessor::onConsoleMessage(String const& message, bool isError)
 {
-    if (mcpBridge) {
-        mcpBridge->sendConsoleLog(message, isError);
+    if (mcp->mcpBridge) {
+        mcp->mcpBridge->sendConsoleLog(message, isError);
     }
-}
-
-void PluginProcessor::sendMCPReply(const String& replyAddr, const SmallArray<pd::Atom>& atoms)
-{
-    sendMessage("mcp_telemetry_reply", replyAddr.toRawUTF8(), atoms);
-    if (mcpBridge) {
-        mcpBridge->sendSelectionTelemetry(replyAddr, atoms);
-    }
-}
-
-bool PluginProcessor::hasMcpTransaction(t_canvas* cnv) const
-{
-    juce::ScopedLock sl(mcpUndoLock);
-    auto it = mcpUndoStack.find(cnv);
-    return it != mcpUndoStack.end() && !it->second.empty();
-}
-
-bool PluginProcessor::hasMcpRedoTransaction(t_canvas* cnv) const
-{
-    juce::ScopedLock sl(mcpUndoLock);
-    auto it = mcpRedoStack.find(cnv);
-    return it != mcpRedoStack.end() && !it->second.empty();
-}
-
-void PluginProcessor::pushMcpTransaction(t_canvas* cnv, const juce::String& canvasName, const juce::OSCMessage& forward, const juce::OSCMessage& inverse, const juce::String& replayAction)
-{
-    {
-        juce::ScopedLock sl(mcpUndoLock);
-        mcpUndoStack[cnv].push_back({ canvasName, forward, inverse, replayAction });
-        if (mcpUndoStack[cnv].size() > 50) {
-            mcpUndoStack[cnv].erase(mcpUndoStack[cnv].begin());
-        }
-        mcpRedoStack[cnv].clear();
-    }
-    juce::MessageManager::callAsync([this] {
-        for (auto* editor : getEditors()) {
-            editor->triggerAsyncUpdate();
-        }
-    });
-}
-
-void PluginProcessor::undoMcpTransaction(t_canvas* cnv)
-{
-    // McpTransaction has no default ctor (OSCMessage needs an address), so hold
-    // the popped transaction by pointer.
-    std::unique_ptr<McpTransaction> tx;
-    {
-        juce::ScopedLock sl(mcpUndoLock);
-        auto it = mcpUndoStack.find(cnv);
-        if (it == mcpUndoStack.end() || it->second.empty()) return;
-
-        tx = std::make_unique<McpTransaction>(it->second.back());
-        it->second.pop_back();
-        mcpRedoStack[cnv].push_back(*tx);
-    }
-
-    // Execute OUTSIDE the lock — the nested batch_atomic must not re-enter the
-    // stack map while we hold mcpUndoLock.
-    if (mcpBridge && tx) {
-        isExecutingMcpUndoRedo = true;
-        mcpBridge->handlePdDomain(tx->replayAction, tx->inverse);
-        isExecutingMcpUndoRedo = false;
-    }
-    juce::MessageManager::callAsync([this] {
-        for (auto* editor : getEditors()) {
-            editor->triggerAsyncUpdate();
-        }
-    });
-}
-
-void PluginProcessor::redoMcpTransaction(t_canvas* cnv)
-{
-    std::unique_ptr<McpTransaction> tx;
-    {
-        juce::ScopedLock sl(mcpUndoLock);
-        auto it = mcpRedoStack.find(cnv);
-        if (it == mcpRedoStack.end() || it->second.empty()) return;
-
-        tx = std::make_unique<McpTransaction>(it->second.back());
-        it->second.pop_back();
-        mcpUndoStack[cnv].push_back(*tx);
-    }
-
-    if (mcpBridge && tx) {
-        isExecutingMcpUndoRedo = true;
-        mcpBridge->handlePdDomain(tx->replayAction, tx->forward);
-        isExecutingMcpUndoRedo = false;
-    }
-    juce::MessageManager::callAsync([this] {
-        for (auto* editor : getEditors()) {
-            editor->triggerAsyncUpdate();
-        }
-    });
-}
-
-void PluginProcessor::clearMcpTransactions(t_canvas* cnv)
-{
-    {
-        juce::ScopedLock sl(mcpUndoLock);
-        mcpUndoStack.erase(cnv);
-        mcpRedoStack.erase(cnv);
-    }
-    juce::MessageManager::callAsync([this] {
-        for (auto* editor : getEditors()) {
-            editor->triggerAsyncUpdate();
-        }
-    });
 }
 
 // This creates new instances of the plugin..

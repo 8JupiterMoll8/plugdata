@@ -229,7 +229,7 @@ public:
         auto midi = ptr.get<t_fake_aimidi>();
         if (!midi || !pd || midi->x_note_count <= 0) return;
 
-        PluginProcessor::McpMidiTake take;
+        McpSession::McpMidiTake take;
         take.id = juce::String::fromUTF8(midi->x_take_id);
         take.bpm = static_cast<int>(midi->x_bpm);
         take.noteCount = midi->x_note_count;
@@ -257,7 +257,7 @@ public:
         take.json = juce::JSON::toString(var(root.get()));
         take.durationSec = maxTime;
 
-        pd->addMcpMidiTake(std::move(take));
+        pd->getMcp()->session.addMcpMidiTake(std::move(take));
     }
 
     void transmitToAi()
@@ -275,7 +275,7 @@ public:
         outlet_symbol(midi->x_out_id, gensym(midi->x_take_id));
         outlet_bang(midi->x_out_bang);
 
-        if (auto* bridge = pd->getMCPBridge()) {
+        if (auto* bridge = pd->getMcp()->getMCPBridge()) {
             juce::String prompt = "Incorporate MIDI take (" + takeId + ", " +
                                   juce::String(count) + " notes, " +
                                   juce::String(bpm) + " BPM) into the patch.";

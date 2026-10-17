@@ -365,7 +365,7 @@ Canvas::~Canvas()
     // leak (<=50 full forward+inverse messages each) and, worse, a later canvas
     // could reuse the freed t_canvas* address and inherit a stale stack.
     if (!isGraph)
-        pd->clearMcpTransactions(patch.getUncheckedPointer());
+        pd->getMcp()->clearMcpTransactions(patch.getUncheckedPointer());
 
     if (getValue<bool>(isGraphChild) && isGraph)
     patch.setVisible(false);
@@ -636,8 +636,8 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
     }
 
     // PRD overlay: titled regions drawn BEHIND the objects (structure at a glance).
-    if (pd && shouldShowAIRegions() && !pd->getMcpRegions().empty()) {
-        for (auto const& r : pd->getMcpRegions()) {
+    if (pd && shouldShowAIRegions() && !pd->getMcp()->session.getMcpRegions().empty()) {
+        for (auto const& r : pd->getMcp()->session.getMcpRegions()) {
             float rx = 0.0f, ry = 0.0f, rw = 0.0f, rh = 0.0f;
             if (r.targetIds.size() > 0) {
                 bool first = true;
@@ -867,9 +867,9 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
 
     // PRD overlay: Console Tape (Eurorack Scribble Strip) annotations.
     // Pinned directly above the module strip, bounded to column width (0% horizontal spill).
-    if (pd && shouldShowAIAnnotations() && !pd->getMcpAnnotations().empty()) {
+    if (pd && shouldShowAIAnnotations() && !pd->getMcp()->session.getMcpAnnotations().empty()) {
         int noteIdx = 0;
-        for (auto const& a : pd->getMcpAnnotations()) {
+        for (auto const& a : pd->getMcp()->session.getMcpAnnotations()) {
             if (a.text.isEmpty()) continue;
             float rawAx = 0.0f, rawAy = 0.0f, rawLx = 0.0f, rawLy = 0.0f;
             bool hasLead = false;
@@ -1131,7 +1131,7 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
         bool isVoiceRec = false;
         float voiceLvl = 0.0f;
         if (pd) {
-            if (auto* br = pd->getMCPBridge()) {
+            if (auto* br = pd->getMcp()->getMCPBridge()) {
                 isVoiceRec = br->isVoiceCapturing();
                 voiceLvl = br->getVoiceLiveLevel();
             }
@@ -1167,11 +1167,11 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
                 float const gap = 4.0f;
                 float const pad = 6.0f;
                 float const by = (h - btn) * 0.5f;
-                bool const capturing = pd && pd->getMCPBridge() && pd->getMCPBridge()->isVoiceCapturing();
-                int const captureMode = capturing ? pd->getMCPBridge()->getVoiceCaptureMode() : 0;
+                bool const capturing = pd && pd->getMcp()->getMCPBridge() && pd->getMcp()->getMCPBridge()->isVoiceCapturing();
+                int const captureMode = capturing ? pd->getMcp()->getMCPBridge()->getVoiceCaptureMode() : 0;
                 bool const melodyRec = capturing && captureMode == 1;
                 bool const beatRec = capturing && captureMode == 2;
-                bool const midiRec = pd && pd->getMCPBridge() && pd->getMCPBridge()->isMidiCapturing();
+                bool const midiRec = pd && pd->getMcp()->getMCPBridge() && pd->getMcp()->getMCPBridge()->isMidiCapturing();
 
                 for (int i = 0; i < 6; ++i) {
                     float const bx = pad + i * (btn + gap);
@@ -1247,7 +1247,7 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
                         nanovg::nvgStroke(nvg);
 
                         if (melodyRec) { // live level aura
-                            float const lvl = pd->getMCPBridge()->getVoiceLiveLevel();
+                            float const lvl = pd->getMcp()->getMCPBridge()->getVoiceLiveLevel();
                             nanovg::nvgBeginPath(nvg);
                             nanovg::nvgRoundedRect(nvg, bx - 2.0f - lvl * 4.0f, by - 2.0f - lvl * 4.0f,
                                            btn + 4.0f + lvl * 8.0f, btn + 4.0f + lvl * 8.0f, 8.0f);
@@ -1277,7 +1277,7 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
                         nanovg::nvgStroke(nvg);
 
                         if (beatRec) { // live level aura
-                            float const lvl = pd->getMCPBridge()->getVoiceLiveLevel();
+                            float const lvl = pd->getMcp()->getMCPBridge()->getVoiceLiveLevel();
                             nanovg::nvgBeginPath(nvg);
                             nanovg::nvgRoundedRect(nvg, bx - 2.0f - lvl * 4.0f, by - 2.0f - lvl * 4.0f,
                                            btn + 4.0f + lvl * 8.0f, btn + 4.0f + lvl * 8.0f, 8.0f);
@@ -1318,7 +1318,7 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
 
                 // Record slot: declared intent + live level while capturing.
                 if (melodyRec || beatRec || midiRec) {
-                    int const nNotes = (pd && pd->getMCPBridge()) ? pd->getMCPBridge()->getMidiCaptureNoteCount() : 0;
+                    int const nNotes = (pd && pd->getMcp()->getMCPBridge()) ? pd->getMcp()->getMCPBridge()->getMidiCaptureNoteCount() : 0;
                     juce::String const recText = midiRec
                         ? ("Play MIDI keyboard - tap keys to stop (" + juce::String(nNotes) + " notes)")
                         : (melodyRec ? "Sing a melody - tap the note to stop" : "Beatbox - tap the drum to stop");
@@ -1329,7 +1329,7 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
                     nanovg::nvgDrawRoundedRect(nvg, boxX, boxY, boxW, 32.0f, nanovg::nvgRGBA(26, 18, 20, 242), recBorder, 7.0f);
 
                     float const pulse = 0.65f + 0.35f * std::sin(static_cast<float>(juce::Time::getMillisecondCounter()) * 0.008f);
-                    float const lvl = juce::jlimit(0.0f, 1.0f, pd->getMCPBridge()->getVoiceLiveLevel() * 3.5f);
+                    float const lvl = juce::jlimit(0.0f, 1.0f, pd->getMcp()->getMCPBridge()->getVoiceLiveLevel() * 3.5f);
                     nanovg::nvgBeginPath(nvg);
                     nanovg::nvgCircle(nvg, boxX + 15.0f, boxY + 16.0f, 4.0f);
                     NVGcolor const dotColor = midiRec
@@ -1830,8 +1830,8 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
 
     // PRD overlay: ghost/preview of PROPOSED (uncommitted) changes. Drawn above
     // the patch, never part of it — the artist sees the change before it's real.
-    if (pd && shouldShowAIGhosts() && !pd->getMcpGhosts().empty()) {
-        for (auto const& g : pd->getMcpGhosts()) {
+    if (pd && shouldShowAIGhosts() && !pd->getMcp()->session.getMcpGhosts().empty()) {
+        for (auto const& g : pd->getMcp()->session.getMcpGhosts()) {
             NVGScopedState scopedGhost(nvg);
             if (g.kind == 0) {
                 float const gx = canvasOrigin.x + g.x;
@@ -1937,7 +1937,7 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
     // Cinematic Viewport HUD & Subtitle Overlay (Video & Tutorial Mode)
     // Rendered in screen coordinates (unscaled/unpanned) — zero cord collisions.
     if (pd) {
-        auto hud = pd->getMcpHud();
+        auto hud = pd->getMcp()->session.getMcpHud();
         if (hud.active && shouldShowAIHud()) {
             NVGScopedState scopedHud(nvg);
             float const vw = static_cast<float>(viewport ? viewport->getWidth() : getWidth());
@@ -2215,14 +2215,14 @@ bool Canvas::shouldShowAIState() const
 bool Canvas::shouldShowAIRegions() const
 {
     if (presentationMode.getValue()) return false;
-    if (pd && !pd->getMcpRegions().empty()) return true;
+    if (pd && !pd->getMcp()->session.getMcpRegions().empty()) return true;
     return showAiRegions;
 }
 
 bool Canvas::shouldShowAIAnnotations() const
 {
     if (presentationMode.getValue()) return false;
-    if (pd && !pd->getMcpAnnotations().empty()) return true;
+    if (pd && !pd->getMcp()->session.getMcpAnnotations().empty()) return true;
     return showAiAnnotations;
 }
 
@@ -2336,9 +2336,9 @@ juce::StringArray Canvas::getSelectionStableIds()
     t_canvas* cnv = patchPtr ? patchPtr.get() : nullptr;
     for (auto* obj : getSelectionOfType<Object>()) {
         if (auto* ptr = obj->getPointer()) {
-            auto tid = pd->getStableId(ptr);
+            auto tid = pd->getMcp()->getStableId(ptr);
             if (tid.isEmpty() && cnv) {
-                tid = pd->getOrAdoptStableId(cnv, ptr);
+                tid = pd->getMcp()->getOrAdoptStableId(cnv, ptr);
             }
             if (tid.isNotEmpty()) ids.add(tid);
         }
@@ -2352,12 +2352,12 @@ void Canvas::createTextNoteAt(Point<int> canvasPos)
 
     // Drop any abandoned empty artist note first so note indices never drift.
     {
-        juce::ScopedLock sl(pd->mcpOverlayLock);
-        std::erase_if(pd->mcpAnnotations, [](PluginProcessor::McpAnnotation const& a) {
+        juce::ScopedLock sl(pd->getMcp()->session.mcpOverlayLock);
+        std::erase_if(pd->getMcp()->session.mcpAnnotations, [](McpSession::McpAnnotation const& a) {
             return a.text.isEmpty() && a.kind == "artist";
         });
 
-        PluginProcessor::McpAnnotation ann;
+        McpSession::McpAnnotation ann;
         ann.x = static_cast<float>(canvasPos.x - canvasOrigin.x);
         ann.y = static_cast<float>(canvasPos.y - canvasOrigin.y);
         ann.kind = "artist";
@@ -2369,16 +2369,16 @@ void Canvas::createTextNoteAt(Point<int> canvasPos)
             ann.targetId = selIds[0];
             ann.targetIds = selIds;
         }
-        pd->mcpAnnotations.push_back(ann);
+        pd->getMcp()->session.mcpAnnotations.push_back(ann);
     }
 
-    openNoteEditorForIndex(static_cast<int>(pd->getMcpAnnotations().size()) - 1);
+    openNoteEditorForIndex(static_cast<int>(pd->getMcp()->session.getMcpAnnotations().size()) - 1);
 }
 
 void Canvas::openNoteEditorForIndex(int index)
 {
     if (!pd) return;
-    auto const anns = pd->getMcpAnnotations();
+    auto const anns = pd->getMcp()->session.getMcpAnnotations();
     if (index < 0 || index >= static_cast<int>(anns.size())) return;
     auto const ann = anns[static_cast<size_t>(index)];
 
@@ -2393,12 +2393,12 @@ void Canvas::openNoteEditorForIndex(int index)
             if (mcpNoteEditIndex < 0) return;
             auto const txt = mcpNoteEditor ? mcpNoteEditor->getText().trim() : juce::String();
             if (pd) {
-                juce::ScopedLock sl(pd->mcpOverlayLock);
-                if (mcpNoteEditIndex < static_cast<int>(pd->mcpAnnotations.size())) {
+                juce::ScopedLock sl(pd->getMcp()->session.mcpOverlayLock);
+                if (mcpNoteEditIndex < static_cast<int>(pd->getMcp()->session.mcpAnnotations.size())) {
                     if (txt.isEmpty()) {
-                        pd->mcpAnnotations.erase(pd->mcpAnnotations.begin() + mcpNoteEditIndex);
+                        pd->getMcp()->session.mcpAnnotations.erase(pd->getMcp()->session.mcpAnnotations.begin() + mcpNoteEditIndex);
                     } else {
-                        auto& a = pd->mcpAnnotations[static_cast<size_t>(mcpNoteEditIndex)];
+                        auto& a = pd->getMcp()->session.mcpAnnotations[static_cast<size_t>(mcpNoteEditIndex)];
                         a.text = txt;
                         a.kind = "artist";
                     }
@@ -2418,9 +2418,9 @@ void Canvas::openNoteEditorForIndex(int index)
         // Live feedback: write the field's text onto the note as you type.
         mcpNoteEditor->onTextChange = [this] {
             if (mcpNoteEditor && pd && mcpNoteEditIndex >= 0) {
-                juce::ScopedLock sl(pd->mcpOverlayLock);
-                if (mcpNoteEditIndex < static_cast<int>(pd->mcpAnnotations.size()))
-                    pd->mcpAnnotations[static_cast<size_t>(mcpNoteEditIndex)].text = mcpNoteEditor->getText();
+                juce::ScopedLock sl(pd->getMcp()->session.mcpOverlayLock);
+                if (mcpNoteEditIndex < static_cast<int>(pd->getMcp()->session.mcpAnnotations.size()))
+                    pd->getMcp()->session.mcpAnnotations[static_cast<size_t>(mcpNoteEditIndex)].text = mcpNoteEditor->getText();
             }
             repaint();
             if (editor) editor->nvgSurface.invalidateAll();
@@ -2574,7 +2574,7 @@ void Canvas::sendSketchBuild(const juce::String& prompt)
 {
     if (!pd) return;
     // Visible-Only Ingestion: hidden ink is excluded from the brief (sent as []).
-    if (mcpCompletedStrokes.empty() && pd->getMcpReferenceImages().empty()) return;
+    if (mcpCompletedStrokes.empty() && pd->getMcp()->session.getMcpReferenceImages().empty()) return;
 
     // Committing = done drawing: disarm the pen so the artist can immediately
     // drag/tweak the freshly built patch without leaving ink everywhere.
@@ -2601,7 +2601,7 @@ void Canvas::sendSketchBuild(const juce::String& prompt)
     }
 
     auto const subpatch = patch.getPointer() ? juce::String(reinterpret_cast<uintptr_t>(patch.getPointer().get())) : juce::String("0");
-    if (auto* br = pd->getMCPBridge()) {
+    if (auto* br = pd->getMcp()->getMCPBridge()) {
         br->sendSketchBuild(subpatch, mcpStudioInkVisible ? buildSketchJson() : juce::String("[]"), bboxJson, prompt);
     }
 
@@ -2696,7 +2696,7 @@ juce::Image loadImageFromClipboard()
 void Canvas::renderReferenceImages(NVGcontext* nvg, Rectangle<int> invalidRegion)
 {
     if (!pd || !shouldShowAIReferences()) return; // 👁 layer toggle + performance mode
-    auto const images = pd->getMcpReferenceImages();
+    auto const images = pd->getMcp()->session.getMcpReferenceImages();
     if (images.empty()) return;
 
     for (auto const& img : images) {
@@ -2818,7 +2818,7 @@ bool Canvas::pasteImageFromClipboard()
 
     auto const mousePosition = getMouseXYRelative() - canvasOrigin;
 
-    PluginProcessor::McpReferenceImage ref;
+    McpSession::McpReferenceImage ref;
     ref.id = hash;
     ref.filePath = pngFile.getFullPathName();
     ref.title = "Pasted_" + hash.substring(0, 6) + ".png";
@@ -2836,10 +2836,10 @@ bool Canvas::pasteImageFromClipboard()
     }
     ref.width = w;
     ref.height = h;
-    pd->addMcpReferenceImage(ref);
+    pd->getMcp()->session.addMcpReferenceImage(ref);
 
     // Bridge dispatch: /pd/reference/image <path> <x> <y> <w> <h> (PD patch coords)
-    if (auto* br = pd->getMCPBridge()) {
+    if (auto* br = pd->getMcp()->getMCPBridge()) {
         br->sendReferenceImage(ref.filePath, ref.x, ref.y, ref.width, ref.height);
     }
 
@@ -2857,10 +2857,10 @@ bool Canvas::pasteImageFromClipboard()
 void Canvas::renderVoiceTakes(NVGcontext* nvg, Rectangle<int> invalidRegion)
 {
     if (!pd || presentationMode.getValue()) return;
-    auto takes = pd->getMcpVoiceTakes();
+    auto takes = pd->getMcp()->session.getMcpVoiceTakes();
     if (takes.empty()) return;
 
-    auto* br = pd->getMCPBridge();
+    auto* br = pd->getMcp()->getMCPBridge();
     juce::String const playingId = br ? br->getPlayingVoiceTakeId() : juce::String();
 
     constexpr float chipW = 240.0f;
@@ -2876,7 +2876,7 @@ void Canvas::renderVoiceTakes(NVGcontext* nvg, Rectangle<int> invalidRegion)
                                                     : static_cast<float>(canvasOrigin.x + 40);
             float const py = mcpTakeSpawnPos.y != 0 ? static_cast<float>(mcpTakeSpawnPos.y)
                                                     : static_cast<float>(canvasOrigin.y + 40);
-            pd->setMcpVoiceTakePos(take.id, px - static_cast<float>(canvasOrigin.x),
+            pd->getMcp()->session.setMcpVoiceTakePos(take.id, px - static_cast<float>(canvasOrigin.x),
                                    py - static_cast<float>(canvasOrigin.y) + 46.0f * static_cast<float>(slot));
             take.x = px - static_cast<float>(canvasOrigin.x);
             take.y = py - static_cast<float>(canvasOrigin.y) + 46.0f * static_cast<float>(slot);
@@ -3009,7 +3009,7 @@ void Canvas::renderVoiceTakes(NVGcontext* nvg, Rectangle<int> invalidRegion)
 bool Canvas::handleVoiceTakeClick(MouseEvent const& e, Point<int> mousePos)
 {
     if (!pd) return false;
-    auto const takes = pd->getMcpVoiceTakes();
+    auto const takes = pd->getMcp()->session.getMcpVoiceTakes();
     for (auto it = takes.rbegin(); it != takes.rend(); ++it) {
         auto const& take = *it;
         if (!take.visible) continue;
@@ -3017,7 +3017,7 @@ bool Canvas::handleVoiceTakeClick(MouseEvent const& e, Point<int> mousePos)
         if (!b.contains(mousePos)) continue;
 
         int const relX = mousePos.x - b.getX();
-        auto* br = pd->getMCPBridge();
+        auto* br = pd->getMcp()->getMCPBridge();
 
         if (relX >= 30 && relX <= 60) {
             // ▶ / ■ audition toggle
@@ -3029,7 +3029,7 @@ bool Canvas::handleVoiceTakeClick(MouseEvent const& e, Point<int> mousePos)
         if (relX >= b.getWidth() - 30) {
             // ✕ remove (stop audition first if it's this one)
             if (br && br->getPlayingVoiceTakeId() == take.id) br->stopVoiceTake();
-            pd->removeMcpVoiceTake(take.id);
+            pd->getMcp()->session.removeMcpVoiceTake(take.id);
             repaint();
             if (editor) editor->nvgSurface.invalidateAll();
             return true;
@@ -3047,10 +3047,10 @@ bool Canvas::handleVoiceTakeClick(MouseEvent const& e, Point<int> mousePos)
 void Canvas::renderMidiTakes(NVGcontext* nvg, Rectangle<int> invalidRegion)
 {
     if (!pd || presentationMode.getValue()) return;
-    auto takes = pd->getMcpMidiTakes();
+    auto takes = pd->getMcp()->session.getMcpMidiTakes();
     if (takes.empty()) return;
 
-    auto* br = pd->getMCPBridge();
+    auto* br = pd->getMcp()->getMCPBridge();
     juce::String const playingId = br ? br->getPlayingMidiTakeId() : juce::String();
 
     constexpr float chipW = 240.0f;
@@ -3065,7 +3065,7 @@ void Canvas::renderMidiTakes(NVGcontext* nvg, Rectangle<int> invalidRegion)
                                                     : static_cast<float>(canvasOrigin.x + 40);
             float const py = mcpTakeSpawnPos.y != 0 ? static_cast<float>(mcpTakeSpawnPos.y)
                                                     : static_cast<float>(canvasOrigin.y + 40);
-            pd->setMcpMidiTakePos(take.id, px - static_cast<float>(canvasOrigin.x),
+            pd->getMcp()->session.setMcpMidiTakePos(take.id, px - static_cast<float>(canvasOrigin.x),
                                   py - static_cast<float>(canvasOrigin.y) + 46.0f * static_cast<float>(slot));
             take.x = px - static_cast<float>(canvasOrigin.x);
             take.y = py - static_cast<float>(canvasOrigin.y) + 46.0f * static_cast<float>(slot);
@@ -3167,7 +3167,7 @@ void Canvas::renderMidiTakes(NVGcontext* nvg, Rectangle<int> invalidRegion)
 bool Canvas::handleMidiTakeClick(MouseEvent const& e, Point<int> mousePos)
 {
     if (!pd) return false;
-    auto const takes = pd->getMcpMidiTakes();
+    auto const takes = pd->getMcp()->session.getMcpMidiTakes();
     for (auto it = takes.rbegin(); it != takes.rend(); ++it) {
         auto const& take = *it;
         if (!take.visible) continue;
@@ -3175,7 +3175,7 @@ bool Canvas::handleMidiTakeClick(MouseEvent const& e, Point<int> mousePos)
         if (!b.contains(mousePos)) continue;
 
         int const relX = mousePos.x - b.getX();
-        auto* br = pd->getMCPBridge();
+        auto* br = pd->getMcp()->getMCPBridge();
 
         if (relX >= 26 && relX <= 50) {
             // ▶ / ⏸ audition toggle
@@ -3188,7 +3188,7 @@ bool Canvas::handleMidiTakeClick(MouseEvent const& e, Point<int> mousePos)
         if (relX >= b.getWidth() - 30) {
             // ✕ remove (stop playback first if it's currently playing)
             if (br && br->getPlayingMidiTakeId() == take.id) br->stopMidiTake();
-            pd->removeMcpMidiTake(take.id);
+            pd->getMcp()->session.removeMcpMidiTake(take.id);
             repaint();
             if (editor) editor->nvgSurface.invalidateAll();
             return true;
@@ -3206,7 +3206,7 @@ bool Canvas::handleMidiTakeClick(MouseEvent const& e, Point<int> mousePos)
 bool Canvas::handleReferenceImageClick(MouseEvent const& e, Point<int> mousePos, bool isRightClick)
 {
     if (!pd) return false;
-    auto const images = pd->getMcpReferenceImages();
+    auto const images = pd->getMcp()->session.getMcpReferenceImages();
     for (auto it = images.rbegin(); it != images.rend(); ++it) {
         auto const& img = *it;
         // Include the title header in the hit zone so the tag doubles as a grab handle
@@ -3246,16 +3246,16 @@ bool Canvas::handleReferenceImageClick(MouseEvent const& e, Point<int> mousePos,
                     }
                     canvas->sendPillPrompt(prompt, false);
                 } else if (result == 2) {
-                    for (auto const& im : canvas->pd->getMcpReferenceImages()) {
+                    for (auto const& im : canvas->pd->getMcp()->session.getMcpReferenceImages()) {
                         if (im.id == imageId) {
-                            canvas->pd->setMcpReferenceLock(imageId, !im.isLocked);
+                            canvas->pd->getMcp()->session.setMcpReferenceLock(imageId, !im.isLocked);
                             break;
                         }
                     }
                     canvas->repaint();
                     if (canvas->editor) canvas->editor->nvgSurface.invalidateAll();
                 } else if (result == 3) {
-                    canvas->pd->removeMcpReferenceImage(imageId);
+                    canvas->pd->getMcp()->session.removeMcpReferenceImage(imageId);
                     canvas->mcpRefImageCache.erase(imageId.toStdString());
                     canvas->repaint();
                     if (canvas->editor) canvas->editor->nvgSurface.invalidateAll();
@@ -3270,7 +3270,7 @@ bool Canvas::handleReferenceImageClick(MouseEvent const& e, Point<int> mousePos,
 bool Canvas::isApprovalRequested() const
 {
     if (!pd) return false;
-    auto const hud = pd->getMcpHud();
+    auto const hud = pd->getMcp()->session.getMcpHud();
     return hud.active && hud.chapter.containsIgnoreCase("APPROVE");
 }
 
@@ -3308,23 +3308,23 @@ void Canvas::setOverlayMask(int mask)
 
 bool Canvas::hasOverlayTargets() const
 {
-    return pd && pd->hasMcpOverlayTargets();
+    return pd && pd->getMcp()->session.hasMcpOverlayTargets();
 }
 
 bool Canvas::isObjectTargeted(Object const* obj) const
 {
-    if (!pd || !pd->hasMcpOverlayTargets()) return true;
+    if (!pd || !pd->getMcp()->session.hasMcpOverlayTargets()) return true;
     if (!obj) return false;
-    return pd->isMcpTargeted(obj->getPointer());
+    return pd->getMcp()->session.isMcpTargeted(obj->getPointer());
 }
 
 bool Canvas::isConnectionTargeted(Connection const* c) const
 {
-    if (!pd || !pd->hasMcpOverlayTargets()) return true;
+    if (!pd || !pd->getMcp()->session.hasMcpOverlayTargets()) return true;
     if (!c) return false;
     t_gobj* const outPtr = c->outobj ? c->outobj->getPointer() : nullptr;
     t_gobj* const inPtr = c->inobj ? c->inobj->getPointer() : nullptr;
-    return pd->isMcpConnectionTargeted(outPtr, inPtr);
+    return pd->getMcp()->session.isMcpConnectionTargeted(outPtr, inPtr);
 }
 
 int Canvas::getOverlays() const
@@ -3762,7 +3762,7 @@ Object* Canvas::findObjectByStableId(juce::String const& targetId) const
     for (auto* obj : objects) {
         if (!obj) continue;
         if (auto* ptr = obj->getPointer()) {
-            if (pd->getStableId(ptr) == targetId)
+            if (pd->getMcp()->getStableId(ptr) == targetId)
                 return obj;
         }
     }
@@ -3804,7 +3804,7 @@ bool Canvas::getAnnotationLiveBounds(juce::String const& targetId, juce::StringA
 
             // Stack multiple notes on the same group vertically upwards
             if (pd) {
-                auto const allAnns = pd->getMcpAnnotations();
+                auto const allAnns = pd->getMcp()->session.getMcpAnnotations();
                 int noteOrder = 0;
                 for (auto const& prevA : allAnns) {
                     bool isSelf = false;
@@ -3850,7 +3850,7 @@ bool Canvas::getAnnotationLiveBounds(juce::String const& targetId, float fallbac
 juce::Rectangle<float> Canvas::getAnnotationScreenBounds(size_t annIndex) const
 {
     if (!pd) return {};
-    auto const anns = pd->getMcpAnnotations();
+    auto const anns = pd->getMcp()->session.getMcpAnnotations();
     if (annIndex >= anns.size()) return {};
     auto const& a = anns[annIndex];
     float rawAx = 0.0f, rawAy = 0.0f, rawLx = 0.0f, rawLy = 0.0f;
@@ -3880,9 +3880,9 @@ void Canvas::mouseMove(MouseEvent const& e)
     bool hoverClose = false;
     int hoverChip = -1;
 
-    if (pd && !pd->getMcpAnnotations().empty()) {
+    if (pd && !pd->getMcp()->session.getMcpAnnotations().empty()) {
         auto const pt = e.getPosition().toFloat();
-        auto const anns = pd->getMcpAnnotations();
+        auto const anns = pd->getMcp()->session.getMcpAnnotations();
         for (int i = static_cast<int>(anns.size()) - 1; i >= 0; --i) {
             auto const tb = getAnnotationScreenBounds(static_cast<size_t>(i));
             if (tb.isEmpty()) continue;
@@ -3944,9 +3944,9 @@ bool Canvas::isPointOverNote(Point<int> canvasPt) const
         if (mcpPillDrawerMode != 0 && mcpPillDrawerFrame.contains(canvasPt)) return true;
         if (mcpPillDrawerMode == 3 && mcpPaletteFrame.contains(canvasPt)) return true;
     }
-    if (!pd || pd->getMcpAnnotations().empty()) return false;
+    if (!pd || pd->getMcp()->session.getMcpAnnotations().empty()) return false;
     auto const pt = canvasPt.toFloat();
-    auto const anns = pd->getMcpAnnotations();
+    auto const anns = pd->getMcp()->session.getMcpAnnotations();
     for (size_t i = 0; i < anns.size(); ++i) {
         auto const tb = getAnnotationScreenBounds(i);
         if (tb.isEmpty()) continue;
@@ -4000,7 +4000,7 @@ bool Canvas::handleNoteClick(Point<int> canvasPt)
                     juce::String lens(lenses[idx]);
                     mcpActiveLens = lens;
                     if (pd) {
-                        if (auto* br = pd->getMCPBridge()) br->sendLens(lens.isEmpty() ? "free" : lens);
+                        if (auto* br = pd->getMcp()->getMCPBridge()) br->sendLens(lens.isEmpty() ? "free" : lens);
                     }
                     mcpPillDrawerMode = 0;
                     mcpPillDrawerFrame = {};
@@ -4065,7 +4065,7 @@ bool Canvas::handleNoteClick(Point<int> canvasPt)
                     case 3:
                         // Melody record: declared intent — sing (no guessing).
                         if (pd) {
-                            if (auto* br = pd->getMCPBridge()) {
+                            if (auto* br = pd->getMcp()->getMCPBridge()) {
                                 if (br->isVoiceCapturing()) {
                                     br->stopVoiceCaptureAndAnalyze();
                                 } else {
@@ -4083,7 +4083,7 @@ bool Canvas::handleNoteClick(Point<int> canvasPt)
                     case 4:
                         // Beat record: declared intent — beatbox (no guessing).
                         if (pd) {
-                            if (auto* br = pd->getMCPBridge()) {
+                            if (auto* br = pd->getMcp()->getMCPBridge()) {
                                 if (br->isVoiceCapturing()) {
                                     br->stopVoiceCaptureAndAnalyze();
                                 } else {
@@ -4101,7 +4101,7 @@ bool Canvas::handleNoteClick(Point<int> canvasPt)
                     case 5:
                         // MIDI record: declared intent — MIDI keyboard (exact notes).
                         if (pd) {
-                            if (auto* br = pd->getMCPBridge()) {
+                            if (auto* br = pd->getMcp()->getMCPBridge()) {
                                 if (br->isMidiCapturing()) {
                                     br->stopMidiCaptureAndStage();
                                 } else {
@@ -4167,9 +4167,9 @@ bool Canvas::handleNoteClick(Point<int> canvasPt)
         }
     }
 
-    if (!pd || pd->getMcpAnnotations().empty()) return false;
+    if (!pd || pd->getMcp()->session.getMcpAnnotations().empty()) return false;
     auto const pt = canvasPt.toFloat();
-    auto anns = pd->getMcpAnnotations();
+    auto anns = pd->getMcp()->session.getMcpAnnotations();
     for (int i = static_cast<int>(anns.size()) - 1; i >= 0; --i) {
         auto const& a = anns[static_cast<size_t>(i)];
         auto const tb = getAnnotationScreenBounds(static_cast<size_t>(i));
@@ -4189,9 +4189,9 @@ bool Canvas::handleNoteClick(Point<int> canvasPt)
         if (closeZone.contains(pt)) {
             if (mcpNoteEditor) mcpNoteEditor->setVisible(false);
             mcpNoteEditIndex = -1;
-            juce::ScopedLock sl(pd->mcpOverlayLock);
-            if (i < static_cast<int>(pd->mcpAnnotations.size()))
-                pd->mcpAnnotations.erase(pd->mcpAnnotations.begin() + i);
+            juce::ScopedLock sl(pd->getMcp()->session.mcpOverlayLock);
+            if (i < static_cast<int>(pd->getMcp()->session.mcpAnnotations.size()))
+                pd->getMcp()->session.mcpAnnotations.erase(pd->getMcp()->session.mcpAnnotations.begin() + i);
             repaint();
             if (editor) editor->nvgSurface.invalidateAll();
             return true;
@@ -4256,7 +4256,7 @@ bool Canvas::handleNoteClick(Point<int> canvasPt)
                                         if (auto* cp = editor->getCopilotPanel())
                                             cp->receiveMessage("user", replyTxt);
                                     }
-                                    if (auto* br = pd->getMCPBridge())
+                                    if (auto* br = pd->getMcp()->getMCPBridge())
                                         br->sendArtistNote(targetId, replyTxt);
                                 }
                             }
@@ -4428,9 +4428,9 @@ void Canvas::mouseDown(MouseEvent const& e)
             hideSelectionPill();
 
             // Pill / note clicks were already handled above (before the pen branch).
-            if (false && pd && !pd->getMcpAnnotations().empty()) {
+            if (false && pd && !pd->getMcp()->session.getMcpAnnotations().empty()) {
                 auto const pt = e.getPosition().toFloat();
-                auto anns = pd->getMcpAnnotations();
+                auto anns = pd->getMcp()->session.getMcpAnnotations();
                 for (int i = static_cast<int>(anns.size()) - 1; i >= 0; --i) {
                     auto const& a = anns[static_cast<size_t>(i)];
                     float const tx = canvasOrigin.x + a.x - 6.0f;
@@ -4452,9 +4452,9 @@ void Canvas::mouseDown(MouseEvent const& e)
                                     juce::String txt = mcpNoteEditor ? mcpNoteEditor->getText().trim() : juce::String();
                                     juce::String targetId;
                                     if (pd) {
-                                        juce::ScopedLock sl(pd->mcpOverlayLock);
-                                        if (mcpNoteEditIndex < static_cast<int>(pd->mcpAnnotations.size())) {
-                                            auto& ann = pd->mcpAnnotations[static_cast<size_t>(mcpNoteEditIndex)];
+                                        juce::ScopedLock sl(pd->getMcp()->session.mcpOverlayLock);
+                                        if (mcpNoteEditIndex < static_cast<int>(pd->getMcp()->session.mcpAnnotations.size())) {
+                                            auto& ann = pd->getMcp()->session.mcpAnnotations[static_cast<size_t>(mcpNoteEditIndex)];
                                             ann.text = txt;
                                             ann.kind = "artist"; // it's the artist's note now
                                             targetId = ann.targetId;
@@ -4463,7 +4463,7 @@ void Canvas::mouseDown(MouseEvent const& e)
                                     mcpNoteEditIndex = -1;
                                     if (mcpNoteEditor) mcpNoteEditor->setVisible(false);
                                     if (send && txt.isNotEmpty() && pd) {
-                                        if (auto* br = pd->getMCPBridge()) br->sendArtistNote(targetId, txt);
+                                        if (auto* br = pd->getMcp()->getMCPBridge()) br->sendArtistNote(targetId, txt);
                                     }
                                     repaint();
                                 };
@@ -4479,9 +4479,9 @@ void Canvas::mouseDown(MouseEvent const& e)
                                 // (the note is GPU-drawn, so it updates reliably every keystroke).
                                 mcpNoteEditor->onTextChange = [this] {
                                     if (mcpNoteEditor && pd && mcpNoteEditIndex >= 0) {
-                                        juce::ScopedLock sl(pd->mcpOverlayLock);
-                                        if (mcpNoteEditIndex < static_cast<int>(pd->mcpAnnotations.size()))
-                                            pd->mcpAnnotations[static_cast<size_t>(mcpNoteEditIndex)].text = mcpNoteEditor->getText();
+                                        juce::ScopedLock sl(pd->getMcp()->session.mcpOverlayLock);
+                                        if (mcpNoteEditIndex < static_cast<int>(pd->getMcp()->session.mcpAnnotations.size()))
+                                            pd->getMcp()->session.mcpAnnotations[static_cast<size_t>(mcpNoteEditIndex)].text = mcpNoteEditor->getText();
                                     }
                                     repaint();
                                     if (editor) editor->nvgSurface.invalidateAll();
@@ -4595,7 +4595,7 @@ void Canvas::mouseDrag(MouseEvent const& e)
     if (mcpDraggingTakeId.isNotEmpty()) {
         auto const pt = e.getEventRelativeTo(this).getPosition();
         auto const pdPos = pt - mcpTakeDragOffset - canvasOrigin;
-        if (pd) pd->setMcpVoiceTakePos(mcpDraggingTakeId, static_cast<float>(pdPos.x), static_cast<float>(pdPos.y));
+        if (pd) pd->getMcp()->session.setMcpVoiceTakePos(mcpDraggingTakeId, static_cast<float>(pdPos.x), static_cast<float>(pdPos.y));
         repaint();
         if (editor) editor->nvgSurface.invalidateAll();
         return;
@@ -4605,7 +4605,7 @@ void Canvas::mouseDrag(MouseEvent const& e)
     if (mcpDraggingMidiTakeId.isNotEmpty()) {
         auto const pt = e.getEventRelativeTo(this).getPosition();
         auto const pdPos = pt - mcpMidiTakeDragOffset - canvasOrigin;
-        if (pd) pd->setMcpMidiTakePos(mcpDraggingMidiTakeId, static_cast<float>(pdPos.x), static_cast<float>(pdPos.y));
+        if (pd) pd->getMcp()->session.setMcpMidiTakePos(mcpDraggingMidiTakeId, static_cast<float>(pdPos.x), static_cast<float>(pdPos.y));
         repaint();
         if (editor) editor->nvgSurface.invalidateAll();
         return;
@@ -4615,7 +4615,7 @@ void Canvas::mouseDrag(MouseEvent const& e)
     if (mcpDraggingRefImageId.isNotEmpty()) {
         auto const pt = e.getEventRelativeTo(this).getPosition();
         auto const pdPos = pt - mcpRefImageDragOffset - canvasOrigin;
-        if (pd) pd->moveMcpReferenceImage(mcpDraggingRefImageId, static_cast<float>(pdPos.x), static_cast<float>(pdPos.y));
+        if (pd) pd->getMcp()->session.moveMcpReferenceImage(mcpDraggingRefImageId, static_cast<float>(pdPos.x), static_cast<float>(pdPos.y));
         repaint();
         if (editor) editor->nvgSurface.invalidateAll();
         return;
@@ -4793,7 +4793,7 @@ void Canvas::mouseUp(MouseEvent const& e)
             auto jsonStr = juce::JSON::toString(juce::var(ptsVar), true);
             bool const isFastPath = e.mods.isShiftDown();
             if (pd) {
-                if (auto* br = pd->getMCPBridge()) {
+                if (auto* br = pd->getMcp()->getMCPBridge()) {
                     auto const subpatch = patch.getPointer() ? juce::String(reinterpret_cast<uintptr_t>(patch.getPointer().get())) : juce::String("0");
                     br->sendSketchStroke(subpatch, jsonStr, isFastPath);
                 }
@@ -5354,7 +5354,7 @@ void Canvas::parkSelectionPill()
 
     auto const prompt = mcpSelectionPill ? mcpSelectionPill->getText().trim() : juce::String();
     if (prompt.isNotEmpty()) {
-        PluginProcessor::McpAnnotation ann;
+        McpSession::McpAnnotation ann;
         ann.kind = "artist";
         ann.text = prompt;
         ann.t = juce::Time::getMillisecondCounterHiRes() / 1000.0;
@@ -5374,8 +5374,8 @@ void Canvas::parkSelectionPill()
             }
         }
 
-        juce::ScopedLock sl(pd->mcpOverlayLock);
-        pd->mcpAnnotations.push_back(ann);
+        juce::ScopedLock sl(pd->getMcp()->session.mcpOverlayLock);
+        pd->getMcp()->session.mcpAnnotations.push_back(ann);
     }
 
     if (mcpSelectionPill) mcpSelectionPill->setText(juce::String(), false);
@@ -5413,9 +5413,9 @@ void Canvas::submitSelectionPill(bool queueForChat)
         t_canvas* cnv = patchPtr ? patchPtr.get() : nullptr;
         for (auto* obj : getSelectionOfType<Object>()) {
             if (auto* ptr = obj->getPointer()) {
-                auto tid = pd->getStableId(ptr);
+                auto tid = pd->getMcp()->getStableId(ptr);
                 if (tid.isEmpty() && cnv) {
-                    tid = pd->getOrAdoptStableId(cnv, ptr);
+                    tid = pd->getMcp()->getOrAdoptStableId(cnv, ptr);
                 }
                 if (tid.isNotEmpty()) targetIds.add(tid);
             }
@@ -5641,14 +5641,14 @@ void Canvas::sendPillPrompt(const juce::String& prompt, bool queueForChat)
     t_canvas* cnv = patchPtr ? patchPtr.get() : nullptr;
     for (auto* obj : getSelectionOfType<Object>()) {
         if (auto* ptr = obj->getPointer()) {
-            auto tid = pd->getStableId(ptr);
+            auto tid = pd->getMcp()->getStableId(ptr);
             if (tid.isEmpty() && cnv) {
-                tid = pd->getOrAdoptStableId(cnv, ptr);
+                tid = pd->getMcp()->getOrAdoptStableId(cnv, ptr);
             }
             if (tid.isNotEmpty()) targetIds.add(tid);
         }
     }
-    if (auto* br = pd->getMCPBridge()) br->sendSelectionPrompt(prompt, targetIds, queueForChat);
+    if (auto* br = pd->getMcp()->getMCPBridge()) br->sendSelectionPrompt(prompt, targetIds, queueForChat);
 }
 
 void Canvas::copySelection()
@@ -6505,8 +6505,8 @@ void Canvas::undo()
     }
 
     // 1. If an AI transaction exists, undo that first (safe transactional rollback with semantic IDs)
-    if (pd && pd->hasMcpTransaction(patch.getUncheckedPointer())) {
-        pd->undoMcpTransaction(patch.getUncheckedPointer());
+    if (pd && pd->getMcp()->hasMcpTransaction(patch.getUncheckedPointer())) {
+        pd->getMcp()->undoMcpTransaction(patch.getUncheckedPointer());
         synchronise();
         handleUpdateNowIfNeeded();
         patch.deselectAll();
@@ -6531,15 +6531,15 @@ void Canvas::undo()
 
 bool Canvas::canUndo()
 {
-    if (pd && pd->hasMcpTransaction(patch.getUncheckedPointer())) return true;
+    if (pd && pd->getMcp()->hasMcpTransaction(patch.getUncheckedPointer())) return true;
     return patch.canUndo();
 }
 
 void Canvas::redo()
 {
     // 1. If an AI transaction was undone, redo that first to recreate objects before redoing manual edits on them
-    if (pd && pd->hasMcpRedoTransaction(patch.getUncheckedPointer())) {
-        pd->redoMcpTransaction(patch.getUncheckedPointer());
+    if (pd && pd->getMcp()->hasMcpRedoTransaction(patch.getUncheckedPointer())) {
+        pd->getMcp()->redoMcpTransaction(patch.getUncheckedPointer());
         synchronise();
         handleUpdateNowIfNeeded();
         patch.deselectAll();

@@ -1276,7 +1276,7 @@ void Object::performRender(NVGcontext* nvg)
         nanovg::nvgStroke(nvg);
     } else if (cnv->shouldShowAIState()) {
         // PRD overlay: AI state marker drawn per-object (1=changed, 2=proposed, 3=error).
-        int const aiState = cnv->pd->getAiOverlayState(getPointer());
+        int const aiState = cnv->pd->getMcp()->session.getAiOverlayState(getPointer());
         if (aiState != 0) {
             int const st = aiState;
             NVGcolor col = (st == 1) ? nanovg::nvgRGB(0x3d, 0xdd, 0x8a)

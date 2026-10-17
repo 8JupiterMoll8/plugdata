@@ -1053,8 +1053,8 @@ juce::String MCPBridge::computeDiagnoseFacts(PluginProcessor* processor, t_canva
     std::vector<juce::String> classNames;
     std::unordered_map<t_gobj*, juce::String> ptrToId;
     auto canonKey = canonicalCanvasKey(cnv);
-    auto mapIt = processor->mcpStableObjectMap.find(canonKey.toStdString());
-    if (mapIt != processor->mcpStableObjectMap.end())
+    auto mapIt = processor->getMcp()->session.mcpStableObjectMap.find(canonKey.toStdString());
+    if (mapIt != processor->getMcp()->session.mcpStableObjectMap.end())
         for (auto& [tid, ptr] : mapIt->second)
             if (ptr) ptrToId[ptr] = juce::String(tid);
 
@@ -1402,8 +1402,8 @@ juce::String MCPBridge::computeSignalTrace(PluginProcessor* processor, t_canvas*
     std::vector<juce::String> classNames;
     std::unordered_map<t_gobj*, juce::String> ptrToId;
     auto canonKey = canonicalCanvasKey(cnv);
-    auto mapIt = processor->mcpStableObjectMap.find(canonKey.toStdString());
-    if (mapIt != processor->mcpStableObjectMap.end())
+    auto mapIt = processor->getMcp()->session.mcpStableObjectMap.find(canonKey.toStdString());
+    if (mapIt != processor->getMcp()->session.mcpStableObjectMap.end())
         for (auto& [tid, ptr] : mapIt->second)
             if (ptr) ptrToId[ptr] = juce::String(tid);
 
@@ -1806,7 +1806,7 @@ static bool mcpHasCollisions(PluginProcessor* processor, t_canvas* cnv, int pad)
             if (a.x < b.x + b.w + pad && a.x + a.w + pad > b.x
              && a.y < b.y + b.h + pad && a.y + a.h + pad > b.y) return true;
         }
-    for (auto const& rg : processor->mcpRegions) {
+    for (auto const& rg : processor->getMcp()->session.mcpRegions) {
         if (rg.title.isEmpty()) continue;
         int rx = static_cast<int>(rg.x), ry = static_cast<int>(rg.y);
         int rw = static_cast<int>(rg.w), rh = 26;
@@ -1830,8 +1830,8 @@ juce::String MCPBridge::computeClusters(PluginProcessor* processor, t_canvas* cn
 
     std::unordered_map<t_gobj*, juce::String> ptrToId;
     auto canonKey = canonicalCanvasKey(cnv);
-    auto mapIt = processor->mcpStableObjectMap.find(canonKey.toStdString());
-    if (mapIt != processor->mcpStableObjectMap.end())
+    auto mapIt = processor->getMcp()->session.mcpStableObjectMap.find(canonKey.toStdString());
+    if (mapIt != processor->getMcp()->session.mcpStableObjectMap.end())
         for (auto& [tid, ptr] : mapIt->second)
             if (ptr) ptrToId[ptr] = juce::String(tid);
 
@@ -2133,7 +2133,7 @@ int MCPBridge::sanitizeLayout(PluginProcessor* processor, t_canvas* cnv, int pad
             }
         }
         // De-overlap objects that overlap region title bars
-        for (auto const& rg : processor->mcpRegions) {
+        for (auto const& rg : processor->getMcp()->session.mcpRegions) {
             if (rg.title.isEmpty()) continue;
             int rx = static_cast<int>(rg.x), ry = static_cast<int>(rg.y);
             int rw = static_cast<int>(rg.w), rh = 26;
@@ -2514,8 +2514,8 @@ juce::var MCPBridge::buildIdentitySidecar(PluginProcessor* processor, t_canvas* 
     auto buildIdArray = [&](const juce::String& mapKey, t_canvas* c) -> juce::var {
         juce::Array<juce::var> arr;
         std::unordered_map<t_gobj*, juce::String> ptrToId;
-        auto mapIt = processor->mcpStableObjectMap.find(mapKey.toStdString());
-        if (mapIt != processor->mcpStableObjectMap.end()) {
+        auto mapIt = processor->getMcp()->session.mcpStableObjectMap.find(mapKey.toStdString());
+        if (mapIt != processor->getMcp()->session.mcpStableObjectMap.end()) {
             for (auto const& [id, ptr] : mapIt->second)
                 if (ptr) ptrToId[ptr] = juce::String(id);
         }
@@ -2535,7 +2535,7 @@ juce::var MCPBridge::buildIdentitySidecar(PluginProcessor* processor, t_canvas* 
     root->setProperty("format", juce::String("MCP-IDENTITY"));
     root->setProperty("v", 1);
     root->setProperty("identity_version",
-        (double)processor->mcpIdentityVersion.load(std::memory_order_relaxed));
+        (double)processor->getMcp()->session.mcpIdentityVersion.load(std::memory_order_relaxed));
     root->setProperty("root", buildIdArray(canonicalCanvasKey(cnv), cnv));
 
     // Named subcanvases: canonicalCanvasKey matches the map keys the bridge uses
@@ -2594,9 +2594,9 @@ int MCPBridge::mcpApplyIdentitySidecar(PluginProcessor* processor, juce::Dynamic
         for (t_gobj* g = target->gl_list; g; g = g->g_next, ++idx) {
             auto it = idxToId.find(idx);
             if (it == idxToId.end()) continue;
-            processor->mcpStableObjectMap[mapKey.toStdString()][it->second.toStdString()] = g;
-            if (processor->mcpStableSerialMap.find(g) == processor->mcpStableSerialMap.end())
-                processor->mcpStableSerialMap[g] = processor->mcpSerialCounter++;
+            processor->getMcp()->session.mcpStableObjectMap[mapKey.toStdString()][it->second.toStdString()] = g;
+            if (processor->getMcp()->session.mcpStableSerialMap.find(g) == processor->getMcp()->session.mcpStableSerialMap.end())
+                processor->getMcp()->session.mcpStableSerialMap[g] = processor->getMcp()->session.mcpSerialCounter++;
             restored++;
         }
         return restored;
@@ -2616,13 +2616,13 @@ int MCPBridge::mcpApplyIdentitySidecar(PluginProcessor* processor, juce::Dynamic
             auto childIds = subObj->getProperty(juce::Identifier(childName));
             if (childIds.getArray() != nullptr && childIds.getArray()->size() > 0) {
                 juce::String childKey = canonicalCanvasKey(child);
-                processor->mcpStableObjectMap[childKey.toStdString()].clear();
+                processor->getMcp()->session.mcpStableObjectMap[childKey.toStdString()].clear();
                 restored += registerArray(childIds, childKey, child);
             }
         }
     }
 
-    processor->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+    processor->getMcp()->session.mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
     return restored;
 }
 
@@ -3232,10 +3232,10 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             juce::String err, warning;
             {
                 sys_lock();
-                t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+                t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
                 if (!cnv && (canvasName == "pd-main" || canvasName == "main" || canvasName.isEmpty()))
                     cnv = pd_this->pd_canvaslist;
-                t_gobj* g = processor->resolveStableId(canvasName, tempId);
+                t_gobj* g = processor->getMcp()->resolveStableId(canvasName, tempId);
                 if (g && !mcpGobjIsLive(cnv, g)) g = nullptr; // stale → treat as unknown
                 err = mcpObjSetCore(g, tempId, inlet, selector, atoms, &warning);
                 sys_unlock();
@@ -3260,13 +3260,13 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         auto tempId        = msg.size() > 2 ? getArgString(msg[2]) : juce::String();
         auto newText       = msg.size() > 3 ? getArgString(msg[3]) : juce::String();
 
-        t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+        t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
         if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
         if (!cnv) { sendReply("/pd/obj_relabel/reply/" + correlationId, 0.0f); return; }
 
         int ok = 0;
         sys_lock();
-        t_gobj* g = processor->resolveStableId(canvasName, tempId);
+        t_gobj* g = processor->getMcp()->resolveStableId(canvasName, tempId);
         if (g && pd::Interface::isTextObject(g) && newText.isNotEmpty()) {
             auto* t = reinterpret_cast<t_text*>(g);
             if (t->te_binbuf) {
@@ -3319,7 +3319,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     atoms.push_back(at);
                 }
                 juce::String warning;
-                t_gobj* g = processor->resolveStableId(canvasName, tempId);
+                t_gobj* g = processor->getMcp()->resolveStableId(canvasName, tempId);
                 auto err = mcpObjSetCore(g, tempId, inlet, selector, atoms, &warning);
                 auto* ro = new juce::DynamicObject();
                 ro->setProperty("tempId", tempId);
@@ -3561,7 +3561,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             juce::String bboxJson = "{}";
 
             if (proc) {
-                for (auto const& img : proc->getMcpReferenceImages()) {
+                for (auto const& img : proc->getMcp()->session.getMcpReferenceImages()) {
                     auto* o = new juce::DynamicObject();
                     o->setProperty("id", img.id);
                     o->setProperty("path", img.filePath);
@@ -3575,7 +3575,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     o->setProperty("visible", img.visible);
                     imagesArr.add(juce::var(o));
                 }
-                for (auto const& a : proc->getMcpAnnotations()) {
+                for (auto const& a : proc->getMcp()->session.getMcpAnnotations()) {
                     if (a.text.isEmpty()) continue;
                     auto* o = new juce::DynamicObject();
                     o->setProperty("text", a.text);
@@ -3583,7 +3583,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     o->setProperty("targetId", a.targetId);
                     notesArr.add(juce::var(o));
                 }
-                for (auto const& t : proc->getMcpVoiceTakes()) {
+                for (auto const& t : proc->getMcp()->session.getMcpVoiceTakes()) {
                     auto* o = new juce::DynamicObject();
                     o->setProperty("id", t.id);
                     o->setProperty("wav", t.wavPath);
@@ -3595,7 +3595,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     o->setProperty("visible", t.visible);
                     takesArr.add(juce::var(o));
                 }
-                for (auto const& t : proc->getMcpMidiTakes()) {
+                for (auto const& t : proc->getMcp()->session.getMcpMidiTakes()) {
                     auto* o = new juce::DynamicObject();
                     o->setProperty("id", t.id);
                     o->setProperty("voice", t.voice);
@@ -3657,7 +3657,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             juce::Array<juce::var> arr;
             {
                 sys_lock();
-                t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+                t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
                 if (!cnv && (canvasName == "pd-main" || canvasName == "main" || canvasName.isEmpty()))
                     cnv = pd_this->pd_canvaslist;
                 if (cnv) {
@@ -3669,7 +3669,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     // OWNING module tempId so callers (auto_map) can scope to a
                     // single module — C++ is the truth, TS must not re-derive.
                     auto findTempId = [&](t_gobj* y) -> juce::String {
-                        for (auto& [key, m] : processor->mcpStableObjectMap)
+                        for (auto& [key, m] : processor->getMcp()->session.mcpStableObjectMap)
                             for (auto& [id, ptr] : m) if (ptr == y) return id;
                         return {};
                     };
@@ -3721,14 +3721,14 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             int applied = 0;
             {
                 sys_lock();
-                t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+                t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
                 if (!cnv && (canvasName == "pd-main" || canvasName == "main" || canvasName.isEmpty()))
                     cnv = pd_this->pd_canvaslist;
                 if (cnv) {
                     // Descend into placed subpatches/abstractions so a param
                     // INSIDE a GOP/MERDA module can be set by name (#43).
                     auto findTempId = [&](t_gobj* y) -> juce::String {
-                        for (auto& [key, m] : processor->mcpStableObjectMap)
+                        for (auto& [key, m] : processor->getMcp()->session.mcpStableObjectMap)
                             for (auto& [id, ptr] : m) if (ptr == y) return id;
                         return {};
                     };
@@ -3782,12 +3782,12 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             auto* values = new juce::DynamicObject();
             {
                 sys_lock();
-                t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+                t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
                 if (!cnv && (canvasName == "pd-main" || canvasName == "main" || canvasName.isEmpty()))
                     cnv = pd_this->pd_canvaslist;
                 for (int i = 0; i < count && cursor < msg.size(); i++) {
                     auto tempId = getArgString(msg[cursor++]);
-                    t_gobj* gobj = processor->resolveStableId(canvasName, tempId);
+                    t_gobj* gobj = processor->getMcp()->resolveStableId(canvasName, tempId);
                     if (gobj && !mcpGobjIsLive(cnv, gobj)) gobj = nullptr; // stale → unknown
                     if (gobj) {
                         auto* o = new juce::DynamicObject();
@@ -3819,10 +3819,10 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             juce::String json;
             {
                 sys_lock();
-                t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+                t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
                 if (!cnv && (canvasName == "pd-main" || canvasName == "main" || canvasName.isEmpty()))
                     cnv = pd_this->pd_canvaslist;
-                t_gobj* gobj = processor->resolveStableId(canvasName, tempId);
+                t_gobj* gobj = processor->getMcp()->resolveStableId(canvasName, tempId);
                 if (gobj && !mcpGobjIsLive(cnv, gobj)) gobj = nullptr; // stale → unknown
                 if (gobj) json = mcpBuildObjJson(gobj);
                 sys_unlock();
@@ -3859,7 +3859,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             auto correlationId = getArgString(msg[2]);
 
             sys_lock();
-            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
             if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
 
             if (!cnv) {
@@ -3869,7 +3869,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             }
 
             // Resolve by stableId first, fallback to numeric index
-            t_gobj* gobj = processor->resolveStableId(canvasName, targetId);
+            t_gobj* gobj = processor->getMcp()->resolveStableId(canvasName, targetId);
             if (!gobj) {
                 bool isNumber = targetId.isNotEmpty();
                 for (int i = (targetId.startsWith("-") ? 1 : 0); i < targetId.length(); ++i) {
@@ -3947,7 +3947,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             auto correlationId = getArgString(msg[2]);
 
             sys_lock();
-            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
             if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
 
             if (!cnv) {
@@ -3957,7 +3957,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             }
 
             // Resolve by stableId first, fallback to numeric index
-            t_gobj* gobj = processor->resolveStableId(canvasName, targetId);
+            t_gobj* gobj = processor->getMcp()->resolveStableId(canvasName, targetId);
             if (!gobj) {
                 bool isNumber = targetId.isNotEmpty();
                 for (int i = (targetId.startsWith("-") ? 1 : 0); i < targetId.length(); ++i) {
@@ -4024,7 +4024,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             auto correlationId = getArgString(msg[1]);
 
             sys_lock();
-            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
             if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
 
             if (!cnv) {
@@ -4044,8 +4044,8 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             // Step 2: Walk the identity map and validate each entry (O(m))
             auto canonKey = canonicalCanvasKey(cnv);
             auto canvasStr = canonKey.toStdString();
-            auto& canvasMap = processor->mcpStableObjectMap[canvasStr];
-            uint64_t version = processor->mcpIdentityVersion.load(std::memory_order_relaxed);
+            auto& canvasMap = processor->getMcp()->session.mcpStableObjectMap[canvasStr];
+            uint64_t version = processor->getMcp()->session.mcpIdentityVersion.load(std::memory_order_relaxed);
 
             auto* rootObj = new juce::DynamicObject();
             rootObj->setProperty("version", static_cast<juce::int64>(version));
@@ -4064,8 +4064,8 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 }
 
                 // Serial verification (UAF defense)
-                auto serialIt = processor->mcpStableSerialMap.find(ptr);
-                if (serialIt == processor->mcpStableSerialMap.end()) {
+                auto serialIt = processor->getMcp()->session.mcpStableSerialMap.find(ptr);
+                if (serialIt == processor->getMcp()->session.mcpStableSerialMap.end()) {
                     toEvict.push_back(tempId);
                     continue;
                 }
@@ -4099,13 +4099,13 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             for (auto& staleId : toEvict) {
                 auto staleIt = canvasMap.find(staleId);
                 if (staleIt != canvasMap.end()) {
-                    processor->mcpStableSerialMap.erase(staleIt->second);
+                    processor->getMcp()->session.mcpStableSerialMap.erase(staleIt->second);
                     canvasMap.erase(staleIt);
                 }
             }
             if (!toEvict.empty()) {
-                processor->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
-                version = processor->mcpIdentityVersion.load(std::memory_order_relaxed);
+                processor->getMcp()->session.mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+                version = processor->getMcp()->session.mcpIdentityVersion.load(std::memory_order_relaxed);
                 rootObj->setProperty("version", static_cast<juce::int64>(version));
                 rootObj->setProperty("evicted", static_cast<int>(toEvict.size()));
             }
@@ -4130,7 +4130,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         // Node.js uses this to decide if a full snapshot fetch is needed.
         if (msg.size() >= 1 && processor) {
             auto correlationId = getArgString(msg[0]);
-            uint64_t version = processor->mcpIdentityVersion.load(std::memory_order_relaxed);
+            uint64_t version = processor->getMcp()->session.mcpIdentityVersion.load(std::memory_order_relaxed);
 
             juce::OSCMessage reply { juce::OSCAddressPattern("/pd/identity_version/reply/" + correlationId) };
             reply.addArgument(static_cast<int32>(static_cast<int>(version & 0x7FFFFFFF)));
@@ -4162,7 +4162,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             static std::deque<std::string> s_batchDedupOrder;
             static constexpr int BATCH_DEDUP_MAX = 128;
             static constexpr uint64_t BATCH_DEDUP_TTL_MS = 30000;
-            if (!processor->isExecutingMcpUndoRedo) {
+            if (!processor->getMcp()->session.isExecutingMcpUndoRedo) {
                 std::string corrKey = correlationId.toStdString();
                 uint64_t nowMs = juce::Time::currentTimeMillis();
                 auto it = s_batchDedupCache.find(corrKey);
@@ -4279,7 +4279,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 // original as gui_* and misrouting every later op on that id.
                 // Refuse it here; skip the paste + registration entirely.
                 if (ot.isNotEmpty() && !oid.isEmpty()
-                    && processor->resolveStableId(canvasName, oid) != nullptr) {
+                    && processor->getMcp()->resolveStableId(canvasName, oid) != nullptr) {
                     CreateFailure cf;
                     cf.tempId = oid.toStdString();
                     cf.type = ot.toStdString();
@@ -4381,7 +4381,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             if (cursor < msg.size()) layoutSnap = static_cast<int>(getArgFloat(msg[cursor++]));
             if (cursor < msg.size()) autoFixOcclusions = getArgFloat(msg[cursor++]) > 0.5f;
 
-            if (processor->isExecutingMcpUndoRedo) {
+            if (processor->getMcp()->session.isExecutingMcpUndoRedo) {
                 autoLayout = false;
                 autoFixOcclusions = false;
             }
@@ -4427,7 +4427,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     return; // the caller gave up: this frame may be gone, touch nothing
                 mcp::OneShotHandoff::FinishGuard finishGuard(*handoff);
                 auto tLambdaStart = std::chrono::high_resolution_clock::now();
-                cnv = processor->getCanvasBySymbolStrict(canvasName);
+                cnv = processor->getMcp()->getCanvasBySymbolStrict(canvasName);
                 if (!cnv && (canvasName == "pd-main" || canvasName == "main" || canvasName.isEmpty()))
                     cnv = pd_this->pd_canvaslist;
                 if (!cnv) {
@@ -4447,7 +4447,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     // zero audio dropout (runs inside the same audio-thread lambda).
                     {
                         auto canvasStr = canonStr;
-                        auto& canvasMap = processor->mcpStableObjectMap[canvasStr];
+                        auto& canvasMap = processor->getMcp()->session.mcpStableObjectMap[canvasStr];
 
                         // Step A: Build set of all live pointers from gl_list (O(n))
                         std::unordered_set<t_gobj*> livePointers;
@@ -4459,12 +4459,12 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         for (auto& [tempId, ptr] : canvasMap) {
                             if (livePointers.find(ptr) == livePointers.end()) {
                                 toEvict.push_back(tempId);
-                                processor->mcpStableSerialMap.erase(ptr);
+                                processor->getMcp()->session.mcpStableSerialMap.erase(ptr);
                             }
                         }
                         for (auto& id : toEvict) {
                             canvasMap.erase(id);
-                            processor->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+                            processor->getMcp()->session.mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
                             reconcileEvicted++;
                         }
 
@@ -4512,8 +4512,8 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                                             + juce::String(adoptIdx++)).toStdString();
                                 }
                                 canvasMap[autoId] = y;
-                                processor->mcpStableSerialMap[y] = processor->mcpSerialCounter++;
-                                processor->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+                                processor->getMcp()->session.mcpStableSerialMap[y] = processor->getMcp()->session.mcpSerialCounter++;
+                                processor->getMcp()->session.mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
                                 reconcileAdopted++;
                             }
                         }
@@ -4534,8 +4534,8 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     // PHASE 1: DISCONNECT — remove wires BEFORE objects are deleted
                     // so endpoints and stable IDs remain valid for clean unlinking.
                     for (auto& pdc : preDisconnects) {
-                        t_gobj* sg = processor->resolveStableId(canvasName, pdc.srcId);
-                        t_gobj* dg = processor->resolveStableId(canvasName, pdc.destId);
+                        t_gobj* sg = processor->getMcp()->resolveStableId(canvasName, pdc.srcId);
+                        t_gobj* dg = processor->getMcp()->resolveStableId(canvasName, pdc.destId);
                         if (sg && dg) {
                             t_object* so = pd::Interface::checkObject(sg);
                             t_object* d_o = pd::Interface::checkObject(dg);
@@ -4554,14 +4554,14 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     // Capture each doomed object's creation text + bounds + wires
                     // FIRST so the inverse can recreate it (message-delta, no pointers).
                     {
-                        auto& delMap = processor->mcpStableObjectMap[canonStr];
+                        auto& delMap = processor->getMcp()->session.mcpStableObjectMap[canonStr];
                         std::unordered_map<t_gobj*, std::string> ptrToTempId;
                         for (auto& [tid, ptr] : delMap)
                             if (ptr) ptrToTempId[ptr] = tid;
 
                         std::unordered_set<t_gobj*> deleteSet;
                         for (auto& pd : preDeletes) {
-                            t_gobj* obj = processor->resolveStableId(canvasName, pd.objectId);
+                            t_gobj* obj = processor->getMcp()->resolveStableId(canvasName, pd.objectId);
                             if (!obj) continue;
                             deleteSet.insert(obj);
 
@@ -4613,11 +4613,11 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
                     SmallArray<t_gobj*> toDelete;
                     for (auto& pd : preDeletes) {
-                        t_gobj* obj = processor->resolveStableId(canvasName, pd.objectId);
+                        t_gobj* obj = processor->getMcp()->resolveStableId(canvasName, pd.objectId);
                         if (obj) {
-                            processor->mcpStableObjectMap[canonStr].erase(pd.objectId.toStdString());
-                            processor->mcpStableSerialMap.erase(obj);
-                            processor->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+                            processor->getMcp()->session.mcpStableObjectMap[canonStr].erase(pd.objectId.toStdString());
+                            processor->getMcp()->session.mcpStableSerialMap.erase(obj);
+                            processor->getMcp()->session.mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
                             toDelete.add(obj);
                             deleted++;
                         }
@@ -4628,7 +4628,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
                     // PHASE 3: EDIT
                     for (auto& pe : preEdits) {
-                        t_gobj* obj = processor->resolveStableId(canvasName, pe.objectId);
+                        t_gobj* obj = processor->getMcp()->resolveStableId(canvasName, pe.objectId);
                         if (obj) {
                             t_object* o = pd::Interface::checkObject(obj);
                             if (o) {
@@ -4651,10 +4651,10 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                                     if (y == obj) { still = true; break; }
                                 newObj = still ? obj : pd::Interface::getNewest(cnv);
                                 if (newObj) {
-                                    processor->mcpStableObjectMap[canonStr][pe.objectId.toStdString()] = newObj;
-                                    if (newObj != obj) processor->mcpStableSerialMap.erase(obj);
-                                    processor->mcpStableSerialMap[newObj] = processor->mcpSerialCounter++;
-                                    processor->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+                                    processor->getMcp()->session.mcpStableObjectMap[canonStr][pe.objectId.toStdString()] = newObj;
+                                    if (newObj != obj) processor->getMcp()->session.mcpStableSerialMap.erase(obj);
+                                    processor->getMcp()->session.mcpStableSerialMap[newObj] = processor->getMcp()->session.mcpSerialCounter++;
+                                    processor->getMcp()->session.mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
                                     // C++ truth: when a class can't be instantiated Pd
                                     // substitutes text_class (g_text.c canvas_objtext,
                                     // "... couldn't create") and leaves an ERROR BOX — the
@@ -4815,9 +4815,9 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                                 redBoxes.add(no.ptr);
                             } else {
                                 // Map the stable tempId to the live gobj pointer
-                                processor->mcpStableObjectMap[canonStr][pc.tempId.toStdString()] = no.ptr;
-                                processor->mcpStableSerialMap[no.ptr] = processor->mcpSerialCounter++;
-                                processor->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+                                processor->getMcp()->session.mcpStableObjectMap[canonStr][pc.tempId.toStdString()] = no.ptr;
+                                processor->getMcp()->session.mcpStableSerialMap[no.ptr] = processor->getMcp()->session.mcpSerialCounter++;
+                                processor->getMcp()->session.mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
 
                                 // Auto-seed line~/vline~ init value (fork ignores creation args)
                                 if (pc.seedInit) {
@@ -4899,8 +4899,8 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         }
                     }
                     for (auto& cc : allConns) {
-                        t_gobj* sg = processor->resolveStableId(canvasName, cc.srcId);
-                        t_gobj* dg = processor->resolveStableId(canvasName, cc.destId);
+                        t_gobj* sg = processor->getMcp()->resolveStableId(canvasName, cc.srcId);
+                        t_gobj* dg = processor->getMcp()->resolveStableId(canvasName, cc.destId);
                         if (!sg || !dg) {
                             // Phase A (PRD diagnostic layer): name the silent
                             // failure instead of skipping silently.
@@ -5064,7 +5064,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     // were erased — every live wire endpoint resolves.
                     {
                         auto canvasStr = canonStr;
-                        auto& canvasMap = processor->mcpStableObjectMap[canvasStr];
+                        auto& canvasMap = processor->getMcp()->session.mcpStableObjectMap[canvasStr];
                         std::unordered_map<t_gobj*, std::string> ptrToTempId;
                         for (auto& [tid, ptr] : canvasMap)
                             if (ptr) ptrToTempId[ptr] = tid;
@@ -5156,7 +5156,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         // Preserve modular columns and emit warning instead of smashing canvas to y=40.
                         fallbackComposed = true;
                     }
-                    processor->synchroniseCanvases();
+                    processor->getMcp()->synchroniseCanvases();
                 };
 
                 if (juce::MessageManager::getInstance()->isThisTheMessageThread()) {
@@ -5176,11 +5176,11 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 }
             } else {
                 if (juce::MessageManager::getInstance()->isThisTheMessageThread()) {
-                    if (processor) processor->synchroniseCanvases();
+                    if (processor) processor->getMcp()->synchroniseCanvases();
                 } else {
                     // Decoupled UI viewport sync - non-blocking async idle dispatch
                     juce::MessageManager::callAsync([p = processor] {
-                        if (p) p->synchroniseCanvases();
+                        if (p) p->getMcp()->synchroniseCanvases();
                     });
                 }
             }
@@ -5256,7 +5256,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             }
 
             // Stage 2: Register with Unified C++ Transaction Engine for GUI Ctrl+Z / Undo
-            if (processor && cnv && !processor->isExecutingMcpUndoRedo) {
+            if (processor && cnv && !processor->getMcp()->session.isExecutingMcpUndoRedo) {
                 if (created > 0 || connected > 0 || disconnected > 0 || edited > 0 || deleted > 0) {
                     juce::OSCMessage invMsg { juce::OSCAddressPattern("/pd/batch_atomic") };
                     invMsg.addArgument(canvasName);
@@ -5322,7 +5322,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     invMsg.addArgument(static_cast<float>(layoutSnap));
                     invMsg.addArgument(0.0f);
 
-                    processor->pushMcpTransaction(cnv, canvasName, msg, invMsg);
+                    processor->getMcp()->pushMcpTransaction(cnv, canvasName, msg, invMsg);
                 }
             }
 
@@ -5445,7 +5445,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
             sender.send(reply);
             // R3a — store reply in dedup cache (LRU + TTL, for retry idempotency).
-            if (!processor->isExecutingMcpUndoRedo) {
+            if (!processor->getMcp()->session.isExecutingMcpUndoRedo) {
                 uint64_t nowMs = juce::Time::currentTimeMillis();
                 std::string corrKey = correlationId.toStdString();
                 s_batchDedupCache.insert_or_assign(corrKey, BatchDedupEntry{nowMs, reply});
@@ -5473,7 +5473,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             auto correlationId = getArgString(msg[1]);
 
             sys_lock();
-            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
             if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
 
             if (!cnv) {
@@ -5492,8 +5492,8 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             // Build reverse identity map (ptr → tempId)
             auto canvasStr = canvasName.toStdString();
             std::unordered_map<t_gobj*, juce::String> ptrToId;
-            if (processor->mcpStableObjectMap.count(canvasStr)) {
-                for (auto const& [id, ptr] : processor->mcpStableObjectMap[canvasStr]) {
+            if (processor->getMcp()->session.mcpStableObjectMap.count(canvasStr)) {
+                for (auto const& [id, ptr] : processor->getMcp()->session.mcpStableObjectMap[canvasStr]) {
                     if (ptr) ptrToId[ptr] = juce::String(id);
                 }
             }
@@ -5554,7 +5554,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             auto correlationId = msg.size() > 3 ? getArgString(msg[3]) : "";
 
             sys_lock();
-            t_canvas* cnv = processor ? processor->getCanvasBySymbol(canvasName) : nullptr;
+            t_canvas* cnv = processor ? processor->getMcp()->getCanvasBySymbol(canvasName) : nullptr;
             if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
 
             if (cnv) {
@@ -5600,7 +5600,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
             juce::String content;
             sys_lock();
-            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
             if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
             if (cnv) {
                 char* buf = nullptr;
@@ -5662,11 +5662,11 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             }
 
             // Report F3: open the file and writer here, never on the audio thread.
-            if (!processor->mcpOpenRecorder(filePath)) {
+            if (!processor->getMcp()->mcpOpenRecorder(filePath)) {
                 sendReply(replyAddr, 0.0f);
                 return;
             }
-            processor->mcpRecording.store(true, std::memory_order_release);
+            processor->getMcp()->session.mcpRecording.store(true, std::memory_order_release);
             post("MCP record_start: recording path=%s", filePath.toRawUTF8());
             sendReply(replyAddr, 1.0f);
         }
@@ -5679,7 +5679,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
     if (action == "record_stop") {
         auto correlationId = msg.size() > 0 ? getArgString(msg[0]) : "0";
         if (processor) {
-            processor->mcpCloseRecorder(); // flushes and closes the file
+            processor->getMcp()->mcpCloseRecorder(); // flushes and closes the file
         }
         sendReply("/pd/record_stop/reply/" + correlationId, 1.0f);
         return;
@@ -5775,7 +5775,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             probeManager.stopAllProbes("load_content_reset");
 
             sys_lock();
-            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
             if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
             if (cnv) {
                 // 1. Clear existing objects
@@ -5837,7 +5837,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             // Synchronise canvas UI and restart DSP.
             // startDSP() is called directly here — same pattern as /pd/dsp
             // handler which also calls it from the OSC receiver thread.
-            processor->enqueueFunctionAsync([p = processor] { p->synchroniseCanvases(); });
+            processor->enqueueFunctionAsync([p = processor] { p->getMcp()->synchroniseCanvases(); });
 
             if (objectCount > 0 && processor)
                 processor->startDSP();
@@ -5848,7 +5848,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             atoms.add(pd::Atom(processor->generateSymbol("0")));
             processor->receiveSysMessage("mcp_clear_ids", atoms);
 
-            processor->enqueueFunctionAsync([p = processor] { p->synchroniseCanvases(); });
+            processor->enqueueFunctionAsync([p = processor] { p->getMcp()->synchroniseCanvases(); });
 
             // arg0 = objectCount, arg1 = undoReset (clear+rebuild flushed the
             // stale undo queue). Old TS clients read arg0 and ignore arg1.
@@ -5882,7 +5882,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             juce::var sidecar;
 
             sys_lock();
-            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
             if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
             if (cnv) {
                 char* buf = nullptr;
@@ -5948,9 +5948,9 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             const std::string newKey = juce::File(destFilePath).getFileName().toStdString();
             processor->enqueueFunctionAsync([p = processor, cnv, destFilePath, oldKey, newKey]() {
                 juce::File f(destFilePath);
-                if (oldKey != newKey && p->mcpStableObjectMap.count(oldKey)) {
-                    p->mcpStableObjectMap[newKey] = std::move(p->mcpStableObjectMap[oldKey]);
-                    p->mcpStableObjectMap.erase(oldKey);
+                if (oldKey != newKey && p->getMcp()->session.mcpStableObjectMap.count(oldKey)) {
+                    p->getMcp()->session.mcpStableObjectMap[newKey] = std::move(p->getMcp()->session.mcpStableObjectMap[oldKey]);
+                    p->getMcp()->session.mcpStableObjectMap.erase(oldKey);
                 }
                 for (auto* editor : p->getEditors()) {
                     if (!editor) continue;
@@ -6046,12 +6046,12 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 [proc = processor, canvasName, bodyText, sidecar, replyAddr, bridge = this]() {
                     int objectCount = 0;
                     sys_lock();
-                    t_canvas* cnv = proc->getCanvasBySymbol(canvasName);
+                    t_canvas* cnv = proc->getMcp()->getCanvasBySymbol(canvasName);
                     if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
                     if (cnv) {
                         auto canonKey = MCPBridge::canonicalCanvasKey(cnv);
                         // 0. Reset identity for this canvas tree BEFORE re-registering
-                        proc->mcpStableObjectMap[canonKey.toStdString()].clear();
+                        proc->getMcp()->session.mcpStableObjectMap[canonKey.toStdString()].clear();
 
                         // 1. Clear existing objects (message-thread-safe)
                         mcp::PdOps::clearCanvas(cnv);
@@ -6078,14 +6078,14 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     }
                     sys_unlock();
 
-                    proc->synchroniseCanvases();
+                    proc->getMcp()->synchroniseCanvases();
                     if (objectCount > 0) proc->startDSP();
                     // Clear/free replaced every prior object — its index-based
                     // undo entries now dangle. Reset the queue to stay crash-safe.
                     resetCanvasUndo(proc, canvasName);
                     // Also drop MCP transactions: their inverse deltas reference
                     // the objects we just replaced and would fire on dead tempIds.
-                    if (cnv) proc->clearMcpTransactions(cnv);
+                    if (cnv) proc->getMcp()->clearMcpTransactions(cnv);
 
                     // arg0 = objectCount, arg1 = undoReset.
                     juce::Array<juce::var> loadReplyArgs;
@@ -6391,7 +6391,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         bool hasCanvas = false;
 
         sys_lock();
-        t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+        t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
         if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
 
         if (cnv) {
@@ -6436,7 +6436,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
         juce::String json;
         sys_lock();
-        t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+        t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
         if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
         json = cnv ? computeClusters(processor, cnv, canvasName)
                    : juce::String("{\"error\":\"canvas not found\"}");
@@ -6457,7 +6457,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
         juce::String json = "{\"error\":\"canvas not found\"}";
         sys_lock();
-        t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+        t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
         if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
         if (cnv) json = computePerfFacts(processor, cnv, canvasName);
         sys_unlock();
@@ -6475,14 +6475,14 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         bool hasCanvas = false;
 
         sys_lock();
-        t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+        t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
         if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
 
         if (cnv) {
             hasCanvas = true;
             std::unordered_map<t_gobj*, juce::String> ptrToId;
-            auto mapIt = processor->mcpStableObjectMap.find(canonicalCanvasKey(cnv).toStdString());
-            if (mapIt != processor->mcpStableObjectMap.end())
+            auto mapIt = processor->getMcp()->session.mcpStableObjectMap.find(canonicalCanvasKey(cnv).toStdString());
+            if (mapIt != processor->getMcp()->session.mcpStableObjectMap.end())
                 for (auto& [tid, ptr] : mapIt->second)
                     if (ptr) ptrToId[ptr] = juce::String(tid);
 
@@ -6587,7 +6587,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         bool hasCanvas = false;
 
         sys_lock();
-        t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+        t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
         if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
 
         if (cnv) {
@@ -6595,8 +6595,8 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             struct R { juce::String tid; int x, y, w, h; };
             std::vector<R> rects;
             std::unordered_map<t_gobj*, juce::String> ptrToId;
-            auto mapIt = processor->mcpStableObjectMap.find(canonicalCanvasKey(cnv).toStdString());
-            if (mapIt != processor->mcpStableObjectMap.end())
+            auto mapIt = processor->getMcp()->session.mcpStableObjectMap.find(canonicalCanvasKey(cnv).toStdString());
+            if (mapIt != processor->getMcp()->session.mcpStableObjectMap.end())
                 for (auto& [tid, ptr] : mapIt->second)
                     if (ptr) ptrToId[ptr] = juce::String(tid);
 
@@ -6627,7 +6627,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     }
                 }
             }
-            for (auto const& rg : processor->mcpRegions) {
+            for (auto const& rg : processor->getMcp()->session.mcpRegions) {
                 if (rg.title.isEmpty()) continue;
                 int rx = static_cast<int>(rg.x), ry = static_cast<int>(rg.y);
                 int rw = static_cast<int>(rg.w), rh = 26;
@@ -6663,7 +6663,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         bool hasCanvas = false;
 
         sys_lock();
-        t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+        t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
         if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
 
         if (cnv) {
@@ -6673,8 +6673,8 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
     std::vector<juce::String> classNames;
             std::unordered_map<t_gobj*, int> ptrToIdx;
             std::unordered_map<t_gobj*, juce::String> ptrToId;
-            auto mapIt = processor->mcpStableObjectMap.find(canonicalCanvasKey(cnv).toStdString());
-            if (mapIt != processor->mcpStableObjectMap.end())
+            auto mapIt = processor->getMcp()->session.mcpStableObjectMap.find(canonicalCanvasKey(cnv).toStdString());
+            if (mapIt != processor->getMcp()->session.mcpStableObjectMap.end())
                 for (auto& [tid, ptr] : mapIt->second)
                     if (ptr) ptrToId[ptr] = juce::String(tid);
 
@@ -6771,7 +6771,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             juce::MessageManager::callAsync(
                 [proc = processor, canvasName, correlationId, bridge = this]() {
                     sys_lock();
-                    t_canvas* cnv = proc->getCanvasBySymbol(canvasName);
+                    t_canvas* cnv = proc->getMcp()->getCanvasBySymbol(canvasName);
                     if (cnv) {
                         mcp::PdOps::clearCanvas(cnv);
                     }
@@ -6782,14 +6782,14 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     resetCanvasUndo(proc, canvasName);
                     // Drop MCP transactions too — their inverses reference the
                     // objects we just freed.
-                    if (cnv) proc->clearMcpTransactions(cnv);
+                    if (cnv) proc->getMcp()->clearMcpTransactions(cnv);
 
                     SmallArray<pd::Atom> atoms;
                     atoms.add(pd::Atom(proc->generateSymbol(canvasName)));
                     atoms.add(pd::Atom(proc->generateSymbol("0")));
                     proc->receiveSysMessage("mcp_clear_ids", atoms);
 
-                    proc->synchroniseCanvases();
+                    proc->getMcp()->synchroniseCanvases();
 
                     bridge->sendRawReply("/pd/cleared");
                     if (correlationId != "0") {
@@ -6839,7 +6839,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         for (int i = 0; i < count && cursor < msg.size(); i++) ids.push_back(getArgString(msg[cursor++]));
         auto correlationId = (cursor < msg.size()) ? getArgString(msg[cursor]) : "0";
 
-        t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+        t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
         if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
         if (!cnv) { sendReply("/pd/select/reply/" + correlationId, 0.0f); return; }
 
@@ -6850,7 +6850,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             canvasComp->patch.deselectAll();
             std::vector<Object*> chosen;
             for (const auto& id : ids) {
-                t_gobj* g = proc->resolveStableId(canvasName, id);
+                t_gobj* g = proc->getMcp()->resolveStableId(canvasName, id);
                 if (!g) continue;
                 for (auto* objComp : canvasComp->objects) {
                     if (objComp && objComp->getPointer() == g) {
@@ -6908,40 +6908,40 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         int cursor = 5;
         for (int i = 0; i < count && cursor < msg.size(); i++) ids.push_back(getArgString(msg[cursor++]));
 
-        t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+        t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
         if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
         if (!cnv) { sendReply("/pd/ai_overlay/reply/" + correlationId, 0.0f); return; }
 
         juce::MessageManager::callAsync([proc = processor, cnv, canvasName, state, transient, ids, correlationId, bridge = this]() {
-            juce::ScopedLock overlaySl(proc->mcpOverlayLock);
+            juce::ScopedLock overlaySl(proc->getMcp()->session.mcpOverlayLock);
             if (state == 0 && ids.empty()) {
                 // Clear ALL — but only transient ones when the caller is transient.
                 if (transient) {
-                    for (auto it = proc->mcpAiOverlay.begin(); it != proc->mcpAiOverlay.end(); ) {
-                        if (it->second.transient) it = proc->mcpAiOverlay.erase(it);
+                    for (auto it = proc->getMcp()->session.mcpAiOverlay.begin(); it != proc->getMcp()->session.mcpAiOverlay.end(); ) {
+                        if (it->second.transient) it = proc->getMcp()->session.mcpAiOverlay.erase(it);
                         else ++it;
                     }
                 } else {
-                    proc->mcpAiOverlay.clear();
+                    proc->getMcp()->session.mcpAiOverlay.clear();
                 }
             } else if (state == 0) {
                 // Clear specific ids — transient clears only touch transient marks,
                 // so an ambient flash can never erase a persistent answer/diff mark.
                 for (auto const& id : ids) {
-                    t_gobj* g = proc->resolveStableId(canvasName, id);
+                    t_gobj* g = proc->getMcp()->resolveStableId(canvasName, id);
                     if (!g) continue;
-                    auto it = proc->mcpAiOverlay.find(g);
-                    if (it == proc->mcpAiOverlay.end()) continue;
-                    if (!transient || it->second.transient) proc->mcpAiOverlay.erase(it);
+                    auto it = proc->getMcp()->session.mcpAiOverlay.find(g);
+                    if (it == proc->getMcp()->session.mcpAiOverlay.end()) continue;
+                    if (!transient || it->second.transient) proc->getMcp()->session.mcpAiOverlay.erase(it);
                 }
             } else {
                 for (auto const& id : ids) {
-                    if (t_gobj* g = proc->resolveStableId(canvasName, id))
-                        proc->mcpAiOverlay[g] = PluginProcessor::AiMark { state, transient };
+                    if (t_gobj* g = proc->getMcp()->resolveStableId(canvasName, id))
+                        proc->getMcp()->session.mcpAiOverlay[g] = McpSession::AiMark { state, transient };
                 }
             }
             if (auto* cc = getOrCreateCanvasComponent(proc, cnv)) cc->repaint();
-            bridge->sendReply("/pd/ai_overlay/reply/" + correlationId, static_cast<float>(proc->mcpAiOverlay.size()));
+            bridge->sendReply("/pd/ai_overlay/reply/" + correlationId, static_cast<float>(proc->getMcp()->session.mcpAiOverlay.size()));
         });
         return;
     }
@@ -6957,25 +6957,25 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : "0";
         auto jsonStr       = msg.size() > 2 ? getArgString(msg[2]) : juce::String("[]");
 
-        t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+        t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
         if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
         if (!cnv) { sendReply("/pd/ai_ghost/reply/" + correlationId, 0.0f); return; }
 
         auto parsed = juce::JSON::parse(jsonStr);
 
         juce::MessageManager::callAsync([proc = processor, cnv, canvasName, correlationId, bridge = this, parsed]() {
-            juce::ScopedLock overlaySl(proc->mcpOverlayLock);
-            proc->mcpGhosts.clear();
+            juce::ScopedLock overlaySl(proc->getMcp()->session.mcpOverlayLock);
+            proc->getMcp()->session.mcpGhosts.clear();
             if (auto* arr = parsed.getArray()) {
                 sys_lock();
                 for (auto const& v : *arr) {
                     auto* o = v.getDynamicObject();
                     if (!o) continue;
-                    PluginProcessor::McpGhost g;
+                    McpSession::McpGhost g;
                     if (o->getProperty("kind").toString() == "wire") {
                         g.kind = 1;
-                        t_gobj* gs = proc->resolveStableId(canvasName, o->getProperty("src").toString());
-                        t_gobj* gd = proc->resolveStableId(canvasName, o->getProperty("dest").toString());
+                        t_gobj* gs = proc->getMcp()->resolveStableId(canvasName, o->getProperty("src").toString());
+                        t_gobj* gd = proc->getMcp()->resolveStableId(canvasName, o->getProperty("dest").toString());
                         if (!gs || !gd) continue;
                         int sx, sy, sw, sh, dx, dy, dw, dh;
                         pd::Interface::getObjectBounds(cnv, gs, &sx, &sy, &sw, &sh);
@@ -6990,12 +6990,12 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         g.h = static_cast<float>(o->getProperty("h"));
                         g.label = o->getProperty("label").toString();
                     }
-                    proc->mcpGhosts.push_back(g);
+                    proc->getMcp()->session.mcpGhosts.push_back(g);
                 }
                 sys_unlock();
             }
             if (auto* cc = getOrCreateCanvasComponent(proc, cnv)) cc->repaint();
-            bridge->sendReply("/pd/ai_ghost/reply/" + correlationId, static_cast<float>(proc->mcpGhosts.size()));
+            bridge->sendReply("/pd/ai_ghost/reply/" + correlationId, static_cast<float>(proc->getMcp()->session.mcpGhosts.size()));
         });
         return;
     }
@@ -7011,28 +7011,28 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : "0";
         auto jsonStr       = msg.size() > 2 ? getArgString(msg[2]) : juce::String("[]");
 
-        t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+        t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
         if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
         if (!cnv) { sendReply("/pd/ai_annotate/reply/" + correlationId, 0.0f); return; }
 
         auto parsed = juce::JSON::parse(jsonStr);
 
         juce::MessageManager::callAsync([proc = processor, cnv, canvasName, correlationId, bridge = this, parsed]() {
-            juce::ScopedLock overlaySl(proc->mcpOverlayLock);
-            proc->mcpAnnotations.clear();
+            juce::ScopedLock overlaySl(proc->getMcp()->session.mcpOverlayLock);
+            proc->getMcp()->session.mcpAnnotations.clear();
             if (auto* arr = parsed.getArray()) {
                 sys_lock();
                 for (auto const& v : *arr) {
                     auto* o = v.getDynamicObject();
                     if (!o) continue;
-                    PluginProcessor::McpAnnotation a;
+                    McpSession::McpAnnotation a;
                     a.text = o->getProperty("text").toString();
                     a.kind = o->getProperty("kind").toString();
                     a.t = juce::Time::getMillisecondCounterHiRes() * 0.001;
                     if (a.text.isEmpty()) continue;
                     auto target = o->getProperty("target").toString();
                     if (target.isNotEmpty()) {
-                        t_gobj* g = proc->resolveStableId(canvasName, target);
+                        t_gobj* g = proc->getMcp()->resolveStableId(canvasName, target);
                         if (!g) continue;
                         int x, y, w, h;
                         pd::Interface::getObjectBounds(cnv, g, &x, &y, &w, &h);
@@ -7048,9 +7048,9 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                             avoid.emplace_back(static_cast<float>(bx), static_cast<float>(by),
                                                static_cast<float>(bw), static_cast<float>(bh));
                         }
-                        for (auto const& an : proc->mcpAnnotations)
+                        for (auto const& an : proc->getMcp()->session.mcpAnnotations)
                             avoid.emplace_back(an.x - 6.0f, an.y - 9.0f, an.text.length() * 7.0f + 28.0f, 18.0f);
-                        for (auto const& rg : proc->mcpRegions) {
+                        for (auto const& rg : proc->getMcp()->session.mcpRegions) {
                             if (rg.title.isNotEmpty())
                                 avoid.emplace_back(rg.x, rg.y, rg.w, 24.0f);
                         }
@@ -7079,13 +7079,13 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         a.x = static_cast<float>(o->getProperty("x"));
                         a.y = static_cast<float>(o->getProperty("y"));
                     }
-                    proc->mcpAnnotations.push_back(a);
+                    proc->getMcp()->session.mcpAnnotations.push_back(a);
                 }
                 sys_unlock();
             }
             if (auto* cc = getOrCreateCanvasComponent(proc, cnv)) cc->repaint();
             juce::var details = juce::Array<juce::var>();
-            for (auto const& an : proc->mcpAnnotations) {
+            for (auto const& an : proc->getMcp()->session.mcpAnnotations) {
                 auto* d = new juce::DynamicObject();
                 d->setProperty("targetId", an.targetId);
                 d->setProperty("text", an.text);
@@ -7098,7 +7098,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 details.append(d);
             }
             juce::Array<juce::var> replyArgs;
-            replyArgs.add(static_cast<float>(proc->mcpAnnotations.size()));
+            replyArgs.add(static_cast<float>(proc->getMcp()->session.mcpAnnotations.size()));
             replyArgs.add(juce::JSON::toString(details, true));
             bridge->sendReply("/pd/ai_annotate/reply/" + correlationId, replyArgs);
         });
@@ -7115,7 +7115,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : "0";
         auto jsonStr       = msg.size() > 2 ? getArgString(msg[2]) : juce::String("[]");
 
-        t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+        t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
         if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
         if (!cnv) { sendReply("/pd/ai_region/reply/" + correlationId, 0.0f); return; }
 
@@ -7126,13 +7126,13 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             // mcpOverlayLock. The GUI/render path takes sys_lock -> mcpOverlayLock;
             // holding BOTH here in the opposite order deadlocked and froze the UI.
             // Build into a local vector, then swap it in under mcpOverlayLock only.
-            std::vector<PluginProcessor::McpRegion> built;
+            std::vector<McpSession::McpRegion> built;
             if (auto* arr = parsed.getArray()) {
                 sys_lock();
                 for (auto const& v : *arr) {
                     auto* o = v.getDynamicObject();
                     if (!o) continue;
-                    PluginProcessor::McpRegion r;
+                    McpSession::McpRegion r;
                     r.title = o->getProperty("title").toString();
                     r.kind = o->getProperty("kind").toString();
                     auto* targets = o->getProperty("targets").getArray();
@@ -7143,7 +7143,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         bool first = true;
                         int minX = 0, minY = 0, maxX = 0, maxY = 0;
                         for (auto const& tv : *targets) {
-                            t_gobj* g = proc->resolveStableId(canvasName, tv.toString());
+                            t_gobj* g = proc->getMcp()->resolveStableId(canvasName, tv.toString());
                             if (!g) continue;
                             int x, y, w, h;
                             pd::Interface::getObjectBounds(cnv, g, &x, &y, &w, &h);
@@ -7170,11 +7170,11 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 sys_unlock();
             }
             {
-                juce::ScopedLock overlaySl(proc->mcpOverlayLock);
-                proc->mcpRegions = std::move(built);
+                juce::ScopedLock overlaySl(proc->getMcp()->session.mcpOverlayLock);
+                proc->getMcp()->session.mcpRegions = std::move(built);
             }
             if (auto* cc = getOrCreateCanvasComponent(proc, cnv)) cc->repaint();
-            bridge->sendReply("/pd/ai_region/reply/" + correlationId, static_cast<float>(proc->mcpRegions.size()));
+            bridge->sendReply("/pd/ai_region/reply/" + correlationId, static_cast<float>(proc->getMcp()->session.mcpRegions.size()));
         });
         return;
     }
@@ -7191,27 +7191,27 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         auto correlationId = getArgString(msg[1]);
         auto jsonStr = getArgString(msg[2]);
 
-        t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+        t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
         if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
 
         auto parsed = juce::JSON::parse(jsonStr);
 
         juce::MessageManager::callAsync([proc = processor, cnv, correlationId, bridge = this, parsed]() {
-            juce::ScopedLock overlaySl(proc->mcpOverlayLock);
-            proc->mcpHud = PluginProcessor::McpHud();
+            juce::ScopedLock overlaySl(proc->getMcp()->session.mcpOverlayLock);
+            proc->getMcp()->session.mcpHud = McpSession::McpHud();
             if (auto* o = parsed.getDynamicObject()) {
-                proc->mcpHud.active = o->hasProperty("active") ? static_cast<bool>(o->getProperty("active")) : true;
-                proc->mcpHud.chapter = o->getProperty("chapter").toString();
-                proc->mcpHud.tool = o->getProperty("tool").toString();
-                proc->mcpHud.latency = o->getProperty("latency").toString();
-                proc->mcpHud.prompt = o->getProperty("prompt").toString();
-                proc->mcpHud.receipt = o->getProperty("receipt").toString();
-                proc->mcpHud.telemetry = o->getProperty("telemetry").toString();
+                proc->getMcp()->session.mcpHud.active = o->hasProperty("active") ? static_cast<bool>(o->getProperty("active")) : true;
+                proc->getMcp()->session.mcpHud.chapter = o->getProperty("chapter").toString();
+                proc->getMcp()->session.mcpHud.tool = o->getProperty("tool").toString();
+                proc->getMcp()->session.mcpHud.latency = o->getProperty("latency").toString();
+                proc->getMcp()->session.mcpHud.prompt = o->getProperty("prompt").toString();
+                proc->getMcp()->session.mcpHud.receipt = o->getProperty("receipt").toString();
+                proc->getMcp()->session.mcpHud.telemetry = o->getProperty("telemetry").toString();
             }
             if (cnv) {
                 if (auto* cc = getOrCreateCanvasComponent(proc, cnv)) cc->repaint();
             }
-            bridge->sendReply("/pd/ai_hud/reply/" + correlationId, proc->mcpHud.active ? 1.0f : 0.0f);
+            bridge->sendReply("/pd/ai_hud/reply/" + correlationId, proc->getMcp()->session.mcpHud.active ? 1.0f : 0.0f);
         });
         return;
     }
@@ -7222,7 +7222,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         auto canvasName    = normalizeCanvas(getArgString(msg[0]));
         auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : "0";
 
-        t_canvas* cnv = processor ? processor->getCanvasBySymbol(canvasName) : nullptr;
+        t_canvas* cnv = processor ? processor->getMcp()->getCanvasBySymbol(canvasName) : nullptr;
         if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
 
         juce::MessageManager::callAsync([proc = processor, cnv, correlationId, bridge = this]() {
@@ -7244,8 +7244,8 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             obj->setProperty("aiAnnotations", static_cast<bool>(mask & AIAnnotations));
             obj->setProperty("aiGhosts", static_cast<bool>(mask & AIGhosts));
             obj->setProperty("aiHud", static_cast<bool>(mask & AIHud));
-            obj->setProperty("hasTargets", proc ? proc->hasMcpOverlayTargets() : false);
-            obj->setProperty("targetedCount", proc ? static_cast<int>(proc->getMcpOverlayTargetsCount()) : 0);
+            obj->setProperty("hasTargets", proc ? proc->getMcp()->session.hasMcpOverlayTargets() : false);
+            obj->setProperty("targetedCount", proc ? static_cast<int>(proc->getMcp()->session.getMcpOverlayTargetsCount()) : 0);
 
             juce::String jsonStr = juce::JSON::toString(juce::var(obj.get()));
             bridge->sendReply("/pd/get_overlays/reply/" + correlationId, jsonStr);
@@ -7260,7 +7260,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : "0";
         auto argStr        = msg.size() > 2 ? getArgString(msg[2]) : "{}";
 
-        t_canvas* cnv = processor ? processor->getCanvasBySymbol(canvasName) : nullptr;
+        t_canvas* cnv = processor ? processor->getMcp()->getCanvasBySymbol(canvasName) : nullptr;
         if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
 
         juce::MessageManager::callAsync([proc = processor, cnv, canvasName, argStr, correlationId, bridge = this]() {
@@ -7297,7 +7297,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
                 if (proc) {
                     if (o->hasProperty("clearTargets") && static_cast<bool>(o->getProperty("clearTargets"))) {
-                        proc->clearMcpOverlayTargets();
+                        proc->getMcp()->session.clearMcpOverlayTargets();
                     } else if (o->hasProperty("targets")) {
                         auto targetsVar = o->getProperty("targets");
                         if (targetsVar.isArray()) {
@@ -7305,11 +7305,11 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                             std::unordered_set<t_gobj*> targetGobjs;
                             for (int i = 0; i < arr->size(); ++i) {
                                 juce::String id = (*arr)[i].toString();
-                                t_gobj* g = proc->resolveStableId(canvasName, id);
+                                t_gobj* g = proc->getMcp()->resolveStableId(canvasName, id);
                                 if (g) targetGobjs.insert(g);
                             }
                             bool strict = o->hasProperty("strictCables") ? static_cast<bool>(o->getProperty("strictCables")) : false;
-                            proc->setMcpOverlayTargets(std::move(targetGobjs), strict);
+                            proc->getMcp()->session.setMcpOverlayTargets(std::move(targetGobjs), strict);
                         }
                     }
                 }
@@ -7335,8 +7335,8 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             obj->setProperty("aiAnnotations", static_cast<bool>(currentMask & AIAnnotations));
             obj->setProperty("aiGhosts", static_cast<bool>(currentMask & AIGhosts));
             obj->setProperty("aiHud", static_cast<bool>(currentMask & AIHud));
-            obj->setProperty("hasTargets", proc ? proc->hasMcpOverlayTargets() : false);
-            obj->setProperty("targetedCount", proc ? static_cast<int>(proc->getMcpOverlayTargetsCount()) : 0);
+            obj->setProperty("hasTargets", proc ? proc->getMcp()->session.hasMcpOverlayTargets() : false);
+            obj->setProperty("targetedCount", proc ? static_cast<int>(proc->getMcp()->session.getMcpOverlayTargetsCount()) : 0);
 
             juce::String jsonStr = juce::JSON::toString(juce::var(obj.get()));
             bridge->sendReply("/pd/set_overlays/reply/" + correlationId, jsonStr);
@@ -7417,14 +7417,14 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             }
 
             sys_lock();
-            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
             if (cnv) {
                 pd::Patch patchWrapper(pd::WeakReference(cnv, processor), processor, false);
                 patchWrapper.createObject(static_cast<int>(x), static_cast<int>(y), buildObjectText(kind, tokens));
             }
             sys_unlock();
 
-            processor->enqueueFunctionAsync([p = processor] { p->synchroniseCanvases(); });
+            processor->enqueueFunctionAsync([p = processor] { p->getMcp()->synchroniseCanvases(); });
         }
         return;
     }
@@ -7438,7 +7438,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             int created = 0;
 
             sys_lock();
-            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
             if (cnv) {
                 pd::Patch patchWrapper(pd::WeakReference(cnv, processor), processor, false);
                 for (int o = 0; o < count && cursor < msg.size(); o++) {
@@ -7459,7 +7459,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             }
             sys_unlock();
 
-            processor->enqueueFunctionAsync([p = processor] { p->synchroniseCanvases(); });
+            processor->enqueueFunctionAsync([p = processor] { p->getMcp()->synchroniseCanvases(); });
 
             sendReply("/pd/create_batch/reply/" + correlationId, static_cast<float>(created));
         }
@@ -7517,7 +7517,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             int done = 0;
 
             sys_lock();
-            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
             if (cnv) {
                 for (int c = 0; c < count && startIdx + 3 < msg.size(); c++) {
                     int srcIdx = static_cast<int>(getArgFloat(msg[startIdx++]));
@@ -7536,7 +7536,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             }
             sys_unlock();
 
-            processor->enqueueFunctionAsync([p = processor] { p->synchroniseCanvases(); });
+            processor->enqueueFunctionAsync([p = processor] { p->getMcp()->synchroniseCanvases(); });
 
             if (action == "connect_batch") {
                 sendReply("/pd/connect_batch/reply/" + correlationId, static_cast<float>(done));
@@ -7596,7 +7596,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             int destIn = static_cast<int>(getArgFloat(msg[4]));
 
             sys_lock();
-            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
             if (cnv) {
                 t_object* src = pd::Interface::checkObject(glistObjectAt(cnv, srcIdx));
                 t_object* dest = pd::Interface::checkObject(glistObjectAt(cnv, destIdx));
@@ -7607,7 +7607,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             }
             sys_unlock();
 
-            processor->enqueueFunctionAsync([p = processor] { p->synchroniseCanvases(); });
+            processor->enqueueFunctionAsync([p = processor] { p->getMcp()->synchroniseCanvases(); });
         }
         return;
     }
@@ -7621,7 +7621,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             int done = 0;
 
             sys_lock();
-            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
             if (cnv) {
                 for (int c = 0; c < count && cursor + 3 < msg.size(); c++) {
                     int srcIdx = static_cast<int>(getArgFloat(msg[cursor++]));
@@ -7640,7 +7640,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             }
             sys_unlock();
 
-            processor->enqueueFunctionAsync([p = processor] { p->synchroniseCanvases(); });
+            processor->enqueueFunctionAsync([p = processor] { p->getMcp()->synchroniseCanvases(); });
 
             sendReply("/pd/disconnect_batch/reply/" + correlationId, static_cast<float>(done));
         }
@@ -7702,7 +7702,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             std::sort(indices.rbegin(), indices.rend());
 
             sys_lock();
-            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
             if (cnv) {
                 SmallArray<t_gobj*> toDelete;
                 for (int idx : indices) {
@@ -7716,7 +7716,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             }
             sys_unlock();
 
-            processor->enqueueFunctionAsync([p = processor] { p->synchroniseCanvases(); });
+            processor->enqueueFunctionAsync([p = processor] { p->getMcp()->synchroniseCanvases(); });
 
             sendReply("/pd/delete_batch/reply/" + correlationId, static_cast<float>(indices.size()));
         }
@@ -7729,7 +7729,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             int index = static_cast<int>(getArgFloat(msg[1]));
 
             sys_lock();
-            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
             if (cnv) {
                 t_gobj* obj = glistObjectAt(cnv, index);
                 if (obj) {
@@ -7741,7 +7741,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             }
             sys_unlock();
 
-            processor->enqueueFunctionAsync([p = processor] { p->synchroniseCanvases(); });
+            processor->enqueueFunctionAsync([p = processor] { p->getMcp()->synchroniseCanvases(); });
         }
         return;
     }
@@ -7781,12 +7781,12 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             auto newId = getArgString(msg[3]).toStdString();
 
             bool success = false;
-            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
             auto mapKey = (cnv ? canonicalCanvasKey(cnv) : canvasName).toStdString();
-            auto& map = processor->mcpStableObjectMap[mapKey];
+            auto& map = processor->getMcp()->session.mcpStableObjectMap[mapKey];
             auto const renamed = mcp::identity::renameStableId(map, oldId, newId);
             if (renamed == mcp::identity::RenameResult::Applied)
-                processor->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+                processor->getMcp()->session.mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
             success = renamed != mcp::identity::RenameResult::Missing;
 
             sendReply("/pd/rename_id/reply/" + correlationId, success ? 1.0f : 0.0f);
@@ -7806,9 +7806,9 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             bool changed = false;
 
             // Inline rename — directly mutates mcpStableObjectMap, no queue.
-            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
             auto mapKey = (cnv ? canonicalCanvasKey(cnv) : canvasName).toStdString();
-            auto& map = processor->mcpStableObjectMap[mapKey];
+            auto& map = processor->getMcp()->session.mcpStableObjectMap[mapKey];
             for (int i = 0; i < count && (cursor + 1) < msg.size(); i++) {
                 auto oldId = getArgString(msg[cursor++]).toStdString();
                 auto newId = getArgString(msg[cursor++]).toStdString();
@@ -7817,7 +7817,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 if (result == mcp::identity::RenameResult::Applied) changed = true;
             }
             if (changed)
-                processor->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+                processor->getMcp()->session.mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
 
             auto correlationId = (cursor < msg.size()) ? getArgString(msg[cursor]) : "0";
             sendReply("/pd/rename_id_batch/reply/" + correlationId, static_cast<float>(renamed));
@@ -7888,7 +7888,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             }
             auto correlationId = (cursor < msg.size()) ? getArgString(msg[cursor]) : "0";
 
-            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
             if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
 
             if (cnv) {
@@ -7902,7 +7902,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
                     // Phase 3: reconcile identity BEFORE resolving tempIds so a stale id
                     // can't resolve to the wrong object. Shared routine.
-                    proc->reconcileIdentity(canvasName);
+                    proc->getMcp()->reconcileIdentity(canvasName);
 
                     // SELECTION-FREE: resolve ids straight to Object* and hand the
                     // explicit list to the native encapsulate. The GUI selection is
@@ -7910,7 +7910,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     // no read-back guard is needed. Fail closed on the first miss.
                     SmallArray<Object*> toEncapsulate;
                     for (auto const& id : targetIds) {
-                        t_gobj* g = proc->resolveStableId(canvasName, id);
+                        t_gobj* g = proc->getMcp()->resolveStableId(canvasName, id);
                         bool found = false;
                         if (g) {
                             for (auto* objComp : canvasComp->objects) {
@@ -7936,7 +7936,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     struct EncRec { juce::String id, cls, text; bool used = false; };
                     std::vector<EncRec> encRecs;
                     for (auto const& id : targetIds) {
-                        t_gobj* g = proc->resolveStableId(canvasName, id);
+                        t_gobj* g = proc->getMcp()->resolveStableId(canvasName, id);
                         if (!g) continue;
                         EncRec r;
                         r.id = id;
@@ -7980,21 +7980,21 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
                     if (!verified) {
                         pd::Interface::undo(cnv);            // single-step rollback
-                        proc->reconcileIdentity(canvasName); // re-align map post-rollback
+                        proc->getMcp()->reconcileIdentity(canvasName); // re-align map post-rollback
                         bridge->sendReply("/pd/encapsulate/reply/" + correlationId, 0.0f);
                         return;
                     }
 
                     if (newestObj) {
-                        proc->mcpStableObjectMap[canonicalCanvasKey(cnv).toStdString()][subpatchName.toStdString()] = newestObj;
-                        proc->mcpStableSerialMap[newestObj] = proc->mcpSerialCounter++;
-                        proc->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+                        proc->getMcp()->session.mcpStableObjectMap[canonicalCanvasKey(cnv).toStdString()][subpatchName.toStdString()] = newestObj;
+                        proc->getMcp()->session.mcpStableSerialMap[newestObj] = proc->getMcp()->session.mcpSerialCounter++;
+                        proc->getMcp()->session.mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
 
                         // Re-attach the original tempIds to the recreated inner
                         // objects (match by class + object text; greedy, best-effort).
                         auto* innerCnv = reinterpret_cast<t_canvas*>(newestObj);
-                        auto& parentMap = proc->mcpStableObjectMap[canonicalCanvasKey(cnv).toStdString()];
-                        auto& childMap = proc->mcpStableObjectMap[canonicalCanvasKey(innerCnv).toStdString()];
+                        auto& parentMap = proc->getMcp()->session.mcpStableObjectMap[canonicalCanvasKey(cnv).toStdString()];
+                        auto& childMap = proc->getMcp()->session.mcpStableObjectMap[canonicalCanvasKey(innerCnv).toStdString()];
                         for (t_gobj* y = innerCnv->gl_list; y; y = y->g_next) {
                             juce::String cls = juce::String::fromUTF8(class_getname(pd_class(&y->g_pd)));
                             juce::String txt;
@@ -8009,8 +8009,8 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                                 r.used = true;
                                 childMap[r.id.toStdString()] = y;
                                 parentMap.erase(r.id.toStdString());
-                                proc->mcpStableSerialMap[y] = proc->mcpSerialCounter++;
-                                proc->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+                                proc->getMcp()->session.mcpStableSerialMap[y] = proc->getMcp()->session.mcpSerialCounter++;
+                                proc->getMcp()->session.mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
                                 break;
                             }
                         }
@@ -8042,7 +8042,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 targetIds.push_back(getArgString(msg[cursor++]));
             auto correlationId = (cursor < msg.size()) ? getArgString(msg[cursor]) : "0";
 
-            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
             if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
 
             if (cnv) {
@@ -8057,11 +8057,11 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     // Selection-free (same as /pd/encapsulate): reconcile, resolve the
                     // ids straight to Object*, fail closed on the first miss, and hand
                     // the explicit list to the native encapsulate. No GUI selection.
-                    proc->reconcileIdentity(canvasName);
+                    proc->getMcp()->reconcileIdentity(canvasName);
 
                     SmallArray<Object*> toEncapsulate;
                     for (const auto& id : targetIds) {
-                        t_gobj* g = proc->resolveStableId(canvasName, id);
+                        t_gobj* g = proc->getMcp()->resolveStableId(canvasName, id);
                         bool found = false;
                         if (g) {
                             for (auto* objComp : canvasComp->objects) {
@@ -8105,7 +8105,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         }
                         if (!ok) {
                             pd::Interface::undo(cnv);
-                            proc->reconcileIdentity(canvasName);
+                            proc->getMcp()->reconcileIdentity(canvasName);
                             bridge->sendReply("/pd/encapsulate_to_file/reply/" + correlationId, 0.0f);
                             return;
                         }
@@ -8234,15 +8234,15 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     // ── Step 5: Register new abstraction object in identity map
                     t_gobj* newObj = pd::Interface::getNewest(cnv);
                     if (newObj) {
-                        proc->mcpStableObjectMap[canonicalCanvasKey(cnv).toStdString()][abstrName.toStdString()] = newObj;
-                        proc->mcpStableSerialMap[newObj] = proc->mcpSerialCounter++;
-                        proc->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+                        proc->getMcp()->session.mcpStableObjectMap[canonicalCanvasKey(cnv).toStdString()][abstrName.toStdString()] = newObj;
+                        proc->getMcp()->session.mcpStableSerialMap[newObj] = proc->getMcp()->session.mcpSerialCounter++;
+                        proc->getMcp()->session.mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
                     }
 
                     // ── Step 6: Reload abstractions so Pd registers the file ─
                     proc->reloadAbstractions(juce::File(filePath), cnv);
 
-                    proc->enqueueFunctionAsync([p = proc] { p->synchroniseCanvases(); });
+                    proc->enqueueFunctionAsync([p = proc] { p->getMcp()->synchroniseCanvases(); });
 
                     // glist_delete + pasteDirect above freed/reordered objects
                     // on the parent canvas — flush the stale undo queue.
@@ -8323,7 +8323,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             } else if (targetIds.isEmpty()) {
                 sendReply(replyAddr, juce::String("{\"ok\":false,\"error\":\"GOP_BAD_SPEC\",\"detail\":\"no targetIds\"}"));
             } else {
-                t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+                t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
                 if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
                 if (!cnv) {
                     sendReply(replyAddr, juce::String("{\"ok\":false,\"error\":\"GOP_NO_CANVAS\",\"detail\":\"" + jsonEscape(canvasName) + "\"}"));
@@ -8332,13 +8332,13 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         // Phase 3: reconcile identity BEFORE resolving so a stale id
                         // can't resolve to a live-but-wrong object (same guarantee as
                         // /pd/encapsulate). GOP already fails closed on missing ids.
-                        proc->reconcileIdentity(canvasName);
+                        proc->getMcp()->reconcileIdentity(canvasName);
 
                         // Resolve everything BEFORE touching the canvas.
                         SmallArray<t_gobj*> toDelete;
                         juce::StringArray missing;
                         for (auto& tid : targetIds) {
-                            if (t_gobj* g = proc->resolveStableId(canvasName, tid))
+                            if (t_gobj* g = proc->getMcp()->resolveStableId(canvasName, tid))
                                 toDelete.add(g);
                             else
                                 missing.add(tid);
@@ -8347,13 +8347,13 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         std::vector<ResWire> inWires;
                         std::vector<ResWire> outWires;
                         for (auto& w : inbound) {
-                            if (t_gobj* g = proc->resolveStableId(canvasName, w.src))
+                            if (t_gobj* g = proc->getMcp()->resolveStableId(canvasName, w.src))
                                 inWires.push_back({ g, w.srcOut, w.boxIn });
                             else
                                 missing.add(w.src);
                         }
                         for (auto& w : outbound) {
-                            if (t_gobj* g = proc->resolveStableId(canvasName, w.dest))
+                            if (t_gobj* g = proc->getMcp()->resolveStableId(canvasName, w.dest))
                                 outWires.push_back({ g, w.destIn, w.boxOut });
                             else
                                 missing.add(w.dest);
@@ -8406,16 +8406,16 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                                 // remover. removeObjects() clears selection first (noselect),
                                 // opens UNDO_SEQUENCE_START, records UNDO_CUT, and suspends DSP around free.
                                 for (auto* g : toDelete) {
-                                    proc->mcpStableObjectMap[gopKey].erase(
+                                    proc->getMcp()->session.mcpStableObjectMap[gopKey].erase(
                                         [&]() -> std::string {
-                                            for (auto& [tid, ptr] : proc->mcpStableObjectMap[gopKey])
+                                            for (auto& [tid, ptr] : proc->getMcp()->session.mcpStableObjectMap[gopKey])
                                                 if (ptr == g) return tid;
                                             return "";
                                         }());
-                                    proc->mcpStableSerialMap.erase(g);
+                                    proc->getMcp()->session.mcpStableSerialMap.erase(g);
                                 }
                                 mcp::PdOps::removeObjectsAudioThread(cnv, toDelete);
-                                proc->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+                                proc->getMcp()->session.mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
 
                                 // 3. Rewire parent boundary through the new box with createConnection.
                                 for (auto& w : inWires) {
@@ -8441,10 +8441,10 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                                 undoAtoms.add(pd::Atom(proc->generateSymbol(canvasName)));
                                 proc->receiveSysMessage("mcp_clear_undo", undoAtoms);
                                 for (auto& e : staleErrs) connErrs.add(e);
-                                proc->mcpStableObjectMap[gopKey][safeName.toStdString()] = newObj;
-                                proc->mcpSerialCounter++;
-                                proc->mcpStableSerialMap[newObj] = proc->mcpSerialCounter;
-                                proc->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+                                proc->getMcp()->session.mcpStableObjectMap[gopKey][safeName.toStdString()] = newObj;
+                                proc->getMcp()->session.mcpSerialCounter++;
+                                proc->getMcp()->session.mcpStableSerialMap[newObj] = proc->getMcp()->session.mcpSerialCounter;
+                                proc->getMcp()->session.mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
                                 newTempId = safeName;
                             }
                         }
@@ -8453,7 +8453,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         if (newTempId.isEmpty()) return; // error reply already sent
 
                         // Sync GUI so plugdata displays the newly instantiated abstraction.
-                        proc->enqueueFunctionAsync([p = proc] { p->synchroniseCanvases(); });
+                        proc->enqueueFunctionAsync([p = proc] { p->getMcp()->synchroniseCanvases(); });
 
                         juce::String receipt = "{\"ok\":true,\"tempId\":\"" + jsonEscape(newTempId)
                             + "\",\"inlets\":" + juce::String(static_cast<int>(inWires.size()))
@@ -8514,14 +8514,14 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             }
             auto correlationId = (cursor < msg.size()) ? getArgString(msg[cursor]) : "0";
 
-            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
             if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
 
             if (cnv) {
                 SmallArray<t_gobj*> targetObjs;
                 if (!targetIds.empty()) {
                     for (const auto& id : targetIds) {
-                        t_gobj* g = processor->resolveStableId(canvasName, id);
+                        t_gobj* g = processor->getMcp()->resolveStableId(canvasName, id);
                         if (g) targetObjs.add(g);
                     }
                 } else {
@@ -8532,7 +8532,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
 
                 if (!targetObjs.empty()) {
                     pd::Interface::tidy(cnv, targetObjs);
-                    processor->synchroniseCanvases();
+                    processor->getMcp()->synchroniseCanvases();
                 }
                 sendReply("/pd/tidy/reply/" + correlationId, 1.0f);
             } else {
@@ -8554,7 +8554,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             }
             auto correlationId = (cursor < msg.size()) ? getArgString(msg[cursor]) : "0";
 
-            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
             if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
 
             if (cnv) {
@@ -8569,7 +8569,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     if (!targetIds.empty()) {
                         canvasComp->patch.deselectAll();
                         for (const auto& id : targetIds) {
-                            t_gobj* g = proc->resolveStableId(canvasName, id);
+                            t_gobj* g = proc->getMcp()->resolveStableId(canvasName, id);
                             if (g) {
                                 for (auto* objComp : canvasComp->objects) {
                                     if (objComp && objComp->getPointer() == g) {
@@ -8606,7 +8606,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             auto canvasName = normalizeCanvas(getArgString(msg[0]));
             auto correlationId = (msg.size() >= 2) ? getArgString(msg[1]) : "0";
 
-            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
             if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
 
             juce::MessageManager::callAsync([proc = processor, cnv, correlationId, bridge = this]() {
@@ -8644,7 +8644,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             scale = juce::jlimit(0.1f, 2.0f, scale);
 
             // Resolve t_canvas — null is fine, we fall back to focused editor canvas
-            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
 
             // ScreenshotLabel struct; collection happens inside callAsync after
             // canvasComp is resolved to avoid the null-cnv race (guard 'cnv' here
@@ -8795,8 +8795,8 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     // ptrToId from mcpStableObjectMap for tempId fallback naming
                     std::unordered_map<t_gobj*, juce::String> ptrToId;
                     if (proc) {
-                        auto mapIt = proc->mcpStableObjectMap.find((liveCnv ? canonicalCanvasKey(liveCnv) : canvasName).toStdString());
-                        if (mapIt != proc->mcpStableObjectMap.end())
+                        auto mapIt = proc->getMcp()->session.mcpStableObjectMap.find((liveCnv ? canonicalCanvasKey(liveCnv) : canvasName).toStdString());
+                        if (mapIt != proc->getMcp()->session.mcpStableObjectMap.end())
                             for (auto& [tid, ptr] : mapIt->second)
                                 if (ptr) ptrToId[ptr] = juce::String(tid);
                     }
@@ -9020,7 +9020,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             }
             auto correlationId = (cursor < (int)msg.size()) ? getArgString(msg[cursor]) : "0";
 
-            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
             if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
             if (!cnv) {
                 sendReply("/pd/deoverlap/reply/" + correlationId, 0.0f);
@@ -9031,7 +9031,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             std::vector<t_gobj*> objs;
             if (!targetIds.empty()) {
                 for (auto& id : targetIds) {
-                    t_gobj* g = processor->resolveStableId(canvasName, id);
+                    t_gobj* g = processor->getMcp()->resolveStableId(canvasName, id);
                     if (g) objs.push_back(g);
                 }
             } else {
@@ -9083,7 +9083,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         }
                     }
                 }
-                for (auto const& rg : processor->mcpRegions) {
+                for (auto const& rg : processor->getMcp()->session.mcpRegions) {
                     if (rg.title.isEmpty()) continue;
                     int rx = static_cast<int>(rg.x), ry = static_cast<int>(rg.y);
                     int rw = static_cast<int>(rg.w), rh = 26;
@@ -9116,7 +9116,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             }
             sys_unlock();
 
-            processor->enqueueFunctionAsync([p = processor] { p->synchroniseCanvases(); });
+            processor->enqueueFunctionAsync([p = processor] { p->getMcp()->synchroniseCanvases(); });
             sendReply("/pd/deoverlap/reply/" + correlationId, 1.0f);
         }
         return;
@@ -9138,7 +9138,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         auto correlationId = msg.size() > 4 ? getArgString(msg[4]) : "0";
         juce::String replyAddr = "/pd/layout_guard/reply/" + correlationId;
 
-        t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+        t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
         if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
         if (!cnv) {
             juce::Array<juce::var> none;
@@ -9154,7 +9154,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         if (moved > 0 || occlusions > 0) resetCanvasUndo(processor, canvasName);
         sys_unlock();
 
-        processor->enqueueFunctionAsync([p = processor] { p->synchroniseCanvases(); });
+        processor->enqueueFunctionAsync([p = processor] { p->getMcp()->synchroniseCanvases(); });
         juce::Array<juce::var> guardReply;
         guardReply.add(static_cast<float>(moved));
         guardReply.add(static_cast<float>(occlusions));
@@ -9171,7 +9171,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         auto correlationId = msg.size() > 3 ? getArgString(msg[3]) : "0";
         juce::String replyAddr = "/pd/compose/reply/" + correlationId;
 
-        t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+        t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
         if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
         if (!cnv) { sendReply(replyAddr, 0.0f); return; }
 
@@ -9180,7 +9180,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
         if (moved > 0) resetCanvasUndo(processor, canvasName);
         sys_unlock();
 
-        processor->enqueueFunctionAsync([p = processor] { p->synchroniseCanvases(); });
+        processor->enqueueFunctionAsync([p = processor] { p->getMcp()->synchroniseCanvases(); });
         sendReply(replyAddr, static_cast<float>(moved));
         return;
     }
@@ -9201,7 +9201,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             auto correlationId = (cursor < (int)msg.size()) ? getArgString(msg[cursor])
                                : (msg.size() > 1 ? getArgString(msg[1]) : "0");
 
-            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
             if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
             if (!cnv) {
                 sendReply("/pd/pillars/reply/" + correlationId, 0.0f);
@@ -9212,7 +9212,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             std::vector<t_gobj*> objs;
             if (!targetIds.empty()) {
                 for (auto& id : targetIds) {
-                    t_gobj* g = processor->resolveStableId(canvasName, id);
+                    t_gobj* g = processor->getMcp()->resolveStableId(canvasName, id);
                     if (g) objs.push_back(g);
                 }
             } else {
@@ -9271,7 +9271,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             }
             sys_unlock();
 
-            processor->enqueueFunctionAsync([p = processor] { p->synchroniseCanvases(); });
+            processor->enqueueFunctionAsync([p = processor] { p->getMcp()->synchroniseCanvases(); });
             sendReply("/pd/pillars/reply/" + correlationId, 1.0f);
         }
         return;
@@ -9293,7 +9293,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             auto correlationId = (cursor < (int)msg.size()) ? getArgString(msg[cursor])
                                : (msg.size() > 1 ? getArgString(msg[1]) : "0");
 
-            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
             if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
             if (!cnv) {
                 sendReply("/pd/flow/reply/" + correlationId, 0.0f);
@@ -9304,7 +9304,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             std::vector<t_gobj*> objs;
             if (!targetIds.empty()) {
                 for (auto& id : targetIds) {
-                    t_gobj* g = processor->resolveStableId(canvasName, id);
+                    t_gobj* g = processor->getMcp()->resolveStableId(canvasName, id);
                     if (g) objs.push_back(g);
                 }
             } else {
@@ -9491,7 +9491,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             }
             sys_unlock();
 
-            processor->enqueueFunctionAsync([p = processor] { p->synchroniseCanvases(); });
+            processor->enqueueFunctionAsync([p = processor] { p->getMcp()->synchroniseCanvases(); });
             sendReply("/pd/flow/reply/" + correlationId, 1.0f);
         }
         return;
@@ -9502,7 +9502,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             auto canvasName = normalizeCanvas(getArgString(msg[0]));
             auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : "0";
 
-            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
             if (!cnv && (canvasName == "pd-main" || canvasName == "main" || canvasName.isEmpty())) cnv = pd_this->pd_canvaslist;
 
             if (cnv) {
@@ -9519,16 +9519,16 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         if (canvasComp) break;
                     }
 
-                    if (proc->hasMcpTransaction(cnv)) {
-                        proc->undoMcpTransaction(cnv);
-                        proc->synchroniseCanvases();
+                    if (proc->getMcp()->hasMcpTransaction(cnv)) {
+                        proc->getMcp()->undoMcpTransaction(cnv);
+                        proc->getMcp()->synchroniseCanvases();
                         bridge->sendReply("/pd/undo/reply/" + correlationId, 1.0f);
                     } else if (canvasComp && canvasComp->canUndo()) {
                         canvasComp->undo();
                         bridge->sendReply("/pd/undo/reply/" + correlationId, 1.0f);
                     } else if (!canvasComp) {
                         pd::Interface::undo(cnv);
-                        proc->synchroniseCanvases();
+                        proc->getMcp()->synchroniseCanvases();
                         bridge->sendReply("/pd/undo/reply/" + correlationId, 1.0f);
                     } else {
                         // Canvas present but the undo stack is EMPTY (e.g. after a
@@ -9549,7 +9549,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             auto canvasName = normalizeCanvas(getArgString(msg[0]));
             auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : "0";
 
-            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
             if (!cnv && (canvasName == "pd-main" || canvasName == "main" || canvasName.isEmpty())) cnv = pd_this->pd_canvaslist;
 
             if (cnv) {
@@ -9566,16 +9566,16 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         if (canvasComp) break;
                     }
 
-                    if (proc->hasMcpRedoTransaction(cnv)) {
-                        proc->redoMcpTransaction(cnv);
-                        proc->synchroniseCanvases();
+                    if (proc->getMcp()->hasMcpRedoTransaction(cnv)) {
+                        proc->getMcp()->redoMcpTransaction(cnv);
+                        proc->getMcp()->synchroniseCanvases();
                         bridge->sendReply("/pd/redo/reply/" + correlationId, 1.0f);
                     } else if (canvasComp) {
                         canvasComp->redo();
                         bridge->sendReply("/pd/redo/reply/" + correlationId, 1.0f);
                     } else {
                         pd::Interface::redo(cnv);
-                        proc->synchroniseCanvases();
+                        proc->getMcp()->synchroniseCanvases();
                         bridge->sendReply("/pd/redo/reply/" + correlationId, 1.0f);
                     }
                 });
@@ -9702,7 +9702,7 @@ void MCPBridge::handleTelemetryDomain(const juce::String& /*telAction*/, const j
         }
         if (idx >= 0) {
             sys_lock();
-            t_canvas* canvas = processor->getCanvasBySymbol(canvasName);
+            t_canvas* canvas = processor->getMcp()->getCanvasBySymbol(canvasName);
             if (canvas) {
                 t_gobj* obj = glistObjectAt(canvas, idx);
                 if (obj) {
@@ -9785,7 +9785,7 @@ void MCPBridge::handleArrayDomain(const juce::String& arrayAction, const juce::O
 
         // Auto-create the array if it doesn't exist yet.
         if (!garray) {
-            t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+            t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
             if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
             if (cnv) {
                 int nobj = 0;
@@ -9805,7 +9805,7 @@ void MCPBridge::handleArrayDomain(const juce::String& arrayAction, const juce::O
                 }
                 if (garray) {
                     canvas_dirty(cnv, 1);
-                    processor->enqueueFunctionAsync([p = processor] { p->synchroniseCanvases(); });
+                    processor->enqueueFunctionAsync([p = processor] { p->getMcp()->synchroniseCanvases(); });
                 }
             }
         }
@@ -9860,7 +9860,7 @@ void MCPBridge::handleArrayDomain(const juce::String& arrayAction, const juce::O
             reqSize = offset > 0 ? std::max(2048, offset + dataCount) : std::max(1, dataCount);
         }
 
-        t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+        t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
         if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
         if (cnv) {
             // Stagger each auto-created array so they don't stack on top of
@@ -9882,7 +9882,7 @@ void MCPBridge::handleArrayDomain(const juce::String& arrayAction, const juce::O
             }
             if (garray) {
                 canvas_dirty(cnv, 1);
-                processor->enqueueFunctionAsync([p = processor] { p->synchroniseCanvases(); });
+                processor->enqueueFunctionAsync([p = processor] { p->getMcp()->synchroniseCanvases(); });
             }
         }
     }
@@ -11053,7 +11053,7 @@ void MCPBridge::stopMidiCaptureAndStage()
     juce::File("/home/alphi/Desktop/plugdata/mcp-server/midi-take.json").replaceWithText(jsonStr);
 
     // Register as a first-class moodboard artifact.
-    PluginProcessor::McpMidiTake take;
+    McpSession::McpMidiTake take;
     take.id = takeId;
     take.json = jsonStr;
     take.voice = midiCaptureVoice;
@@ -11061,7 +11061,7 @@ void MCPBridge::stopMidiCaptureAndStage()
     take.noteCount = static_cast<int>(events.size());
     take.durationSec = durationSec;
     take.visible = true;
-    if (processor) processor->addMcpMidiTake(std::move(take));
+    if (processor) processor->getMcp()->session.addMcpMidiTake(std::move(take));
 
     sendReply("/pd/midi/event", jsonStr);
     sendConsoleLog("MCP: MIDI take staged -> " + takeId + " (" + juce::String(events.size())
@@ -11639,7 +11639,7 @@ void MCPBridge::parseVoiceBufferToJson(float const* buffer, int totalSamples, do
         }
     }
     if (processor) {
-        PluginProcessor::McpVoiceTake take;
+        McpSession::McpVoiceTake take;
         take.id = wavPath.isNotEmpty() ? juce::File(wavPath).getFileNameWithoutExtension()
                                        : "take_" + juce::String(juce::Time::getCurrentTime().toMilliseconds());
         take.wavPath = wavPath;
@@ -11666,7 +11666,7 @@ void MCPBridge::parseVoiceBufferToJson(float const* buffer, int totalSamples, do
             }
         }
 
-        processor->addMcpVoiceTake(std::move(take));
+        processor->getMcp()->session.addMcpVoiceTake(std::move(take));
     }
 
     sendReply("/pd/voice/event", jsonStr);
@@ -11911,14 +11911,14 @@ t_outconnect* MCPBridge::resolveProbeTarget(const juce::String& canvasName, cons
         return nullptr;
     }
 
-    t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+    t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
     if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
     if (!cnv) {
         errorOut = "Canvas not found: " + canvasName;
         return nullptr;
     }
 
-    t_gobj* gobj = processor->resolveStableId(canvasName, targetId);
+    t_gobj* gobj = processor->getMcp()->resolveStableId(canvasName, targetId);
 
     if (!gobj) {
         bool isNumber = targetId.isNotEmpty();
@@ -12054,14 +12054,14 @@ void MCPBridge::handleMeterDomain(const juce::String& meterAction, const juce::O
             return;
         }
         if (modeStr == "off") {
-            processor->mcpTapMode.store(PluginProcessor::mcpTapOff, std::memory_order_relaxed);
-            processor->mcpTapSig.store(nullptr, std::memory_order_relaxed);
+            processor->getMcp()->session.mcpTapMode.store(McpSession::mcpTapOff, std::memory_order_relaxed);
+            processor->getMcp()->session.mcpTapSig.store(nullptr, std::memory_order_relaxed);
             mcpTapTempId.clear();
             sendReply("/meter/tap/reply/" + correlationId, juce::String("off"));
             return;
         }
 
-        int mode = (modeStr == "mute") ? PluginProcessor::mcpTapMute : PluginProcessor::mcpTapSolo;
+        int mode = (modeStr == "mute") ? McpSession::mcpTapMute : McpSession::mcpTapSolo;
         sys_lock();
         juce::String errorOut;
         t_outconnect* oc = resolveProbeTarget(canvasName, tempId, outletIndex, errorOut);
@@ -12071,8 +12071,8 @@ void MCPBridge::handleMeterDomain(const juce::String& meterAction, const juce::O
         sys_unlock();
 
         if (!vec || n <= 0) {
-            processor->mcpTapMode.store(PluginProcessor::mcpTapOff, std::memory_order_relaxed);
-            processor->mcpTapSig.store(nullptr, std::memory_order_relaxed);
+            processor->getMcp()->session.mcpTapMode.store(McpSession::mcpTapOff, std::memory_order_relaxed);
+            processor->getMcp()->session.mcpTapSig.store(nullptr, std::memory_order_relaxed);
             mcpTapTempId.clear();
             sendReply("/meter/tap/reply/" + correlationId,
                       juce::String("error: ") + (errorOut.isNotEmpty() ? errorOut : juce::String("signal not ready (is DSP running?)")));
@@ -12084,12 +12084,12 @@ void MCPBridge::handleMeterDomain(const juce::String& meterAction, const juce::O
         mcpTapOutlet = outletIndex;
         auto const until = juce::Time::getMillisecondCounter()
                          + static_cast<juce::uint32>(juce::jlimit(1000.0f, 120000.0f, holdMs));
-        processor->mcpTapUntilMs.store(until, std::memory_order_relaxed);
-        processor->mcpTapSig.store(static_cast<void*>(signal), std::memory_order_relaxed);
-        processor->mcpTapMode.store(mode, std::memory_order_relaxed); // publish LAST
-        processor->mcpTapGeneration.fetch_add(1, std::memory_order_relaxed);
+        processor->getMcp()->session.mcpTapUntilMs.store(until, std::memory_order_relaxed);
+        processor->getMcp()->session.mcpTapSig.store(static_cast<void*>(signal), std::memory_order_relaxed);
+        processor->getMcp()->session.mcpTapMode.store(mode, std::memory_order_relaxed); // publish LAST
+        processor->getMcp()->session.mcpTapGeneration.fetch_add(1, std::memory_order_relaxed);
         sendReply("/meter/tap/reply/" + correlationId,
-                  juce::String(mode == PluginProcessor::mcpTapMute ? "mute " : "solo ") + tempId
+                  juce::String(mode == McpSession::mcpTapMute ? "mute " : "solo ") + tempId
                   + " " + juce::String(static_cast<int>(juce::jlimit(1000.0f, 120000.0f, holdMs))) + "ms");
         return;
     }
@@ -12233,13 +12233,13 @@ void MCPBridge::handleMeterDomain(const juce::String& meterAction, const juce::O
         // master peak-hold. Call this BEFORE triggering, so a one-shot is inside it.
         auto correlationId = msg.size() > 0 ? getArgString(msg[0]) : juce::String("0");
         if (processor) {
-            processor->mcpArmPeak.store(0.0f, std::memory_order_relaxed);
+            processor->getMcp()->session.mcpArmPeak.store(0.0f, std::memory_order_relaxed);
             // #83 diagnostics: snapshot the audio-block counter and zero the
             // window counters so `read` can split the failure causes.
-            processor->mcpArmBlocksAtArm.store(processor->mcpAudioBlocks.load(std::memory_order_relaxed), std::memory_order_relaxed);
-            processor->mcpArmedTailRuns.store(0, std::memory_order_relaxed);
-            processor->mcpArmedTailPeak.store(0.0f, std::memory_order_relaxed);
-            processor->mcpArmActive.store(true, std::memory_order_release);
+            processor->getMcp()->session.mcpArmBlocksAtArm.store(processor->getMcp()->session.mcpAudioBlocks.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            processor->getMcp()->session.mcpArmedTailRuns.store(0, std::memory_order_relaxed);
+            processor->getMcp()->session.mcpArmedTailPeak.store(0.0f, std::memory_order_relaxed);
+            processor->getMcp()->session.mcpArmActive.store(true, std::memory_order_release);
         }
         sendRawReply("/meter/arm/reply/" + correlationId);
         return;
@@ -12250,8 +12250,8 @@ void MCPBridge::handleMeterDomain(const juce::String& meterAction, const juce::O
         // peakDb > -60 → the trigger produced sound. Never misses a one-shot because
         // the window was armed before the event and accumulated every block since.
         auto correlationId = msg.size() > 0 ? getArgString(msg[0]) : juce::String("0");
-        if (processor) processor->mcpArmActive.store(false, std::memory_order_release);
-        float const peak = processor ? processor->mcpArmPeak.load(std::memory_order_relaxed) : 0.0f;
+        if (processor) processor->getMcp()->session.mcpArmActive.store(false, std::memory_order_release);
+        float const peak = processor ? processor->getMcp()->session.mcpArmPeak.load(std::memory_order_relaxed) : 0.0f;
         float const peakDb = (peak > 1e-7f) ? (20.0f * std::log10(peak)) : -100.0f;
         // #83 diagnostics — split the three causes of "armed read silent":
         //   blocksElapsed == 0                    → audio thread isn't ticking
@@ -12260,10 +12260,10 @@ void MCPBridge::handleMeterDomain(const juce::String& meterAction, const juce::O
         int64_t blocksElapsed = 0, armedTailRuns = 0;
         float tailPeak = 0.0f;
         if (processor) {
-            blocksElapsed = (int64_t)(processor->mcpAudioBlocks.load(std::memory_order_relaxed)
-                                      - processor->mcpArmBlocksAtArm.load(std::memory_order_relaxed));
-            armedTailRuns = (int64_t)processor->mcpArmedTailRuns.load(std::memory_order_relaxed);
-            tailPeak = processor->mcpArmedTailPeak.load(std::memory_order_relaxed);
+            blocksElapsed = (int64_t)(processor->getMcp()->session.mcpAudioBlocks.load(std::memory_order_relaxed)
+                                      - processor->getMcp()->session.mcpArmBlocksAtArm.load(std::memory_order_relaxed));
+            armedTailRuns = (int64_t)processor->getMcp()->session.mcpArmedTailRuns.load(std::memory_order_relaxed);
+            tailPeak = processor->getMcp()->session.mcpArmedTailPeak.load(std::memory_order_relaxed);
             post("MCP-ARM-DIAG read: peak=%.6f blocksElapsed=%lld armedTailRuns=%lld tailPeak=%.6f",
                  (double)peak, (long long)blocksElapsed, (long long)armedTailRuns, (double)tailPeak);
         }
@@ -12348,7 +12348,7 @@ void MCPBridge::handleMeterDomain(const juce::String& meterAction, const juce::O
             sendReply("/meter/arm_spectral/reply/" + correlationId, "{\"error\":\"no processor\"}");
             return;
         }
-        int const cap = processor->mcpSpecCapacity.load(std::memory_order_relaxed);
+        int const cap = processor->getMcp()->session.mcpSpecCapacity.load(std::memory_order_relaxed);
         if (cap <= 0) {
             sendReply("/meter/arm_spectral/reply/" + correlationId,
                       "{\"error\":\"spectral capture buffer not ready (DSP not prepared)\"}");
@@ -12361,10 +12361,10 @@ void MCPBridge::handleMeterDomain(const juce::String& meterAction, const juce::O
         if (target > cap) target = cap;
         if (target < PROBE_RING_SIZE) target = std::min(cap, PROBE_RING_SIZE);
 
-        processor->mcpSpecArmed.store(false, std::memory_order_release);
-        processor->mcpSpecWritePos.store(0, std::memory_order_relaxed);
-        processor->mcpSpecLimit.store(target, std::memory_order_relaxed);
-        processor->mcpSpecArmed.store(true, std::memory_order_release);
+        processor->getMcp()->session.mcpSpecArmed.store(false, std::memory_order_release);
+        processor->getMcp()->session.mcpSpecWritePos.store(0, std::memory_order_relaxed);
+        processor->getMcp()->session.mcpSpecLimit.store(target, std::memory_order_relaxed);
+        processor->getMcp()->session.mcpSpecArmed.store(true, std::memory_order_release);
         sendRawReply("/meter/arm_spectral/reply/" + correlationId);
         return;
     }
@@ -12377,26 +12377,26 @@ void MCPBridge::handleMeterDomain(const juce::String& meterAction, const juce::O
             sendReply("/meter/read_spectral/reply/" + correlationId, "{\"error\":\"no processor\"}");
             return;
         }
-        processor->mcpSpecArmed.store(false, std::memory_order_release);
+        processor->getMcp()->session.mcpSpecArmed.store(false, std::memory_order_release);
         // Wait out any in-flight audio append (a few ms at most) before copying.
         for (int spin = 0; spin < 200; ++spin) {
-            if (!processor->mcpSpecBusy.load(std::memory_order_acquire)) break;
+            if (!processor->getMcp()->session.mcpSpecBusy.load(std::memory_order_acquire)) break;
             juce::Thread::sleep(1);
         }
-        int const n = processor->mcpSpecWritePos.load(std::memory_order_acquire);
+        int const n = processor->getMcp()->session.mcpSpecWritePos.load(std::memory_order_acquire);
         double const sr = processor->getSampleRate() > 0.0 ? processor->getSampleRate() : 44100.0;
         // #83 diagnostics — same split as /meter/read (audio thread / armed tail / buffer).
-        int64_t blocksElapsed = (int64_t)(processor->mcpAudioBlocks.load(std::memory_order_relaxed)
-                                  - processor->mcpArmBlocksAtArm.load(std::memory_order_relaxed));
-        int64_t armedTailRuns = (int64_t)processor->mcpArmedTailRuns.load(std::memory_order_relaxed);
-        float tailPeak = processor->mcpArmedTailPeak.load(std::memory_order_relaxed);
+        int64_t blocksElapsed = (int64_t)(processor->getMcp()->session.mcpAudioBlocks.load(std::memory_order_relaxed)
+                                  - processor->getMcp()->session.mcpArmBlocksAtArm.load(std::memory_order_relaxed));
+        int64_t armedTailRuns = (int64_t)processor->getMcp()->session.mcpArmedTailRuns.load(std::memory_order_relaxed);
+        float tailPeak = processor->getMcp()->session.mcpArmedTailPeak.load(std::memory_order_relaxed);
         juce::String diag = ",\"blocksElapsed\":" + juce::String((int)blocksElapsed)
                           + ",\"armedTailRuns\":" + juce::String((int)armedTailRuns)
                           + ",\"tailPeak\":" + juce::String(tailPeak, 6);
         post("MCP-ARM-DIAG read_spectral: samples=%d blocksElapsed=%lld armedTailRuns=%lld tailPeak=%.6f",
              n, (long long)blocksElapsed, (long long)armedTailRuns, (double)tailPeak);
-        juce::String json = armedSpectralJson(processor->mcpSpecBuffer.data(), n, sr);
-        processor->mcpSpecWritePos.store(0, std::memory_order_relaxed);
+        juce::String json = armedSpectralJson(processor->getMcp()->session.mcpSpecBuffer.data(), n, sr);
+        processor->getMcp()->session.mcpSpecWritePos.store(0, std::memory_order_relaxed);
         if (json.isEmpty()) {
             sendReply("/meter/read_spectral/reply/" + correlationId,
                       juce::String("{\"error\":\"insufficient capture\",\"samples\":") + juce::String(n) + diag + "}");
@@ -12418,7 +12418,7 @@ void MCPBridge::handleMeterDomain(const juce::String& meterAction, const juce::O
             juce::Thread::sleep(5);
         }
 
-        t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+        t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
         if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
         if (!cnv) {
             juce::OSCMessage rep { juce::OSCAddressPattern("/meter/master/reply/" + correlationId) };
@@ -12462,7 +12462,7 @@ void MCPBridge::handleMeterDomain(const juce::String& meterAction, const juce::O
             juce::Thread::sleep(5);
         }
 
-        t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
+        t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
         if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
         if (!cnv) {
             sendReply("/meter/trace/reply/" + correlationId, "{\"error\":\"canvas not found: " + jsonEscape(canvasName) + "\"}");
@@ -12490,16 +12490,16 @@ void MCPBridge::timerCallback()
     // Monitor tap (solo/mute): re-resolve the target each tick so a deleted or
     // rewired node can never leave a dangling s_vec on the audio thread; if the
     // node is gone, the tap turns itself off.
-    if (processor && processor->mcpTapMode.load(std::memory_order_relaxed) != PluginProcessor::mcpTapOff
+    if (processor && processor->getMcp()->session.mcpTapMode.load(std::memory_order_relaxed) != McpSession::mcpTapOff
         && mcpTapTempId.isNotEmpty()) {
         juce::String err;
         t_outconnect* oc = resolveProbeTarget(mcpTapCanvas, mcpTapTempId, mcpTapOutlet, err);
         t_signal* sig = oc ? outconnect_get_signal(oc) : nullptr;
         if (sig && sig->s_vec) {
-            processor->mcpTapSig.store(static_cast<void*>(sig), std::memory_order_relaxed);
+            processor->getMcp()->session.mcpTapSig.store(static_cast<void*>(sig), std::memory_order_relaxed);
         } else {
-            processor->mcpTapMode.store(PluginProcessor::mcpTapOff, std::memory_order_relaxed);
-            processor->mcpTapSig.store(nullptr, std::memory_order_relaxed);
+            processor->getMcp()->session.mcpTapMode.store(McpSession::mcpTapOff, std::memory_order_relaxed);
+            processor->getMcp()->session.mcpTapSig.store(nullptr, std::memory_order_relaxed);
             mcpTapTempId.clear();
         }
     }

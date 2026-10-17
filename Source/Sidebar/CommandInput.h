@@ -627,7 +627,7 @@ public:
                 String promptText = message.substring(message.indexOf("ai") + 2).trim();
                 pd->sendMessage("#plugdata_mcp_prompt", "agent_request", { pd->generateSymbol(promptText) });
                 if (auto* proc = dynamic_cast<PluginProcessor*>(pd)) {
-                    if (auto* bridge = proc->getMCPBridge()) {
+                    if (auto* bridge = proc->getMcp()->getMCPBridge()) {
                         bridge->sendPrompt(promptText);
                     }
                 }

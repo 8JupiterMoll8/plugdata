@@ -785,7 +785,7 @@ public:
             chatContent.items.clear();
             updateChatLayout();
             if (pd) {
-                if (auto* bridge = pd->getMCPBridge()) {
+                if (auto* bridge = pd->getMcp()->getMCPBridge()) {
                     bridge->sendReply("/chat/clear", {});
                 }
             }
@@ -825,7 +825,7 @@ public:
 
         // Register listener with MCPBridge if present
         if (pd) {
-            if (auto* bridge = pd->getMCPBridge()) {
+            if (auto* bridge = pd->getMcp()->getMCPBridge()) {
                 bridge->setChatCallback([safeThis = SafePointer<CopilotPanel>(this)](const juce::String& role, const juce::String& text) {
                     if (safeThis != nullptr) {
                         safeThis->receiveMessage(role, text);
@@ -844,7 +844,7 @@ public:
     {
         stopTimer();
         if (pd) {
-            if (auto* bridge = pd->getMCPBridge()) {
+            if (auto* bridge = pd->getMcp()->getMCPBridge()) {
                 bridge->setChatCallback(nullptr);
             }
         }
@@ -872,8 +872,8 @@ public:
         }
 
         if (!pd) return;
-        int takes = static_cast<int>(pd->getMcpMidiTakes().size() + pd->getMcpVoiceTakes().size());
-        int images = static_cast<int>(pd->getMcpReferenceImages().size());
+        int takes = static_cast<int>(pd->getMcp()->session.getMcpMidiTakes().size() + pd->getMcp()->session.getMcpVoiceTakes().size());
+        int images = static_cast<int>(pd->getMcp()->session.getMcpReferenceImages().size());
         if (takes != shelfBar.takeCount || images != shelfBar.imageCount) {
             shelfBar.takeCount = takes;
             shelfBar.imageCount = images;
@@ -890,12 +890,12 @@ public:
 
         menu.showMenuAsync(PopupMenu::Options().withTargetComponent(&inputCapsule.plusButton), [this](int result) {
             if (result == 1) {
-                if (pd && pd->getMCPBridge()) {
-                    pd->getMCPBridge()->startMidiCapture();
+                if (pd && pd->getMcp()->getMCPBridge()) {
+                    pd->getMcp()->getMCPBridge()->startMidiCapture();
                 }
             } else if (result == 2) {
-                if (pd && pd->getMCPBridge()) {
-                    pd->getMCPBridge()->startVoiceCapture(1);
+                if (pd && pd->getMcp()->getMCPBridge()) {
+                    pd->getMcp()->getMCPBridge()->startVoiceCapture(1);
                 }
             } else if (result == 3) {
                 if (editor) {
@@ -961,7 +961,7 @@ public:
             if (auto* cnv = editor->getCurrentCanvas()) {
                 for (auto* obj : cnv->getSelectionOfType<Object>()) {
                     if (auto* ptr = obj->getPointer()) {
-                        auto const tid = pd->getStableId(ptr);
+                        auto const tid = pd->getMcp()->getStableId(ptr);
                         if (tid.isNotEmpty()) targetIds.add(tid);
                     }
                 }
@@ -971,7 +971,7 @@ public:
         chatContent.addMessage("user", text);
         setThinking(true, "Thinking...");
 
-        if (auto* bridge = pd->getMCPBridge()) {
+        if (auto* bridge = pd->getMcp()->getMCPBridge()) {
             bridge->sendSelectionPrompt(text, targetIds, false);
         }
     }

@@ -129,7 +129,7 @@ public:
 
     MCPBridge* bridge() const
     {
-        return pd ? pd->getMCPBridge() : nullptr;
+        return pd ? pd->getMcp()->getMCPBridge() : nullptr;
     }
 
     void timerCallback() override

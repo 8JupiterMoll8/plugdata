@@ -323,7 +323,7 @@ public:
     static juce::String canonicalCanvasKey(t_canvas* cnv);
 
     friend class ProbeManager;
-    friend class PluginProcessor;
+    friend class McpHost; // replays undo/redo transactions through handlePdDomain
 
 private:
     void handlePdDomain(const juce::String& action, const juce::OSCMessage& msg);

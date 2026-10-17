@@ -1133,8 +1133,8 @@ void PluginEditor::handleAsyncUpdate()
             statusbar->setEditButtonState(false);
         }
 
-        auto const currentUndoState = (cnv->patch.canUndo() || (pd && pd->hasMcpTransaction(cnv->patch.getUncheckedPointer()))) && !isDragging && !locked;
-        auto const currentRedoState = (cnv->patch.canRedo() || (pd && pd->hasMcpRedoTransaction(cnv->patch.getUncheckedPointer()))) && !isDragging && !locked;
+        auto const currentUndoState = (cnv->patch.canUndo() || (pd && pd->getMcp()->hasMcpTransaction(cnv->patch.getUncheckedPointer()))) && !isDragging && !locked;
+        auto const currentRedoState = (cnv->patch.canRedo() || (pd && pd->getMcp()->hasMcpRedoTransaction(cnv->patch.getUncheckedPointer()))) && !isDragging && !locked;
 
         undoButton.setEnabled(currentUndoState);
         redoButton.setEnabled(currentRedoState);
@@ -1256,8 +1256,8 @@ void PluginEditor::getCommandInfo(CommandID const commandID, ApplicationCommandI
         isDragging = cnv->dragState.didStartDragging && !cnv->isDraggingLasso && cnv->locked == var(false);
         hasCanvas = true;
 
-        canUndo = (cnv->patch.canUndo() || (pd && pd->hasMcpTransaction(cnv->patch.getUncheckedPointer()))) && !isDragging;
-        canRedo = (cnv->patch.canRedo() || (pd && pd->hasMcpRedoTransaction(cnv->patch.getUncheckedPointer()))) && !isDragging;
+        canUndo = (cnv->patch.canUndo() || (pd && pd->getMcp()->hasMcpTransaction(cnv->patch.getUncheckedPointer()))) && !isDragging;
+        canRedo = (cnv->patch.canRedo() || (pd && pd->getMcp()->hasMcpRedoTransaction(cnv->patch.getUncheckedPointer()))) && !isDragging;
 
         canZoomOut = cnv && getValue<float>(cnv->zoomScale) > 0.25f;
         canZoomIn = cnv && getValue<float>(cnv->zoomScale) < 3.f;
