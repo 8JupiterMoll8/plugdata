@@ -18,6 +18,7 @@
 #include <memory>
 #include "Utility/Config.h"
 #include "Pd/Instance.h"
+#include "Pd/MCPIdentity.h" // renameStableId (also used by PluginProcessor.cpp; finding C6)
 
 class PluginProcessor;
 class MCPBridge;

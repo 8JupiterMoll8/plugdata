@@ -22,6 +22,8 @@
 #include "McpIemArgs.h" // IEM GUI short-form creation-arg guard (shared)
 #include "MCPBridgeSafety.h" // loopback + output-path guards (Report F6)
 #include "MCPBridgeHandoff.h" // safe timed waits on queued lambdas (Report F3)
+#include "MCPIdentity.h" // renameStableId (finding C6)
+#include "MCPJson.h" // jsonEscape for hand-built JSON (finding C6)
 #include "Utility/Fonts.h"
 #include "Utility/SettingsFile.h" // compiledMode (hvcc_mode) in /pd/perf
 #include "Utility/Config.h"
@@ -166,25 +168,16 @@ static void copyTrunc(char* dst, int dstSize, const char* src)
     if (dstSize > 0) dst[i] = 0;
 }
 
+// JSON text for a value that goes between quotes in a hand-built reply (finding C6).
+// UTF-8 passes through unchanged; see MCPJson.h and Tests/mcp/json_escape_test.cpp.
 static juce::String jsonEscape(const char* s)
 {
-    juce::String out;
-    for (const char* p = s; p && *p; ++p) {
-        unsigned char const c = static_cast<unsigned char>(*p);
-        switch (c) {
-            case '"':  out << "\\\""; break;
-            case '\\': out << "\\\\"; break;
-            case '\n': out << "\\n";  break;
-            case '\r': out << "\\r";  break;
-            case '\t': out << "\\t";  break;
-            default:
-                if (c < 0x20)
-                    out << "\\u" << juce::String::toHexString(static_cast<int>(c)).paddedLeft('0', 4);
-                else
-                    out << static_cast<juce::juce_wchar>(c);
-        }
-    }
-    return out;
+    return juce::String::fromUTF8(mcp::json::jsonEscape(s).c_str());
+}
+
+static juce::String jsonEscape(juce::String const& s)
+{
+    return jsonEscape(s.toRawUTF8());
 }
 
 // The armed window: a preallocated message log plus the live Pd binding.
@@ -1227,8 +1220,8 @@ juce::String MCPBridge::computeDiagnoseFacts(PluginProcessor* processor, t_canva
     }
 
     // 5. Build JSON — cycles, unscheduled, dangling, zeroed
-    auto nameOf = [&](int i) { return (i >= 0 && i < (int)names.size()) ? names[(size_t)i] : juce::String("?"); };
-    juce::String json = "{\"canvas\":\"" + canvasName + "\",\"objectCount\":" + juce::String(objs.size());
+    auto nameOf = [&](int i) { return jsonEscape((i >= 0 && i < (int)names.size()) ? names[(size_t)i] : juce::String("?")); };
+    juce::String json = "{\"canvas\":\"" + jsonEscape(canvasName) + "\",\"objectCount\":" + juce::String(objs.size());
     json += ",\"dsp_cycles\":[";
     for (size_t c = 0; c < cycles.size(); ++c) {
         if (c > 0) json += ",";
@@ -1653,21 +1646,21 @@ juce::String MCPBridge::computeSignalTrace(PluginProcessor* processor, t_canvas*
     }
 
     juce::String json = "{";
-    json += "\"canvas\":\"" + canvasName + "\",";
-    json += "\"chokePoint\":\"" + chokeName + "\",";
-    json += "\"class\":\"" + chokeClass + "\",";
+    json += "\"canvas\":\"" + jsonEscape(canvasName) + "\",";
+    json += "\"chokePoint\":\"" + jsonEscape(chokeName) + "\",";
+    json += "\"class\":\"" + jsonEscape(chokeClass) + "\",";
     json += "\"inputLevelDb\":" + juce::String(inDb, 1) + ",";
     json += "\"outputLevelDb\":" + juce::String(outDb, 1) + ",";
-    json += "\"reason\":\"" + chokeReason.replace("\"", "\\\"") + "\",";
+    json += "\"reason\":\"" + jsonEscape(chokeReason) + "\",";
     json += "\"liveSources\":[";
     for (size_t i = 0; i < liveSources.size(); ++i) {
         if (i > 0) json += ",";
-        json += "\"" + liveSources[i] + "\"";
+        json += "\"" + jsonEscape(liveSources[i]) + "\"";
     }
     json += "],\"silentEnvelopes\":[";
     for (size_t i = 0; i < silentEnvelopes.size(); ++i) {
         if (i > 0) json += ",";
-        json += "\"" + silentEnvelopes[i] + "\"";
+        json += "\"" + jsonEscape(silentEnvelopes[i]) + "\"";
     }
     json += "]";
 
@@ -1698,10 +1691,10 @@ juce::String MCPBridge::computeSignalTrace(PluginProcessor* processor, t_canvas*
         float inDbS = maxInPeak[i] > 1e-7f ? (20.0f * std::log10(maxInPeak[i])) : -100.0f;
         bool sink = (classNames[i] == "dac~" || classNames[i] == "out~");
         float outDbS = sink ? inDbS : (maxOutPeak[i] > 1e-7f ? (20.0f * std::log10(maxOutPeak[i])) : -100.0f);
-        json += "{\"tempId\":\"" + names[i] + "\",\"class\":\"" + classNames[i] + "\",";
+        json += "{\"tempId\":\"" + jsonEscape(names[i]) + "\",\"class\":\"" + jsonEscape(classNames[i]) + "\",";
         json += "\"inDb\":" + juce::String(inDbS, 1) + ",\"outDb\":" + juce::String(outDbS, 1);
         if (i == chokeIndex && chokeReason.isNotEmpty())
-            json += ",\"note\":\"" + chokeReason.replace("\"", "\\\"") + "\"";
+            json += ",\"note\":\"" + jsonEscape(chokeReason) + "\"";
         json += "}";
     }
     json += "],\"stagesTruncated\":" + juce::String((int)stageOrder.size() >= 40 ? "true" : "false");
@@ -1889,10 +1882,10 @@ juce::String MCPBridge::computeClusters(PluginProcessor* processor, t_canvas* cn
         juce::String kind = hasBus ? "bus" : (hasSignal ? "signal" : "control");
         if (!firstC) json += ",";
         firstC = false;
-        json += "{\"id\":\"c" + juce::String(++cid) + "\",\"kind\":\"" + kind + "\",\"objects\":[";
+        json += "{\"id\":\"c" + juce::String(++cid) + "\",\"kind\":\"" + jsonEscape(kind) + "\",\"objects\":[";
         for (size_t mi = 0; mi < members.size(); ++mi) {
             if (mi > 0) json += ",";
-            json += "\"" + names[members[mi]] + "\"";
+            json += "\"" + jsonEscape(names[members[mi]]) + "\"";
         }
         json += "]}";
     }
@@ -5360,9 +5353,9 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 for (size_t i = 0; i < detectedConnections.size(); i++) {
                     auto& dc = detectedConnections[i];
                     if (i > 0) dcJson += ",";
-                    dcJson += "{\"s\":\"" + juce::String(dc.srcId)
+                    dcJson += "{\"s\":\"" + jsonEscape(juce::String(dc.srcId))
                            + "\",\"so\":" + juce::String(dc.srcOut)
-                           + ",\"d\":\"" + juce::String(dc.destId)
+                           + ",\"d\":\"" + jsonEscape(juce::String(dc.destId))
                            + "\",\"di\":" + juce::String(dc.destIn) + "}";
                 }
                 dcJson += "]";
@@ -6508,7 +6501,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 }
             }
 
-            json = "{\"canvas\":\"" + canvasName + "\""
+            json = "{\"canvas\":\"" + jsonEscape(canvasName) + "\""
                  + ",\"zoom\":" + juce::String(zoom, 3)
                  + ",\"viewport\":{\"x\":" + juce::String(vx)
                  + ",\"y\":" + juce::String(vy)
@@ -6563,7 +6556,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 bool sigIn0 = (ob != nullptr && obj_issignalinlet(ob, 0) != 0);
 
                 if (!first) json += ",";
-                json += "{\"tempId\":\"" + tid + "\""
+                json += "{\"tempId\":\"" + jsonEscape(tid) + "\""
                       + ",\"x\":" + juce::String(x)
                       + ",\"y\":" + juce::String(yy)
                       + ",\"w\":" + juce::String(w)
@@ -6618,7 +6611,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             }
 
             const int PAD = 5;
-            json = "{\"canvas\":\"" + canvasName + "\",\"collisions\":[";
+            json = "{\"canvas\":\"" + jsonEscape(canvasName) + "\",\"collisions\":[";
             bool first = true;
             for (size_t i = 0; i < rects.size(); ++i) {
                 for (size_t j = i + 1; j < rects.size(); ++j) {
@@ -6628,7 +6621,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                             && a.y < b.y + b.h + PAD && a.y + a.h + PAD > b.y;
                     if (hit) {
                         if (!first) json += ",";
-                        json += "{\"a\":\"" + a.tid + "\",\"b\":\"" + b.tid + "\"}";
+                        json += "{\"a\":\"" + jsonEscape(a.tid) + "\",\"b\":\"" + jsonEscape(b.tid) + "\"}";
                         first = false;
                     }
                 }
@@ -6643,7 +6636,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                             && a.y < ry + rh + PAD && a.y + a.h + PAD > ry;
                     if (hit) {
                         if (!first) json += ",";
-                        json += "{\"a\":\"" + a.tid + "\",\"b\":\"region_title:" + rg.title.replace("\"", "\\\"") + "\"}";
+                        json += "{\"a\":\"" + jsonEscape(a.tid) + "\",\"b\":\"region_title:" + jsonEscape(rg.title) + "\"}";
                         first = false;
                     }
                 }
@@ -6736,7 +6729,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 return t0 < t1 && t0 > 0.05 && t1 < 0.95;
             };
 
-            json = "{\"canvas\":\"" + canvasName + "\",\"model\":\"anchor-line\",\"occlusions\":[";
+            json = "{\"canvas\":\"" + jsonEscape(canvasName) + "\",\"model\":\"anchor-line\",\"occlusions\":[";
             bool first = true;
             for (auto& e : edges) {
                 int si = e.si, di = e.di;
@@ -6748,8 +6741,8 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     if ((int)k == si || (int)k == di) continue;
                     if (lineHitsBox(x1, y1, x2, y2, rects[k].x, rects[k].y, rects[k].w, rects[k].h)) {
                         if (!first) json += ",";
-                        json += "{\"srcId\":\"" + names[si] + "\",\"destId\":\"" + names[di]
-                              + "\",\"via\":\"" + names[k] + "\"}";
+                        json += "{\"srcId\":\"" + jsonEscape(names[si]) + "\",\"destId\":\"" + jsonEscape(names[di])
+                              + "\",\"via\":\"" + jsonEscape(names[k]) + "\"}";
                         first = false;
                     }
                 }
@@ -7790,13 +7783,10 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
             auto mapKey = (cnv ? canonicalCanvasKey(cnv) : canvasName).toStdString();
             auto& map = processor->mcpStableObjectMap[mapKey];
-            auto it = map.find(oldId);
-            if (it != map.end()) {
-                map[newId] = it->second;
-                map.erase(it);
+            auto const renamed = mcp::identity::renameStableId(map, oldId, newId);
+            if (renamed == mcp::identity::RenameResult::Applied)
                 processor->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
-                success = true;
-            }
+            success = renamed != mcp::identity::RenameResult::Missing;
 
             sendReply("/pd/rename_id/reply/" + correlationId, success ? 1.0f : 0.0f);
         }
@@ -7812,6 +7802,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             int count = static_cast<int>(getArgFloat(msg[1]));
             int cursor = 2;
             int renamed = 0;
+            bool changed = false;
 
             // Inline rename — directly mutates mcpStableObjectMap, no queue.
             t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
@@ -7820,14 +7811,11 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             for (int i = 0; i < count && (cursor + 1) < msg.size(); i++) {
                 auto oldId = getArgString(msg[cursor++]).toStdString();
                 auto newId = getArgString(msg[cursor++]).toStdString();
-                auto it = map.find(oldId);
-                if (it != map.end()) {
-                    map[newId] = it->second;
-                    map.erase(it);
-                    renamed++;
-                }
+                auto const result = mcp::identity::renameStableId(map, oldId, newId);
+                if (result != mcp::identity::RenameResult::Missing) renamed++;
+                if (result == mcp::identity::RenameResult::Applied) changed = true;
             }
-            if (renamed > 0)
+            if (changed)
                 processor->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
 
             auto correlationId = (cursor < msg.size()) ? getArgString(msg[cursor]) : "0";
@@ -8330,14 +8318,14 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             if (safeName.isEmpty()) {
                 sendReply(replyAddr, juce::String("{\"ok\":false,\"error\":\"GOP_BAD_NAME\",\"detail\":\"empty module name\"}"));
             } else if (specError.isNotEmpty()) {
-                sendReply(replyAddr, juce::String("{\"ok\":false,\"error\":\"GOP_BAD_SPEC\",\"detail\":\"" + specError + "\"}"));
+                sendReply(replyAddr, juce::String("{\"ok\":false,\"error\":\"GOP_BAD_SPEC\",\"detail\":\"" + jsonEscape(specError) + "\"}"));
             } else if (targetIds.isEmpty()) {
                 sendReply(replyAddr, juce::String("{\"ok\":false,\"error\":\"GOP_BAD_SPEC\",\"detail\":\"no targetIds\"}"));
             } else {
                 t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
                 if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
                 if (!cnv) {
-                    sendReply(replyAddr, juce::String("{\"ok\":false,\"error\":\"GOP_NO_CANVAS\",\"detail\":\"" + canvasName + "\"}"));
+                    sendReply(replyAddr, juce::String("{\"ok\":false,\"error\":\"GOP_NO_CANVAS\",\"detail\":\"" + jsonEscape(canvasName) + "\"}"));
                 } else {
                     juce::MessageManager::callAsync([proc = processor, cnv, canvasName, safeName, filePath, targetIds, inbound, outbound, posX, posY, correlationId, replyAddr, bridge = this]() {
                         // Phase 3: reconcile identity BEFORE resolving so a stale id
@@ -8370,7 +8358,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                                 missing.add(w.dest);
                         }
                         if (missing.size() > 0) {
-                            bridge->sendReply(replyAddr, "{\"ok\":false,\"error\":\"GOP_TARGET_NOT_FOUND\",\"detail\":\"" + missing.joinIntoString(",") + "\"}");
+                            bridge->sendReply(replyAddr, "{\"ok\":false,\"error\":\"GOP_TARGET_NOT_FOUND\",\"detail\":\"" + jsonEscape(missing.joinIntoString(",")) + "\"}");
                             return;
                         }
 
@@ -8410,7 +8398,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                                 // Roll the failed box back out; originals intact.
                                 if (newObj) glist_delete(cnv, newObj);
                                 canvas_update_dsp();
-                                bridge->sendReply(replyAddr, "{\"ok\":false,\"error\":\"GOP_CREATE_FAILED\",\"detail\":\"[" + safeName + "] couldn't create (red box)\"}");
+                                bridge->sendReply(replyAddr, "{\"ok\":false,\"error\":\"GOP_CREATE_FAILED\",\"detail\":\"[" + jsonEscape(safeName) + "] couldn't create (red box)\"}");
                             } else {
                                 auto gopKey = canonicalCanvasKey(cnv).toStdString();
                                 // 2. Delete originals via the message-thread-safe
@@ -8466,13 +8454,13 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         // Sync GUI so plugdata displays the newly instantiated abstraction.
                         proc->enqueueFunctionAsync([p = proc] { p->synchroniseCanvases(); });
 
-                        juce::String receipt = "{\"ok\":true,\"tempId\":\"" + newTempId
+                        juce::String receipt = "{\"ok\":true,\"tempId\":\"" + jsonEscape(newTempId)
                             + "\",\"inlets\":" + juce::String(static_cast<int>(inWires.size()))
                             + ",\"outlets\":" + juce::String(static_cast<int>(outWires.size()))
                             + ",\"connected\":" + juce::String(connected)
                             + ",\"warnings\":[" + [&]() -> juce::String {
                                 juce::StringArray q;
-                                for (auto& e : connErrs) q.add("\"" + e + "\"");
+                                for (auto& e : connErrs) q.add("\"" + jsonEscape(e) + "\"");
                                 return q.joinIntoString(",");
                             }() + "]}";
                         bridge->sendReply(replyAddr, receipt);
@@ -10812,7 +10800,7 @@ void MCPBridge::startMidiCapture(int maxSeconds, const juce::String& voiceBindin
     midiCapturing.store(true, std::memory_order_release);
 
     sendConsoleLog("MCP: Recording MIDI - play! (tap again to stop)", false);
-    sendReply("/pd/midi/event", "{\"status\":\"armed\",\"voice\":\"" + midiCaptureVoice + "\"}");
+    sendReply("/pd/midi/event", "{\"status\":\"armed\",\"voice\":\"" + jsonEscape(midiCaptureVoice) + "\"}");
 }
 
 void MCPBridge::midiInputTick(const juce::MidiBuffer& midi, int numSamples, juce::AudioBuffer<float>* audioBuffer, double sampleRate)
@@ -12476,7 +12464,7 @@ void MCPBridge::handleMeterDomain(const juce::String& meterAction, const juce::O
         t_canvas* cnv = processor->getCanvasBySymbol(canvasName);
         if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
         if (!cnv) {
-            sendReply("/meter/trace/reply/" + correlationId, "{\"error\":\"canvas not found: " + canvasName + "\"}");
+            sendReply("/meter/trace/reply/" + correlationId, "{\"error\":\"canvas not found: " + jsonEscape(canvasName) + "\"}");
             return;
         }
 

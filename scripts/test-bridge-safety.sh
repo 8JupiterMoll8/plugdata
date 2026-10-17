@@ -4,7 +4,7 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 out="$(mktemp -d)"
 trap 'rm -rf "$out"' EXIT
-for t in bridge_safety_test handoff_test; do
+for t in bridge_safety_test handoff_test json_escape_test identity_rename_test; do
   "${CXX:-g++}" -std=c++17 -Wall -Wextra -Werror -pthread -o "$out/$t" "$root/Tests/mcp/$t.cpp"
   "$out/$t"
 done

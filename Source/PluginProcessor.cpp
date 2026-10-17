@@ -3004,13 +3004,10 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
             t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
             auto canvasStr = (canvas ? MCPBridge::canonicalCanvasKey(canvas) : canvas_symbol).toStdString();
             auto& map = mcpStableObjectMap[canvasStr];
-            auto it = map.find(old_id.toStdString());
-            if (it != map.end()) {
-                map[new_id.toStdString()] = it->second;
-                map.erase(it);
+            auto const renamed = mcp::identity::renameStableId(map, old_id.toStdString(), new_id.toStdString());
+            if (renamed == mcp::identity::RenameResult::Applied)
                 mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
-                success = true;
-            }
+            success = renamed != mcp::identity::RenameResult::Missing;
             sys_unlock();
 
             SmallArray<pd::Atom> atoms;
