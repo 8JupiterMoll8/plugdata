@@ -19,6 +19,7 @@
 #include "Objects/GemCapture.h" // PRD 1.4: native GEM window capture
 #include <g_all_guis.h>       // t_slider live fields (x_min/x_max/x_fval) for obj_get
 #include "Pd/Interface.h"
+#include "Mcp/PdOps.h" // fork Pd ops (removeObjects routing, audio-thread delete, clear)
 #include "McpIemArgs.h" // IEM GUI short-form creation-arg guard (shared)
 #include "MCPBridgeSafety.h" // loopback + output-path guards (Report F6)
 #include "MCPBridgeHandoff.h" // safe timed waits on queued lambdas (Report F3)
@@ -4622,7 +4623,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         }
                     }
                     if (toDelete.size() > 0) {
-                        pd::Interface::removeObjectsAudioThread(cnv, toDelete);
+                        mcp::PdOps::removeObjectsAudioThread(cnv, toDelete);
                     }
 
                     // PHASE 3: EDIT
@@ -4644,7 +4645,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                                     for (int i = 1; i < toks.size(); ++i) eu.args.add(toks[i]);
                                     editUndoEntries.push_back(eu);
                                 }
-                                pd::Interface::renameObject(cnv, obj, pe.newText.toRawUTF8(), pe.newText.length());
+                                mcp::PdOps::renameObject(cnv, obj, pe.newText.toRawUTF8(), pe.newText.length());
                                 t_gobj* newObj = nullptr; bool still = false;
                                 for (t_gobj* y = cnv->gl_list; y; y = y->g_next)
                                     if (y == obj) { still = true; break; }
@@ -4853,7 +4854,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         // index mappings against the post-delete gl_list so the reply's
                         // tempId→index pairs stay correct.
                         if (redBoxes.size() > 0) {
-                            pd::Interface::removeObjectsAudioThread(cnv, redBoxes);
+                            mcp::PdOps::removeObjectsAudioThread(cnv, redBoxes);
                             for (size_t mi = 0; mi < mappingIndices.size() && mi < createdPtrs.size(); ++mi) {
                                 if (!createdPtrs[mi]) continue;
                                 int idx = 0, found = -1;
@@ -5778,7 +5779,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
             if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
             if (cnv) {
                 // 1. Clear existing objects
-                pd::Interface::clearCanvasAudioThread(cnv);
+                mcp::PdOps::clearCanvasAudioThread(cnv);
 
                 // 2. Load .pd file — strip the #N canvas header line then
                 //    use pasteDirect() which correctly handles both #X obj
@@ -6053,7 +6054,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                         proc->mcpStableObjectMap[canonKey.toStdString()].clear();
 
                         // 1. Clear existing objects (message-thread-safe)
-                        pd::Interface::clearCanvas(cnv);
+                        mcp::PdOps::clearCanvas(cnv);
 
                         // 2. Paste the prepared body
                         if (bodyText.isNotEmpty())
@@ -6772,7 +6773,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     sys_lock();
                     t_canvas* cnv = proc->getCanvasBySymbol(canvasName);
                     if (cnv) {
-                        pd::Interface::clearCanvas(cnv);
+                        mcp::PdOps::clearCanvas(cnv);
                     }
                     sys_unlock();
 
@@ -7709,7 +7710,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                     if (obj) toDelete.add(obj);
                 }
                 if (toDelete.size() > 0) {
-                    pd::Interface::removeObjects(cnv, toDelete);
+                    mcp::PdOps::removeObjects(cnv, toDelete);
                     canvas_dirty(cnv, 1);
                 }
             }
@@ -7734,7 +7735,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                 if (obj) {
                     SmallArray<t_gobj*> toDelete;
                     toDelete.add(obj);
-                    pd::Interface::removeObjects(cnv, toDelete);
+                    mcp::PdOps::removeObjects(cnv, toDelete);
                     canvas_dirty(cnv, 1);
                 }
             }
@@ -8413,7 +8414,7 @@ void MCPBridge::handlePdDomain(const juce::String& action, const juce::OSCMessag
                                         }());
                                     proc->mcpStableSerialMap.erase(g);
                                 }
-                                pd::Interface::removeObjectsAudioThread(cnv, toDelete);
+                                mcp::PdOps::removeObjectsAudioThread(cnv, toDelete);
                                 proc->mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
 
                                 // 3. Rewire parent boundary through the new box with createConnection.
@@ -9707,7 +9708,7 @@ void MCPBridge::handleTelemetryDomain(const juce::String& /*telAction*/, const j
                 if (obj) {
                     SmallArray<t_gobj*> toDelete;
                     toDelete.add(obj);
-                    pd::Interface::removeObjects(canvas, toDelete);
+                    mcp::PdOps::removeObjects(canvas, toDelete);
                     canvas_dirty(canvas, 1);
                 }
             }

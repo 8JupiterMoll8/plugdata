@@ -266,6 +266,9 @@ file(GLOB plugdata_sources
     ${SOURCES_DIRECTORY}/Pd/*.h
     ${SOURCES_DIRECTORY}/Heavy/*.cpp
     ${SOURCES_DIRECTORY}/Heavy/*.h
+    # MCP-HOOK(sources): the fork's seam code (docs/mcp-bridge/SEAM.md)
+    ${SOURCES_DIRECTORY}/Mcp/*.cpp
+    ${SOURCES_DIRECTORY}/Mcp/*.h
     ${SOURCES_DIRECTORY}/Standalone/InternalSynth.h
     ${SOURCES_DIRECTORY}/Standalone/InternalSynth.cpp
     ${SOURCES_DIRECTORY}/Standalone/PlugDataApp.h

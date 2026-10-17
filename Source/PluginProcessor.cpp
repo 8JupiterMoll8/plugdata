@@ -16,6 +16,7 @@
 #include "Pd/Library.h"
 #include "Pd/MCPBridge.h"
 #include "Pd/McpIemArgs.h"
+#include "Mcp/PdOps.h" // MCP-HOOK(pdOps): garray_getname, removeObjects/renameObject for the mcp_* cases
 
 #include "Utility/Config.h"
 #include "Utility/Fonts.h"
@@ -2964,7 +2965,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
                 if (targetObj) {
                     SmallArray<t_gobj*> objectsToDelete;
                     objectsToDelete.add(targetObj);
-                    pd::Interface::removeObjects(canvas, objectsToDelete);
+                    mcp::PdOps::removeObjects(canvas, objectsToDelete);
                     mcpStableObjectMap[canonStr].erase(object_id.toStdString());
                     mcpStableSerialMap.erase(targetObj);
                     mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
@@ -3068,7 +3069,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
                 auto canonStr = MCPBridge::canonicalCanvasKey(canvas).toStdString();
                 t_gobj* targetObj = resolveStableId(canvas_symbol, object_id);
                 if (targetObj) {
-                    pd::Interface::renameObject(canvas, targetObj, new_text.toRawUTF8(), new_text.getNumBytesAsUTF8());
+                    mcp::PdOps::renameObject(canvas, targetObj, new_text.toRawUTF8(), new_text.getNumBytesAsUTF8());
                     
                     // Check if targetObj is still present on the canvas
                     bool stillExists = false;
