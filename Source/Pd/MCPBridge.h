@@ -329,7 +329,7 @@ public:
 private:
     // Verb table (MCPBridgeVerbs.inc): one private member function per row, built
     // into a command table at startup. A verb with a row is served from there;
-    // every other verb still reaches its handle<Domain>Domain function.
+    // the other domains still reach their handle<Domain>Domain function (P3.3 S6).
     using VerbHandler = void (MCPBridge::*)(const juce::String& action, const juce::OSCMessage& msg);
     using VerbTable = mcp::CommandTable<VerbHandler>;
     static VerbTable const& commandTable();
@@ -341,7 +341,6 @@ private:
 #define MCP_DOMAIN(domain, handler) void handler(const juce::String& action, const juce::OSCMessage& msg);
 #include "Pd/MCPBridgeVerbs.inc"
 
-    void handlePdDomain(const juce::String& action, const juce::OSCMessage& msg);
     void handleParamDomain(const juce::String& paramName, const juce::OSCMessage& msg);
     void handleTriggerDomain(const juce::String& triggerAction, const juce::OSCMessage& msg);
     void handleTelemetryDomain(const juce::String& telAction, const juce::OSCMessage& msg);

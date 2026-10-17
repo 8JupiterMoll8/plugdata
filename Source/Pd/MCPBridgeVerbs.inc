@@ -112,6 +112,65 @@ MCP_VERB(pd, "collisions", pdCollisions)
 MCP_VERB(pd, "wire_occlusions", pdWireOcclusions)
 MCP_VERB(pd, "measure_text", pdMeasureText)
 
+// ── pd: layout ──
+MCP_VERB(pd, "tidy", pdTidy)
+MCP_VERB(pd, "align", pdAlign)
+MCP_VERB(pd, "zoom_to_fit", pdZoomToFit)
+MCP_VERB(pd, "deoverlap", pdDeoverlap)
+MCP_VERB(pd, "layout_guard", pdLayoutGuard)
+MCP_VERB(pd, "compose", pdCompose)
+MCP_VERB(pd, "pillars", pdPillars)
+MCP_VERB(pd, "flow", pdFlow)
+
+// ── pd: encapsulate ──
+MCP_VERB(pd, "encapsulate", pdEncapsulate)
+MCP_VERB(pd, "encapsulate_to_file", pdEncapsulateToFile)
+MCP_VERB(pd, "encapsulate_gop", pdEncapsulateGop)
+
+// ── pd: overlays and capture ──
+MCP_VERB(pd, "select", pdSelect)
+MCP_VERB(pd, "ai_overlay", pdAiOverlay)
+MCP_VERB(pd, "ai_ghost", pdAiGhost)
+MCP_VERB(pd, "ai_annotate", pdAiAnnotate)
+MCP_VERB(pd, "ai_region", pdAiRegion)
+MCP_VERB(pd, "ai_hud", pdAiHud)
+MCP_VERB(pd, "get_overlays", pdGetOverlays)
+MCP_VERB(pd, "set_overlays", pdSetOverlays)
+MCP_VERB(pd, "moodboard", pdMoodboard)
+MCP_VERB(pd, "screenshot_canvas", pdScreenshotCanvas)
+MCP_VERB(pd, "gem_capture", pdGemCapture)
+
+// ── pd: identity ──
+MCP_VERB(pd, "identity_snapshot", pdIdentitySnapshot)
+MCP_VERB(pd, "identity_version", pdIdentityVersion)
+MCP_VERB(pd, "clear_ids", pdClearIds)
+MCP_VERB(pd, "register_id", pdRegisterId)
+MCP_VERB(pd, "rename_id", pdRenameId)
+MCP_VERB(pd, "rename_id_batch", pdRenameIdBatch)
+MCP_VERB(pd, "get_mappings", pdGetMappings)
+
+// ── pd: legacy index and *_id forms ──
+MCP_VERB(pd, "create", pdCreate)
+MCP_VERB(pd, "create_batch", pdCreateBatch)
+MCP_VERB(pd, "connect_batch", pdConnectBatch)
+MCP_ALIAS(pd, "connect", pdConnectBatch)
+MCP_VERB(pd, "disconnect", pdDisconnect)
+MCP_VERB(pd, "disconnect_batch", pdDisconnectBatch)
+MCP_VERB(pd, "delete", pdDelete)
+MCP_VERB(pd, "delete_batch", pdDeleteBatch)
+MCP_VERB(pd, "move_id", pdMoveId)
+MCP_ALIAS(pd, "move_batch", pdMoveId)
+MCP_ALIAS(pd, "move_batch_id", pdMoveId)
+MCP_VERB(pd, "create_id", pdCreateId)
+MCP_VERB(pd, "create_batch_id", pdCreateBatchId)
+MCP_VERB(pd, "connect_id", pdConnectId)
+MCP_VERB(pd, "connect_batch_id", pdConnectBatchId)
+MCP_VERB(pd, "disconnect_id", pdDisconnectId)
+MCP_VERB(pd, "disconnect_batch_id", pdDisconnectBatchId)
+MCP_VERB(pd, "delete_id", pdDeleteId)
+MCP_VERB(pd, "delete_batch_id", pdDeleteBatchId)
+MCP_VERB(pd, "edit_id", pdEditId)
+
 #undef MCP_SOURCE
 #undef MCP_VERB
 #undef MCP_ALIAS

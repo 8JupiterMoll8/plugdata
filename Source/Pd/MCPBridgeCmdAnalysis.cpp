@@ -8,6 +8,16 @@
 
 #include "MCPBridgeCmdCommon.h"
 
+// ── PRD layout-v2 Phase A: read-only layout facts ───────────────────
+// C++ is the truth of layout (same law as identity + failures):
+//   /pd/bounds         : true x/y/w/h per object (JUCE Object components / gobj_getrect)
+//   /pd/collisions     : AABB overlap pairs on true rects (5px pad)
+//   /pd/wire_occlusions: wire-vs-box hits on true rects; wire modeled as
+//                        src bottom-center → dest top-center anchor line
+//                        (true bezier/90° cord paths live in JUCE
+//                        Connection components — Phase B queries those).
+// All read-only under sys_lock, zero DSP touch, zero dropout.
+
     // ── PRD diagnostic layer §2.2: /pd/diagnose — THE GRAPH X-RAY ───────
     // /pd/diagnose <canvasName> [corrId]
     // Read-only structured facts, computed where the data lives (no console
