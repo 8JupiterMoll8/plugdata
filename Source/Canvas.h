@@ -6,7 +6,6 @@
 
 #pragma once
 
-#include <unordered_map>
 #include "Mcp/CanvasMcpLayer.h" // MCP-HOOK(overlayPaint)
 #include <nanovg_async.h>
 #ifdef NANOVG_GL_IMPLEMENTATION
@@ -79,18 +78,9 @@ public:
     PluginProcessor* pd;
 
     void mouseDown(MouseEvent const& e) override;
-    void mouseMove(MouseEvent const& e) override;
-    void mouseExit(MouseEvent const& e) override;
+    void mouseMove(MouseEvent const& e) override; // MCP-HOOK(canvasInput)
+    void mouseExit(MouseEvent const& e) override; // MCP-HOOK(canvasInput)
 
-    // PRD overlay: handle a click that may land on an AI note (x = dismiss, body =
-    // open the editor). Returns true if a note consumed it. Called by the canvas AND
-    // by objects (so notes overlaying objects stay clickable).
-    bool handleNoteClick(Point<int> canvasPt);
-    bool isPointOverNote(Point<int> canvasPt) const;
-    Object* findObjectByStableId(juce::String const& targetId) const;
-    bool getAnnotationLiveBounds(juce::String const& targetId, juce::StringArray const& targetIds, float fallbackX, float fallbackY, float fallbackLx, float fallbackLy, bool fallbackHasLeader, float& outAx, float& outAy, float& outLx, float& outLy, bool& outHasLeader, juce::Rectangle<int>* outGroupBounds = nullptr) const;
-    bool getAnnotationLiveBounds(juce::String const& targetId, float fallbackX, float fallbackY, float fallbackLx, float fallbackLy, bool fallbackHasLeader, float& outAx, float& outAy, float& outLx, float& outLy, bool& outHasLeader) const;
-    juce::Rectangle<float> getAnnotationScreenBounds(size_t annIndex) const;
     void mouseDrag(MouseEvent const& e) override;
     void mouseUp(MouseEvent const& e) override;
     bool hitTest(int x, int y) override;
@@ -118,14 +108,6 @@ public:
 
     bool shouldShowObjectActivity() const;
     bool shouldShowIndex() const;
-    void setSketchToolActive(bool active);
-    bool isSketchToolActive() const;
-    bool isSketchingActive() const;
-    // Phase 1B: combined bounding box of all persistent ink strokes, in Canvas
-    // component coordinates (empty rect when no strokes exist).
-    juce::Rectangle<float> getSketchBoundsInCanvas() const;
-    // All completed strokes serialized as [[{x,y,t},...],...] in PD patch coords.
-    juce::String buildSketchJson() const;
     bool shouldShowConnectionDirection() const;
     bool shouldShowConnectionActivity() const;
 
@@ -154,7 +136,7 @@ public:
     void pasteSelection();
     void duplicateSelection();
 
-    void encapsulateSelection(String const& subpatchName = "pd");
+    void encapsulateSelection(String const& subpatchName = "pd"); // MCP-CARRIED(encapsulate-named)
     // Selection-free variant: encapsulate an explicit object list (no GUI selection).
     void encapsulateSelection(String const& subpatchName, SmallArray<Object*> const& objectsToEncapsulate);
     void triggerizeSelection();
@@ -168,10 +150,6 @@ public:
 
     void undo();
     void redo();
-    /** True if undo() would actually change something (an MCP transaction or a
-     *  non-empty native undo stack). Lets the bridge report an honest no-op
-     *  instead of always claiming success. */
-    bool canUndo();
 
     void jumpToOrigin();
     void restoreViewportState();
@@ -261,191 +239,9 @@ public:
     bool altDown : 1 = false;
     bool shiftDown : 1 = false;
 
-    // The MCP layer: AI overlay paint and targeting (Source/Mcp/CanvasMcpLayer.h).
-    CanvasMcpLayer& getMcpLayer() { return *mcpLayer; }       // MCP-HOOK(overlayPaint)
+    // The MCP layer: AI overlays, notes, tools, pill, input hooks (Source/Mcp/CanvasMcpLayer.h).
+    CanvasMcpLayer& getMcpLayer() const { return *mcpLayer; } // MCP-HOOK(overlayPaint)
     std::unique_ptr<CanvasMcpLayer> mcpLayer;                 // MCP-HOOK(overlayPaint)
-
-    // PRD overlay: inline editor to reply to an AI note (double-click a note tag).
-    std::unique_ptr<juce::TextEditor> mcpNoteEditor;
-    NVGImage mcpNoteRenderer; // draws the editor into the GPU frame (live typing)
-    int mcpNoteEditIndex = -1;
-    std::uint32_t mcpNoteOpenedAt = 0; // grace period so it can't self-close on open
-    int mcpNoteHover = -1;             // hovered note index (-1 = none)
-    bool mcpNoteHoverClose = false;    // hovering the dismiss "x"
-    int mcpNoteHoverChip = -1;         // hovered pivot chip index (-1 = none)
-    bool mcpNoteHoverSidebar = false;  // hovering the sidebar link icon "↗"
-    bool mcpNoteHoverReply = false;    // hovering the inline reply button "💬"
-
-    // PRD Copilot: floating selection prompt pill (the "sculptor's chisel").
-    // A glass prompt field that blooms under the selection; Enter sends it via
-    // bridge->sendPrompt() and the MCP server resolves the selection. It never
-    // grabs keyboard focus until the artist clicks it, so canvas hotkeys
-    // (o/m/c/b) keep working while the pill is visible.
-    std::unique_ptr<juce::TextEditor> mcpSelectionPill;
-    NVGImage mcpSelectionPillRenderer; // draws the prompt field into the GPU frame
-    // After the artist sends/dismisses, briefly suppress re-showing so an
-    // immediate sidebar refresh can't re-pop the pill. Time-based, NOT keyed
-    // to the selection — re-selecting the same object must show it again.
-    std::uint32_t mcpSelectionPillHideUntil = 0;
-    bool mcpPillRequested = false;
-    void updateSelectionPill();
-    void hideSelectionPill();
-    void dismissSelectionPill();
-    // Enter = live (spawn), Shift+Enter = queue for chat. TextEditor only fires
-    // onReturnKey for a PLAIN Return (Shift+Return fails its key comparison), so
-    // a KeyListener catches the Shift variant before the editor swallows it.
-    void submitSelectionPill(bool queueForChat);
-    struct SelectionPillKeyListener : public juce::KeyListener {
-        explicit SelectionPillKeyListener(Canvas* c) : canvas(c) {}
-        bool keyPressed(const juce::KeyPress& key, juce::Component* origin) override;
-        Canvas* canvas;
-    };
-    std::unique_ptr<SelectionPillKeyListener> mcpSelectionPillKeys;
-    // Ctrl+V catcher: fires before TextEditors can swallow the key, so the paste
-    // slot works even while a tape-note editor has the caret.
-    struct SlotPasteKeyListener : public juce::KeyListener {
-        explicit SlotPasteKeyListener(Canvas* c) : canvas(c) {}
-        bool keyPressed(const juce::KeyPress& key, juce::Component* origin) override;
-        Canvas* canvas;
-    };
-    std::unique_ptr<SlotPasteKeyListener> mcpSlotPasteKeys;
-    struct SelectionPillAnimator : public juce::Timer {
-        explicit SelectionPillAnimator(Canvas* c) : canvas(c) {}
-        void timerCallback() override;
-        Canvas* canvas;
-    };
-    std::unique_ptr<SelectionPillAnimator> mcpPillAnimator;
-
-    struct SketchPoint {
-        float x = 0.0f;
-        float y = 0.0f;
-        double t = 0.0;
-    };
-    std::vector<SketchPoint> mcpCurrentStroke;
-    std::vector<std::vector<SketchPoint>> mcpCompletedStrokes;
-    bool isSketching = false;
-    bool mcpSketchToolActive = false;
-    float mcpSketchAlpha = 1.0f;
-
-    struct SketchFadeTimer : public juce::Timer {
-        explicit SketchFadeTimer(Canvas* c) : canvas(c) {}
-        void timerCallback() override;
-        Canvas* canvas;
-    };
-    std::unique_ptr<SketchFadeTimer> mcpSketchFadeTimer;
-    void startSketchFadeTimer();
-
-    // Phase 1B — Moodboard Chisel: when no PD object is selected but ink exists,
-    // the pill anchors 14px below the sketch bounding box as a tactile action
-    // bar: [⚡ Build] | prompt | [↩ Undo] [🗑 Clear].
-    bool mcpPillSketchMode = false;
-    juce::Rectangle<float> mcpLastSketchBounds; // last ink bbox — keeps the chisel parked after Clear
-    bool mcpEraseGesture = false;              // current drag is an eraser pass (toolstrip eraser)
-    // Mood lane: clicking empty glass opens the pill as a "New Mood" palette
-    // (tools + prompt) before any ink exists.
-    bool mcpMoodPillActive = false;
-    juce::Point<int> mcpMoodPillPos;
-    // Paste slot: tapping 🖼 opens an empty dashed frame; Ctrl+V fills it.
-    // Nothing is auto-read from the clipboard — paste is an explicit act.
-    bool mcpImageSlotActive = false;
-    juce::Point<int> mcpImageSlotPos;
-    // Transient hint chip (e.g. "Clipboard has no image") under the mood strip.
-    juce::String mcpMoodHint;
-    std::uint32_t mcpMoodHintUntil = 0;
-    // Shift+Enter: park the typed intent + artifacts without waking the AI.
-    void parkSelectionPill();
-    void sendSketchBuild(const juce::String& prompt); // dispatch /pd/sketch/build
-    void undoLastStroke();
-    void clearAllInk();
-
-    // Studio brainstorm mode: the sidebar Studio drawer owns commit/undo/clear,
-    // the pen is up, and the selection pill is suppressed — nothing to select
-    // while collecting ideas. Edit mode (pill) returns when Studio mode is off.
-    bool mcpStudioMode = false;
-    void setStudioMode(bool active);
-    bool isStudioMode() const { return mcpStudioMode; }
-    // Commit the visible moodboard from the canvas itself (toolstrip / Ctrl+Enter):
-    // pulls the drawer's typed draft, dispatches, clears the draft.
-    void commitStudioFromCanvas();
-    // Dedicated eraser tool (statusbar dock): left-drag deletes strokes,
-    // exactly like Ctrl-drag. Mutually exclusive with the pen.
-    bool mcpEraserToolActive = false;
-    void setEraserToolActive(bool active);
-    bool isEraserToolActive() const { return mcpEraserToolActive; }
-    // Type tool (T): click the glass to pin a crisp console-tape text note on the
-    // Moodboard layer — never a [comment] DSP box. Reuses the inline note editor.
-    bool mcpTextToolActive = false;
-    void setTextToolActive(bool active);
-    bool isTextToolActive() const { return mcpTextToolActive; }
-    void createTextNoteAt(Point<int> canvasPos);
-    void openNoteEditorForIndex(int index);
-    // Stable tempIds of the current object selection — the surgical lane's anchor.
-    juce::StringArray getSelectionStableIds();
-    // Visible-Only Ingestion: hidden ink is neither rendered nor sent to the AI.
-    bool mcpStudioInkVisible = true;
-    void setStudioInkVisible(bool visible);
-    bool isStudioInkVisible() const { return mcpStudioInkVisible; }
-
-    // Phase 2 — Reference Images: pasted schematics/photos live on the canvas
-    // glass behind cords/objects. Textures cache the decoded image in a
-    // context-safe NVGImage (auto-invalidated when the NanoVG context restarts).
-    struct RefImageTexture {
-        NVGImage texture;          // uploaded via the async recorder (render thread owns the GPU)
-        NVGcontext* ctx = nullptr; // context it was made on — recreated if it changes
-    };
-    std::unordered_map<std::string, RefImageTexture> mcpRefImageCache;
-    juce::String mcpDraggingRefImageId;
-    juce::Point<int> mcpRefImageDragOffset;
-    bool pasteImageFromClipboard();
-    bool handleReferenceImageClick(MouseEvent const& e, Point<int> mousePos, bool isRightClick);
-
-    // Phase 3 — Voice take chips on the glass: ▶ audition + mini-waveform + ✕.
-    bool handleVoiceTakeClick(MouseEvent const& e, Point<int> mousePos);
-    bool handleMidiTakeClick(MouseEvent const& e, Point<int> mousePos);
-    juce::String mcpDraggingMidiTakeId;
-    juce::Point<int> mcpMidiTakeDragOffset;
-    juce::String mcpDraggingTakeId;
-    juce::Point<int> mcpTakeDragOffset;
-    juce::Point<int> mcpTakeSpawnPos; // where the next recorded take lands (canvas coords)
-    // On-demand tool drawer (pressing "/" in the pill). Tools, not orders:
-    // a native popup of neutral capabilities. Never shown unless asked.
-    void showPillToolsMenu();
-    void showPillLensesMenu();
-    void sendPillPrompt(const juce::String& prompt, bool queueForChat = false);
-    juce::String mcpActiveLens; // "" = free / no lens
-    juce::Rectangle<int> mcpSelectionPillFrame; // full visual panel (LED + field + send)
-    int mcpPillDrawerMode = 0; // 0 = closed, 1 = lenses, 2 = tools, 3 = smart palette
-    juce::Rectangle<int> mcpPillDrawerFrame;
-    juce::LookAndFeel_V4 mcpPillLookAndFeel;    // dark menu skin matching the pill
-    void configurePillLookAndFeel();
-
-    // Antigravity-style Smart Vertical Command Palette
-    struct PillPaletteItem {
-        juce::String id;
-        juce::String title;
-        juce::String category;
-        juce::String desc;
-        juce::String icon;
-        juce::String prompt;
-    };
-    std::vector<PillPaletteItem> mcpPaletteItems;
-    std::vector<int> mcpFilteredPaletteIndices;
-    int mcpPaletteSelectedIndex = 0;
-    juce::Rectangle<int> mcpPaletteFrame;
-    void initPaletteItems();
-    void filterPaletteItems(const juce::String& query);
-    void showPillPalette();
-    void triggerPaletteItem(int index);
-
-    // Tier-2 artist approval: a destructive op from the agent surfaces as two
-    // in-canvas chips [Approve] [Cancel] (Enter/Esc). Sends "approve"/"deny" —
-    // the server holds the token inert until this human yes. Drawn in CANVAS
-    // coords (like the pill) so click hit-testing is transform-free.
-    bool isApprovalRequested() const;
-    void sendApproval(bool approve);
-    juce::Rectangle<int> mcpApprovalFrame; // full bar
-    juce::Rectangle<int> mcpApprovalYes;   // Approve chip
-    juce::Rectangle<int> mcpApprovalNo;    // Cancel chip
 
     Value isGraphChild = SynchronousValue(var(false));
     Value hideNameAndArgs = SynchronousValue(var(false));

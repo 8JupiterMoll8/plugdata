@@ -93,7 +93,7 @@ Connection::Connection(Canvas* parent, Iolet* s, Iolet* e, t_outconnect* oc)
 
     setAccessible(false);
     lookAndFeelChanged();
-    updatePath();
+    updatePath(); // MCP-CARRIED(connection-initial-path)
 }
 
 Connection::~Connection()

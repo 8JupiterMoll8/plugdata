@@ -651,7 +651,6 @@ void Dialogs::showCanvasRightClickMenu(Canvas* cnv, Component* originalComponent
 
     enum MenuOptions {
         Extra = 200,
-        AskAI,
         Help,
         Reference,
         ToFront,
@@ -675,10 +674,7 @@ void Dialogs::showCanvasRightClickMenu(Canvas* cnv, Component* originalComponent
     popupMenu.addCustomItem(Extra, std::make_unique<QuickActionsBar>(editor), nullptr, "Quick Actions");
     popupMenu.addSeparator();
 
-    if (hasSelection) {
-        popupMenu.addItem(AskAI, "Ask AI... (/)", true);
-        popupMenu.addSeparator();
-    }
+    cnv->getMcpLayer().addContextMenuItems(popupMenu, hasSelection); // MCP-HOOK(canvasInput)
 
     if (!multiple && object && object->gui) {
         object->gui->getMenuOptions(popupMenu);
@@ -808,14 +804,8 @@ void Dialogs::showCanvasRightClickMenu(Canvas* cnv, Component* originalComponent
                 iolet->repaint();
         }
 
-        if (result == AskAI) {
-            cnv->mcpPillRequested = true;
-            cnv->updateSelectionPill();
-            if (cnv->mcpSelectionPill) {
-                cnv->mcpSelectionPill->grabKeyboardFocus();
-            }
+        if (cnv->getMcpLayer().handleContextMenuResult(result)) // MCP-HOOK(canvasInput)
             return;
-        }
 
         if (result == Properties) {
             auto toShow = SmallArray<Component*>();

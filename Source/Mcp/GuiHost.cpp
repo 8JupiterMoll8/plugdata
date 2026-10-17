@@ -307,7 +307,7 @@ public:
     {
         Canvas* canvasComp = findOpenCanvas(proc, cnv);
         if (!canvasComp) return UndoResult::NoView;
-        if (!canvasComp->canUndo()) return UndoResult::Empty;
+        if (!canvasComp->getMcpLayer().canUndo()) return UndoResult::Empty;
         canvasComp->undo();
         return UndoResult::Done;
     }
@@ -356,11 +356,11 @@ public:
         auto* canvas = editor->getCurrentCanvas();
         if (!canvas) return std::nullopt;
         SketchInfo info;
-        info.strokesJson = canvas->buildSketchJson();
-        auto const sb = canvas->getSketchBoundsInCanvas();
+        info.strokesJson = canvas->getMcpLayer().buildSketchJson();
+        auto const sb = canvas->getMcpLayer().getSketchBoundsInCanvas();
         if (!sb.isEmpty())
             info.bounds = sb.translated(-static_cast<float>(canvas->canvasOrigin.x), -static_cast<float>(canvas->canvasOrigin.y));
-        info.selection = canvas->getSelectionStableIds();
+        info.selection = canvas->getMcpLayer().getSelectionStableIds();
         return info;
     }
 

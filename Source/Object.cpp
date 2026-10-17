@@ -765,16 +765,8 @@ void Object::updateIolets()
 
 void Object::mouseDown(MouseEvent const& e)
 {
-    // PRD overlay: if an AI note is drawn over this object, the note wins the click
-    // (x = dismiss, body = edit). Forward the click to the canvas note handler.
-    if (!e.mods.isRightButtonDown() && cnv && cnv->handleNoteClick(e.getEventRelativeTo(cnv).getPosition()))
+    if (cnv && cnv->getMcpLayer().objectMouseDown(e)) // MCP-HOOK(canvasInput): AI notes and the pen win the click
         return;
-
-    // Multimodal Pen / Sketch overlay: Alt-drag or active sketch tool draws on canvas
-    if (!e.mods.isRightButtonDown() && cnv && cnv->getMcpLayer().shouldShowAISketch() && (e.mods.isAltDown() || cnv->isSketchToolActive())) {
-        cnv->mouseDown(e.getEventRelativeTo(cnv));
-        return;
-    }
 
     // Only show right-click menu in locked mode if the object can be opened
     // We don't allow alt+click for popupmenus here, as that will conflict with some object behaviour, like for [range.hsl]
@@ -851,10 +843,8 @@ void Object::mouseDown(MouseEvent const& e)
 
 void Object::mouseUp(MouseEvent const& e)
 {
-    if (cnv && cnv->getMcpLayer().shouldShowAISketch() && (cnv->isSketchingActive() || (cnv->isSketchToolActive() && !wasLockedOnMouseDown))) {
-        cnv->mouseUp(e.getEventRelativeTo(cnv));
+    if (cnv && cnv->getMcpLayer().objectMouseUp(e, wasLockedOnMouseDown)) // MCP-HOOK(canvasInput)
         return;
-    }
 
     if (wasLockedOnMouseDown || (gui && gui->isEditorShown()))
         return;
@@ -957,10 +947,8 @@ void Object::mouseUp(MouseEvent const& e)
 
 void Object::mouseDrag(MouseEvent const& e)
 {
-    if (cnv && cnv->getMcpLayer().shouldShowAISketch() && (e.mods.isAltDown() || cnv->isSketchToolActive() || cnv->isSketchingActive())) {
-        cnv->mouseDrag(e.getEventRelativeTo(cnv));
+    if (cnv && cnv->getMcpLayer().objectMouseDrag(e)) // MCP-HOOK(canvasInput)
         return;
-    }
 
     if (wasLockedOnMouseDown || (gui && gui->isEditorShown()))
         return;

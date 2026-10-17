@@ -72,6 +72,22 @@ expect 0 "a hunk with an MCP-HOOK tag passes" "$script" --gate
 expect 0 "--report on a tagged file" "$script" --report
 expect_in_output 'Source/Canvas.cpp[[:space:]]+1[[:space:]]+1[[:space:]]+0[[:space:]]+1$' "the report counts the tagged hunk"
 
+# MCP-CARRIED(<key>): a carried hunk, accepted when SEAM.md explains the key.
+printf 'a\nfix(); // MCP-CARRIED(test-fix)\nb\nc\nd\ne\nhook(); // MCP-HOOK(paint)\n' > Source/Canvas.cpp
+seam ""
+commit "carried hunk, key unexplained"
+expect 1 "an MCP-CARRIED key missing from SEAM.md fails the gate" "$script" --gate
+expect_in_output 'MCP-CARRIED\(test-fix\)' "the gate names the unexplained key"
+printf '# Seam\n\n## Carried patches\n\n| File | Why |\n|---|---|\n\n## Carried hunks\n\n| Tag | Why |\n|---|---|\n| `MCP-CARRIED(test-fix)` | test reason |\n' > docs/mcp-bridge/SEAM.md
+commit "key explained"
+expect 0 "an MCP-CARRIED hunk whose key SEAM.md explains passes" "$script" --gate
+
+# --worktree measures uncommitted edits (the default measures HEAD).
+printf 'a\nfix(); // MCP-CARRIED(test-fix)\nb\nc\nuntagged();\nd\ne\nhook(); // MCP-HOOK(paint)\n' > Source/Canvas.cpp
+expect 0 "an uncommitted untagged edit is invisible to the HEAD gate" "$script" --gate
+expect 1 "--worktree sees the uncommitted untagged edit" "$script" --gate --worktree
+git checkout -q -- Source/Canvas.cpp
+
 printf 'x\ny\n' > Source/Other.cpp
 git add -A && git commit -q -m "other file" && git rev-parse HEAD~1 > /dev/null
 printf '#include "Canvas.h"\n// bridge\n' > Source/Pd/MCPBridge.cpp

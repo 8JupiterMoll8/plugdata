@@ -900,7 +900,7 @@ public:
             } else if (result == 3) {
                 if (editor) {
                     if (auto* cnv = editor->getCurrentCanvas()) {
-                        cnv->pasteImageFromClipboard();
+                        cnv->getMcpLayer().pasteImageFromClipboard();
                     }
                 }
             }

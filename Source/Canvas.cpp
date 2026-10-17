@@ -4,19 +4,15 @@
  // WARRANTIES, see the file, "LICENSE.txt," in this distribution.
  */
 #include <juce_gui_basics/juce_gui_basics.h>
-#include <juce_cryptography/juce_cryptography.h>
 #include "Utility/Config.h"
 #include "Utility/Fonts.h"
-#include "Utility/NVGTextShim.h"
 
 #include "Sidebar/Sidebar.h"
 #include "Statusbar.h"
 #include "Canvas.h"
 #include "Object.h"
-#include "Sidebar/CopilotPanel.h"
 #include "Connection.h"
 #include "PluginProcessor.h"
-#include "Pd/MCPBridge.h" // artist-note forwarding from the inline note editor
 #include "PluginEditor.h"
 #include "LookAndFeel.h"
 #include "Components/SuggestionComponent.h"
@@ -362,11 +358,7 @@ Canvas::~Canvas()
     editor->removeModifierKeyListener(this);
     pd->unregisterMessageListener(this);
 
-    // Drop this canvas's MCP undo/redo transactions. Without this the stacks
-    // leak (<=50 full forward+inverse messages each) and, worse, a later canvas
-    // could reuse the freed t_canvas* address and inherit a stale stack.
-    if (!isGraph)
-        pd->getMcp()->clearMcpTransactions(patch.getUncheckedPointer());
+    mcpLayer->canvasDestroyed(); // MCP-HOOK(canvasLifecycle)
 
     if (getValue<bool>(isGraphChild) && isGraph)
     patch.setVisible(false);
@@ -390,7 +382,7 @@ void Canvas::changeListenerCallback(ChangeBroadcaster* c)
         if (isSelectedDifferent(selectedComponents, previousSelectedComponents)) {
             previousSelectedComponents = selectedComponents;
             editor->updateSelection(this);
-            updateSelectionPill();
+            mcpLayer->updateSelectionPill(); // MCP-HOOK(canvasLifecycle)
         }
     }
 }
@@ -867,632 +859,6 @@ bool Canvas::shouldShowIndex() const
     return showIndex && !presentationMode.getValue();
 }
 
-void Canvas::setSketchToolActive(bool active)
-{
-    mcpSketchToolActive = active;
-    if (active) {
-        mcpEraserToolActive = false; // one tool at a time
-        mcpTextToolActive = false;
-    }
-    setMouseCursor((active || mcpEraserToolActive || mcpTextToolActive) ? MouseCursor::CrosshairCursor : MouseCursor::NormalCursor);
-    // The chisel's presence follows the pen: arming shows it, dropping it hides
-    // it (when the board is empty). Keeps the mode state always visible.
-    updateSelectionPill();
-    repaint();
-    if (editor) editor->nvgSurface.invalidateAll();
-}
-
-void Canvas::setEraserToolActive(bool active)
-{
-    mcpEraserToolActive = active;
-    if (active) {
-        mcpSketchToolActive = false; // one tool at a time
-        mcpTextToolActive = false;
-    }
-    setMouseCursor((active || mcpSketchToolActive) ? MouseCursor::CrosshairCursor : MouseCursor::NormalCursor);
-    updateSelectionPill();
-    repaint();
-    if (editor) editor->nvgSurface.invalidateAll();
-}
-
-void Canvas::setTextToolActive(bool active)
-{
-    mcpTextToolActive = active;
-    if (active) {
-        mcpSketchToolActive = false; // one tool at a time
-        mcpEraserToolActive = false;
-        setMouseCursor(MouseCursor::IBeamCursor);
-    } else if (!mcpSketchToolActive && !mcpEraserToolActive) {
-        setMouseCursor(MouseCursor::NormalCursor);
-    }
-    updateSelectionPill();
-    repaint();
-    if (editor) editor->nvgSurface.invalidateAll();
-}
-
-bool Canvas::isSketchToolActive() const
-{
-    return mcpSketchToolActive;
-}
-
-bool Canvas::isSketchingActive() const
-{
-    return isSketching;
-}
-
-void Canvas::setStudioMode(bool active)
-{
-    mcpStudioMode = false;
-    setSketchToolActive(false);
-    updateSelectionPill();
-    repaint();
-    if (editor) editor->nvgSurface.invalidateAll();
-}
-
-void Canvas::setStudioInkVisible(bool visible)
-{
-    mcpStudioInkVisible = visible;
-    repaint();
-    if (editor) editor->nvgSurface.invalidateAll();
-}
-
-void Canvas::commitStudioFromCanvas()
-{
-    juce::String draft;
-    if (editor) {
-        if (auto* cp = editor->getCopilotPanel()) draft = cp->getStudioDraft();
-    }
-    sendSketchBuild(draft);
-    if (editor) {
-        if (auto* cp = editor->getCopilotPanel()) cp->clearStudioDraft();
-    }
-}
-
-juce::StringArray Canvas::getSelectionStableIds()
-{
-    juce::StringArray ids;
-    if (!pd) return ids;
-    auto patchPtr = patch.getPointer();
-    t_canvas* cnv = patchPtr ? patchPtr.get() : nullptr;
-    for (auto* obj : getSelectionOfType<Object>()) {
-        if (auto* ptr = obj->getPointer()) {
-            auto tid = pd->getMcp()->getStableId(ptr);
-            if (tid.isEmpty() && cnv) {
-                tid = pd->getMcp()->getOrAdoptStableId(cnv, ptr);
-            }
-            if (tid.isNotEmpty()) ids.add(tid);
-        }
-    }
-    return ids;
-}
-
-void Canvas::createTextNoteAt(Point<int> canvasPos)
-{
-    if (!pd) return;
-
-    // Drop any abandoned empty artist note first so note indices never drift.
-    {
-        juce::ScopedLock sl(pd->getMcp()->session.mcpOverlayLock);
-        std::erase_if(pd->getMcp()->session.mcpAnnotations, [](McpSession::McpAnnotation const& a) {
-            return a.text.isEmpty() && a.kind == "artist";
-        });
-
-        McpSession::McpAnnotation ann;
-        ann.x = static_cast<float>(canvasPos.x - canvasOrigin.x);
-        ann.y = static_cast<float>(canvasPos.y - canvasOrigin.y);
-        ann.kind = "artist";
-        ann.t = juce::Time::getMillisecondCounterHiRes() / 1000.0;
-        // Surgical lane: a selection turns the note into an attachment bound to it
-        // (renders anchored beside the object with a leader tick).
-        auto const selIds = getSelectionStableIds();
-        if (selIds.size() > 0) {
-            ann.targetId = selIds[0];
-            ann.targetIds = selIds;
-        }
-        pd->getMcp()->session.mcpAnnotations.push_back(ann);
-    }
-
-    openNoteEditorForIndex(static_cast<int>(pd->getMcp()->session.getMcpAnnotations().size()) - 1);
-}
-
-void Canvas::openNoteEditorForIndex(int index)
-{
-    if (!pd) return;
-    auto const anns = pd->getMcp()->session.getMcpAnnotations();
-    if (index < 0 || index >= static_cast<int>(anns.size())) return;
-    auto const ann = anns[static_cast<size_t>(index)];
-
-    if (!mcpNoteEditor) {
-        mcpNoteEditor = std::make_unique<juce::TextEditor>();
-        mcpNoteEditor->setMultiLine(false);
-        mcpNoteEditor->setReturnKeyStartsNewLine(false);
-        mcpNoteEditor->setWantsKeyboardFocus(true);
-
-        // Commit: pin the typed note. Empty text = discard it entirely.
-        auto commit = [this] {
-            if (mcpNoteEditIndex < 0) return;
-            auto const txt = mcpNoteEditor ? mcpNoteEditor->getText().trim() : juce::String();
-            if (pd) {
-                juce::ScopedLock sl(pd->getMcp()->session.mcpOverlayLock);
-                if (mcpNoteEditIndex < static_cast<int>(pd->getMcp()->session.mcpAnnotations.size())) {
-                    if (txt.isEmpty()) {
-                        pd->getMcp()->session.mcpAnnotations.erase(pd->getMcp()->session.mcpAnnotations.begin() + mcpNoteEditIndex);
-                    } else {
-                        auto& a = pd->getMcp()->session.mcpAnnotations[static_cast<size_t>(mcpNoteEditIndex)];
-                        a.text = txt;
-                        a.kind = "artist";
-                    }
-                }
-            }
-            mcpNoteEditIndex = -1;
-            if (mcpNoteEditor) mcpNoteEditor->setVisible(false);
-            repaint();
-            if (editor) editor->nvgSurface.invalidateAll();
-        };
-
-        mcpNoteEditor->onReturnKey = [commit] { commit(); };
-        mcpNoteEditor->onFocusLost = [this, commit] {
-            if (juce::Time::getMillisecondCounter() - mcpNoteOpenedAt < 500) return;
-            commit();
-        };
-        // Live feedback: write the field's text onto the note as you type.
-        mcpNoteEditor->onTextChange = [this] {
-            if (mcpNoteEditor && pd && mcpNoteEditIndex >= 0) {
-                juce::ScopedLock sl(pd->getMcp()->session.mcpOverlayLock);
-                if (mcpNoteEditIndex < static_cast<int>(pd->getMcp()->session.mcpAnnotations.size()))
-                    pd->getMcp()->session.mcpAnnotations[static_cast<size_t>(mcpNoteEditIndex)].text = mcpNoteEditor->getText();
-            }
-            repaint();
-            if (editor) editor->nvgSurface.invalidateAll();
-        };
-        mcpNoteEditor->onEscapeKey = [commit] { commit(); }; // Esc = finish editing
-
-        mcpNoteEditor->setColour(juce::TextEditor::backgroundColourId, juce::Colour(0xff16161c));
-        mcpNoteEditor->setColour(juce::TextEditor::textColourId, juce::Colours::white);
-        mcpNoteEditor->setColour(juce::TextEditor::outlineColourId, juce::Colour(0xffffbe50));
-        mcpNoteEditor->setColour(juce::TextEditor::focusedOutlineColourId, juce::Colour(0xffffbe50));
-        mcpNoteEditor->setColour(juce::TextEditor::highlightColourId, juce::Colour(0xffffbe50));
-        mcpNoteEditor->setColour(juce::CaretComponent::caretColourId, juce::Colours::white);
-        addAndMakeVisible(*mcpNoteEditor);
-        if (!mcpSlotPasteKeys) mcpSlotPasteKeys = std::make_unique<SlotPasteKeyListener>(this);
-        mcpNoteEditor->addKeyListener(mcpSlotPasteKeys.get());
-    }
-
-    mcpNoteEditIndex = index;
-    mcpNoteOpenedAt = juce::Time::getMillisecondCounter();
-    mcpNoteEditor->setBounds(juce::roundToInt(canvasOrigin.x + ann.x - 6.0f),
-                             juce::roundToInt(canvasOrigin.y + ann.y - 26.0f),
-                             220, 20);
-    mcpNoteEditor->setText(ann.text, false);
-    mcpNoteEditor->setVisible(true);
-    mcpNoteEditor->toFront(true);
-
-    auto* ed = mcpNoteEditor.get();
-    juce::MessageManager::callAsync([ed] {
-        if (ed) {
-            ed->grabKeyboardFocus();
-            ed->selectAll();
-        }
-    });
-
-    repaint();
-    if (editor) editor->nvgSurface.invalidateAll();
-}
-
-void Canvas::SketchFadeTimer::timerCallback()
-{
-    if (!canvas) return;
-    canvas->mcpSketchAlpha -= 0.025f;
-    if (canvas->mcpSketchAlpha <= 0.0f) {
-        canvas->mcpSketchAlpha = 0.0f;
-        canvas->mcpCompletedStrokes.clear();
-        stopTimer();
-    }
-    canvas->repaint();
-    if (canvas->editor) canvas->editor->nvgSurface.invalidateAll();
-}
-
-void Canvas::startSketchFadeTimer()
-{
-    mcpSketchAlpha = 1.0f;
-    if (!mcpSketchFadeTimer) {
-        mcpSketchFadeTimer = std::make_unique<SketchFadeTimer>(this);
-    }
-    mcpSketchFadeTimer->startTimerHz(40);
-}
-
-juce::Rectangle<float> Canvas::getSketchBoundsInCanvas() const
-{
-    float minX = 1e9f, minY = 1e9f, maxX = -1e9f, maxY = -1e9f;
-    bool any = false;
-    for (auto const& stroke : mcpCompletedStrokes) {
-        for (auto const& p : stroke) {
-            minX = std::min(minX, p.x);
-            minY = std::min(minY, p.y);
-            maxX = std::max(maxX, p.x);
-            maxY = std::max(maxY, p.y);
-            any = true;
-        }
-    }
-    if (!any) return {};
-    return { minX, minY, maxX - minX, maxY - minY };
-}
-
-juce::String Canvas::buildSketchJson() const
-{
-    juce::Array<juce::var> strokesVar;
-    for (auto const& stroke : mcpCompletedStrokes) {
-        juce::Array<juce::var> ptsVar;
-        for (auto const& p : stroke) {
-            auto* obj = new juce::DynamicObject();
-            obj->setProperty("x", p.x - static_cast<float>(canvasOrigin.x));
-            obj->setProperty("y", p.y - static_cast<float>(canvasOrigin.y));
-            obj->setProperty("t", p.t);
-            ptsVar.add(juce::var(obj));
-        }
-        strokesVar.add(juce::var(ptsVar));
-    }
-    return juce::JSON::toString(juce::var(strokesVar), true);
-}
-
-void Canvas::sendSketchBuild(const juce::String& prompt)
-{
-    if (!pd) return;
-    // Visible-Only Ingestion: hidden ink is excluded from the brief (sent as []).
-    if (mcpCompletedStrokes.empty() && pd->getMcp()->session.getMcpReferenceImages().empty()) return;
-
-    // Committing = done drawing: disarm the pen so the artist can immediately
-    // drag/tweak the freshly built patch without leaving ink everywhere.
-    // (In Studio mode the drawer owns the pen — keep it up for the next idea.)
-    if (!mcpStudioMode) setSketchToolActive(false);
-
-    // Bounding box in PD patch coords — construct_patch_v4 speaks this space.
-    juce::String bboxJson = "{}";
-    if (mcpStudioInkVisible && !mcpCompletedStrokes.empty()) {
-        auto const sb = getSketchBoundsInCanvas();
-        auto* bboxObj = new juce::DynamicObject();
-        bboxObj->setProperty("x", sb.getX() - static_cast<float>(canvasOrigin.x));
-        bboxObj->setProperty("y", sb.getY() - static_cast<float>(canvasOrigin.y));
-        bboxObj->setProperty("w", sb.getWidth());
-        bboxObj->setProperty("h", sb.getHeight());
-        bboxJson = juce::JSON::toString(juce::var(bboxObj), true);
-    }
-
-    // Park the artist's words in the sidebar log (canvas stays calm).
-    if (editor) {
-        if (auto* cp = editor->getCopilotPanel()) {
-            cp->receiveMessage("user", prompt.isNotEmpty() ? prompt : juce::String("Build from moodboard"));
-        }
-    }
-
-    auto const subpatch = patch.getPointer() ? juce::String(reinterpret_cast<uintptr_t>(patch.getPointer().get())) : juce::String("0");
-    if (auto* br = pd->getMcp()->getMCPBridge()) {
-        br->sendSketchBuild(subpatch, mcpStudioInkVisible ? buildSketchJson() : juce::String("[]"), bboxJson, prompt);
-    }
-
-    // ── Commit: the ink did its job and clears; the mood STAYS. ───────────────
-    // Artist-first default (learned in the field): pictures, notes and takes are
-    // moodboard furniture — they survive the build so you can A/B the new patch
-    // against the reference it came from. Remove them explicitly with 🗑/🔒.
-    mcpCompletedStrokes.clear();
-    mcpCurrentStroke.clear();
-    mcpLastSketchBounds = {};
-
-    updateSelectionPill();
-    repaint();
-    if (editor) editor->nvgSurface.invalidateAll();
-}
-
-void Canvas::undoLastStroke()
-{
-    if (mcpCompletedStrokes.empty()) return;
-    mcpCompletedStrokes.pop_back();
-    updateSelectionPill();
-    repaint();
-    if (editor) editor->nvgSurface.invalidateAll();
-}
-
-void Canvas::clearAllInk()
-{
-    mcpCompletedStrokes.clear();
-    mcpCurrentStroke.clear();
-    mcpSketchAlpha = 1.0f;
-    if (mcpSketchFadeTimer) mcpSketchFadeTimer->stopTimer();
-    updateSelectionPill();
-    repaint();
-    if (editor) editor->nvgSurface.invalidateAll();
-}
-
-//===----------------------------------------------------------------------===//
-// Phase 2 — Reference Images (pasted schematics on the canvas glass)
-//===----------------------------------------------------------------------===//
-
-namespace {
-// JUCE 7.0's SystemClipboard only speaks text. Image paste therefore tries, in order:
-//  1. Linux/X11 + Wayland clipboard tools (xclip / wl-paste), bounded by `timeout`;
-//  2. a text-path heuristic — many apps copy "file:///path/img.png" as clipboard text.
-juce::Image loadImageFromClipboard()
-{
-    auto const clipboardText = juce::SystemClipboard::getTextFromClipboard().trim();
-    if (clipboardText.isNotEmpty() && clipboardText.length() < 4096) {
-        juce::File file;
-        if (clipboardText.startsWithIgnoreCase("file://"))
-            file = juce::URL(clipboardText).getLocalFile();
-        else if (juce::File::isAbsolutePath(clipboardText))
-            file = juce::File(clipboardText);
-
-        if (file.existsAsFile()) {
-            if (auto image = juce::ImageFileFormat::loadFrom(file); image.isValid()) {
-                return image;
-            }
-        }
-    }
-
-#if JUCE_LINUX
-    auto const tmp = juce::File::getSpecialLocation(juce::File::tempDirectory)
-                         .getChildFile("plugdata_paste_" + juce::String(juce::Random::getSystemRandom().nextInt64()) + ".img");
-    auto const quotedPath = "'" + tmp.getFullPathName().replace("'", "'\\''") + "'";
-    juce::StringArray attempts;
-    attempts.add("timeout 3 xclip -selection clipboard -t image/png -o > " + quotedPath);
-    attempts.add("timeout 3 wl-paste --type image/png > " + quotedPath);
-    attempts.add("timeout 3 wl-paste > " + quotedPath);
-    for (auto const& command : attempts) {
-        tmp.deleteFile();
-        juce::ChildProcess proc;
-        if (!proc.start(juce::StringArray { "/bin/sh", "-c", command })) {
-            continue;
-        }
-        proc.waitForProcessToFinish(3500);
-        if (proc.isRunning()) proc.kill();
-        if (tmp.existsAsFile() && tmp.getSize() > 0) {
-            if (auto image = juce::ImageFileFormat::loadFrom(tmp); image.isValid()) {
-                tmp.deleteFile();
-                return image;
-            }
-        }
-    }
-    tmp.deleteFile();
-#endif
-
-    return {};
-}
-} // namespace
-
-bool Canvas::pasteImageFromClipboard()
-{
-    auto const clipboardImage = loadImageFromClipboard();
-    if (!clipboardImage.isValid()) {
-        // Slot is open but the clipboard has no image yet — coach, keep the slot.
-        if (mcpImageSlotActive) {
-            mcpMoodHint = "Clipboard has no image — copy one, then Ctrl+V here";
-            mcpMoodHintUntil = juce::Time::getMillisecondCounter() + 2600;
-            repaint();
-            if (editor) editor->nvgSurface.invalidateAll();
-        }
-        return false;
-    }
-    if (!pd) return true; // consume the paste; there is nowhere to put it
-
-    // Encode once: hash names the cache file, bytes are reused for the disk write.
-    juce::MemoryOutputStream pngData;
-    juce::PNGImageFormat pngFormat;
-    if (!pngFormat.writeImageToStream(clipboardImage, pngData)) return true;
-    auto const hash = juce::MD5(pngData.getData(), pngData.getDataSize()).toHexString();
-
-    auto const refsDir = ProjectInfo::appDataDir.getChildFile("references");
-    refsDir.createDirectory();
-    auto const pngFile = refsDir.getChildFile(hash + ".png");
-    if (!pngFile.existsAsFile()) {
-        if (auto stream = std::unique_ptr<juce::FileOutputStream>(pngFile.createOutputStream())) {
-            stream->write(pngData.getData(), pngData.getDataSize());
-            stream->flush();
-        }
-    }
-
-    // Fit the image to the paste slot when one is open, else to a sane default.
-    float const maxW = mcpImageSlotActive ? 320.0f : 520.0f;
-    float const maxH = mcpImageSlotActive ? 220.0f : 420.0f;
-    float const fit = juce::jmin(1.0f, juce::jmin(maxW / static_cast<float>(clipboardImage.getWidth()), maxH / static_cast<float>(clipboardImage.getHeight())));
-    float const w = static_cast<float>(clipboardImage.getWidth()) * fit;
-    float const h = static_cast<float>(clipboardImage.getHeight()) * fit;
-
-    auto const mousePosition = getMouseXYRelative() - canvasOrigin;
-
-    McpSession::McpReferenceImage ref;
-    ref.id = hash;
-    ref.filePath = pngFile.getFullPathName();
-    ref.title = "Pasted_" + hash.substring(0, 6) + ".png";
-    // Surgical lane: pasting over a selection attaches the image to it.
-    auto const selIds = getSelectionStableIds();
-    if (selIds.size() > 0) ref.targetId = selIds[0];
-    if (mcpImageSlotActive) {
-        // Drop into the waiting slot, centered.
-        ref.x = static_cast<float>(mcpImageSlotPos.x - canvasOrigin.x) - w * 0.5f;
-        ref.y = static_cast<float>(mcpImageSlotPos.y - canvasOrigin.y) - h * 0.5f;
-        mcpImageSlotActive = false; // slot consumed
-    } else {
-        ref.x = static_cast<float>(mousePosition.x) - w * 0.5f;
-        ref.y = static_cast<float>(mousePosition.y) - h * 0.5f;
-    }
-    ref.width = w;
-    ref.height = h;
-    pd->getMcp()->session.addMcpReferenceImage(ref);
-
-    // Bridge dispatch: /pd/reference/image <path> <x> <y> <w> <h> (PD patch coords)
-    if (auto* br = pd->getMcp()->getMCPBridge()) {
-        br->sendReferenceImage(ref.filePath, ref.x, ref.y, ref.width, ref.height);
-    }
-
-    // Pasting a reference = composing mode: put the pen down so the fresh image
-    // is immediately draggable / lockable (re-arm with the ✏️ chip when done).
-    // In Studio brainstorm mode the drawer owns the pen — keep drawing.
-    if (!mcpStudioMode) setSketchToolActive(false);
-
-    repaint();
-    if (editor) editor->nvgSurface.invalidateAll();
-    return true;
-}
-
-bool Canvas::handleVoiceTakeClick(MouseEvent const& e, Point<int> mousePos)
-{
-    if (!pd) return false;
-    auto const takes = pd->getMcp()->session.getMcpVoiceTakes();
-    for (auto it = takes.rbegin(); it != takes.rend(); ++it) {
-        auto const& take = *it;
-        if (!take.visible) continue;
-        Rectangle<int> const b(static_cast<int>(canvasOrigin.x + take.x), static_cast<int>(canvasOrigin.y + take.y), 240, 38);
-        if (!b.contains(mousePos)) continue;
-
-        int const relX = mousePos.x - b.getX();
-        auto* br = pd->getMcp()->getMCPBridge();
-
-        if (relX >= 30 && relX <= 60) {
-            // ▶ / ■ audition toggle
-            if (br) br->playVoiceTake(take.id, take.wavPath);
-            repaint();
-            if (editor) editor->nvgSurface.invalidateAll();
-            return true;
-        }
-        if (relX >= b.getWidth() - 30) {
-            // ✕ remove (stop audition first if it's this one)
-            if (br && br->getPlayingVoiceTakeId() == take.id) br->stopVoiceTake();
-            pd->getMcp()->session.removeMcpVoiceTake(take.id);
-            repaint();
-            if (editor) editor->nvgSurface.invalidateAll();
-            return true;
-        }
-
-        // Body: drag the chip
-        mcpDraggingTakeId = take.id;
-        mcpTakeDragOffset = mousePos - b.getPosition();
-        setMouseCursor(juce::MouseCursor::DraggingHandCursor);
-        return true;
-    }
-    return false;
-}
-
-bool Canvas::handleMidiTakeClick(MouseEvent const& e, Point<int> mousePos)
-{
-    if (!pd) return false;
-    auto const takes = pd->getMcp()->session.getMcpMidiTakes();
-    for (auto it = takes.rbegin(); it != takes.rend(); ++it) {
-        auto const& take = *it;
-        if (!take.visible) continue;
-        Rectangle<int> const b(static_cast<int>(canvasOrigin.x + take.x), static_cast<int>(canvasOrigin.y + take.y), 240, 38);
-        if (!b.contains(mousePos)) continue;
-
-        int const relX = mousePos.x - b.getX();
-        auto* br = pd->getMcp()->getMCPBridge();
-
-        if (relX >= 26 && relX <= 50) {
-            // ▶ / ⏸ audition toggle
-            if (br) br->playMidiTake(take.id, take.json);
-            repaint();
-            if (editor) editor->nvgSurface.invalidateAll();
-            return true;
-        }
-
-        if (relX >= b.getWidth() - 30) {
-            // ✕ remove (stop playback first if it's currently playing)
-            if (br && br->getPlayingMidiTakeId() == take.id) br->stopMidiTake();
-            pd->getMcp()->session.removeMcpMidiTake(take.id);
-            repaint();
-            if (editor) editor->nvgSurface.invalidateAll();
-            return true;
-        }
-
-        // Body: drag the chip
-        mcpDraggingMidiTakeId = take.id;
-        mcpMidiTakeDragOffset = mousePos - b.getPosition();
-        setMouseCursor(juce::MouseCursor::DraggingHandCursor);
-        return true;
-    }
-    return false;
-}
-
-bool Canvas::handleReferenceImageClick(MouseEvent const& e, Point<int> mousePos, bool isRightClick)
-{
-    if (!pd) return false;
-    auto const images = pd->getMcp()->session.getMcpReferenceImages();
-    for (auto it = images.rbegin(); it != images.rend(); ++it) {
-        auto const& img = *it;
-        // Include the title header in the hit zone so the tag doubles as a grab handle
-        Rectangle<float> const b(static_cast<float>(canvasOrigin.x) + img.x - 4.0f,
-                                 static_cast<float>(canvasOrigin.y) + img.y - 22.0f,
-                                 img.width + 8.0f, img.height + 26.0f);
-        if (!b.contains(mousePos.toFloat())) continue;
-
-        if (!isRightClick) {
-            if (img.isLocked) return true; // locked: swallow the click, don't lasso through it
-            mcpDraggingRefImageId = img.id;
-            mcpRefImageDragOffset = mousePos - Point<int>(juce::roundToInt(static_cast<float>(canvasOrigin.x) + img.x),
-                                                          juce::roundToInt(static_cast<float>(canvasOrigin.y) + img.y));
-            setMouseCursor(juce::MouseCursor::DraggingHandCursor);
-            return true;
-        }
-
-        auto const imageId = img.id;
-        auto const title = img.title.isNotEmpty() ? img.title : juce::File(img.filePath).getFileName();
-        auto const locked = img.isLocked;
-
-        juce::PopupMenu menu;
-        menu.addSectionHeader("Reference Image");
-        menu.addItem(1, "Analyze Circuit with AI");
-        menu.addItem(2, locked ? "Unlock Position" : "Lock Position");
-        menu.addSeparator();
-        menu.addItem(3, "Delete Reference Image");
-        menu.showMenuAsync(juce::PopupMenu::Options().withTargetScreenArea(Rectangle<int>(e.getScreenPosition(), e.getScreenPosition().translated(1, 1))),
-            [safeThis = juce::Component::SafePointer<Canvas>(this), imageId, title](int result) {
-                auto* canvas = safeThis.getComponent();
-                if (!canvas || !canvas->pd) return;
-
-                if (result == 1) {
-                    auto const prompt = "[REFERENCE IMAGE] Analyze the pasted schematic \"" + title + "\" on the canvas and build a live patch that matches its circuit or panel.";
-                    if (canvas->editor) {
-                        if (auto* cp = canvas->editor->getCopilotPanel()) cp->receiveMessage("user", prompt);
-                    }
-                    canvas->sendPillPrompt(prompt, false);
-                } else if (result == 2) {
-                    for (auto const& im : canvas->pd->getMcp()->session.getMcpReferenceImages()) {
-                        if (im.id == imageId) {
-                            canvas->pd->getMcp()->session.setMcpReferenceLock(imageId, !im.isLocked);
-                            break;
-                        }
-                    }
-                    canvas->repaint();
-                    if (canvas->editor) canvas->editor->nvgSurface.invalidateAll();
-                } else if (result == 3) {
-                    canvas->pd->getMcp()->session.removeMcpReferenceImage(imageId);
-                    canvas->mcpRefImageCache.erase(imageId.toStdString());
-                    canvas->repaint();
-                    if (canvas->editor) canvas->editor->nvgSurface.invalidateAll();
-                }
-            });
-        return true;
-    }
-    return false;
-}
-
-// The server signals a pending destructive op via the HUD chapter ("APPROVE?").
-bool Canvas::isApprovalRequested() const
-{
-    if (!pd) return false;
-    auto const hud = pd->getMcp()->session.getMcpHud();
-    return hud.active && hud.chapter.containsIgnoreCase("APPROVE");
-}
-
-// Artist clicked [Approve] / [Cancel] (or pressed Enter / Esc). The pill prompt
-// path carries it to the server, which holds the token inert until this yes.
-void Canvas::sendApproval(bool approve)
-{
-    mcpApprovalFrame = {};
-    mcpApprovalYes = {};
-    mcpApprovalNo = {};
-    sendPillPrompt(approve ? "approve" : "deny");
-    repaint();
-    if (editor) editor->nvgSurface.invalidateAll();
-}
-
 bool Canvas::shouldShowConnectionDirection() const
 {
     return showConnectionDirection;
@@ -1696,11 +1062,11 @@ void Canvas::performSynchronise()
     bool const needsFlush = !alreadyFlushed;
     ScopedValueSetter<bool> flushGuard(alreadyFlushed, true);
     // By flushing twice, we can make sure that any message sent before this point will be dequeued
-    if (needsFlush && !isGraph) {
+    if (needsFlush && !isGraph) { // MCP-CARRIED(sync-flush-while-audio)
         if (!pd->getIsProcessingAudio())
             pd->doubleFlushMessageQueue();
         else
-            pd->flushMessageQueue();
+            pd->flushMessageQueue(); // MCP-CARRIED(sync-flush-while-audio)
     }
 
     // Remove deleted connections
@@ -1818,9 +1184,7 @@ void Canvas::performSynchronise()
         }
     }
 
-    for (auto* c : connections) {
-        c->updatePath();
-    }
+    mcpLayer->canvasSynchronised(); // MCP-HOOK(canvasLifecycle): paths for bridge-built wires
 
     if (!isGraph) {
         viewport->updateCanvasTransform();
@@ -1926,593 +1290,8 @@ void Canvas::altKeyChanged(bool const isHeld)
     }
 }
 
-Object* Canvas::findObjectByStableId(juce::String const& targetId) const
-{
-    if (targetId.isEmpty() || !pd) return nullptr;
-    for (auto* obj : objects) {
-        if (!obj) continue;
-        if (auto* ptr = obj->getPointer()) {
-            if (pd->getMcp()->getStableId(ptr) == targetId)
-                return obj;
-        }
-    }
-    return nullptr;
-}
-
-bool Canvas::getAnnotationLiveBounds(juce::String const& targetId, juce::StringArray const& targetIds, float fallbackX, float fallbackY, float fallbackLx, float fallbackLy, bool fallbackHasLeader, float& outAx, float& outAy, float& outLx, float& outLy, bool& outHasLeader, juce::Rectangle<int>* outGroupBounds) const
-{
-    auto const ids = targetIds.size() > 0 ? targetIds : (targetId.isNotEmpty() ? juce::StringArray(targetId) : juce::StringArray());
-    if (ids.size() > 0) {
-        bool first = true;
-        int minX = 0, minY = 0, maxX = 0, maxY = 0;
-        for (auto const& tid : ids) {
-            if (auto* obj = findObjectByStableId(tid)) {
-                auto const b = obj->getObjectBounds();
-                if (first) {
-                    minX = b.getX(); minY = b.getY();
-                    maxX = b.getRight(); maxY = b.getBottom();
-                    first = false;
-                } else {
-                    minX = std::min(minX, b.getX());
-                    minY = std::min(minY, b.getY());
-                    maxX = std::max(maxX, b.getRight());
-                    maxY = std::max(maxY, b.getBottom());
-                }
-            }
-        }
-        if (!first) {
-            if (outGroupBounds) {
-                *outGroupBounds = juce::Rectangle<int>(minX, minY, maxX - minX, maxY - minY);
-            }
-
-            // Console Tape: pinned directly above the top edge of the module strip
-            outLx = static_cast<float>(minX + 14);
-            outLy = static_cast<float>(minY);
-            outAx = static_cast<float>(minX);
-            outAy = static_cast<float>(minY - 24);
-            outHasLeader = true;
-
-            // Stack multiple notes on the same group vertically upwards
-            if (pd) {
-                auto const allAnns = pd->getMcp()->session.getMcpAnnotations();
-                int noteOrder = 0;
-                for (auto const& prevA : allAnns) {
-                    bool isSelf = false;
-                    if (prevA.targetIds.size() > 0 && ids.size() > 0) {
-                        if (prevA.targetIds == ids) isSelf = true;
-                    } else if (prevA.targetId == targetId) {
-                        isSelf = true;
-                    }
-                    if (isSelf) break;
-                    // Check if targeting the same objects
-                    bool sameTarget = false;
-                    auto const prevIds = prevA.targetIds.size() > 0 ? prevA.targetIds : (prevA.targetId.isNotEmpty() ? juce::StringArray(prevA.targetId) : juce::StringArray());
-                    for (auto const& ptid : prevIds) {
-                        for (auto const& tid : ids) {
-                            if (ptid == tid) { sameTarget = true; break; }
-                        }
-                        if (sameTarget) break;
-                    }
-                    if (sameTarget) ++noteOrder;
-                }
-                outAy -= noteOrder * 24.0f;
-            }
-
-            return true;
-        }
-        return false; // All target objects deleted -> auto-prune
-    }
-
-    if (outGroupBounds) *outGroupBounds = juce::Rectangle<int>();
-    outAx = fallbackX;
-    outAy = fallbackY;
-    outLx = fallbackLx;
-    outLy = fallbackLy;
-    outHasLeader = fallbackHasLeader;
-    return true;
-}
-
-bool Canvas::getAnnotationLiveBounds(juce::String const& targetId, float fallbackX, float fallbackY, float fallbackLx, float fallbackLy, bool fallbackHasLeader, float& outAx, float& outAy, float& outLx, float& outLy, bool& outHasLeader) const
-{
-    return getAnnotationLiveBounds(targetId, juce::StringArray(), fallbackX, fallbackY, fallbackLx, fallbackLy, fallbackHasLeader, outAx, outAy, outLx, outLy, outHasLeader, nullptr);
-}
-
-juce::Rectangle<float> Canvas::getAnnotationScreenBounds(size_t annIndex) const
-{
-    if (!pd) return {};
-    auto const anns = pd->getMcp()->session.getMcpAnnotations();
-    if (annIndex >= anns.size()) return {};
-    auto const& a = anns[annIndex];
-    float rawAx = 0.0f, rawAy = 0.0f, rawLx = 0.0f, rawLy = 0.0f;
-    bool hasLead = false;
-    juce::Rectangle<int> grpBounds;
-    if (!getAnnotationLiveBounds(a.targetId, a.targetIds, a.x, a.y, a.leaderX, a.leaderY, a.hasLeader, rawAx, rawAy, rawLx, rawLy, hasLead, &grpBounds))
-        return {};
-
-    float const ax = canvasOrigin.x + rawAx;
-    float const ay = canvasOrigin.y + rawAy;
-    constexpr float tapeH = 20.0f;
-    float const textW = a.text.length() * 6.8f + 40.0f;
-    float const groupW = grpBounds.isEmpty() ? 140.0f : static_cast<float>(grpBounds.getWidth());
-    float tapeW = 0.0f;
-    if (!grpBounds.isEmpty() && groupW >= 90.0f) {
-        tapeW = std::min(groupW, std::max(80.0f, textW));
-    } else {
-        tapeW = std::max(groupW, std::min(160.0f, textW));
-    }
-    return juce::Rectangle<float>(ax, ay, tapeW, tapeH);
-}
-
-void Canvas::mouseMove(MouseEvent const& e)
-{
-    // Hover feedback: brighten the note under the cursor & detect chip hovers.
-    int hoverIdx = -1;
-    bool hoverClose = false;
-    int hoverChip = -1;
-
-    if (pd && !pd->getMcp()->session.getMcpAnnotations().empty()) {
-        auto const pt = e.getPosition().toFloat();
-        auto const anns = pd->getMcp()->session.getMcpAnnotations();
-        for (int i = static_cast<int>(anns.size()) - 1; i >= 0; --i) {
-            auto const tb = getAnnotationScreenBounds(static_cast<size_t>(i));
-            if (tb.isEmpty()) continue;
-
-            auto const chips = CanvasMcpLayer::getAnnotationPivotChips(anns[static_cast<size_t>(i)].text, anns[static_cast<size_t>(i)].kind);
-            float totalChipsW = 0.0f;
-            for (auto const& c : chips) totalChipsW += CanvasMcpLayer::getChipWidth(c.label) + 4.0f;
-            float const drawerW = std::max(tb.getWidth(), totalChipsW + 4.0f);
-            constexpr float drawerH = 22.0f;
-            juce::Rectangle<float> const combinedBounds(tb.getX(), tb.getY(), drawerW, tb.getHeight() + drawerH + 3.0f);
-
-            if (combinedBounds.contains(pt)) {
-                hoverIdx = i;
-                hoverClose = (pt.y <= tb.getBottom() && pt.x >= tb.getRight() - 16.0f);
-
-                if (pt.y > tb.getBottom() + 1.0f) {
-                    float curChipX = tb.getX() + 4.0f;
-                    float const chipY = tb.getY() + tb.getHeight() + 2.5f;
-                    float const chipH = drawerH - 5.0f;
-                    for (size_t ci = 0; ci < chips.size(); ++ci) {
-                        float const cw = CanvasMcpLayer::getChipWidth(chips[ci].label);
-                        juce::Rectangle<float> chipBox(curChipX, chipY, cw, chipH);
-                        if (chipBox.contains(pt)) {
-                            hoverChip = static_cast<int>(ci);
-                            break;
-                        }
-                        curChipX += cw + 4.0f;
-                    }
-                }
-                break;
-            }
-        }
-    }
-    if (hoverIdx != mcpNoteHover || hoverClose != mcpNoteHoverClose || hoverChip != mcpNoteHoverChip) {
-        mcpNoteHover = hoverIdx;
-        mcpNoteHoverClose = hoverClose;
-        mcpNoteHoverChip = hoverChip;
-        repaint();
-        if (editor) editor->nvgSurface.invalidateAll();
-    }
-}
-
-void Canvas::mouseExit(MouseEvent const& e)
-{
-    if (mcpNoteHover != -1 || mcpNoteHoverClose || mcpNoteHoverChip != -1) {
-        mcpNoteHover = -1;
-        mcpNoteHoverClose = false;
-        mcpNoteHoverChip = -1;
-        repaint();
-        if (editor) editor->nvgSurface.invalidateAll();
-    }
-}
-
-bool Canvas::isPointOverNote(Point<int> canvasPt) const
-{
-    if (mcpSelectionPill && mcpSelectionPill->isVisible()) {
-        auto const panel = mcpSelectionPillFrame.isEmpty() ? mcpSelectionPill->getBounds() : mcpSelectionPillFrame;
-        if (panel.contains(canvasPt)) return true;
-        if (mcpPillDrawerMode != 0 && mcpPillDrawerFrame.contains(canvasPt)) return true;
-        if (mcpPillDrawerMode == 3 && mcpPaletteFrame.contains(canvasPt)) return true;
-    }
-    if (!pd || pd->getMcp()->session.getMcpAnnotations().empty()) return false;
-    auto const pt = canvasPt.toFloat();
-    auto const anns = pd->getMcp()->session.getMcpAnnotations();
-    for (size_t i = 0; i < anns.size(); ++i) {
-        auto const tb = getAnnotationScreenBounds(i);
-        if (tb.isEmpty()) continue;
-        if (static_cast<int>(i) == mcpNoteHover) {
-            auto const chips = CanvasMcpLayer::getAnnotationPivotChips(anns[i].text, anns[i].kind);
-            float totalChipsW = 0.0f;
-            for (auto const& c : chips) totalChipsW += CanvasMcpLayer::getChipWidth(c.label) + 4.0f;
-            float const drawerW = std::max(tb.getWidth(), totalChipsW + 4.0f);
-            juce::Rectangle<float> combined(tb.getX(), tb.getY(), drawerW, tb.getHeight() + 25.0f);
-            if (combined.contains(pt)) return true;
-        } else if (tb.contains(pt)) {
-            return true;
-        }
-    }
-    if (mcpNoteEditor && mcpNoteEditor->isVisible() && mcpNoteEditor->getBounds().contains(canvasPt))
-        return true;
-    return false;
-}
-
-bool Canvas::handleNoteClick(Point<int> canvasPt)
-{
-    // Tier-2 approval chips take priority — they float above the pill.
-    if (!mcpApprovalFrame.isEmpty() && mcpApprovalFrame.contains(canvasPt)) {
-        if (mcpApprovalYes.contains(canvasPt)) sendApproval(true);
-        else if (mcpApprovalNo.contains(canvasPt)) sendApproval(false);
-        return true;
-    }
-
-    if (mcpSelectionPill && mcpSelectionPill->isVisible()) {
-        // Smart Command Palette clicks
-        if (mcpPillDrawerMode == 3 && mcpPaletteFrame.contains(canvasPt)) {
-            int const relY = canvasPt.y - (mcpPaletteFrame.getY() + 24);
-            int const rowH = 30;
-            if (relY >= 0) {
-                int const clickedRow = relY / rowH;
-                triggerPaletteItem(clickedRow);
-                return true;
-            }
-        }
-
-        // 1. Drawer clicks (Lenses / Tools)
-        if (mcpPillDrawerMode != 0 && mcpPillDrawerFrame.contains(canvasPt)) {
-            int const relX = canvasPt.x - mcpPillDrawerFrame.getX();
-            int const dw = mcpPillDrawerFrame.getWidth();
-            if (mcpPillDrawerMode == 1) {
-                // Lenses: Free | Signal | Logic | Order
-                float const itemW = (static_cast<float>(dw) - 8.0f) / 4.0f;
-                int idx = static_cast<int>((relX - 4) / itemW);
-                if (idx >= 0 && idx < 4) {
-                    const char* lenses[] = { "", "signal", "logic", "order" };
-                    juce::String lens(lenses[idx]);
-                    mcpActiveLens = lens;
-                    if (pd) {
-                        if (auto* br = pd->getMcp()->getMCPBridge()) br->sendLens(lens.isEmpty() ? "free" : lens);
-                    }
-                    mcpPillDrawerMode = 0;
-                    mcpPillDrawerFrame = {};
-                    repaint();
-                    if (editor) editor->nvgSurface.invalidateAll();
-                    return true;
-                }
-            } else if (mcpPillDrawerMode == 2) {
-                // Tools: Explain | Drive | Filter | Reverb | Pack GOP | Tidy
-                const char* toolPrompts[] = {
-                    "explain this",
-                    "add tanh~ saturation",
-                    "add lowpass filter",
-                    "add reverb space",
-                    "pack this into gop module",
-                    "tidy layout"
-                };
-                float const itemW = (static_cast<float>(dw) - 8.0f) / 6.0f;
-                int idx = static_cast<int>((relX - 4) / itemW);
-                if (idx >= 0 && idx < 6) {
-                    mcpPillDrawerMode = 0;
-                    mcpPillDrawerFrame = {};
-                    sendPillPrompt(toolPrompts[idx]);
-                    dismissSelectionPill();
-                    return true;
-                }
-            }
-            return true;
-        }
-
-        // 2. Pill clicks
-        auto const panel = mcpSelectionPillFrame.isEmpty() ? mcpSelectionPill->getBounds() : mcpSelectionPillFrame;
-        if (panel.contains(canvasPt)) {
-            int const relX = canvasPt.x - panel.getX();
-
-            // Mood strip: [✏] [T] [🖼] [🎙 Melody] [🥁 Beat] [🎹 MIDI] — icons first, surfaces second.
-            if (mcpPillSketchMode && mcpCompletedStrokes.empty()) {
-                if (relX >= 6 && relX < 210) {
-                    int const idx = (relX - 6) / 34;
-                    switch (idx) {
-                    case 0:
-                        setSketchToolActive(!isSketchToolActive());
-                        repaint();
-                        if (editor) editor->nvgSurface.invalidateAll();
-                        return true;
-                    case 1:
-                        createTextNoteAt(mcpMoodPillActive ? mcpMoodPillPos : juce::Point<int>(panel.getCentreX(), panel.getBottom()));
-                        return true;
-                    case 2:
-                        // Open (or cancel) a paste slot — Ctrl+V fills it. Nothing
-                        // is read from the clipboard automatically.
-                        mcpImageSlotActive = !mcpImageSlotActive;
-                        mcpImageSlotPos = mcpMoodPillActive
-                            ? mcpMoodPillPos
-                            : juce::Point<int>(panel.getCentreX(), panel.getBottom() + 130);
-                        // Pull keyboard focus to the canvas so Ctrl+V can never be
-                        // swallowed by a lingering tape-note editor.
-                        grabKeyboardFocus();
-                        repaint();
-                        if (editor) editor->nvgSurface.invalidateAll();
-                        return true;
-                    case 3:
-                        // Melody record: declared intent — sing (no guessing).
-                        if (pd) {
-                            if (auto* br = pd->getMcp()->getMCPBridge()) {
-                                if (br->isVoiceCapturing()) {
-                                    br->stopVoiceCaptureAndAnalyze();
-                                } else {
-                                    setSketchToolActive(false);
-                                    setEraserToolActive(false);
-                                    setTextToolActive(false);
-                                    mcpTakeSpawnPos = mcpMoodPillActive ? mcpMoodPillPos : juce::Point<int>(panel.getCentreX(), panel.getBottom() + 170);
-                                    br->startVoiceCapture(60, 1);
-                                }
-                                repaint();
-                                if (editor) editor->nvgSurface.invalidateAll();
-                            }
-                        }
-                        return true;
-                    case 4:
-                        // Beat record: declared intent — beatbox (no guessing).
-                        if (pd) {
-                            if (auto* br = pd->getMcp()->getMCPBridge()) {
-                                if (br->isVoiceCapturing()) {
-                                    br->stopVoiceCaptureAndAnalyze();
-                                } else {
-                                    setSketchToolActive(false);
-                                    setEraserToolActive(false);
-                                    setTextToolActive(false);
-                                    mcpTakeSpawnPos = mcpMoodPillActive ? mcpMoodPillPos : juce::Point<int>(panel.getCentreX(), panel.getBottom() + 170);
-                                    br->startVoiceCapture(60, 2);
-                                }
-                                repaint();
-                                if (editor) editor->nvgSurface.invalidateAll();
-                            }
-                        }
-                        return true;
-                    case 5:
-                        // MIDI record: declared intent — MIDI keyboard (exact notes).
-                        if (pd) {
-                            if (auto* br = pd->getMcp()->getMCPBridge()) {
-                                if (br->isMidiCapturing()) {
-                                    br->stopMidiCaptureAndStage();
-                                } else {
-                                    setSketchToolActive(false);
-                                    setEraserToolActive(false);
-                                    setTextToolActive(false);
-                                    mcpTakeSpawnPos = mcpMoodPillActive ? mcpMoodPillPos : juce::Point<int>(panel.getCentreX(), panel.getBottom() + 170);
-                                    br->startMidiCapture(120, "canvas");
-                                }
-                                repaint();
-                                if (editor) editor->nvgSurface.invalidateAll();
-                            }
-                        }
-                        return true;
-                    }
-                }
-                return true; // the strip frame swallows clicks
-            }
-
-            // Sketch / Moodboard Chisel: [⚡ Build] | prompt | [T] [🖼] [↩ Undo] [🗑 Clear] [✏️ pen]
-            if (mcpPillSketchMode) {
-                if (relX <= 88) {
-                    sendSketchBuild(mcpSelectionPill ? mcpSelectionPill->getText().trim() : juce::String());
-                    return true;
-                }
-                if (relX >= panel.getWidth() - 238 && relX < panel.getWidth() - 210) {
-                    setTextToolActive(!isTextToolActive());
-                    repaint();
-                    if (editor) editor->nvgSurface.invalidateAll();
-                    return true;
-                }
-                if (relX >= panel.getWidth() - 210 && relX < panel.getWidth() - 182) {
-                    pasteImageFromClipboard();
-                    return true;
-                }
-                if (relX >= panel.getWidth() - 182 && relX < panel.getWidth() - 106) {
-                    undoLastStroke();
-                    return true;
-                }
-                if (relX >= panel.getWidth() - 106 && relX < panel.getWidth() - 32) {
-                    clearAllInk();
-                    return true;
-                }
-                if (relX >= panel.getWidth() - 32) {
-                    // Pen toggle: put it down / pick it back up mid-sketch.
-                    setSketchToolActive(!isSketchToolActive());
-                    return true;
-                }
-                mcpSelectionPill->grabKeyboardFocus();
-                return true;
-            }
-
-
-
-            // Right ~32px: ↵ Submit button
-            if (relX >= panel.getWidth() - 32) {
-                submitSelectionPill(false);
-                return true;
-            }
-            // Middle: Text field focus!
-            mcpSelectionPill->grabKeyboardFocus();
-            return true;
-        }
-    }
-
-    if (!pd || pd->getMcp()->session.getMcpAnnotations().empty()) return false;
-    auto const pt = canvasPt.toFloat();
-    auto anns = pd->getMcp()->session.getMcpAnnotations();
-    for (int i = static_cast<int>(anns.size()) - 1; i >= 0; --i) {
-        auto const& a = anns[static_cast<size_t>(i)];
-        auto const tb = getAnnotationScreenBounds(static_cast<size_t>(i));
-        if (tb.isEmpty()) continue;
-
-        auto const chips = CanvasMcpLayer::getAnnotationPivotChips(a.text, a.kind);
-        float totalChipsW = 0.0f;
-        for (auto const& c : chips) totalChipsW += CanvasMcpLayer::getChipWidth(c.label) + 4.0f;
-        float const drawerW = std::max(tb.getWidth(), totalChipsW + 4.0f);
-        constexpr float drawerH = 22.0f;
-        juce::Rectangle<float> const combinedBounds(tb.getX(), tb.getY(), drawerW, tb.getHeight() + drawerH + 3.0f);
-
-        if (!combinedBounds.contains(pt)) continue;
-
-        // 1. Rightmost ~16px of the tape header is the dismiss "x"
-        juce::Rectangle<float> closeZone(tb.getRight() - 16.0f, tb.getY(), 16.0f, tb.getHeight());
-        if (closeZone.contains(pt)) {
-            if (mcpNoteEditor) mcpNoteEditor->setVisible(false);
-            mcpNoteEditIndex = -1;
-            juce::ScopedLock sl(pd->getMcp()->session.mcpOverlayLock);
-            if (i < static_cast<int>(pd->getMcp()->session.mcpAnnotations.size()))
-                pd->getMcp()->session.mcpAnnotations.erase(pd->getMcp()->session.mcpAnnotations.begin() + i);
-            repaint();
-            if (editor) editor->nvgSurface.invalidateAll();
-            return true;
-        }
-
-        // 2. Click inside the Pivot Chips drawer (pt.y > tb.getBottom())
-        if (pt.y > tb.getBottom() + 1.0f) {
-            float curChipX = tb.getX() + 4.0f;
-            float const chipY = tb.getY() + tb.getHeight() + 2.5f;
-            float const chipH = drawerH - 5.0f;
-            for (size_t ci = 0; ci < chips.size(); ++ci) {
-                float const cw = CanvasMcpLayer::getChipWidth(chips[ci].label);
-                juce::Rectangle<float> chipBox(curChipX, chipY, cw, chipH);
-                if (chipBox.contains(pt)) {
-                    auto const& chip = chips[ci];
-                    if (chip.prompt == "__undo__") {
-                        undo();
-                        mcpNoteHover = -1;
-                        mcpNoteHoverChip = -1;
-                        repaint();
-                        if (editor) editor->nvgSurface.invalidateAll();
-                        return true;
-                    }
-                    if (chip.prompt == "__reply__") {
-                        // Open direct inline reply editor right below the tape!
-                        // Select target objects first so context is wired
-                        if (a.targetIds.size() > 0 || a.targetId.isNotEmpty()) {
-                            deselectAll();
-                            auto const ids = a.targetIds.size() > 0 ? a.targetIds : juce::StringArray(a.targetId);
-                            for (auto const& tid : ids) {
-                                if (auto* obj = findObjectByStableId(tid)) setSelected(obj, true);
-                            }
-                        }
-                        if (!mcpNoteEditor) {
-                            mcpNoteEditor = std::make_unique<juce::TextEditor>();
-                            mcpNoteEditor->setMultiLine(false);
-                            mcpNoteEditor->setReturnKeyStartsNewLine(false);
-                            mcpNoteEditor->setWantsKeyboardFocus(true);
-                            mcpNoteEditor->setColour(juce::TextEditor::backgroundColourId, juce::Colour(0xff16161c));
-                            mcpNoteEditor->setColour(juce::TextEditor::textColourId, juce::Colours::white);
-                            mcpNoteEditor->setColour(juce::TextEditor::outlineColourId, juce::Colour(0xff4a9eff));
-                            mcpNoteEditor->setColour(juce::TextEditor::focusedOutlineColourId, juce::Colour(0xff4a9eff));
-                            mcpNoteEditor->setColour(juce::TextEditor::highlightColourId, juce::Colour(0xff4a9eff));
-                            mcpNoteEditor->setColour(juce::CaretComponent::caretColourId, juce::Colours::white);
-                            addAndMakeVisible(*mcpNoteEditor);
-                        }
-                        mcpNoteEditIndex = i;
-                        mcpNoteOpenedAt = juce::Time::getMillisecondCounter();
-                        mcpNoteEditor->onReturnKey = [this, targetId = a.targetId, targetIds = a.targetIds] {
-                            if (mcpNoteEditor && pd) {
-                                juce::String const replyTxt = mcpNoteEditor->getText().trim();
-                                if (replyTxt.isNotEmpty()) {
-                                    if (targetIds.size() > 0 || targetId.isNotEmpty()) {
-                                        deselectAll();
-                                        auto const ids = targetIds.size() > 0 ? targetIds : juce::StringArray(targetId);
-                                        for (auto const& tid : ids) {
-                                            if (auto* obj = findObjectByStableId(tid)) setSelected(obj, true);
-                                        }
-                                    }
-                                    sendPillPrompt(replyTxt, false);
-                                    if (editor) {
-                                        if (auto* cp = editor->getCopilotPanel())
-                                            cp->receiveMessage("user", replyTxt);
-                                    }
-                                    if (auto* br = pd->getMcp()->getMCPBridge())
-                                        br->sendArtistNote(targetId, replyTxt);
-                                }
-                            }
-                            mcpNoteEditIndex = -1;
-                            if (mcpNoteEditor) mcpNoteEditor->setVisible(false);
-                            repaint();
-                            if (editor) editor->nvgSurface.invalidateAll();
-                        };
-                        mcpNoteEditor->onEscapeKey = [this] {
-                            mcpNoteEditIndex = -1;
-                            if (mcpNoteEditor) mcpNoteEditor->setVisible(false);
-                            repaint();
-                            if (editor) editor->nvgSurface.invalidateAll();
-                        };
-                        mcpNoteEditor->onFocusLost = [this] {
-                            if (juce::Time::getMillisecondCounter() - mcpNoteOpenedAt < 500) return;
-                            mcpNoteEditIndex = -1;
-                            if (mcpNoteEditor) mcpNoteEditor->setVisible(false);
-                            repaint();
-                            if (editor) editor->nvgSurface.invalidateAll();
-                        };
-                        mcpNoteEditor->setBounds(juce::roundToInt(tb.getX()),
-                                                 juce::roundToInt(tb.getY() + tb.getHeight() + 2.0f),
-                                                 juce::roundToInt(std::max(tb.getWidth(), 240.0f)), 22);
-                        mcpNoteEditor->setText(juce::String(), false);
-                        mcpNoteEditor->setTextToShowWhenEmpty("Reply to Copilot on this module... (Enter sends)", juce::Colour(0xff7088a0));
-                        mcpNoteEditor->setVisible(true);
-                        mcpNoteEditor->toFront(true);
-                        {
-                            auto* ed = mcpNoteEditor.get();
-                            juce::MessageManager::callAsync([ed] { if (ed) ed->grabKeyboardFocus(); });
-                        }
-                        repaint();
-                        if (editor) editor->nvgSurface.invalidateAll();
-                        return true;
-                    }
-
-                    // Sound pivot chip clicked:
-                    // 1. Select the module objects
-                    if (a.targetIds.size() > 0 || a.targetId.isNotEmpty()) {
-                        deselectAll();
-                        auto const ids = a.targetIds.size() > 0 ? a.targetIds : juce::StringArray(a.targetId);
-                        for (auto const& tid : ids) {
-                            if (auto* obj = findObjectByStableId(tid)) setSelected(obj, true);
-                        }
-                    }
-                    // 2. Dispatch prompt
-                    sendPillPrompt(chip.prompt, false);
-                    // 3. Log to Sidebar chat
-                    if (editor) {
-                        if (auto* cp = editor->getCopilotPanel())
-                            cp->receiveMessage("user", chip.prompt);
-                    }
-                    mcpNoteHover = -1;
-                    mcpNoteHoverChip = -1;
-                    repaint();
-                    if (editor) editor->nvgSurface.invalidateAll();
-                    return true;
-                }
-                curChipX += cw + 4.0f;
-            }
-            return true;
-        }
-
-        // 3. Body click on tape header:
-        // Select module objects & open note in Sidebar Master Notebook
-        if (a.targetIds.size() > 0 || a.targetId.isNotEmpty()) {
-            deselectAll();
-            auto const ids = a.targetIds.size() > 0 ? a.targetIds : juce::StringArray(a.targetId);
-            for (auto const& tid : ids) {
-                if (auto* obj = findObjectByStableId(tid)) setSelected(obj, true);
-            }
-        }
-        if (auto* copilotSidebar = editor ? editor->getSidebarForPanel(Sidebar::CopilotChatPanel) : nullptr) {
-            copilotSidebar->showSidebar(true);
-            copilotSidebar->showPanel(Sidebar::CopilotChatPanel);
-            if (auto* cp = editor->getCopilotPanel()) {
-                cp->showAnnotationNote(a.text, a.kind, a.targetIds);
-            }
-        }
-        repaint();
-        if (editor) editor->nvgSurface.invalidateAll();
-        return true;
-    }
-    return false;
-}
+void Canvas::mouseMove(MouseEvent const& e) { mcpLayer->mouseMove(e); } // MCP-HOOK(canvasInput)
+void Canvas::mouseExit(MouseEvent const& e) { mcpLayer->mouseExit(e); } // MCP-HOOK(canvasInput)
 
 void Canvas::mouseDown(MouseEvent const& e)
 {
@@ -2530,167 +1309,18 @@ void Canvas::mouseDown(MouseEvent const& e)
 
     auto* source = e.originalComponent;
 
-    // Paste slot: click inside the frame = paste now; click outside = cancel it.
-    if (mcpImageSlotActive && source == this) {
-        auto const pos = e.getEventRelativeTo(this).getPosition();
-        juce::Rectangle<int> const slot(mcpImageSlotPos.x - 160, mcpImageSlotPos.y - 110, 320, 220);
-        if (slot.contains(pos)) {
-            pasteImageFromClipboard();
-        } else {
-            mcpImageSlotActive = false;
-            repaint();
-            if (editor) editor->nvgSurface.invalidateAll();
-        }
+    if (mcpLayer->mouseDownEarly(e)) // MCP-HOOK(canvasInput)
         return;
-    }
-
-    // The pill/chisel and its chips float ABOVE everything: their clicks must beat
-    // the pen, the reference images and the lasso. Without this, an armed pen
-    // swallows [↩ Undo] / [🗑 Clear] clicks as new strokes.
-    if (source == this && !e.mods.isRightButtonDown() && handleNoteClick(e.getPosition())) return;
-
-    // Voice take chips float above the glass: ▶ audition / ✕ / drag.
-    if (source == this && !e.mods.isRightButtonDown() && handleVoiceTakeClick(e, e.getEventRelativeTo(this).getPosition())) return;
-    if (source == this && !e.mods.isRightButtonDown() && handleMidiTakeClick(e, e.getEventRelativeTo(this).getPosition())) return;
-
-    // PRD Phase 2: reference images on the canvas glass — drag to move, right-click
-    // for the menu. In edit mode an armed pen draws over them; in Studio mode they
-    // stay grabbable (Alt forces drawing, even there).
-    bool const forceDraw = e.mods.isAltDown();
-    bool const penBlocksImages = !mcpStudioMode && (forceDraw || mcpSketchToolActive || mcpEraserToolActive);
-    if (source == this && !penBlocksImages) {
-        if (handleReferenceImageClick(e, e.getEventRelativeTo(this).getPosition(), e.mods.isRightButtonDown())) return;
-    }
 
     // Left-click
     if (!e.mods.isRightButtonDown()) {
 
-        // Type tool (T): click the glass to drop a console-tape note at the cursor.
-        if (mcpTextToolActive && source == this) {
-            createTextNoteAt(e.getEventRelativeTo(this).getPosition());
+        if (mcpLayer->mouseDownLeft(e)) // MCP-HOOK(canvasInput)
             return;
-        }
-
-        // Multimodal Pen / Sketch overlay: Alt-drag, active pen, or eraser tool
-        if (mcpLayer->shouldShowAISketch() && (e.mods.isAltDown() || mcpSketchToolActive || mcpEraserToolActive)) {
-            // Two lanes: with no selection, the ink is moodboard material (the
-            // chisel takes over the glass). With a selection, the ink is a
-            // surgical annotation — the selection IS kept and the pill stays.
-            isSketching = true;
-            mcpEraseGesture = mcpEraserToolActive && !e.mods.isAltDown();
-            mcpSketchAlpha = 1.0f;
-            if (mcpSketchFadeTimer) mcpSketchFadeTimer->stopTimer();
-            mcpCurrentStroke.clear();
-            if (!mcpEraseGesture) {
-                auto const pt = e.getPosition();
-                mcpCurrentStroke.push_back({static_cast<float>(pt.x), static_cast<float>(pt.y), juce::Time::getMillisecondCounterHiRes()});
-            }
-            repaint();
-            if (editor) editor->nvgSurface.invalidateAll();
-            return;
-        }
 
         if (source == this) {
-            // Empty glass click: let native PlugData handle deselect and lasso cleanly.
-            // The Mood Strip only appears when Studio Mode is explicitly active.
-            mcpMoodPillActive = false;
-            mcpPillRequested = false;
-            hideSelectionPill();
-
-            // Pill / note clicks were already handled above (before the pen branch).
-            if (false && pd && !pd->getMcp()->session.getMcpAnnotations().empty()) {
-                auto const pt = e.getPosition().toFloat();
-                auto anns = pd->getMcp()->session.getMcpAnnotations();
-                for (int i = static_cast<int>(anns.size()) - 1; i >= 0; --i) {
-                    auto const& a = anns[static_cast<size_t>(i)];
-                    float const tx = canvasOrigin.x + a.x - 6.0f;
-                    float const ty = canvasOrigin.y + a.y - 9.0f;
-                    float const tw = a.text.length() * 7.0f + 30.0f; // estimated hit width
-                    if (Rectangle<float>(tx, ty, tw, 18.0f).contains(pt)) {
-                        // Click a note to reply; notes auto-fade, so there is no dismiss
-                        // gesture (no "x" to fight with).
-                        {
-                            // PRD overlay: click a note -> reply inline (becomes your message to the AI)
-                            if (!mcpNoteEditor) {
-                                mcpNoteEditor = std::make_unique<juce::TextEditor>();
-                                mcpNoteEditor->setMultiLine(false);
-                                mcpNoteEditor->setReturnKeyStartsNewLine(false);
-                                mcpNoteEditor->setWantsKeyboardFocus(true);
-                                // Commit: write the text back onto the note and forward it to the AI.
-                                auto commit = [this](bool send) {
-                                    if (mcpNoteEditIndex < 0) return;
-                                    juce::String txt = mcpNoteEditor ? mcpNoteEditor->getText().trim() : juce::String();
-                                    juce::String targetId;
-                                    if (pd) {
-                                        juce::ScopedLock sl(pd->getMcp()->session.mcpOverlayLock);
-                                        if (mcpNoteEditIndex < static_cast<int>(pd->getMcp()->session.mcpAnnotations.size())) {
-                                            auto& ann = pd->getMcp()->session.mcpAnnotations[static_cast<size_t>(mcpNoteEditIndex)];
-                                            ann.text = txt;
-                                            ann.kind = "artist"; // it's the artist's note now
-                                            targetId = ann.targetId;
-                                        }
-                                    }
-                                    mcpNoteEditIndex = -1;
-                                    if (mcpNoteEditor) mcpNoteEditor->setVisible(false);
-                                    if (send && txt.isNotEmpty() && pd) {
-                                        if (auto* br = pd->getMcp()->getMCPBridge()) br->sendArtistNote(targetId, txt);
-                                    }
-                                    repaint();
-                                };
-                                mcpNoteEditor->onReturnKey = [commit] { commit(true); };
-                                // Never lose typing: also commit when focus leaves the field —
-                                // but ignore the focus-loss that fires right after opening
-                                // (the field doesn't have focus yet, so it would self-close).
-                                mcpNoteEditor->onFocusLost = [this, commit] {
-                                    if (juce::Time::getMillisecondCounter() - mcpNoteOpenedAt < 500) return;
-                                    commit(true);
-                                };
-                                // Live feedback: write the field's text onto the NOTE as you type
-                                // (the note is GPU-drawn, so it updates reliably every keystroke).
-                                mcpNoteEditor->onTextChange = [this] {
-                                    if (mcpNoteEditor && pd && mcpNoteEditIndex >= 0) {
-                                        juce::ScopedLock sl(pd->getMcp()->session.mcpOverlayLock);
-                                        if (mcpNoteEditIndex < static_cast<int>(pd->getMcp()->session.mcpAnnotations.size()))
-                                            pd->getMcp()->session.mcpAnnotations[static_cast<size_t>(mcpNoteEditIndex)].text = mcpNoteEditor->getText();
-                                    }
-                                    repaint();
-                                    if (editor) editor->nvgSurface.invalidateAll();
-                                };
-                                mcpNoteEditor->onEscapeKey = [this] {
-                                    mcpNoteEditIndex = -1;
-                                    if (mcpNoteEditor) mcpNoteEditor->setVisible(false);
-                                };
-                                mcpNoteEditor->setColour(juce::TextEditor::backgroundColourId, juce::Colour(0xff16161c));
-                                mcpNoteEditor->setColour(juce::TextEditor::textColourId, juce::Colours::white);
-                                mcpNoteEditor->setColour(juce::TextEditor::outlineColourId, juce::Colour(0xff4a9eff));
-                                mcpNoteEditor->setColour(juce::TextEditor::focusedOutlineColourId, juce::Colour(0xff4a9eff));
-                                mcpNoteEditor->setColour(juce::TextEditor::highlightColourId, juce::Colour(0xff4a9eff));
-                                mcpNoteEditor->setColour(juce::CaretComponent::caretColourId, juce::Colours::white);
-                                addAndMakeVisible(*mcpNoteEditor);
-                            }
-                            mcpNoteEditIndex = i;
-                            mcpNoteOpenedAt = juce::Time::getMillisecondCounter(); // arm the grace period
-                            // Place the editor ABOVE the note so the note (and its "x") stay clickable.
-                            mcpNoteEditor->setBounds(juce::roundToInt(canvasOrigin.x + a.x - 6.0f),
-                                                     juce::roundToInt(canvasOrigin.y + a.y - 34.0f),
-                                                     juce::jmax(140, juce::roundToInt(a.text.length() * 7.0f) + 40), 20);
-                            mcpNoteEditor->setText(a.text, false);
-                            mcpNoteEditor->setVisible(true);
-                            mcpNoteEditor->toFront(true);
-                            // Grab focus AFTER the click finishes — grabbing during mouseDown
-                            // gets overridden by the canvas, so typed keys would go nowhere.
-                            {
-                                auto* ed = mcpNoteEditor.get();
-                                juce::MessageManager::callAsync([ed] {
-                                    if (ed) { ed->grabKeyboardFocus(); ed->selectAll(); }
-                                });
-                            }
-                            repaint();
-                            return;
-                        }
-                    }
-                }
-            }
+            if (mcpLayer->mouseDownOnGlass(e)) // MCP-HOOK(canvasInput)
+                return;
             dragState.duplicateOffset = { 0, 0 };
             dragState.lastDuplicateOffset = { 0, 0 };
             dragState.wasDuplicated = false;
@@ -2730,17 +1360,8 @@ void Canvas::mouseDown(MouseEvent const& e)
     }
     // Right click
     else {
-        if (mcpLayer->shouldShowAISketch() && (mcpSketchToolActive || mcpEraserToolActive)) {
-            // Right-drag eraser — selection stays (surgical lane).
-            isSketching = true;
-            mcpEraseGesture = true; // right-drag always erases
-            mcpSketchAlpha = 1.0f;
-            if (mcpSketchFadeTimer) mcpSketchFadeTimer->stopTimer();
-            mcpCurrentStroke.clear();
-            repaint();
-            if (editor) editor->nvgSurface.invalidateAll();
+        if (mcpLayer->mouseDownRight(e)) // MCP-HOOK(canvasInput)
             return;
-        }
         Dialogs::showCanvasRightClickMenu(this, source, e.getScreenPosition());
     }
 }
@@ -2761,73 +1382,8 @@ bool Canvas::hitTest(int const x, int const y)
 
 void Canvas::mouseDrag(MouseEvent const& e)
 {
-    // Voice take chip drag.
-    if (mcpDraggingTakeId.isNotEmpty()) {
-        auto const pt = e.getEventRelativeTo(this).getPosition();
-        auto const pdPos = pt - mcpTakeDragOffset - canvasOrigin;
-        if (pd) pd->getMcp()->session.setMcpVoiceTakePos(mcpDraggingTakeId, static_cast<float>(pdPos.x), static_cast<float>(pdPos.y));
-        repaint();
-        if (editor) editor->nvgSurface.invalidateAll();
+    if (mcpLayer->mouseDrag(e)) // MCP-HOOK(canvasInput)
         return;
-    }
-
-    // MIDI take chip drag.
-    if (mcpDraggingMidiTakeId.isNotEmpty()) {
-        auto const pt = e.getEventRelativeTo(this).getPosition();
-        auto const pdPos = pt - mcpMidiTakeDragOffset - canvasOrigin;
-        if (pd) pd->getMcp()->session.setMcpMidiTakePos(mcpDraggingMidiTakeId, static_cast<float>(pdPos.x), static_cast<float>(pdPos.y));
-        repaint();
-        if (editor) editor->nvgSurface.invalidateAll();
-        return;
-    }
-
-    // PRD Phase 2: dragging a reference image across the canvas glass.
-    if (mcpDraggingRefImageId.isNotEmpty()) {
-        auto const pt = e.getEventRelativeTo(this).getPosition();
-        auto const pdPos = pt - mcpRefImageDragOffset - canvasOrigin;
-        if (pd) pd->getMcp()->session.moveMcpReferenceImage(mcpDraggingRefImageId, static_cast<float>(pdPos.x), static_cast<float>(pdPos.y));
-        repaint();
-        if (editor) editor->nvgSurface.invalidateAll();
-        return;
-    }
-
-    if (isSketching) {
-        auto const pt = e.getPosition();
-
-        // ERASER MODE: dedicated eraser tool, Ctrl-drag, or Right-drag hit-tests strokes
-        if (mcpEraseGesture || e.mods.isCtrlDown() || e.mods.isRightButtonDown()) {
-            float eraseRadius = 25.0f;
-            bool erasedAny = false;
-            for (auto it = mcpCompletedStrokes.begin(); it != mcpCompletedStrokes.end(); ) {
-                bool hit = false;
-                for (auto const& p : *it) {
-                    float dx = p.x - pt.x;
-                    float dy = p.y - pt.y;
-                    if (dx*dx + dy*dy < eraseRadius*eraseRadius) {
-                        hit = true;
-                        break;
-                    }
-                }
-                if (hit) {
-                    it = mcpCompletedStrokes.erase(it);
-                    erasedAny = true;
-                } else {
-                    ++it;
-                }
-            }
-            if (erasedAny) {
-                updateSelectionPill();
-                repaint();
-                if (editor) editor->nvgSurface.invalidateAll();
-            }
-            return;
-        }
-
-        mcpCurrentStroke.push_back({static_cast<float>(pt.x), static_cast<float>(pt.y), juce::Time::getMillisecondCounterHiRes()});
-        repaint();
-        if (editor) editor->nvgSurface.invalidateAll();
-        return;
-    }
 
     if (canvasRateReducer.tooFast())
         return;
@@ -2920,81 +1476,17 @@ bool Canvas::autoscroll(MouseEvent const& e)
 
 void Canvas::mouseUp(MouseEvent const& e)
 {
-    // Finish a voice take chip drag.
-    if (mcpDraggingTakeId.isNotEmpty()) {
-        mcpDraggingTakeId.clear();
-        setMouseCursor(juce::MouseCursor::NormalCursor);
-        repaint();
-        if (editor) editor->nvgSurface.invalidateAll();
+    if (mcpLayer->mouseUp(e)) // MCP-HOOK(canvasInput)
         return;
-    }
-
-    // Finish a MIDI take chip drag.
-    if (mcpDraggingMidiTakeId.isNotEmpty()) {
-        mcpDraggingMidiTakeId.clear();
-        setMouseCursor(juce::MouseCursor::NormalCursor);
-        repaint();
-        if (editor) editor->nvgSurface.invalidateAll();
-        return;
-    }
-
-    // PRD Phase 2: finish a reference-image drag.
-    if (mcpDraggingRefImageId.isNotEmpty()) {
-        mcpDraggingRefImageId.clear();
-        setMouseCursor(juce::MouseCursor::NormalCursor);
-        repaint();
-        if (editor) editor->nvgSurface.invalidateAll();
-        return;
-    }
-
-    if (isSketching) {
-        isSketching = false;
-        mcpEraseGesture = false;
-        if (mcpCurrentStroke.size() >= 2) {
-            mcpCompletedStrokes.push_back(mcpCurrentStroke);
-            juce::Array<juce::var> ptsVar;
-            for (auto const& p : mcpCurrentStroke) {
-                auto* obj = new juce::DynamicObject();
-                obj->setProperty("x", p.x - static_cast<float>(canvasOrigin.x));
-                obj->setProperty("y", p.y - static_cast<float>(canvasOrigin.y));
-                obj->setProperty("t", p.t);
-                ptsVar.add(juce::var(obj));
-            }
-            auto jsonStr = juce::JSON::toString(juce::var(ptsVar), true);
-            bool const isFastPath = e.mods.isShiftDown();
-            if (pd) {
-                if (auto* br = pd->getMcp()->getMCPBridge()) {
-                    auto const subpatch = patch.getPointer() ? juce::String(reinterpret_cast<uintptr_t>(patch.getPointer().get())) : juce::String("0");
-                    br->sendSketchStroke(subpatch, jsonStr, isFastPath);
-                }
-            }
-            mcpCurrentStroke.clear();
-            // startSketchFadeTimer(); // PERSISTENT INK
-        } else {
-            mcpCurrentStroke.clear();
-            // Empty canvas tap: zero popups, keep canvas 100% clean
-            mcpMoodPillActive = false;
-        }
-        // Ink persists -> anchor the Moodboard Chisel under the fresh bbox.
-        updateSelectionPill();
-        repaint();
-        if (editor) editor->nvgSurface.invalidateAll();
-        return;
-    }
 
     setPanDragMode(false);
     setMouseCursor(MouseCursor::NormalCursor);
 
     connectionCancelled = false;
 
-    // Double-click canvas to create new object (ignore clicks on AI notes)
-    if (!isPointOverNote(e.getPosition()) && e.mods.isLeftButtonDown() && e.getNumberOfClicks() == 2 && e.originalComponent == this && !isGraph && !getValue<bool>(locked)) {
-        // IMMUNITY: Kill any open mood strip and suppress AI pills during object creation
-        mcpMoodPillActive = false;
-        mcpPillRequested = false;
-        hideSelectionPill();
-        mcpSelectionPillHideUntil = juce::Time::getMillisecondCounter() + 1500;
-
+    // Double-click canvas to create new object
+    if (!mcpLayer->isPointOverNote(e.getPosition()) && e.mods.isLeftButtonDown() && e.getNumberOfClicks() == 2 && e.originalComponent == this && !isGraph && !getValue<bool>(locked)) { // MCP-HOOK(canvasInput)
+        mcpLayer->objectCreatedByDoubleClick(); // MCP-HOOK(canvasInput)
         auto* newObject = objects.add(this, "", e.getPosition());
         deselectAll();
         setSelected(newObject, true); // Select newly created object
@@ -3060,128 +1552,20 @@ void Canvas::updateSidebarSelection()
         if (auto* s = editor->getSidebarForPanel(Sidebar::ObjectReferencePanel))
             s->updateReference(lassoSelection.size() == 1 ? lassoSelection[0]->getType().toString() : String());
 
-        updateSelectionPill();
+        mcpLayer->updateSelectionPill(); // MCP-HOOK(canvasLifecycle)
     });
 }
 
 bool Canvas::keyPressed(KeyPress const& key)
 {
-    // Paste-slot fast path: Ctrl/Cmd+V pastes the clipboard image directly,
-    // independent of the global Paste command and its focus rules.
-    if (mcpImageSlotActive) {
-        auto const kc = key.getKeyCode();
-        bool const ctrlV = (key.getModifiers().isCtrlDown() || key.getModifiers().isCommandDown())
-            && (kc == 'v' || kc == 'V' || kc == 22 /* Ctrl+V control code */ || key.getTextCharacter() == 'v');
-        if (ctrlV) {
-            pasteImageFromClipboard();
-            return true;
-        }
-    }
-
-    if (mcpSelectionPill && mcpSelectionPill->hasKeyboardFocus(true))
-        return false;
-
-    // Tier-2 approval: Enter approves the pending destructive op, Esc cancels.
-    if (isApprovalRequested()) {
-        if (key == juce::KeyPress::returnKey) {
-            sendApproval(true);
-            return true;
-        }
-        if (key == juce::KeyPress::escapeKey) {
-            sendApproval(false);
-            return true;
-        }
-    }
+    if (auto const handled = mcpLayer->keyPressedEarly(key)) // MCP-HOOK(canvasInput)
+        return *handled;
 
     if (editor->getCurrentCanvas() != this || isGraph)
         return false;
 
-    // Paste slot: Esc cancels the waiting frame.
-    if (mcpImageSlotActive && key.getKeyCode() == juce::KeyPress::escapeKey) {
-        mcpImageSlotActive = false;
-        repaint();
-        if (editor) editor->nvgSurface.invalidateAll();
+    if (mcpLayer->keyPressedForCanvas(key)) // MCP-HOOK(canvasInput)
         return true;
-    }
-
-    // Moodboard tools escape hatch: Esc always disarms the tool first, so the
-    // artist is never trapped drawing/typing when the chisel replaced the pill.
-    if ((mcpSketchToolActive || mcpEraserToolActive || mcpTextToolActive) && key.getKeyCode() == juce::KeyPress::escapeKey) {
-        setSketchToolActive(false);
-        setEraserToolActive(false);
-        setTextToolActive(false);
-        return true;
-    }
-
-    // Moodboard hotkeys (Lane 1): T arms the type tool, Tab flips Pen <-> Eraser,
-    // Z / Ctrl+Z pops the last ink stroke. Esc exits (handled above).
-    // Only hijack hotkeys if the pen/eraser is ACTIVELY in hand or Studio mode is explicitly ON.
-    // In regular patching, 't' must always create a native Toggle box!
-    bool const moodboardArmed = mcpSketchToolActive || mcpEraserToolActive || mcpTextToolActive || mcpStudioMode;
-    if (moodboardArmed) {
-        if (key.getKeyCode() == 't' || key.getKeyCode() == 'T') {
-            setTextToolActive(!mcpTextToolActive);
-            return true;
-        }
-        if (key.getKeyCode() == juce::KeyPress::tabKey) {
-            if (mcpSketchToolActive) setEraserToolActive(true);
-            else setSketchToolActive(true);
-            return true;
-        }
-        if (key.getKeyCode() == 'z' || key.getKeyCode() == 'Z') {
-            if (!mcpCompletedStrokes.empty()) {
-                undoLastStroke();
-                return true;
-            }
-        }
-    }
-
-    // Studio brainstorm: Enter commits from the keyboard — no mouse travel to the
-    // sidebar. Shift+Enter PARKS the intent in the bay without waking the AI.
-    if (mcpStudioMode && key.getKeyCode() == juce::KeyPress::returnKey
-        && (key.getModifiers().isCtrlDown() || key.getModifiers().isShiftDown() || key.getModifiers().isCommandDown())) {
-        bool const cmdCombo = key.getModifiers().isCtrlDown() || key.getModifiers().isCommandDown();
-        if (key.getModifiers().isShiftDown() && !cmdCombo) {
-            parkSelectionPill(); // Shift = park (no AI)
-        } else {
-            commitStudioFromCanvas(); // Ctrl/Cmd+Enter = send
-        }
-        return true;
-    }
-
-    // Summon the AI pill prompt on selected object(s) when Spacebar (Leertaste) or "/" is pressed:
-    if (key.getKeyCode() == juce::KeyPress::spaceKey || key.getTextCharacter() == '/' || key.getKeyCode() == '/') {
-        if (!getSelectionOfType<Object>().empty() && !ObjectBase::isBeingEdited()) {
-            mcpPillRequested = true;
-            mcpPillDrawerMode = 0;
-            mcpPaletteFrame = {};
-            updateSelectionPill();
-            if (mcpSelectionPill) {
-                mcpSelectionPill->setText(juce::String(), false);
-                mcpSelectionPill->grabKeyboardFocus();
-                // If triggered by slash, open the command/skills palette directly
-                if (key.getTextCharacter() == '/' || key.getKeyCode() == '/') {
-                    showPillToolsMenu();
-                }
-            }
-            return true;
-        }
-    }
-
-    // Fast-focus / hotkey handling when the selection pill is visible:
-    if (mcpSelectionPill && mcpSelectionPill->isVisible()) {
-        if (key.getKeyCode() == juce::KeyPress::tabKey || key.getKeyCode() == juce::KeyPress::returnKey) {
-            // Mood strip has no prompt field — focus keys do nothing there.
-            if (mcpPillSketchMode && mcpCompletedStrokes.empty()) return true;
-            mcpSelectionPill->grabKeyboardFocus();
-            return true;
-        }
-        if (key.getKeyCode() == juce::KeyPress::escapeKey) {
-            mcpPillRequested = false;
-            dismissSelectionPill();
-            return true;
-        }
-    }
     pd->keyHandler.sendKeyPress(key); // Send keypress for listers to #key, #keyup and #keyname
 
     int const keycode = key.getKeyCode();
@@ -3274,8 +1658,7 @@ void Canvas::deselectAll(bool const broadcastChange)
     selectedComponents.deselectAll();
     if (auto* s = editor->getSidebarForPanel(Sidebar::InspectorPanel))
         s->hideParameters();
-    // Fall back to the sketch pill when ink exists; otherwise this hides it.
-    updateSelectionPill();
+    mcpLayer->updateSelectionPill(); // MCP-HOOK(canvasLifecycle): the pill follows the selection
 
     if (!broadcastChange) {
         MessageManager::callAsync([_this = SafePointer(this)] {
@@ -3287,538 +1670,10 @@ void Canvas::deselectAll(bool const broadcastChange)
 
 void Canvas::hideAllActiveEditors()
 {
-    hideSelectionPill();
+    mcpLayer->hideSelectionPill(); // MCP-HOOK(canvasLifecycle)
     for (auto* object : objects) {
         object->hideEditor();
     }
-}
-
-void Canvas::updateSelectionPill()
-{
-    // IMMUNITY: Never show the selection pill while ANY object or comment text is being edited!
-    // Native Pure Data object naming + autocomplete suggestor must have 100% exclusive priority.
-    if (ObjectBase::isBeingEdited()) {
-        mcpPillSketchMode = false;
-        mcpPillRequested = false;
-        hideSelectionPill();
-        return;
-    }
-
-    if (isGraph || getValue<bool>(locked) || presentationMode.getValue()) {
-        mcpPillSketchMode = false;
-        mcpPillRequested = false;
-        hideSelectionPill();
-        return;
-    }
-
-    auto selectedObjects = getSelectionOfType<Object>();
-    // The chisel owns the canvas while ink exists, the pen/eraser is up, or a
-    // fresh mood palette was opened; otherwise hide.
-    if (selectedObjects.empty() && mcpCompletedStrokes.empty() && !mcpSketchToolActive && !mcpEraserToolActive && !mcpMoodPillActive) {
-        mcpPillSketchMode = false;
-        mcpPillRequested = false;
-        hideSelectionPill();
-        return;
-    }
-
-    // Object mode: only show the pill if the artist explicitly requested it (e.g. hit "/"),
-    // or if Studio mode is active, or if ink was sketched over the selection.
-    // This stops the 480px pill from obstructing cords during everyday box dragging!
-    if (!selectedObjects.empty() && !mcpPillRequested && !mcpStudioMode && mcpCompletedStrokes.empty()) {
-        hideSelectionPill();
-        return;
-    }
-
-    // Brief grace window after a send/dismiss so an immediate sidebar/selection
-    // refresh can't re-pop the pill. Time-based (not keyed to the selection), so
-    // re-selecting the SAME object later always brings it back.
-    if (juce::Time::getMillisecondCounter() < mcpSelectionPillHideUntil) return;
-
-    // Keep canvas 100% clean — never pop up floating chisel bar on empty canvas!
-    if (selectedObjects.empty()) {
-        mcpPillSketchMode = false;
-        hideSelectionPill();
-        return;
-    }
-    bool const sketchMode = false;
-    mcpPillSketchMode = false;
-
-    int pillH = 32;
-    int pillW = 0;
-    int pillX = 0;
-    int pillY = 0;
-    int editorX = 0;
-    int editorW = 0;
-
-    bool sketchStrip = false;
-    if (sketchMode) {
-        // Prefer the live ink bbox; fall back to the last one so the chisel stays
-        // parked after [🗑 Clear]; fall back again to the fresh mood-palette click.
-        auto const liveBounds = getSketchBoundsInCanvas();
-        if (!liveBounds.isEmpty()) mcpLastSketchBounds = liveBounds;
-        juce::Rectangle<float> sb = !liveBounds.isEmpty() ? liveBounds : mcpLastSketchBounds;
-        if (sb.isEmpty() && mcpMoodPillActive) {
-            sb = juce::Rectangle<float>(static_cast<float>(mcpMoodPillPos.x), static_cast<float>(mcpMoodPillPos.y), 1.0f, 1.0f);
-        }
-        if (sb.isEmpty()) {
-            mcpPillSketchMode = false;
-            hideSelectionPill();
-            return;
-        }
-        if (mcpCompletedStrokes.empty()) {
-            mcpPillSketchMode = false;
-            hideSelectionPill();
-            return;
-        }
-        sketchStrip = false;
-        pillW = 520;
-        pillX = juce::roundToInt(sb.getCentreX()) - pillW / 2;
-        pillY = juce::roundToInt(sb.getBottom()) + 14;
-        editorX = 92; // [⚡ Build] chip
-        editorW = pillW - 92 - 238; // ...prompt... [T] [🖼] [↩ Undo] [🗑 Clear] [✏️ pen]
-        mcpPillDrawerMode = 0;
-        mcpPillDrawerFrame = {};
-        mcpPaletteFrame = {};
-    } else {
-        // Object::getBounds() is already in Canvas component coordinates, so the pill
-        // scrolls/zooms with the patch for free (canvasOrigin is constant).
-        Rectangle<int> bounds;
-        bool first = true;
-        for (auto const* obj : selectedObjects) {
-            if (!obj) continue;
-            auto const ob = obj->getBounds();
-            bounds = first ? ob : bounds.getUnion(ob);
-            first = false;
-        }
-        if (first) {
-            hideSelectionPill();
-            return;
-        }
-
-        pillW = 380;
-        pillH = 28;
-        // Position purely in CANVAS content coords (same space as obj->getBounds()).
-        pillX = bounds.getCentreX() - pillW / 2;
-        pillY = bounds.getBottom() + 10;
-        editorX = 30;
-        editorW = pillW - 30 - 32; // [⚡] ...prompt field... [↵]
-    }
-
-    mcpSelectionPillFrame = juce::Rectangle<int>(pillX, pillY, pillW, pillH);
-    if (!sketchMode) {
-        mcpPillDrawerMode = 0;
-        mcpPillDrawerFrame = {};
-        mcpPaletteFrame = {};
-    }
-
-    if (!mcpSelectionPill) {
-        mcpSelectionPill = std::make_unique<juce::TextEditor>();
-        mcpSelectionPill->getProperties().set("NoBackground", true);
-        mcpSelectionPill->getProperties().set("NoOutline", true);
-        mcpSelectionPill->setMultiLine(false);
-        mcpSelectionPill->setReturnKeyStartsNewLine(false);
-        mcpSelectionPill->setWantsKeyboardFocus(true);
-        mcpSelectionPill->setColour(juce::TextEditor::backgroundColourId, juce::Colours::transparentBlack);
-        mcpSelectionPill->setColour(juce::TextEditor::textColourId, juce::Colours::white);
-        mcpSelectionPill->setColour(juce::TextEditor::outlineColourId, juce::Colours::transparentBlack);
-        mcpSelectionPill->setColour(juce::TextEditor::focusedOutlineColourId, juce::Colours::transparentBlack);
-        mcpSelectionPill->setColour(juce::TextEditor::highlightColourId, juce::Colour(0xff4a9eff));
-        mcpSelectionPill->setColour(juce::CaretComponent::caretColourId, juce::Colours::white);
-        mcpSelectionPill->setFont(juce::Font("Inter", 13.0f, juce::Font::plain));
-        mcpSelectionPill->applyFontToAllText(juce::Font("Inter", 13.0f, juce::Font::plain));
-        mcpSelectionPill->setBorder(juce::BorderSize<int>(0, 0, 0, 0));
-        mcpSelectionPill->setIndents(2, 0);
-        mcpSelectionPill->setJustification(juce::Justification::centredLeft);
-
-        mcpSelectionPill->onReturnKey = [this] { submitSelectionPill(false); };
-        mcpSelectionPillKeys = std::make_unique<SelectionPillKeyListener>(this);
-        mcpSelectionPill->addKeyListener(mcpSelectionPillKeys.get());
-        if (!mcpSlotPasteKeys) mcpSlotPasteKeys = std::make_unique<SlotPasteKeyListener>(this);
-        mcpSelectionPill->addKeyListener(mcpSlotPasteKeys.get());
-        mcpSelectionPill->onEscapeKey = [this] {
-            if (mcpPillDrawerMode != 0) {
-                mcpPillDrawerMode = 0;
-                mcpPillDrawerFrame = {};
-                mcpPaletteFrame = {};
-                repaint();
-                if (editor) editor->nvgSurface.invalidateAll();
-                return;
-            }
-            if (mcpSelectionPill) mcpSelectionPill->setText(juce::String(), false);
-            dismissSelectionPill();
-        };
-        mcpSelectionPill->onTextChange = [this] {
-            repaint();
-            if (editor) editor->nvgSurface.invalidateAll();
-        };
-        mcpSelectionPill->onFocusLost = [this] {
-            // Keep a typed prompt, but if it's empty and drawer is closed get out of the way.
-            if (mcpSelectionPill && mcpSelectionPill->getText().trim().isEmpty() && mcpPillDrawerMode == 0)
-                dismissSelectionPill();
-        };
-        addAndMakeVisible(*mcpSelectionPill);
-    }
-
-    // Object mode: room on the left for + and on the right for 🎙️ Mic.
-    // Sketch mode: room for the [⚡ Build] chip and the [↩ Undo] [🗑 Clear] pair.
-    // edH = 30 gives generous headroom and descender room so text is never clipped at the bottom.
-    int const edH = 30;
-    int const edY = pillY + (pillH - edH) / 2;
-    if (sketchStrip) {
-        // Mood strip: no prompt field. Park the editor off-cells (still "visible"
-        // so hiding it can't trigger a focus-loss dismiss).
-        mcpSelectionPill->setBounds(pillX - 60, pillY, 1, 1);
-    } else {
-        mcpSelectionPill->setBounds(pillX + editorX, edY, editorW, edH);
-    }
-    mcpSelectionPill->setVisible(true);
-    // toFront(false), NOT true: bringing it forward must never steal keyboard
-    // focus, or typing 'o'/'m'/'c'/'b' on the canvas would land in the prompt
-    // instead of creating/editing objects.
-    mcpSelectionPill->toFront(false);
-    if (!mcpPillAnimator) {
-        mcpPillAnimator = std::make_unique<SelectionPillAnimator>(this);
-    }
-    mcpPillAnimator->startTimerHz(6);
-    repaint();
-    if (editor) editor->nvgSurface.invalidateAll();
-}
-
-void Canvas::hideSelectionPill()
-{
-    if (mcpPillAnimator) {
-        mcpPillAnimator->stopTimer();
-    }
-    mcpPillDrawerMode = 0;
-    mcpPillDrawerFrame = {};
-    mcpPaletteFrame = {};
-    if (mcpSelectionPill && mcpSelectionPill->isVisible()) {
-        mcpSelectionPill->setVisible(false);
-        repaint();
-        if (editor) editor->nvgSurface.invalidateAll();
-    }
-}
-
-void Canvas::dismissSelectionPill()
-{
-    mcpPillDrawerMode = 0;
-    mcpPillDrawerFrame = {};
-    mcpPaletteFrame = {};
-    mcpMoodPillActive = false;
-    mcpPillRequested = false;
-    // Artist dismissed (send / Esc / empty focus-out): suppress re-show for a
-    // short window so the immediate refresh can't re-pop it. Time-based, so
-    // re-selecting the same object later always brings it back.
-    mcpSelectionPillHideUntil = juce::Time::getMillisecondCounter() + 700;
-    hideSelectionPill();
-}
-
-// Shift+Enter: park, don't wake the AI. The typed intent becomes a tape note
-// (bound to the selection when there is one); ink and images stay staged.
-void Canvas::parkSelectionPill()
-{
-    if (!pd) {
-        dismissSelectionPill();
-        return;
-    }
-
-    auto const prompt = mcpSelectionPill ? mcpSelectionPill->getText().trim() : juce::String();
-    if (prompt.isNotEmpty()) {
-        McpSession::McpAnnotation ann;
-        ann.kind = "artist";
-        ann.text = prompt;
-        ann.t = juce::Time::getMillisecondCounterHiRes() / 1000.0;
-
-        auto const selIds = getSelectionStableIds();
-        if (selIds.size() > 0) {
-            ann.targetId = selIds[0];
-            ann.targetIds = selIds;
-        } else {
-            auto sb = getSketchBoundsInCanvas();
-            if (sb.isEmpty() && mcpMoodPillActive) {
-                ann.x = static_cast<float>(mcpMoodPillPos.x - canvasOrigin.x);
-                ann.y = static_cast<float>(mcpMoodPillPos.y - canvasOrigin.y);
-            } else {
-                ann.x = sb.getCentreX() - static_cast<float>(canvasOrigin.x);
-                ann.y = sb.getCentreY() - static_cast<float>(canvasOrigin.y);
-            }
-        }
-
-        juce::ScopedLock sl(pd->getMcp()->session.mcpOverlayLock);
-        pd->getMcp()->session.mcpAnnotations.push_back(ann);
-    }
-
-    if (mcpSelectionPill) mcpSelectionPill->setText(juce::String(), false);
-    dismissSelectionPill();
-    repaint();
-    if (editor) editor->nvgSurface.invalidateAll();
-}
-
-void Canvas::submitSelectionPill(bool queueForChat)
-{
-    mcpPillDrawerMode = 0;
-    mcpPillDrawerFrame = {};
-    mcpPaletteFrame = {};
-    if (!mcpSelectionPill) return;
-
-    auto const prompt = mcpSelectionPill->getText().trim();
-
-    // Sketch mode: Enter / Shift+Enter = Commit & Build the staged ink.
-    if (mcpPillSketchMode) {
-        sendSketchBuild(prompt);
-        mcpSelectionPill->setText(juce::String(), false);
-        // Keep the chisel parked so [↩ Undo] / [🗑 Clear] stay one tap away.
-        updateSelectionPill();
-        repaint();
-        if (editor) editor->nvgSurface.invalidateAll();
-        return;
-    }
-
-    if (prompt.isNotEmpty() && pd) {
-        // Find selection stable tempIds & compute group bounding box
-        juce::StringArray targetIds;
-        bool first = true;
-        int minX = 0, minY = 0, maxX = 0, maxY = 0;
-        auto patchPtr = patch.getPointer();
-        t_canvas* cnv = patchPtr ? patchPtr.get() : nullptr;
-        for (auto* obj : getSelectionOfType<Object>()) {
-            if (auto* ptr = obj->getPointer()) {
-                auto tid = pd->getMcp()->getStableId(ptr);
-                if (tid.isEmpty() && cnv) {
-                    tid = pd->getMcp()->getOrAdoptStableId(cnv, ptr);
-                }
-                if (tid.isNotEmpty()) targetIds.add(tid);
-            }
-            auto const b = obj->getObjectBounds();
-            if (first) {
-                minX = b.getX(); minY = b.getY();
-                maxX = b.getRight(); maxY = b.getBottom();
-                first = false;
-            } else {
-                minX = std::min(minX, b.getX());
-                minY = std::min(minY, b.getY());
-                maxX = std::max(maxX, b.getRight());
-                maxY = std::max(maxY, b.getBottom());
-            }
-        }
-
-        // Park the prompt in the Sidebar Copilot chat log (no clutter on canvas)
-        if (editor) {
-            if (auto* cp = editor->getCopilotPanel()) {
-                cp->receiveMessage("user", prompt);
-            }
-        }
-
-        // C++ truth: sendPillPrompt resolves the selection's stable tempIds from the
-        // bridge-owned map — the server never guesses from its identity mirror.
-        sendPillPrompt(prompt, queueForChat);
-        mcpSelectionPill->setText(juce::String(), false);
-    }
-
-    dismissSelectionPill();
-    repaint();
-    if (editor) editor->nvgSurface.invalidateAll();
-}
-
-bool Canvas::SlotPasteKeyListener::keyPressed(const juce::KeyPress& key, juce::Component*)
-{
-    if (!canvas || !canvas->mcpImageSlotActive) return false;
-    auto const kc = key.getKeyCode();
-    bool const ctrlV = (key.getModifiers().isCtrlDown() || key.getModifiers().isCommandDown())
-        && (kc == 'v' || kc == 'V' || kc == 22 /* Ctrl+V control code */);
-    if (ctrlV) {
-        canvas->pasteImageFromClipboard();
-        return true;
-    }
-    return false;
-}
-
-bool Canvas::SelectionPillKeyListener::keyPressed(const juce::KeyPress& key, juce::Component*)
-{    if (canvas && canvas->mcpPillDrawerMode == 3) {
-        auto const count = static_cast<int>(canvas->mcpFilteredPaletteIndices.size());
-        if (key.getKeyCode() == juce::KeyPress::upKey && count > 0) {
-            canvas->mcpPaletteSelectedIndex = (canvas->mcpPaletteSelectedIndex - 1 + count) % count;
-            canvas->repaint();
-            if (canvas->editor) canvas->editor->nvgSurface.invalidateAll();
-            return true;
-        }
-        if (key.getKeyCode() == juce::KeyPress::downKey && count > 0) {
-            canvas->mcpPaletteSelectedIndex = (canvas->mcpPaletteSelectedIndex + 1) % count;
-            canvas->repaint();
-            if (canvas->editor) canvas->editor->nvgSurface.invalidateAll();
-            return true;
-        }
-        if (key.getKeyCode() == juce::KeyPress::returnKey && !key.getModifiers().isShiftDown() && count > 0) {
-            canvas->triggerPaletteItem(canvas->mcpPaletteSelectedIndex);
-            return true;
-        }
-        if (key.getKeyCode() == juce::KeyPress::escapeKey) {
-            canvas->mcpPillDrawerMode = 0;
-            canvas->mcpPaletteFrame = {};
-            canvas->repaint();
-            if (canvas->editor) canvas->editor->nvgSurface.invalidateAll();
-            return true;
-        }
-    }
-    // Shift+Enter = Park: keep the artifacts + typed intent in the bay without
-    // waking the AI. (Plain Enter is the send — TextEditor fires onReturnKey.)
-    if (key.getKeyCode() == juce::KeyPress::returnKey && key.getModifiers().isShiftDown()) {
-        if (canvas) canvas->parkSelectionPill();
-        return true;
-    }
-    // "/" opens the on-demand smart command palette if input is empty
-    if (key.getTextCharacter() == '/' || key.getKeyCode() == '/') {
-        if (canvas && canvas->mcpSelectionPill && canvas->mcpSelectionPill->getText().trim().isEmpty()) {
-            canvas->showPillToolsMenu();
-            return true;
-        }
-    }
-    // "*" (the ✦ key) opens the Lenses drawer if input is empty
-    if (key.getTextCharacter() == '*') {
-        if (canvas && canvas->mcpSelectionPill && canvas->mcpSelectionPill->getText().trim().isEmpty()) {
-            canvas->showPillLensesMenu();
-            return true;
-        }
-    }
-    return false;
-}
-
-void Canvas::SelectionPillAnimator::timerCallback()
-{
-    if (canvas && canvas->mcpSelectionPill && canvas->mcpSelectionPill->isVisible()) {
-        canvas->repaint();
-        if (canvas->editor) canvas->editor->nvgSurface.invalidateAll();
-    } else {
-        stopTimer();
-    }
-}
-
-void Canvas::showPillLensesMenu()
-{
-    if (!mcpSelectionPill || !mcpSelectionPill->isVisible()) return;
-    mcpPillDrawerMode = (mcpPillDrawerMode == 1 ? 0 : 1);
-    if (mcpPillDrawerMode != 0) {
-        auto const p = mcpSelectionPillFrame.isEmpty() ? mcpSelectionPill->getBounds() : mcpSelectionPillFrame;
-        mcpPillDrawerFrame = juce::Rectangle<int>(p.getX(), p.getBottom() + 5, p.getWidth(), 30);
-    } else {
-        mcpPillDrawerFrame = {};
-    }
-    repaint();
-    if (editor) editor->nvgSurface.invalidateAll();
-}
-
-void Canvas::configurePillLookAndFeel()
-{
-}
-
-void Canvas::showPillToolsMenu()
-{
-    showPillPalette();
-}
-
-void Canvas::initPaletteItems()
-{
-    if (!mcpPaletteItems.empty()) return;
-
-    // ⚡ Actions (FastPath - 0 Tokens, 5 ms)
-    mcpPaletteItems.push_back({ "tidy", "Tidy Layout", "Action", "Begradigt Kabel & Spalten (0 Tokens)", "⚡", "[@action:tidy]" });
-    mcpPaletteItems.push_back({ "pack-gop", "Pack into GOP", "Action", "Erstellt Eurorack-Modul mit Faceplate", "📦", "[@action:pack-gop]" });
-    mcpPaletteItems.push_back({ "array10", "10x Osc Array", "Action", "Boilerplate-Bank mit Gain-Schutz", "🔢", "[@action:array10]" });
-    mcpPaletteItems.push_back({ "add-knobs", "Add Controls", "Action", "Regler fuer Signal-Inlets erzeugen", "🎛️", "[@action:add-knobs]" });
-    mcpPaletteItems.push_back({ "undo", "Undo Step", "Action", "Letzte Aenderung sofort rueckgaengig", "↩️", "[@action:undo]" });
-
-    // 🧬 Skills (AI Sounddesign)
-    mcpPaletteItems.push_back({ "kick-drum", "Punchy 909 Kick", "Skill", "Pitch-Sweep & [tanh~] Saettigung", "🥁", "[@skill:kick-drum]" });
-    mcpPaletteItems.push_back({ "acid-bass", "Acid 303 Bass", "Skill", "Resonanz-Filter mit Slide & Envelope", "🎛️", "[@skill:acid-bass]" });
-    mcpPaletteItems.push_back({ "ambient-verb", "Ambient Space Verb", "Skill", "Schwebende Hallfahne mit Resonator", "🌌", "[@skill:ambient-verb]" });
-    mcpPaletteItems.push_back({ "tape-drive", "Lo-Fi Tape Saturator", "Skill", "Analoger Bandschmutz mit Wow/Flutter", "📻", "[@skill:tape-drive]" });
-    mcpPaletteItems.push_back({ "genesis", "Chaos Genesis", "Skill", "Experimentelle ELSE-Kreuzmodulation", "🧬", "[@skill:genesis]" });
-
-    // ✦ Lenses (Personas)
-    mcpPaletteItems.push_back({ "doctor", "Doctor Lens", "Lens", "Röntgenblick auf Stille, Fehler & Klicks", "🩺", "[@lens:doctor]" });
-    mcpPaletteItems.push_back({ "jam", "Jam Lens", "Lens", "Schneller, kreativer Co-Produzent", "⚡", "[@lens:jam]" });
-    mcpPaletteItems.push_back({ "modular", "Modular Lens", "Lens", "Eurorack CV & Voltage Routing", "🔌", "[@lens:modular]" });
-
-    filterPaletteItems({});
-}
-
-void Canvas::filterPaletteItems(const juce::String& query)
-{
-    mcpFilteredPaletteIndices.clear();
-    auto q = query.trim().toLowerCase();
-    if (q.startsWithChar('/')) q = q.substring(1).trim();
-
-    for (size_t i = 0; i < mcpPaletteItems.size(); ++i) {
-        if (q.isEmpty() ||
-            mcpPaletteItems[i].title.toLowerCase().contains(q) ||
-            mcpPaletteItems[i].desc.toLowerCase().contains(q) ||
-            mcpPaletteItems[i].category.toLowerCase().contains(q)) {
-            mcpFilteredPaletteIndices.push_back(static_cast<int>(i));
-        }
-    }
-    mcpPaletteSelectedIndex = 0;
-}
-
-void Canvas::showPillPalette()
-{
-    if (!mcpSelectionPill || !mcpSelectionPill->isVisible()) return;
-    initPaletteItems();
-    mcpPillDrawerMode = (mcpPillDrawerMode == 3 ? 0 : 3);
-    if (mcpPillDrawerMode == 3) {
-        filterPaletteItems({});
-    } else {
-        mcpPaletteFrame = {};
-    }
-    repaint();
-    if (editor) editor->nvgSurface.invalidateAll();
-}
-
-void Canvas::triggerPaletteItem(int index)
-{
-    if (index >= 0 && index < static_cast<int>(mcpFilteredPaletteIndices.size())) {
-        auto const& item = mcpPaletteItems[static_cast<size_t>(mcpFilteredPaletteIndices[static_cast<size_t>(index)])];
-        mcpPillDrawerMode = 0;
-        mcpPaletteFrame = {};
-
-        juce::String currentText = mcpSelectionPill ? mcpSelectionPill->getText().trim() : juce::String();
-
-        // 1-Click FastPath convenience:
-        // If the text editor was completely empty and user selected a pure action (like Tidy or Undo):
-        if (currentText.isEmpty() && (item.category == "Action" && item.id != "array10")) {
-            sendPillPrompt(item.prompt, false);
-            dismissSelectionPill();
-            return;
-        }
-
-        // Composable Tag Insertion:
-        // Append tag so user can either hit Enter immediately or keep typing!
-        juce::String newText = currentText.isEmpty() ? (item.prompt + " ") : (currentText + " " + item.prompt + " ");
-        if (mcpSelectionPill) {
-            mcpSelectionPill->setText(newText, true);
-            mcpSelectionPill->setCaretPosition(newText.length());
-            mcpSelectionPill->grabKeyboardFocus();
-        }
-        repaint();
-        if (editor) editor->nvgSurface.invalidateAll();
-    }
-}
-
-void Canvas::sendPillPrompt(const juce::String& prompt, bool queueForChat)
-{
-    if (prompt.isEmpty() || !pd) return;
-    juce::StringArray targetIds;
-    auto patchPtr = patch.getPointer();
-    t_canvas* cnv = patchPtr ? patchPtr.get() : nullptr;
-    for (auto* obj : getSelectionOfType<Object>()) {
-        if (auto* ptr = obj->getPointer()) {
-            auto tid = pd->getMcp()->getStableId(ptr);
-            if (tid.isEmpty() && cnv) {
-                tid = pd->getMcp()->getOrAdoptStableId(cnv, ptr);
-            }
-            if (tid.isNotEmpty()) targetIds.add(tid);
-        }
-    }
-    if (auto* br = pd->getMcp()->getMCPBridge()) br->sendSelectionPrompt(prompt, targetIds, queueForChat);
 }
 
 void Canvas::copySelection()
@@ -3922,9 +1777,8 @@ void Canvas::dragAndDropPaste(String const& patchString, Point<int> const mouseP
 
 void Canvas::pasteSelection()
 {
-    // PRD Phase 2: an image on the system clipboard becomes a canvas reference
-    // image; otherwise fall through to the classic PD object paste.
-    if (pasteImageFromClipboard()) return;
+    if (mcpLayer->pasteImageFromClipboard()) // MCP-HOOK(canvasInput): a clipboard image becomes a reference image
+        return;
 
     patch.startUndoSequence("Paste object/s");
 
@@ -4227,14 +2081,14 @@ void Canvas::triggerizeSelection()
     }
 }
 
-void Canvas::encapsulateSelection(String const& subpatchName)
+void Canvas::encapsulateSelection(String const& subpatchName) // MCP-CARRIED(encapsulate-named)
 {
     encapsulateSelection(subpatchName, getSelectionOfType<Object>());
 }
 
 // The MCP bridge encapsulates an explicit object list under a chosen name, so the
 // selection and the "pd" name are parameters here (the menu command passes neither).
-void Canvas::encapsulateSelection(String const& subpatchName, SmallArray<Object*> const& objectsToEncapsulate)
+void Canvas::encapsulateSelection(String const& subpatchName, SmallArray<Object*> const& objectsToEncapsulate) // MCP-CARRIED(encapsulate-named)
 {
     auto selectedObjects = objectsToEncapsulate;
 
@@ -4309,14 +2163,14 @@ void Canvas::encapsulateSelection(String const& subpatchName, SmallArray<Object*
         auto const& externalIolets = externalIoletsFor[iolet];
 
         // An inlet fed only by control-rate wires from outside becomes [inlet], not [inlet~]
-        bool const isSignal = iolet->isInlet()
+        bool const isSignal = iolet->isInlet() // MCP-CARRIED(encapsulate-control-inlets)
             ? std::any_of(externalIolets.begin(), externalIolets.end(), [](auto* source) { return source->isSignal(); })
             : iolet->isSignal();
 
         IoletGroup* group = nullptr;
         for (auto& candidate : ioletGroups) {
             // A signal and a data iolet can never share an object, even if they connect to the same things
-            if (candidate.isInlet != iolet->isInlet() || candidate.isSignal != isSignal)
+            if (candidate.isInlet != iolet->isInlet() || candidate.isSignal != isSignal) // MCP-CARRIED(encapsulate-control-inlets)
                 continue;
             if (candidate.externalIolets.size() != externalIolets.size())
                 continue;
@@ -4328,7 +2182,7 @@ void Canvas::encapsulateSelection(String const& subpatchName, SmallArray<Object*
         }
 
         if (!group) {
-            ioletGroups.add(IoletGroup { iolet->isInlet(), isSignal, {}, externalIolets });
+            ioletGroups.add(IoletGroup { iolet->isInlet(), isSignal, {}, externalIolets }); // MCP-CARRIED(encapsulate-control-inlets)
             group = &ioletGroups.back();
         }
 
@@ -4379,7 +2233,7 @@ void Canvas::encapsulateSelection(String const& subpatchName, SmallArray<Object*
     patch.deselectAll();
 
     auto const centre = selectionBounds.getCentre();
-    auto const nameToken = (subpatchName.isEmpty() || subpatchName == "pd") ? String("pd") : ("pd " + subpatchName);
+    auto const nameToken = (subpatchName.isEmpty() || subpatchName == "pd") ? String("pd") : ("pd " + subpatchName); // MCP-CARRIED(encapsulate-named)
     auto copypasta = String("#N canvas 733 172 450 300 0 1;\n") + "$$_COPY_HERE_$$" + newIoletObjects + newInternalConnections + "#X restore " + String(centre.x) + " " + String(centre.y) + " " + nameToken + ";\n";
 
     // Apply the changed on Pd's thread
@@ -4674,60 +2528,34 @@ void Canvas::undo()
         }
     }
 
-    // 1. If an AI transaction exists, undo that first (safe transactional rollback with semantic IDs)
-    if (pd && pd->getMcp()->hasMcpTransaction(patch.getUncheckedPointer())) {
-        pd->getMcp()->undoMcpTransaction(patch.getUncheckedPointer());
-        synchronise();
-        handleUpdateNowIfNeeded();
-        patch.deselectAll();
-        synchroniseSplitCanvas();
-        updateSidebarSelection();
+    // Tell pd to undo the last action
+    if (!mcpLayer->undo()) // MCP-HOOK(canvasLifecycle): an MCP transaction first; false = nothing to undo
         return;
-    }
 
-    // 2. Otherwise, if user has manual GUI edits on Pure Data's native stack, undo that
-    if (patch.canUndo()) {
-        patch.undo();
-        synchronise();
-        handleUpdateNowIfNeeded();
-        patch.deselectAll();
-        synchroniseSplitCanvas();
-        updateSidebarSelection();
-        return;
-    }
+    // Load state from pd
+    synchronise();
+    handleUpdateNowIfNeeded();
 
-    // Nothing to undo
-}
+    patch.deselectAll();
 
-bool Canvas::canUndo()
-{
-    if (pd && pd->getMcp()->hasMcpTransaction(patch.getUncheckedPointer())) return true;
-    return patch.canUndo();
+    synchroniseSplitCanvas();
+    updateSidebarSelection();
 }
 
 void Canvas::redo()
 {
-    // 1. If an AI transaction was undone, redo that first to recreate objects before redoing manual edits on them
-    if (pd && pd->getMcp()->hasMcpRedoTransaction(patch.getUncheckedPointer())) {
-        pd->getMcp()->redoMcpTransaction(patch.getUncheckedPointer());
-        synchronise();
-        handleUpdateNowIfNeeded();
-        patch.deselectAll();
-        synchroniseSplitCanvas();
-        updateSidebarSelection();
+    // Tell pd to undo the last action
+    if (!mcpLayer->redo()) // MCP-HOOK(canvasLifecycle): an MCP transaction first; false = nothing to redo
         return;
-    }
 
-    // 2. Otherwise, if user has manual GUI edits to redo, tell pd to redo
-    if (patch.canRedo()) {
-        patch.redo();
-        synchronise();
-        handleUpdateNowIfNeeded();
-        patch.deselectAll();
-        synchroniseSplitCanvas();
-        updateSidebarSelection();
-        return;
-    }
+    // Load state from pd
+    synchronise();
+    handleUpdateNowIfNeeded();
+
+    patch.deselectAll();
+
+    synchroniseSplitCanvas();
+    updateSidebarSelection();
 }
 
 void Canvas::valueChanged(Value& v)

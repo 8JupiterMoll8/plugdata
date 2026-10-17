@@ -68,7 +68,7 @@ void CanvasMcpLayer::paintUnderObjects(NVGcontext* nvg, Rectangle<int> invalidRe
                 bool first = true;
                 int minX = 0, minY = 0, maxX = 0, maxY = 0;
                 for (auto const& tid : r.targetIds) {
-                    if (auto* obj = canvas.findObjectByStableId(tid)) {
+                    if (auto* obj = findObjectByStableId(tid)) {
                         auto const b = obj->getObjectBounds();
                         if (first) {
                             minX = b.getX();
@@ -167,10 +167,10 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
             float rawAx = 0.0f, rawAy = 0.0f, rawLx = 0.0f, rawLy = 0.0f;
             bool hasLead = false;
             juce::Rectangle<int> grpBounds;
-            if (!canvas.getAnnotationLiveBounds(a.targetId, a.targetIds, a.x, a.y, a.leaderX, a.leaderY, a.hasLeader, rawAx, rawAy, rawLx, rawLy, hasLead, &grpBounds))
+            if (!getAnnotationLiveBounds(a.targetId, a.targetIds, a.x, a.y, a.leaderX, a.leaderY, a.hasLeader, rawAx, rawAy, rawLx, rawLy, hasLead, &grpBounds))
                 continue;
 
-            auto const tapeBounds = canvas.getAnnotationScreenBounds(static_cast<size_t>(noteIdx));
+            auto const tapeBounds = getAnnotationScreenBounds(static_cast<size_t>(noteIdx));
             if (tapeBounds.isEmpty()) continue;
 
             NVGScopedState scopedAnn(nvg);
@@ -186,8 +186,8 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
             else if (k == "warn") { ar = 0xff; ag = 0x5a; ab = 0x5a; }   // red
             else if (k == "artist") { ar = 0xff; ag = 0xbe; ab = 0x50; } // amber
             NVGcolor const accent = nanovg::nvgRGBA(ar, ag, ab, 255);
-            bool const isHovered = (noteIdx == canvas.mcpNoteHover);
-            bool const isCloseHover = (isHovered && canvas.mcpNoteHoverClose);
+            bool const isHovered = (noteIdx == mcpNoteHover);
+            bool const isCloseHover = (isHovered && mcpNoteHoverClose);
 
             // 1. Tactile Selection Region: illuminate with soft neon tint on hover
             if (isHovered && !grpBounds.isEmpty()) {
@@ -314,7 +314,7 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
             mcpnvg::nvgText(nvg, closeX, ay + tapeH * 0.5f, "x", nullptr);
 
             // 10. Pivot Chips Drawer (blooms below hovered tape)
-            if (isHovered && canvas.mcpNoteEditIndex != noteIdx) {
+            if (isHovered && mcpNoteEditIndex != noteIdx) {
                 auto const chips = getAnnotationPivotChips(a.text, a.kind);
                 float totalChipsW = 0.0f;
                 for (auto const& c : chips) totalChipsW += getChipWidth(c.label) + 4.0f;
@@ -346,7 +346,7 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
                 for (size_t ci = 0; ci < chips.size(); ++ci) {
                     auto const& chip = chips[ci];
                     float const cw = getChipWidth(chip.label);
-                    bool const isThisChipHovered = (canvas.mcpNoteHoverChip == static_cast<int>(ci));
+                    bool const isThisChipHovered = (mcpNoteHoverChip == static_cast<int>(ci));
 
                     NVGcolor bgCol, strkCol, txtCol;
                     if (chip.prompt == "__undo__") {
@@ -406,19 +406,19 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
 
     // PRD overlay: draw the inline note editor INTO the GPU frame (same trick as
     // Object's text editor) so what the artist types is visible live.
-    if (canvas.mcpNoteEditor && canvas.mcpNoteEditor->isVisible()) {
+    if (mcpNoteEditor && mcpNoteEditor->isVisible()) {
         NVGScopedState scopedNote(nvg);
-        auto const nb = canvas.mcpNoteEditor->getBounds();
+        auto const nb = mcpNoteEditor->getBounds();
         nanovg::nvgTranslate(nvg, static_cast<float>(nb.getX()), static_cast<float>(nb.getY()));
         nanovg::nvgDrawRoundedRect(nvg, 0, 0, static_cast<float>(nb.getWidth()), static_cast<float>(nb.getHeight()),
                            nanovg::nvgRGBA(22, 22, 28, 255), nanovg::nvgRGBA(74, 158, 255, 255), 4.0f);
-        canvas.editor->getNanoLLGC()->renderComponent(*canvas.mcpNoteEditor);
+        canvas.editor->getNanoLLGC()->renderComponent(*mcpNoteEditor);
     }
 
     // PRD Copilot: the floating selection prompt pill — glass panel drawn in NVG,
     // live TextEditor composited on top (same trick as the note editor).
-    if (canvas.mcpSelectionPill && canvas.mcpSelectionPill->isVisible()) {
-        auto const panel = canvas.mcpSelectionPillFrame.isEmpty() ? canvas.mcpSelectionPill->getBounds() : canvas.mcpSelectionPillFrame;
+    if (mcpSelectionPill && mcpSelectionPill->isVisible()) {
+        auto const panel = mcpSelectionPillFrame.isEmpty() ? mcpSelectionPill->getBounds() : mcpSelectionPillFrame;
         float const w = static_cast<float>(panel.getWidth());
         float const h = static_cast<float>(panel.getHeight());
         bool isVoiceRec = false;
@@ -454,7 +454,7 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
             nanovg::nvgStrokeWidth(nvg, 1.0f);
             nanovg::nvgStroke(nvg);
 
-            if (canvas.mcpPillSketchMode && canvas.mcpCompletedStrokes.empty()) {
+            if (mcpPillSketchMode && mcpCompletedStrokes.empty()) {
                 // Mood strip: icons first, surfaces second. [✏] [T] [🖼] [🎙 Melody] [🥁 Beat]
                 float const btn = 30.0f;
                 float const gap = 4.0f;
@@ -468,7 +468,7 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
 
                 for (int i = 0; i < 6; ++i) {
                     float const bx = pad + i * (btn + gap);
-                    bool const active = (i == 0 && canvas.mcpSketchToolActive) || (i == 1 && canvas.mcpTextToolActive) || (i == 3 && melodyRec) || (i == 4 && beatRec) || (i == 5 && midiRec);
+                    bool const active = (i == 0 && mcpSketchToolActive) || (i == 1 && mcpTextToolActive) || (i == 3 && melodyRec) || (i == 4 && beatRec) || (i == 5 && midiRec);
 
                     NVGcolor bg = nanovg::nvgRGBA(38, 42, 50, 230);
                     NVGcolor border = nanovg::nvgRGBA(160, 175, 200, 100);
@@ -646,18 +646,18 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
                 }
 
                 // Hint chip under the strip
-                if (canvas.mcpMoodHint.isNotEmpty() && juce::Time::getMillisecondCounter() < canvas.mcpMoodHintUntil) {
+                if (mcpMoodHint.isNotEmpty() && juce::Time::getMillisecondCounter() < mcpMoodHintUntil) {
                     mcpnvg::nvgFontFace(nvg, "Inter");
                     mcpnvg::nvgFontSize(nvg, 11.0f);
                     mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
                     float tb[4];
-                    mcpnvg::nvgTextBounds(nvg, 0.0f, 0.0f, canvas.mcpMoodHint.toRawUTF8(), nullptr, tb);
+                    mcpnvg::nvgTextBounds(nvg, 0.0f, 0.0f, mcpMoodHint.toRawUTF8(), nullptr, tb);
                     float const hw = (tb[2] - tb[0]) + 16.0f;
                     nanovg::nvgDrawRoundedRect(nvg, 0.0f, h + 6.0f, hw, 20.0f, nanovg::nvgRGBA(16, 18, 22, 232), nanovg::nvgRGBA(255, 190, 80, 150), 5.0f);
                     nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(255, 214, 150, 240));
-                    mcpnvg::nvgText(nvg, 8.0f, h + 16.0f, canvas.mcpMoodHint.toRawUTF8(), nullptr);
+                    mcpnvg::nvgText(nvg, 8.0f, h + 16.0f, mcpMoodHint.toRawUTF8(), nullptr);
                 }
-            } else if (canvas.mcpPillSketchMode) {
+            } else if (mcpPillSketchMode) {
                 // Moodboard Chisel: [⚡ Build] | prompt | [T] [🖼] [↩ Undo] [🗑 Clear] [✏️ pen]
                 float const chipH = 22.0f;
                 float const chipY = (h - chipH) * 0.5f;
@@ -691,12 +691,12 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
                     float const tx = w - 234.0f;
                     float const tw2 = 24.0f;
                     nanovg::nvgDrawRoundedRect(nvg, tx, chipY, tw2, chipH,
-                                       canvas.mcpTextToolActive ? nanovg::nvgRGBA(74, 158, 255, 240) : nanovg::nvgRGBA(38, 42, 50, 230),
-                                       canvas.mcpTextToolActive ? nanovg::nvgRGBA(140, 195, 255, 255) : nanovg::nvgRGBA(160, 175, 200, 110), 4.0f);
+                                       mcpTextToolActive ? nanovg::nvgRGBA(74, 158, 255, 240) : nanovg::nvgRGBA(38, 42, 50, 230),
+                                       mcpTextToolActive ? nanovg::nvgRGBA(140, 195, 255, 255) : nanovg::nvgRGBA(160, 175, 200, 110), 4.0f);
                     mcpnvg::nvgFontFace(nvg, "Inter");
                     mcpnvg::nvgFontSize(nvg, 12.0f);
                     mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-                    nanovg::nvgFillColor(nvg, canvas.mcpTextToolActive ? nanovg::nvgRGBA(255, 255, 255, 255) : nanovg::nvgRGBA(215, 225, 240, 235));
+                    nanovg::nvgFillColor(nvg, mcpTextToolActive ? nanovg::nvgRGBA(255, 255, 255, 255) : nanovg::nvgRGBA(215, 225, 240, 235));
                     mcpnvg::nvgText(nvg, tx + tw2 * 0.5f, chipY + chipH * 0.5f, "T", nullptr);
                 }
 
@@ -776,7 +776,7 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
                     float const px = w - 30.0f;
                     float const pw = 24.0f;
                     float const pcy = chipY + chipH * 0.5f;
-                    if (canvas.mcpSketchToolActive) {
+                    if (mcpSketchToolActive) {
                         nanovg::nvgDrawRoundedRect(nvg, px, chipY, pw, chipH, nanovg::nvgRGBA(0, 180, 220, 240), nanovg::nvgRGBA(0, 245, 255, 255), 4.0f);
                     } else {
                         nanovg::nvgDrawRoundedRect(nvg, px, chipY, pw, chipH, nanovg::nvgRGBA(38, 42, 50, 230), nanovg::nvgRGBA(160, 175, 200, 80), 4.0f);
@@ -788,13 +788,13 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
                     nanovg::nvgLineTo(nvg, pcx + 5.0f, pcy - 2.0f);
                     nanovg::nvgLineTo(nvg, pcx - 2.0f, pcy + 5.0f);
                     nanovg::nvgClosePath(nvg);
-                    nanovg::nvgStrokeColor(nvg, canvas.mcpSketchToolActive ? nanovg::nvgRGBA(255, 255, 255, 255) : nanovg::nvgRGBA(200, 215, 235, 220));
+                    nanovg::nvgStrokeColor(nvg, mcpSketchToolActive ? nanovg::nvgRGBA(255, 255, 255, 255) : nanovg::nvgRGBA(200, 215, 235, 220));
                     nanovg::nvgStrokeWidth(nvg, 1.2f);
                     nanovg::nvgStroke(nvg);
                     nanovg::nvgBeginPath(nvg);
                     nanovg::nvgMoveTo(nvg, pcx - 4.5f, pcy + 4.5f);
                     nanovg::nvgLineTo(nvg, pcx - 6.0f, pcy + 6.0f);
-                    nanovg::nvgStrokeColor(nvg, canvas.mcpSketchToolActive ? nanovg::nvgRGBA(255, 255, 255, 255) : nanovg::nvgRGBA(0, 230, 255, 220));
+                    nanovg::nvgStrokeColor(nvg, mcpSketchToolActive ? nanovg::nvgRGBA(255, 255, 255, 255) : nanovg::nvgRGBA(0, 230, 255, 220));
                     nanovg::nvgStrokeWidth(nvg, 1.4f);
                     nanovg::nvgStroke(nvg);
                 }
@@ -836,12 +836,12 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
         }
 
         // Ambient blinking caret when unfocused & empty to clearly signal interactive input affordance
-        if (canvas.mcpSelectionPill && !canvas.mcpSelectionPill->hasKeyboardFocus(true) && canvas.mcpSelectionPill->getText().isEmpty()
-            && !(canvas.mcpPillSketchMode && canvas.mcpCompletedStrokes.empty())) {
+        if (mcpSelectionPill && !mcpSelectionPill->hasKeyboardFocus(true) && mcpSelectionPill->getText().isEmpty()
+            && !(mcpPillSketchMode && mcpCompletedStrokes.empty())) {
             bool const caretBlink = ((juce::Time::getMillisecondCounter() / 530) % 2) == 0;
             if (caretBlink) {
                 NVGScopedState scopedCaret(nvg);
-                float const caretX = panel.getX() + (canvas.mcpPillSketchMode ? 96.0f : 38.0f);
+                float const caretX = panel.getX() + (mcpPillSketchMode ? 96.0f : 38.0f);
                 float const caretY = panel.getY() + panel.getHeight() * 0.5f;
                 nanovg::nvgBeginPath(nvg);
                 nanovg::nvgMoveTo(nvg, caretX, caretY - 7.0f);
@@ -853,45 +853,45 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
         }
 
         // Crisp on-canvas placeholder when empty (subtle dim when focused)
-        if (canvas.mcpSelectionPill && canvas.mcpSelectionPill->getText().isEmpty()
-            && !(canvas.mcpPillSketchMode && canvas.mcpCompletedStrokes.empty())) {
+        if (mcpSelectionPill && mcpSelectionPill->getText().isEmpty()
+            && !(mcpPillSketchMode && mcpCompletedStrokes.empty())) {
             NVGScopedState scopedHint(nvg);
             mcpnvg::nvgFontFace(nvg, "Inter");
             mcpnvg::nvgFontSize(nvg, 12.0f);
             mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
             juce::String hint;
-            if (canvas.mcpPillSketchMode) {
-                hint = canvas.mcpCompletedStrokes.empty()
+            if (mcpPillSketchMode) {
+                hint = mcpCompletedStrokes.empty()
                     ? "New Mood — paint, paste, type... then Build"
                     : "Describe the build, or hit Build...";
-                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(140, 155, 175, canvas.mcpSelectionPill->hasKeyboardFocus(true) ? 90 : 170));
+                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(140, 155, 175, mcpSelectionPill->hasKeyboardFocus(true) ? 90 : 170));
             } else if (isVoiceRec) {
                 hint = "Listening... (speak prompt or beatbox groove)";
                 nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(255, 110, 95, 240));
-            } else if (canvas.mcpActiveLens.isNotEmpty()) {
-                hint = "[" + canvas.mcpActiveLens.toUpperCase() + "] Ask AI on selection...";
-                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(140, 155, 175, canvas.mcpSelectionPill->hasKeyboardFocus(true) ? 90 : 170));
+            } else if (mcpActiveLens.isNotEmpty()) {
+                hint = "[" + mcpActiveLens.toUpperCase() + "] Ask AI on selection...";
+                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(140, 155, 175, mcpSelectionPill->hasKeyboardFocus(true) ? 90 : 170));
             } else {
                 hint = "Ask AI on selection... (Enter to mutate, Esc to cancel)";
-                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(140, 155, 175, canvas.mcpSelectionPill->hasKeyboardFocus(true) ? 90 : 170));
+                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(140, 155, 175, mcpSelectionPill->hasKeyboardFocus(true) ? 90 : 170));
             }
-            mcpnvg::nvgText(nvg, panel.getX() + (canvas.mcpPillSketchMode ? 96.0f : 38.0f), panel.getY() + panel.getHeight() * 0.5f, hint.toRawUTF8(), nullptr);
+            mcpnvg::nvgText(nvg, panel.getX() + (mcpPillSketchMode ? 96.0f : 38.0f), panel.getY() + panel.getHeight() * 0.5f, hint.toRawUTF8(), nullptr);
         }
 
         {
             NVGScopedState scopedField(nvg);
-            auto const fb = canvas.mcpSelectionPill->getBounds();
+            auto const fb = mcpSelectionPill->getBounds();
             nanovg::nvgTranslate(nvg, static_cast<float>(fb.getX()), static_cast<float>(fb.getY()));
-            canvas.editor->getNanoLLGC()->renderComponent(*canvas.mcpSelectionPill);
+            canvas.editor->getNanoLLGC()->renderComponent(*mcpSelectionPill);
         }
 
         // Native Horizontal Card Drawer or Smart Command Palette
-        if (canvas.mcpPillDrawerMode != 0) {
-            if (canvas.mcpPillDrawerMode == 3) {
-                const_cast<Canvas*>(&canvas)->initPaletteItems();
+        if (mcpPillDrawerMode != 0) {
+            if (mcpPillDrawerMode == 3) {
+                const_cast<CanvasMcpLayer*>(this)->initPaletteItems();
                 float const pw = std::max(static_cast<float>(panel.getWidth()), 390.0f);
                 float const rowH = 30.0f;
-                int const totalCount = static_cast<int>(canvas.mcpFilteredPaletteIndices.size());
+                int const totalCount = static_cast<int>(mcpFilteredPaletteIndices.size());
                 int const visibleCount = std::min(8, totalCount);
                 float const ph = 28.0f + visibleCount * rowH + 6.0f;
                 float const px = static_cast<float>(panel.getX());
@@ -899,7 +899,7 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
                 if (py + ph > static_cast<float>(canvas.getHeight()) - 20.0f) {
                     py = static_cast<float>(panel.getY()) - ph - 5.0f;
                 }
-                const_cast<Canvas*>(&canvas)->mcpPaletteFrame = juce::Rectangle<int>(roundToInt(px), roundToInt(py), roundToInt(pw), roundToInt(ph));
+                const_cast<CanvasMcpLayer*>(this)->mcpPaletteFrame = juce::Rectangle<int>(roundToInt(px), roundToInt(py), roundToInt(pw), roundToInt(ph));
 
                 NVGScopedState scopedPalette(nvg);
                 nanovg::nvgTranslate(nvg, px, py);
@@ -922,10 +922,10 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
                 mcpnvg::nvgText(nvg, 12.0f, 14.0f, "ADD CONTEXT & ACTIONS (+)", nullptr);
 
                 for (int i = 0; i < visibleCount; ++i) {
-                    int const itemIdx = canvas.mcpFilteredPaletteIndices[static_cast<size_t>(i)];
-                    auto const& item = canvas.mcpPaletteItems[static_cast<size_t>(itemIdx)];
+                    int const itemIdx = mcpFilteredPaletteIndices[static_cast<size_t>(i)];
+                    auto const& item = mcpPaletteItems[static_cast<size_t>(itemIdx)];
                     float const ry = 26.0f + i * rowH;
-                    bool const isSelected = (i == canvas.mcpPaletteSelectedIndex);
+                    bool const isSelected = (i == mcpPaletteSelectedIndex);
 
                     if (isSelected) {
                         nanovg::nvgDrawRoundedRect(nvg, 4.0f, ry, pw - 8.0f, rowH - 2.0f,
@@ -977,7 +977,7 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
                 float const dh = 30.0f;
                 float const dx = static_cast<float>(panel.getX());
                 float const dy = static_cast<float>(panel.getY() + panel.getHeight()) + 5.0f;
-                canvas.mcpPillDrawerFrame = juce::Rectangle<int>(roundToInt(dx), roundToInt(dy), roundToInt(dw), roundToInt(dh));
+                mcpPillDrawerFrame = juce::Rectangle<int>(roundToInt(dx), roundToInt(dy), roundToInt(dw), roundToInt(dh));
 
                 NVGScopedState scopedDrawer(nvg);
                 nanovg::nvgTranslate(nvg, dx, dy);
@@ -996,7 +996,7 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
                 mcpnvg::nvgFontSize(nvg, 11.5f);
                 mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
 
-                if (canvas.mcpPillDrawerMode == 1) {
+                if (mcpPillDrawerMode == 1) {
                     // Lenses: Doctor | Jam | Genesis | Modular | Free
                     const char* lenses[] = { "Doctor", "Jam", "Genesis", "Modular", "Free" };
                     const char* lensKeys[] = { "doctor", "jam", "genesis", "modular", "free" };
@@ -1006,7 +1006,7 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
                         float const iy = 3.0f;
                         float const iw = itemW - 3.0f;
                         float const ih = dh - 6.0f;
-                        bool const isActive = (canvas.mcpActiveLens == lensKeys[i]) || (canvas.mcpActiveLens.isEmpty() && i == 4);
+                        bool const isActive = (mcpActiveLens == lensKeys[i]) || (mcpActiveLens.isEmpty() && i == 4);
                         if (isActive) {
                             nanovg::nvgDrawRoundedRect(nvg, ix, iy, iw, ih, nanovg::nvgRGBA(255, 102, 0, 235), nanovg::nvgRGBA(255, 150, 60, 255), 4.0f);
                             nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(18, 18, 20, 255));
@@ -1016,7 +1016,7 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
                         }
                         mcpnvg::nvgText(nvg, ix + iw * 0.5f, iy + ih * 0.5f, lenses[i], nullptr);
                     }
-                } else if (canvas.mcpPillDrawerMode == 2) {
+                } else if (mcpPillDrawerMode == 2) {
                     // Tools: Explain | Drive | Filter | Reverb | Pack GOP | Tidy
                     const char* tools[] = { "Explain", "Drive", "Filter", "Reverb", "Pack GOP", "Tidy" };
                     float const itemW = (dw - 8.0f) / 6.0f;
@@ -1032,17 +1032,17 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
                 }
             }
         } else {
-            canvas.mcpPillDrawerFrame = {};
-            canvas.mcpPaletteFrame = {};
+            mcpPillDrawerFrame = {};
+            mcpPaletteFrame = {};
         }
     }
 
     // Tier-2 approval chips — a destructive op waits for the artist's yes.
     // Drawn in CANVAS coords (same space as the pill) so clicks hit-test free.
-    if (canvas.isApprovalRequested()) {
+    if (isApprovalRequested()) {
         juce::Rectangle<int> anchor;
-        if (canvas.mcpSelectionPill && canvas.mcpSelectionPill->isVisible() && !canvas.mcpSelectionPillFrame.isEmpty()) {
-            anchor = canvas.mcpSelectionPillFrame;
+        if (mcpSelectionPill && mcpSelectionPill->isVisible() && !mcpSelectionPillFrame.isEmpty()) {
+            anchor = mcpSelectionPillFrame;
         } else {
             auto const sel = canvas.getSelectionOfType<Object>();
             juce::Rectangle<int> b;
@@ -1061,10 +1061,10 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
         constexpr int barH = 46;
         int const bx = anchor.getCentreX() - barW / 2;
         int const by = anchor.getBottom() + 14;
-        canvas.mcpApprovalFrame = juce::Rectangle<int>(bx, by, barW, barH);
+        mcpApprovalFrame = juce::Rectangle<int>(bx, by, barW, barH);
         int const half = (barW - 24) / 2;
-        canvas.mcpApprovalYes = juce::Rectangle<int>(bx + 8, by + 8, half, barH - 16);
-        canvas.mcpApprovalNo = juce::Rectangle<int>(bx + 8 + half + 8, by + 8, half, barH - 16);
+        mcpApprovalYes = juce::Rectangle<int>(bx + 8, by + 8, half, barH - 16);
+        mcpApprovalNo = juce::Rectangle<int>(bx + 8 + half + 8, by + 8, half, barH - 16);
 
         NVGScopedState scopedAppr(nvg);
         nanovg::nvgTranslate(nvg, static_cast<float>(bx), static_cast<float>(by));
@@ -1084,18 +1084,18 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
         nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(210, 220, 235, 235));
         mcpnvg::nvgText(nvg, 8 + half + 8 + half * 0.5f, barH * 0.5f, "Cancel", nullptr);
     } else {
-        canvas.mcpApprovalFrame = {};
-        canvas.mcpApprovalYes = {};
-        canvas.mcpApprovalNo = {};
+        mcpApprovalFrame = {};
+        mcpApprovalYes = {};
+        mcpApprovalNo = {};
     }
     // Multimodal Pen / Sketch Ink Overlay (Rendered directly on GPU in canvas coords)
     renderSketchOverlay(nvg);
 
     // Paste slot ghost: an empty dashed frame waiting for Ctrl+V. Explicit,
     // local, never auto-read from the clipboard.
-    if (canvas.mcpImageSlotActive) {
-        float const scx = static_cast<float>(canvas.mcpImageSlotPos.x);
-        float const scy = static_cast<float>(canvas.mcpImageSlotPos.y);
+    if (mcpImageSlotActive) {
+        float const scx = static_cast<float>(mcpImageSlotPos.x);
+        float const scy = static_cast<float>(mcpImageSlotPos.y);
         float const sx = scx - 160.0f;
         float const sy = scy - 110.0f;
 
@@ -1171,7 +1171,7 @@ void CanvasMcpLayer::paintViewportFrame(NVGcontext* nvg, float const zoom)
     // Studio ink mode: a subtle neon frame around the visible viewport so the
     // armed pen is unmistakable — even after you look away. (Crosshair alone is
     // easy to miss.) Screen-constant width via /zoom.
-    if ((canvas.mcpSketchToolActive || canvas.mcpEraserToolActive) && canvas.viewport && !::getValue<bool>(canvas.presentationMode) && zoom > 0.0f) {
+    if ((mcpSketchToolActive || mcpEraserToolActive) && canvas.viewport && !::getValue<bool>(canvas.presentationMode) && zoom > 0.0f) {
         float const vx = static_cast<float>(canvas.viewport->getViewPositionX()) / zoom;
         float const vy = static_cast<float>(canvas.viewport->getViewPositionY()) / zoom;
         float const vw = static_cast<float>(canvas.viewport->getWidth()) / zoom;
@@ -1450,7 +1450,7 @@ void CanvasMcpLayer::renderSketchOverlay(NVGcontext* nvg)
 {
     if (!shouldShowAISketch()) return;
 
-    auto drawStroke = [&](const std::vector<Canvas::SketchPoint>& stroke, float alpha) {
+    auto drawStroke = [&](const std::vector<SketchPoint>& stroke, float alpha) {
         if (stroke.size() < 2) return;
 
         // 1. Outer Glow (Electric Cyan, soft wide stroke)
@@ -1490,14 +1490,14 @@ void CanvasMcpLayer::renderSketchOverlay(NVGcontext* nvg)
         nanovg::nvgStroke(nvg);
     };
 
-    if (canvas.mcpSketchAlpha > 0.001f && canvas.mcpStudioInkVisible) {
-        for (auto const& s : canvas.mcpCompletedStrokes) {
-            drawStroke(s, canvas.mcpSketchAlpha);
+    if (mcpSketchAlpha > 0.001f && mcpStudioInkVisible) {
+        for (auto const& s : mcpCompletedStrokes) {
+            drawStroke(s, mcpSketchAlpha);
         }
     }
 
-    if (canvas.isSketching && !canvas.mcpCurrentStroke.empty()) {
-        drawStroke(canvas.mcpCurrentStroke, 1.0f);
+    if (isSketching && !mcpCurrentStroke.empty()) {
+        drawStroke(mcpCurrentStroke, 1.0f);
     }
 }
 
@@ -1513,7 +1513,7 @@ void CanvasMcpLayer::renderReferenceImages(NVGcontext* nvg, Rectangle<int> inval
         // Decode with JUCE and upload as ARGB, like PictureObject. The old
         // ::nvgCreateImage(filename) path is not allowed any more: with the async
         // recorder only the render thread may touch the real GPU context.
-        auto& entry = canvas.mcpRefImageCache.try_emplace(img.id.toStdString()).first->second;
+        auto& entry = mcpRefImageCache.try_emplace(img.id.toStdString()).first->second;
         if (!entry.texture.isValid() || entry.ctx != nvg) {
             auto const decoded = juce::ImageFileFormat::loadFrom(juce::File(img.filePath));
             if (decoded.isValid())
@@ -1605,9 +1605,9 @@ void CanvasMcpLayer::renderVoiceTakes(NVGcontext* nvg, Rectangle<int> invalidReg
 
         if (!take.positioned) {
             // First sight: park near where the record strip was (or canvas centre).
-            float const px = canvas.mcpTakeSpawnPos.x != 0 ? static_cast<float>(canvas.mcpTakeSpawnPos.x)
+            float const px = mcpTakeSpawnPos.x != 0 ? static_cast<float>(mcpTakeSpawnPos.x)
                                                     : static_cast<float>(canvas.canvasOrigin.x + 40);
-            float const py = canvas.mcpTakeSpawnPos.y != 0 ? static_cast<float>(canvas.mcpTakeSpawnPos.y)
+            float const py = mcpTakeSpawnPos.y != 0 ? static_cast<float>(mcpTakeSpawnPos.y)
                                                     : static_cast<float>(canvas.canvasOrigin.y + 40);
             canvas.pd->getMcp()->session.setMcpVoiceTakePos(take.id, px - static_cast<float>(canvas.canvasOrigin.x),
                                    py - static_cast<float>(canvas.canvasOrigin.y) + 46.0f * static_cast<float>(slot));
@@ -1756,9 +1756,9 @@ void CanvasMcpLayer::renderMidiTakes(NVGcontext* nvg, Rectangle<int> invalidRegi
         if (!take.visible) continue;
 
         if (!take.positioned) {
-            float const px = canvas.mcpTakeSpawnPos.x != 0 ? static_cast<float>(canvas.mcpTakeSpawnPos.x)
+            float const px = mcpTakeSpawnPos.x != 0 ? static_cast<float>(mcpTakeSpawnPos.x)
                                                     : static_cast<float>(canvas.canvasOrigin.x + 40);
-            float const py = canvas.mcpTakeSpawnPos.y != 0 ? static_cast<float>(canvas.mcpTakeSpawnPos.y)
+            float const py = mcpTakeSpawnPos.y != 0 ? static_cast<float>(mcpTakeSpawnPos.y)
                                                     : static_cast<float>(canvas.canvasOrigin.y + 40);
             canvas.pd->getMcp()->session.setMcpMidiTakePos(take.id, px - static_cast<float>(canvas.canvasOrigin.x),
                                   py - static_cast<float>(canvas.canvasOrigin.y) + 46.0f * static_cast<float>(slot));

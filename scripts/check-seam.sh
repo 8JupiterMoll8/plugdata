@@ -3,6 +3,7 @@
 #
 #   scripts/check-seam.sh --report   per upstream-owned file: hunks, +/- lines, MCP-HOOK hunks (always exit 0)
 #   scripts/check-seam.sh --gate     the report, then exit 1 when the seam rules are broken
+#   add --worktree to either to measure the working tree instead of HEAD (uncommitted edits)
 #
 # Upstream-owned = a file that exists at the base in docs/mcp-bridge/UPSTREAM_BASE and
 # that the fork modified under Source/. Fork-only files (Source/Pd/MCPBridge*, ...) are
@@ -10,14 +11,22 @@
 # algorithm misaligns moved code (280 hunks instead of 215 at the P3.2 start).
 #
 # Rules (docs/mcp-bridge/SEAM.md):
-#   a. every hunk in an upstream file carries `MCP-HOOK(<name>)` on an added line, or
-#      its file is listed under "Carried patches" in SEAM.md;
+#   a. every hunk in an upstream file carries `MCP-HOOK(<name>)` or `MCP-CARRIED(<key>)` on an
+#      added line, or its file is listed under "Carried patches" in SEAM.md; every
+#      `MCP-CARRIED(<key>)` must be explained in SEAM.md (P3.2 S8: carried hunks one by one);
 #   b. Source/Pd/MCPBridge* includes no plugdata GUI header.
 set -uo pipefail
 
 mode="${1:---report}"
 if [[ "$mode" != "--report" && "$mode" != "--gate" ]]; then
-  echo "usage: check-seam.sh [--report|--gate]" >&2
+  echo "usage: check-seam.sh [--report|--gate] [--worktree]" >&2
+  exit 3
+fi
+rev=(HEAD)
+if [[ "${2:-}" == "--worktree" ]]; then
+  rev=()
+elif [[ -n "${2:-}" ]]; then
+  echo "usage: check-seam.sh [--report|--gate] [--worktree]" >&2
   exit 3
 fi
 
@@ -34,7 +43,7 @@ base="$(tr -d '[:space:]' < "$base_file")"
 gui_headers='PluginEditor|Toolbar|Sidebar|Canvas|CanvasViewport|TabComponent|Object|Connection|ObjectBase|AllGuis|GemCapture|Fonts|Dialogs'
 
 # file <TAB> hunks <TAB> plus <TAB> minus <TAB> tagged-hunks
-stats="$(git diff --diff-algorithm=histogram -w -U0 --diff-filter=M "$base" HEAD -- Source | awk '
+stats="$(git diff --diff-algorithm=histogram -w -U0 --diff-filter=M "$base" "${rev[@]}" -- Source | awk '
   function flush() {
     if (in_hunk && hunk_tagged) tagged_hunks++
     if (file != "") printf "%s\t%d\t%d\t%d\t%d\n", file, hunks, plus, minus, tagged_hunks
@@ -44,13 +53,13 @@ stats="$(git diff --diff-algorithm=histogram -w -U0 --diff-filter=M "$base" HEAD
     if (in_hunk && hunk_tagged) tagged_hunks++
     hunks++; in_hunk = 1; hunk_tagged = 0; next
   }
-  in_hunk && /^\+/ { plus++; if (index($0, "MCP-HOOK(") > 0) hunk_tagged = 1; next }
+  in_hunk && /^\+/ { plus++; if (index($0, "MCP-HOOK(") > 0 || index($0, "MCP-CARRIED(") > 0) hunk_tagged = 1; next }
   in_hunk && /^-/  { minus++; next }
   END { flush() }
 ')"
 
-echo "Seam report: fork HEAD vs base $(git rev-parse --short "$base") (histogram, -w, -U0, upstream-owned files)"
-printf '%-46s %6s %8s %7s %6s\n' FILE HUNKS "+LINES" "-LINES" HOOKS
+echo "Seam report: fork ${rev[0]:-working tree} vs base $(git rev-parse --short "$base") (histogram, -w, -U0, upstream-owned files)"
+printf '%-46s %6s %8s %7s %6s\n' FILE HUNKS "+LINES" "-LINES" TAGGED
 sort -t$'\t' -k2,2nr <<<"$stats" | awk -F'\t' 'NF == 5 { printf "%-46s %6d %8d %7d %6d\n", $1, $2, $3, $4, $5 }'
 awk -F'\t' 'NF == 5 { f++; h += $2; p += $3; m += $4; t += $5 } END { printf "%-46s %6d %8d %7d %6d   (%d files)\n", "TOTAL", h, p, m, t, f }' <<<"$stats"
 
@@ -69,6 +78,15 @@ while IFS=$'\t' read -r file hunks _plus _minus tagged; do
     problems=$((problems + 1))
   fi
 done <<<"$stats"
+
+# Every MCP-CARRIED(<key>) on an added line must be explained in SEAM.md.
+while IFS= read -r tag; do
+  [[ -z "$tag" ]] && continue
+  if ! grep -qF "\`$tag\`" "$seam_file" 2>/dev/null; then
+    echo "gate: FAIL $tag is not explained in SEAM.md"
+    problems=$((problems + 1))
+  fi
+done < <(git diff -U0 --diff-filter=M "$base" "${rev[@]}" -- Source | grep '^+' | grep -oE 'MCP-CARRIED\([^)]*\)' | sort -u)
 
 for f in Source/Pd/MCPBridge*; do
   [[ -f "$f" ]] || continue
