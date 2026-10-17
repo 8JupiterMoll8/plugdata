@@ -18,6 +18,7 @@
 #include "MCPBridgeHandoff.h" // safe timed waits on queued lambdas (Report F3)
 #include "MCPIdentity.h" // renameStableId (finding C6)
 #include "MCPJson.h" // jsonEscape for hand-built JSON (finding C6)
+#include "MCPBridgeInternal.h" // getArgString/getArgFloat/jsonEscape/... shared with the command files
 #include "Utility/SettingsFile.h" // compiledMode (hvcc_mode) in /pd/perf
 #include "Utility/Config.h"
 #include "../../Libraries/fftw3/api/fftw3.h"
@@ -34,15 +35,6 @@
 #include <mutex>
 #include <map>
 
-// The bridge reads raw object text with the caller freeing the buffer (the old
-// pd::Interface::getObjectText contract). Upstream's version now returns a
-// SmallString; keep the raw form here so long message boxes stay intact.
-static void mcpGetObjectText(t_object const* ob, char** text, int* size)
-{
-    *text = nullptr;
-    *size = 0;
-    binbuf_gettext(ob->te_binbuf, text, size);
-}
 #include <algorithm>
 struct BatchDedupEntry {
   uint64_t ts = 0;
@@ -146,26 +138,6 @@ struct CtrlMessage {
     char selector[MCP_CTRL_MAX_SYMLEN] = {};
     CtrlAtom atoms[MCP_CTRL_MAX_ATOMS];
 };
-
-static void copyTrunc(char* dst, int dstSize, const char* src)
-{
-    if (!src) { if (dstSize > 0) dst[0] = 0; return; }
-    int i = 0;
-    for (; i < dstSize - 1 && src[i]; ++i) dst[i] = src[i];
-    if (dstSize > 0) dst[i] = 0;
-}
-
-// JSON text for a value that goes between quotes in a hand-built reply (finding C6).
-// UTF-8 passes through unchanged; see MCPJson.h and Tests/mcp/json_escape_test.cpp.
-static juce::String jsonEscape(const char* s)
-{
-    return juce::String::fromUTF8(mcp::json::jsonEscape(s).c_str());
-}
-
-static juce::String jsonEscape(juce::String const& s)
-{
-    return jsonEscape(s.toRawUTF8());
-}
 
 // The armed window: a preallocated message log plus the live Pd binding.
 // Definition MUST stay at global scope (the header forward-declares it and
@@ -339,6 +311,7 @@ MCPBridge::MCPBridge(PluginProcessor* proc, int inPort, int outPort)
     , sendPort(outPort)
     , probeManager(this)
 {
+    commandTable(); // a bad verb table must fail here, at startup, not on the first message
     controlWindow = std::make_unique<McpControlWindow>();
     voiceCaptureBuffer.resize(MAX_VOICE_CAPTURE_SAMPLES, 0.0f);
     bootToken = juce::String(juce::Time::getMillisecondCounter()) + "-"
@@ -490,20 +463,6 @@ juce::String MCPBridge::canonicalCanvasKey(t_canvas* cnv)
 
     // Fallback pointer-derived stable key
     return juce::String::formatted("canvas-%p", cnv);
-}
-
-static juce::String getArgString(const juce::OSCArgument& arg);
-static float getArgFloat(const juce::OSCArgument& arg);
-
-// The plugdata fork does not expose glist_nth; walk the glist ourselves.
-static t_gobj* glistObjectAt(t_canvas* cnv, int index)
-{
-    if (!cnv || index < 0) return nullptr;
-    int i = 0;
-    for (t_gobj* y = cnv->gl_list; y; y = y->g_next) {
-        if (i++ == index) return y;
-    }
-    return nullptr;
 }
 
 // Build the textual object representation PlugData's GUI expects, applying
@@ -2412,6 +2371,9 @@ void MCPBridge::oscMessageReceived(const juce::OSCMessage& message)
 
     auto const domain = parts[0];
 
+    if (dispatchRegistered(domain, parts.size() > 1 ? parts[1] : juce::String(), message))
+        return;
+
     if (domain == "pd") {
         auto action = parts.size() > 1 ? parts[1] : "";
         handlePdDomain(action, message);
@@ -2456,24 +2418,6 @@ void MCPBridge::oscBundleReceived(const juce::OSCBundle& bundle)
             oscMessageReceived(elem.getMessage());
         }
     }
-}
-
-// Helper to extract string from OSC argument
-static juce::String getArgString(const juce::OSCArgument& arg)
-{
-    if (arg.isString()) return arg.getString();
-    if (arg.isFloat32()) return juce::String(arg.getFloat32());
-    if (arg.isInt32()) return juce::String(arg.getInt32());
-    return {};
-}
-
-// Helper to extract float from OSC argument
-static float getArgFloat(const juce::OSCArgument& arg)
-{
-    if (arg.isFloat32()) return arg.getFloat32();
-    if (arg.isInt32()) return static_cast<float>(arg.getInt32());
-    if (arg.isString()) return arg.getString().getFloatValue();
-    return 0.0f;
 }
 
 // ─── PRD Phase 3 §2.2: identity sidecar applier ──────────────────────────
@@ -2624,26 +2568,6 @@ static bool isBangTrack(const juce::String& name)
     if (name.contains("_") || name.containsIgnoreCase("gate") || name.containsIgnoreCase("freq")
         || name.containsIgnoreCase("pitch") || name.containsIgnoreCase("cut")) return false;
     return true;
-}
-
-static float varToFloat(const juce::var& v, float def)
-{
-    if (v.isVoid() || v.isUndefined()) return def;
-    if (v.isBool()) return v.toString().equalsIgnoreCase("true") ? 1.0f : 0.0f;
-    return (float)(double)v;
-}
-
-static int varToInt(const juce::var& v, int def)
-{
-    if (v.isVoid() || v.isUndefined()) return def;
-    return (int)(double)v;
-}
-
-static bool varToBool(const juce::var& v, bool def)
-{
-    if (v.isVoid() || v.isUndefined()) return def;
-    if (v.isBool()) return v.toString().equalsIgnoreCase("true");
-    return (double)v != 0.0;
 }
 
 // Prefix-only mirror of Pd's private struct _inlet (m_obj.c:42) — we read

@@ -19,6 +19,7 @@
 #include "Utility/Config.h"
 #include "Pd/Instance.h"
 #include "Pd/MCPIdentity.h" // renameStableId (also used by PluginProcessor.cpp; finding C6)
+#include "Pd/MCPBridgeRegistry.h" // verb table (Plan 3 P3.3)
 
 class PluginProcessor;
 class MCPBridge;
@@ -326,6 +327,18 @@ public:
     friend class McpHost; // replays undo/redo transactions through handlePdDomain
 
 private:
+    // Verb table (MCPBridgeVerbs.inc): one private member function per row, built
+    // into a command table at startup. A verb with a row is served from there;
+    // every other verb still reaches its handle<Domain>Domain function.
+    using VerbHandler = void (MCPBridge::*)(const juce::String& action, const juce::OSCMessage& msg);
+    using VerbTable = mcp::CommandTable<VerbHandler>;
+    static VerbTable const& commandTable();
+    bool dispatchRegistered(const juce::String& domain, const juce::String& pathVerb, const juce::OSCMessage& msg);
+
+#define MCP_VERB(domain, verb, handler) void handler(const juce::String& action, const juce::OSCMessage& msg);
+#define MCP_DOMAIN(domain, handler) void handler(const juce::String& action, const juce::OSCMessage& msg);
+#include "Pd/MCPBridgeVerbs.inc"
+
     void handlePdDomain(const juce::String& action, const juce::OSCMessage& msg);
     void handleParamDomain(const juce::String& paramName, const juce::OSCMessage& msg);
     void handleTriggerDomain(const juce::String& triggerAction, const juce::OSCMessage& msg);
