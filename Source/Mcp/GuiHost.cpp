@@ -214,7 +214,7 @@ public:
     void setOverlayMask(t_canvas* cnv, int mask) override
     {
         if (auto* cc = getOrCreateCanvasComponent(proc, cnv))
-            cc->setOverlayMask(mask);
+            cc->getMcpLayer().setOverlayMask(mask);
     }
 
     bool zoomToFit(t_canvas* cnv) override

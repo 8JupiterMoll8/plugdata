@@ -20,7 +20,7 @@ The fork's AI bridge (`Source/Pd/MCPBridge*`, the overlay layer, the moodboard) 
 | Pd-thread command | `handleSysMessage(selector, list) -> bool` |
 | save | `patchSaved(t_glist*, path)` |
 | telemetry | `consoleMessage(text, isError)`, `selectionChanged(selector, list)` |
-| overlay paint | `CanvasMcpLayer::paintUnder/OverObjects`, `decorateObject`, `isTargeted(object\|connection)` |
+| overlay paint | `CanvasMcpLayer::paintUnderObjects`, `paintOverObjects`, `paintViewportFrame`, `paintScreenOverlay`, `updateOverlays(state)` (tag `overlayPaint`); `decorateObject` (tag `decorateObject`); `isTargeted(object\|connection)` (tag `overlayTarget`). Done in S7 |
 | canvas input | mouse, key and modifier events, each returning `consumed` |
 | canvas lifecycle | created, destroyed, synchronised, settingsChanged, `undo/redo -> handled` |
 
@@ -31,6 +31,8 @@ Upstream-file hunks that stay as they are, with the reason. Empty until P3.2 S9;
 | File | Why it cannot be a hook |
 |---|---|
 | `Source/Pd/Instance.cpp` | 5 hunks in the console handler (`processPrint`) are the fork's error classification for the ARTIST console: lines containing "couldn't create", "error:" or "canvas: ..." show as errors, and an "error " prefix strips 6 characters, not 7 (upstream drops a letter). A plugdata console fix, not MCP code; the MCP part of that handler is the one tagged hook line. The other 4 hunks are tagged (`mcp_host` receiver: create, free, dispatch case; console hook) plus `pd::Setup::initialiseIemguts()` (pd-iemguts, untagged, carried here too) |
+| `Source/Utility/NVGGraphicsContext.cpp` | `enqueueBaselineText` (1 hunk, a new static function): records one line of nanovg-style text for the MCP overlays (`Utility/NVGTextShim.h`). It builds a `DeferredTextPayload` and calls `enqueueDeferredText`, both file-static in this file, so it cannot move into the shim without exposing upstream internals (P3.2 S7) |
+| `Source/Utility/NVGGraphicsContext.h` | the declaration of `enqueueBaselineText` (1 hunk), see the row above |
 
 ## Submodule patches (`patches/submodules/`)
 
@@ -66,6 +68,11 @@ Not part of the hunk count above (that measures `Source/`). Applied by `scripts/
   - Every `McpGuiHost` method says which thread calls it. The callers that are NOT on the message thread are marked `OFF-THREAD` there (layout bounds under sys_lock, `/pd/bounds`, `/pd/obj_relabel` repaint, the `open_patch` duplicate scan, `measure_text`, `/pd/perf`, `save_as` on the Pd thread). Live, `/pd/obj_relabel` is the source of the `juce_Component.cpp:1881` assertion (2 per call); for P3.4.
   - **Finding L9 (pre-existing, not S6):** `encapsulate_to_file` registers the new `[abstr]` box under its id, then calls `reloadAbstractions`, which recreates abstraction instances. Whether the id survives depends on timing (seen lost once under gdb, kept in 3 normal runs). For P3.5.
   - `/pd/focus_tab` and `/pd/close_tab` build a `juce::File` from the target even when it is a bare name, which logs one `juce_File.cpp:219` assertion per call (pre-existing, same count as before S6).
+
+- **S7 (canvas overlay paint hook).** `Source/Mcp/CanvasMcpLayer.h/.cpp`, one per `Canvas` (`Canvas::getMcpLayer()`, created first thing in the constructor). It holds the four paint blocks of `performRender` (under objects: regions, reference images, voice/MIDI takes; over objects: notes with pivot chips, note editor and selection pill frames, approval chips, sketch ink, image slot, ghosts; the studio ink frame; the screen-space HUD), the `shouldShowAI*` toggles and their `showAi*` bits, `render{SketchOverlay,ReferenceImages,VoiceTakes,MidiTakes}`, `setOverlayMask`, the spotlight targeting, and the per-object AI state mark (`decorateObject`, from `Object::performRender`). Every call sits where its block was; the bodies moved verbatim, with implicit Canvas members turned into `canvas.` accesses (found by the compiler, checked by a normalized line-multiset compare). No `friend` was needed: the fork's Canvas members are public. `Canvas.h` includes `Mcp/CanvasMcpLayer.h` (one tagged line) so `Object.cpp`/`Connection.cpp` need no include hunk.
+  - What stays in `Canvas.cpp` for S8: the note/pill/palette/approval/take/image INPUT code and its state (it uses `CanvasMcpLayer::getAnnotationPivotChips`/`getChipWidth`), the tools and studio mode, `getSketchBoundsInCanvas`/`buildSketchJson`.
+  - `NVGGraphicsContext::enqueueBaselineText` is carried (table above): it needs the file-static deferred-text internals.
+  - Overlay goldens: compared with `scripts/live/compare-pngs-tolerant.py` in the TS repo (no pixel off by more than 31 per channel, top 12 rows skipped for the L7 tab strip); all 6 pass against the P3.1 goldens. Noticed: `06-spotlight` equals `05-state` in the goldens themselves, so the recorder's spotlight frame proves nothing yet (pre-existing).
 
 ## Known upstream behaviour
 

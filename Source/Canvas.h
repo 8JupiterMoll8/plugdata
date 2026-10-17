@@ -7,6 +7,7 @@
 #pragma once
 
 #include <unordered_map>
+#include "Mcp/CanvasMcpLayer.h" // MCP-HOOK(overlayPaint)
 #include <nanovg_async.h>
 #ifdef NANOVG_GL_IMPLEMENTATION
 #    include <juce_opengl/juce_opengl.h>
@@ -117,13 +118,6 @@ public:
 
     bool shouldShowObjectActivity() const;
     bool shouldShowIndex() const;
-    bool shouldShowAIState() const;
-    bool shouldShowAIRegions() const;
-    bool shouldShowAIAnnotations() const;
-    bool shouldShowAIGhosts() const;
-    bool shouldShowAIHud() const;
-    bool shouldShowAISketch() const;
-    bool shouldShowAIReferences() const;
     void setSketchToolActive(bool active);
     bool isSketchToolActive() const;
     bool isSketchingActive() const;
@@ -134,11 +128,6 @@ public:
     juce::String buildSketchJson() const;
     bool shouldShowConnectionDirection() const;
     bool shouldShowConnectionActivity() const;
-    void setOverlayMask(int mask);
-
-    bool hasOverlayTargets() const;
-    bool isObjectTargeted(Object const* obj) const;
-    bool isConnectionTargeted(Connection const* c) const;
 
     void save(std::function<void()> const& nestedCallback = [] { });
     void saveAs(std::function<void()> const& nestedCallback = [] { });
@@ -262,13 +251,6 @@ public:
     bool connectionsBehind : 1 = true;
     bool showObjectActivity : 1 = false;
     bool showIndex : 1 = false;
-    bool showAiState : 1 = false;
-    bool showAiRegions : 1 = true;
-    bool showAiAnnotations : 1 = true;
-    bool showAiGhosts : 1 = true;
-    bool showAiHud : 1 = true;
-    bool showAiSketch : 1 = true;
-    bool showAiReferences : 1 = true;
     bool showConnectionDirection : 1 = false;
     bool showConnectionActivity : 1 = false;
 
@@ -278,6 +260,10 @@ public:
     bool needsSearchUpdate : 1 = false;
     bool altDown : 1 = false;
     bool shiftDown : 1 = false;
+
+    // The MCP layer: AI overlay paint and targeting (Source/Mcp/CanvasMcpLayer.h).
+    CanvasMcpLayer& getMcpLayer() { return *mcpLayer; }       // MCP-HOOK(overlayPaint)
+    std::unique_ptr<CanvasMcpLayer> mcpLayer;                 // MCP-HOOK(overlayPaint)
 
     // PRD overlay: inline editor to reply to an AI note (double-click a note tag).
     std::unique_ptr<juce::TextEditor> mcpNoteEditor;
@@ -348,7 +334,6 @@ public:
     };
     std::unique_ptr<SketchFadeTimer> mcpSketchFadeTimer;
     void startSketchFadeTimer();
-    void renderSketchOverlay(NVGcontext* nvg);
 
     // Phase 1B — Moodboard Chisel: when no PD object is selected but ink exists,
     // the pill anchors 14px below the sketch bounding box as a tactile action
@@ -411,14 +396,11 @@ public:
     std::unordered_map<std::string, RefImageTexture> mcpRefImageCache;
     juce::String mcpDraggingRefImageId;
     juce::Point<int> mcpRefImageDragOffset;
-    void renderReferenceImages(NVGcontext* nvg, Rectangle<int> invalidRegion);
     bool pasteImageFromClipboard();
     bool handleReferenceImageClick(MouseEvent const& e, Point<int> mousePos, bool isRightClick);
 
     // Phase 3 — Voice take chips on the glass: ▶ audition + mini-waveform + ✕.
-    void renderVoiceTakes(NVGcontext* nvg, Rectangle<int> invalidRegion);
     bool handleVoiceTakeClick(MouseEvent const& e, Point<int> mousePos);
-    void renderMidiTakes(NVGcontext* nvg, Rectangle<int> invalidRegion);
     bool handleMidiTakeClick(MouseEvent const& e, Point<int> mousePos);
     juce::String mcpDraggingMidiTakeId;
     juce::Point<int> mcpMidiTakeDragOffset;

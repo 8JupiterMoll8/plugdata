@@ -490,7 +490,7 @@ void Object::triggerOverlayActiveState()
     if (rateReducer.tooFast())
         return;
 
-    if (!cnv->shouldShowObjectActivity() || !cnv->isObjectTargeted(this))
+    if (!cnv->shouldShowObjectActivity() || !cnv->getMcpLayer().isTargeted(this)) // MCP-HOOK(overlayTarget)
         return;
 
     activeStateAlpha = 1.0f;
@@ -771,7 +771,7 @@ void Object::mouseDown(MouseEvent const& e)
         return;
 
     // Multimodal Pen / Sketch overlay: Alt-drag or active sketch tool draws on canvas
-    if (!e.mods.isRightButtonDown() && cnv && cnv->shouldShowAISketch() && (e.mods.isAltDown() || cnv->isSketchToolActive())) {
+    if (!e.mods.isRightButtonDown() && cnv && cnv->getMcpLayer().shouldShowAISketch() && (e.mods.isAltDown() || cnv->isSketchToolActive())) {
         cnv->mouseDown(e.getEventRelativeTo(cnv));
         return;
     }
@@ -851,7 +851,7 @@ void Object::mouseDown(MouseEvent const& e)
 
 void Object::mouseUp(MouseEvent const& e)
 {
-    if (cnv && cnv->shouldShowAISketch() && (cnv->isSketchingActive() || (cnv->isSketchToolActive() && !wasLockedOnMouseDown))) {
+    if (cnv && cnv->getMcpLayer().shouldShowAISketch() && (cnv->isSketchingActive() || (cnv->isSketchToolActive() && !wasLockedOnMouseDown))) {
         cnv->mouseUp(e.getEventRelativeTo(cnv));
         return;
     }
@@ -957,7 +957,7 @@ void Object::mouseUp(MouseEvent const& e)
 
 void Object::mouseDrag(MouseEvent const& e)
 {
-    if (cnv && cnv->shouldShowAISketch() && (e.mods.isAltDown() || cnv->isSketchToolActive() || cnv->isSketchingActive())) {
+    if (cnv && cnv->getMcpLayer().shouldShowAISketch() && (e.mods.isAltDown() || cnv->isSketchToolActive() || cnv->isSketchingActive())) {
         cnv->mouseDrag(e.getEventRelativeTo(cnv));
         return;
     }
@@ -1274,28 +1274,8 @@ void Object::performRender(NVGcontext* nvg)
         nanovg::nvgStrokeWidth(nvg, 1.0f);
         nanovg::nvgRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), getPlugDataLook(*this).getObjectCornerRadius());
         nanovg::nvgStroke(nvg);
-    } else if (cnv->shouldShowAIState()) {
-        // PRD overlay: AI state marker drawn per-object (1=changed, 2=proposed, 3=error).
-        int const aiState = cnv->pd->getMcp()->session.getAiOverlayState(getPointer());
-        if (aiState != 0) {
-            int const st = aiState;
-            NVGcolor col = (st == 1) ? nanovg::nvgRGB(0x3d, 0xdd, 0x8a)
-                        : (st == 2) ? nanovg::nvgRGB(0x4a, 0x9e, 0xff)
-                                    : nanovg::nvgRGB(0xff, 0x5a, 0x5a);
-            NVGScopedState scopedAIState(nvg);
-            nanovg::nvgBeginPath(nvg);
-            nanovg::nvgStrokeColor(nvg, col);
-            nanovg::nvgStrokeWidth(nvg, 2.0f);
-            nanovg::nvgRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), getPlugDataLook(*this).getObjectCornerRadius());
-            nanovg::nvgStroke(nvg);
-
-            // state dot, top-right
-            nanovg::nvgBeginPath(nvg);
-            nanovg::nvgFillColor(nvg, col);
-            nanovg::nvgCircle(nvg, b.getRight() - 3.0f, b.getY() + 3.0f, 4.0f);
-            nanovg::nvgFill(nvg);
-        }
-    } else if (cnv->shouldShowIndex() && cnv->isObjectTargeted(this)) {
+    } else if (cnv->getMcpLayer().decorateObject(nvg, *this, b)) { // MCP-HOOK(decorateObject)
+    } else if (cnv->shouldShowIndex() && cnv->getMcpLayer().isTargeted(this)) { // MCP-HOOK(overlayTarget)
         constexpr int halfHeight = 5;
 
         auto const text = std::to_string(cnv->objects.index_of(this));

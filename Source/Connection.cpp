@@ -198,7 +198,7 @@ void Connection::render(NVGcontext* nvg)
 
     float dashSize = isSignalCable ? numSignalChannels <= 1 ? 2.5f : 1.5f : 0.0f;
     auto useGradientLook = getPlugDataLook(*this).getUseGradientConnectionLook() && !(isSelected() || isHovering);
-    auto showActivity = cableType == DataCable && cnv->shouldShowConnectionActivity() && cnv->isConnectionTargeted(this);
+    auto showActivity = cableType == DataCable && cnv->shouldShowConnectionActivity() && cnv->getMcpLayer().isTargeted(this); // MCP-HOOK(overlayTarget)
     nanovg::nvgStrokePaint(nvg, nanovg::nvgDoubleStroke(nvg, connectionColour, shadowColour, dashColor, dashSize, useGradientLook, showActivity, offset));
     nanovg::nvgStrokeWidth(nvg, cableThickness);
 
@@ -261,7 +261,7 @@ void Connection::render(NVGcontext* nvg)
         nanovg::nvgFill(nvg);
     };
 
-    if (cnv->shouldShowConnectionDirection() && cnv->isConnectionTargeted(this)) {
+    if (cnv->shouldShowConnectionDirection() && cnv->getMcpLayer().isTargeted(this)) { // MCP-HOOK(overlayTarget)
         if (isSegmented()) {
             for (int i = 1; i < currentPlan.size(); i++) {
                 auto const pathLine = Line<float>(currentPlan[i - 1], currentPlan[i]);
@@ -1706,7 +1706,7 @@ void ConnectionPathUpdater::timerCallback()
 
 void Connection::receiveMessage(t_symbol* symbol, SmallArray<pd::Atom> const& atoms)
 {
-    if (cnv->shouldShowConnectionActivity() && cnv->isConnectionTargeted(this)) {
+    if (cnv->shouldShowConnectionActivity() && cnv->getMcpLayer().isTargeted(this)) { // MCP-HOOK(overlayTarget)
         activityStateAnimator.start();
     }
 
