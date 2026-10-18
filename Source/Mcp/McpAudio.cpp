@@ -37,12 +37,14 @@ void McpHost::audioBlockStarted()
     session.mcpAudioBlocks.fetch_add(1, std::memory_order_relaxed); // #83 audio-thread liveness
     session.mcpLastBlockMs.store(juce::Time::getMillisecondCounter(), std::memory_order_relaxed);
     // P3.4 S11 test-only: a forced stall, as a very heavy DSP block would hold the Pd lock (never set otherwise).
-    if (session.mcpDebugStallMs.load(std::memory_order_relaxed) > 0) {
-        int const stallMs = session.mcpDebugStallMs.exchange(0, std::memory_order_relaxed);
+    // The value turns -1 once the lock is held (the verb answers then) and -2 when the stall ends.
+    if (int const stallMs = session.mcpDebugStallMs.load(std::memory_order_relaxed); stallMs > 0) {
         mcp::rt::Pause const pause;
         processor.audioLock.enter();
+        session.mcpDebugStallMs.store(-1, std::memory_order_relaxed);
         juce::Thread::sleep(stallMs);
         processor.audioLock.exit();
+        session.mcpDebugStallMs.store(-2, std::memory_order_relaxed);
     }
     mcp::audit::markAudioThread(); // P3.4 S0: no-op unless PLUGDATA_MCP_AUDIT=1
 }

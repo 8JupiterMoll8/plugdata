@@ -219,6 +219,13 @@ void MCPBridge::pdDebugStallAudio(const juce::String&, const juce::OSCMessage& m
     if (!processor || msg.size() < 1) return;
     int const ms = juce::jlimit(1, 10000, static_cast<int>(getArgFloat(msg[0])));
     auto const correlationId = msg.size() > 1 ? getArgString(msg[1]) : juce::String("0");
-    processor->getMcp()->session.mcpDebugStallMs.store(ms, std::memory_order_relaxed);
-    sendReply("/pd/debug_stall_audio/reply/" + correlationId, static_cast<float>(ms));
+    auto& stall = processor->getMcp()->session.mcpDebugStallMs;
+    stall.store(ms, std::memory_order_relaxed);
+    // Answer once the audio thread holds the Pd lock (-1), so a request sent after the reply meets the stall;
+    // 0 means it never started within 2 s (audio not running).
+    bool started = false;
+    for (int i = 0; i < 2000 && !(started = stall.load(std::memory_order_relaxed) < 0); ++i)
+        juce::Thread::sleep(1);
+    if (!started) stall.store(0, std::memory_order_relaxed);
+    sendReply("/pd/debug_stall_audio/reply/" + correlationId, started ? static_cast<float>(ms) : 0.0f);
 }

@@ -105,6 +105,7 @@ struct BatchJob {
     // canvas — name the failure instead of mutating the wrong patch.
     bool canvasNotFound = false;
     bool undoReset = false;
+    bool pdLockBusy = false; // P3.4 S11: parse could not take the Pd lock within 2 s (nothing applied)
 
     void parse(const juce::OSCMessage& msg);
     void runPdJob();

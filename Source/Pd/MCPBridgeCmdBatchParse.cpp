@@ -122,6 +122,18 @@ void mcp::BatchJob::parse(const juce::OSCMessage& msg)
         preEdits.push_back({ oid, tk.joinIntoString(" ") });
     }
 
+    // P3.4 S11: the tempId theft guard below reads the identity map under the Pd lock. The wait is bounded like
+    // the Pd-context wait: a lock held for 2 s (a stalled audio block) refuses the batch before anything applies.
+    bool const guardLocked = createCount > 0;
+    if (guardLocked) {
+        bool got = false;
+        for (int waited = 0; waited <= 2000 && !(got = processor->audioLock.tryEnter()); ++waited)
+            juce::Thread::sleep(1);
+        if (!got) {
+            pdLockBusy = true;
+            return;
+        }
+    }
     for (int o = 0; o < createCount && cursor < msg.size(); o++) {
         auto oid = getArgString(msg[cursor++]);
         float px = (cursor < msg.size()) ? getArgFloat(msg[cursor++]) : 0;
@@ -138,15 +150,10 @@ void mcp::BatchJob::parse(const juce::OSCMessage& msg)
         // silently overwrite mcpStableObjectMap (below), orphaning the
         // original as gui_* and misrouting every later op on that id.
         // Refuse it here; skip the paste + registration entirely.
-        bool taken = false;
-        if (ot.isNotEmpty() && !oid.isEmpty()) {
-            // P3.4 S11 (review): resolveStableId walks gl_list and edits the identity maps; under the Pd lock
-            // like every other identity access (an MCP undo replays a batch on the message thread meanwhile).
-            sys_lock();
-            taken = processor->getMcp()->resolveStableId(canvasName, oid) != nullptr;
-            sys_unlock();
-        }
-        if (taken) {
+        // resolveStableId walks gl_list and edits the identity maps: under the Pd lock taken above (an MCP undo
+        // can replay a batch on the message thread meanwhile; P3.4 S11 review).
+        if (ot.isNotEmpty() && !oid.isEmpty()
+            && processor->getMcp()->resolveStableId(canvasName, oid) != nullptr) {
             CreateFailure cf;
             cf.tempId = oid.toStdString();
             cf.type = ot.toStdString();
@@ -227,6 +234,9 @@ void mcp::BatchJob::parse(const juce::OSCMessage& msg)
         pastaBuffer += formatAsPdLine(kind, tk, static_cast<int>(px), static_cast<int>(py)) + "\n";
         pendingCreates.push_back({ oid, ot, kind, static_cast<int>(px), static_cast<int>(py), initValue, seedInit });
     }
+
+    if (guardLocked)
+        processor->audioLock.exit();
 
     // ALL connections go through obj_connect after paste (no #X connect in buffer)
     for (int c = 0; c < connectCount && cursor + 3 < msg.size(); c++) {

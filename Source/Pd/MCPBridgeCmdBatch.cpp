@@ -195,6 +195,12 @@ void MCPBridge::pdBatchAtomic(const juce::String& action, const juce::OSCMessage
 
         mcp::BatchJob job { processor, canvasName, correlationId };
         job.parse(msg);
+        if (job.pdLockBusy) {
+            juce::OSCMessage errReply { juce::OSCAddressPattern("/pd/batch_atomic/error/" + correlationId) };
+            errReply.addArgument(juce::String("rejected: the Pd lock was held elsewhere for 2000ms; nothing was applied"));
+            sender.send(errReply);
+            return;
+        }
 
         // =========================================================================
         // EXECUTE IN THE PD CONTEXT (message thread, sys_lock; P3.4 S3)
