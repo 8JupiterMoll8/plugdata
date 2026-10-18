@@ -42,6 +42,11 @@ or posted job. The reasons and the measurements behind each rule are in the TS r
    overlay data under the Pd lock, swap it in under the overlay lock.
 11. **An MCP mutation empties Pd's native undo queue through `resetNativeUndo`** (free, then `canvas_undo_init`):
    the UNDO_INIT head must stay (finding L6).
+12. **Identity state only through `McpHost::identity`, only under the Pd lock** (P3.5). Take `McpHost::PdLockScope`
+   (recursive) around any identity access; `getStableId`, `getOrAdoptStableId`, `resolveStableId` and
+   `reconcileIdentity` take it themselves. Never hold a reference into an id map past the lock. Only
+   `IdentityCore::version()` is lock-free (atomic). With `PLUGDATA_MCP_AUDIT=1` every unlocked access logs
+   `MCP_AUDIT identity-unlocked <where> role=... at <frames>`.
 
 ## Test tools
 
