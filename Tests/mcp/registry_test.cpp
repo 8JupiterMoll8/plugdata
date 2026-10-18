@@ -171,6 +171,16 @@ int main()
         CHECK(reported("telemetry", "", "no_such_verb"));
         CHECK(!reported("bridge", "unknown_verb"));
 
+        // The id-addressed verbs batch_atomic covers are gone (P3.3 S9); the index forms and
+        // move_batch_id (the undo/redo replay verb) stay.
+        for (char const* gone : { "create_id", "create_batch_id", "connect_id", "connect_batch_id", "disconnect_id",
+                 "disconnect_batch_id", "delete_id", "delete_batch_id", "edit_id", "move_id" })
+            CHECK(reported("pd", gone));
+        for (char const* kept : { "create", "create_batch", "connect", "connect_batch", "disconnect", "disconnect_batch",
+                 "delete", "delete_batch", "move_batch", "move_batch_id", "rename_id", "rename_id_batch", "register_id",
+                 "clear_ids", "get_mappings", "batch_atomic" })
+            CHECK(!reported("pd", kept));
+
         // One handler per verb row: a second name for a handler is an MCP_ALIAS.
         std::set<std::string> handlers;
         for (auto const& r : verbRows) CHECK(handlers.insert(r.handler).second);
@@ -190,13 +200,11 @@ int main()
 #define MCP_SYS(selector, handler) rows.push_back({ selector, #handler });
 #include "../../Source/Mcp/McpSysVerbs.inc"
 
-        // The selectors the double list in handleSysMessage / dispatchSysMessage held.
+        // The selectors that still have a sender: the 22 of the old double list minus the id-addressed
+        // forms and mcp_suspend_dsp / mcp_resume_dsp, which only the retired delete_batch_id used (P3.3 S9).
         std::set<std::string> const expected {
-            "mcp_selection_gate", "mcp_move", "mcp_clear_selection", "mcp_move_batch", "mcp_clear_ids",
-            "mcp_clear_undo", "mcp_suspend_dsp", "mcp_resume_dsp", "mcp_create_batch_id", "mcp_create_id",
-            "mcp_register_id", "mcp_connect_id", "mcp_disconnect_id", "mcp_delete_id", "mcp_rename_id",
-            "mcp_move_id", "mcp_edit_id", "mcp_get_mappings", "mcp_census", "mcp_move_batch_id",
-            "mcp_connect_batch_id", "mcp_disconnect_batch_id",
+            "mcp_selection_gate", "mcp_move", "mcp_clear_selection", "mcp_move_batch", "mcp_move_batch_id",
+            "mcp_clear_ids", "mcp_clear_undo", "mcp_register_id", "mcp_rename_id", "mcp_get_mappings", "mcp_census",
         };
         std::set<std::string> selectors;
         for (auto const& r : rows) selectors.insert(r.selector);

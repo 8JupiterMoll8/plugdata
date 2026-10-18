@@ -4,12 +4,12 @@
  // WARRANTIES, see the file, "LICENSE.txt," in this distribution.
 */
 
-// Bridge commands: index-based create/connect/disconnect/delete/move and the *_id forms (Plan 3 P3.3): handlers moved unchanged out of MCPBridge::handlePdDomain.
+// Bridge commands: index-based create/connect/disconnect/delete/move, and move_batch_id (the undo/redo replay verb). Plan 3 P3.3: handlers moved unchanged out of MCPBridge::handlePdDomain; S9 removed the other id-addressed forms (batch_atomic covers them).
 
 #include "MCPBridgeCmdCommon.h"
 
 // Build the textual object representation PlugData's GUI expects, applying
-// the same kind mapping used by mcp_create_batch_id in PluginProcessor.
+// the same kind mapping the retired mcp_create_batch_id used.
 static juce::String buildObjectText(const juce::String& kind, const juce::StringArray& tokens)
 {
     juce::StringArray t = tokens;
@@ -260,7 +260,7 @@ void MCPBridge::pdDeleteBatch(const juce::String& action, const juce::OSCMessage
     return;
 }
 
-void MCPBridge::pdMoveId(const juce::String& action, const juce::OSCMessage& msg)
+void MCPBridge::pdMoveBatchId(const juce::String& action, const juce::OSCMessage& msg)
 {
     if (msg.size() >= 3 && processor) {
         SmallArray<pd::Atom> atoms;
@@ -277,219 +277,11 @@ void MCPBridge::pdMoveId(const juce::String& action, const juce::OSCMessage& msg
             }
         }
 
-        if (action == "move_id") {
-            processor->receiveSysMessage("mcp_move_id", atoms);
-        } else if (action == "move_batch_id") {
+        if (action == "move_batch_id") {
             processor->receiveSysMessage("mcp_move_batch_id", atoms);
         } else {
             processor->receiveSysMessage("mcp_move_batch", atoms);
         }
-    }
-    return;
-}
-
-void MCPBridge::pdCreateId(const juce::String& action, const juce::OSCMessage& msg)
-{
-    if (msg.size() >= 6 && processor) {
-        SmallArray<pd::Atom> atoms;
-        auto canvasName = normalizeCanvas(getArgString(msg[0]));
-        auto correlationId = getArgString(msg[1]);
-        auto objectId = getArgString(msg[2]);
-        float x = getArgFloat(msg[3]);
-        float y = getArgFloat(msg[4]);
-        auto kind = getArgString(msg[5]);
-
-        atoms.add(pd::Atom(processor->generateSymbol(canvasName)));
-        atoms.add(pd::Atom(processor->generateSymbol(correlationId)));
-        atoms.add(pd::Atom(processor->generateSymbol(objectId)));
-        atoms.add(pd::Atom(x));
-        atoms.add(pd::Atom(y));
-        atoms.add(pd::Atom(processor->generateSymbol(kind)));
-
-        for (int i = 6; i < msg.size(); ++i) {
-            atoms.add(pd::Atom(processor->generateSymbol(getArgString(msg[i]))));
-        }
-        processor->receiveSysMessage("mcp_create_id", atoms);
-    }
-    return;
-}
-
-void MCPBridge::pdCreateBatchId(const juce::String& action, const juce::OSCMessage& msg)
-{
-    if (msg.size() >= 3 && processor) {
-        SmallArray<pd::Atom> atoms;
-        auto canvasName = normalizeCanvas(getArgString(msg[0]));
-        auto correlationId = getArgString(msg[1]);
-        float count = getArgFloat(msg[2]);
-
-        atoms.add(pd::Atom(processor->generateSymbol(canvasName)));
-        atoms.add(pd::Atom(processor->generateSymbol(correlationId)));
-        atoms.add(pd::Atom(count));
-
-        for (int i = 3; i < msg.size(); ++i) {
-            if (msg[i].isFloat32() || msg[i].isInt32()) {
-                atoms.add(pd::Atom(getArgFloat(msg[i])));
-            } else {
-                atoms.add(pd::Atom(processor->generateSymbol(getArgString(msg[i]))));
-            }
-        }
-        processor->receiveSysMessage("mcp_create_batch_id", atoms);
-    }
-    return;
-}
-
-void MCPBridge::pdConnectId(const juce::String& action, const juce::OSCMessage& msg)
-{
-    if (msg.size() >= 6 && processor) {
-        SmallArray<pd::Atom> atoms;
-        auto canvasName = normalizeCanvas(getArgString(msg[0]));
-        auto correlationId = getArgString(msg[1]);
-        auto srcId = getArgString(msg[2]);
-        float srcOut = getArgFloat(msg[3]);
-        auto destId = getArgString(msg[4]);
-        float destIn = getArgFloat(msg[5]);
-
-        atoms.add(pd::Atom(processor->generateSymbol(canvasName)));
-        atoms.add(pd::Atom(processor->generateSymbol(correlationId)));
-        atoms.add(pd::Atom(processor->generateSymbol(srcId)));
-        atoms.add(pd::Atom(srcOut));
-        atoms.add(pd::Atom(processor->generateSymbol(destId)));
-        atoms.add(pd::Atom(destIn));
-
-        processor->receiveSysMessage("mcp_connect_id", atoms);
-    }
-    return;
-}
-
-void MCPBridge::pdConnectBatchId(const juce::String& action, const juce::OSCMessage& msg)
-{
-    if (msg.size() >= 2 && processor) {
-        SmallArray<pd::Atom> atoms;
-        auto canvasName = normalizeCanvas(getArgString(msg[0]));
-        auto correlationId = getArgString(msg[1]);
-        atoms.add(pd::Atom(processor->generateSymbol(canvasName)));
-        atoms.add(pd::Atom(processor->generateSymbol(correlationId)));
-
-        for (int i = 2; i < msg.size(); ++i) {
-            if (msg[i].isFloat32() || msg[i].isInt32()) {
-                atoms.add(pd::Atom(getArgFloat(msg[i])));
-            } else {
-                atoms.add(pd::Atom(processor->generateSymbol(getArgString(msg[i]))));
-            }
-        }
-        processor->receiveSysMessage("mcp_connect_batch_id", atoms);
-    }
-    return;
-}
-
-void MCPBridge::pdDisconnectId(const juce::String& action, const juce::OSCMessage& msg)
-{
-    if (msg.size() >= 6 && processor) {
-        SmallArray<pd::Atom> atoms;
-        auto canvasName = normalizeCanvas(getArgString(msg[0]));
-        auto correlationId = getArgString(msg[1]);
-        auto srcId = getArgString(msg[2]);
-        float srcOut = getArgFloat(msg[3]);
-        auto destId = getArgString(msg[4]);
-        float destIn = getArgFloat(msg[5]);
-
-        atoms.add(pd::Atom(processor->generateSymbol(canvasName)));
-        atoms.add(pd::Atom(processor->generateSymbol(correlationId)));
-        atoms.add(pd::Atom(processor->generateSymbol(srcId)));
-        atoms.add(pd::Atom(srcOut));
-        atoms.add(pd::Atom(processor->generateSymbol(destId)));
-        atoms.add(pd::Atom(destIn));
-
-        processor->receiveSysMessage("mcp_disconnect_id", atoms);
-    }
-    return;
-}
-
-void MCPBridge::pdDisconnectBatchId(const juce::String& action, const juce::OSCMessage& msg)
-{
-    if (msg.size() >= 2 && processor) {
-        SmallArray<pd::Atom> atoms;
-        auto canvasName = normalizeCanvas(getArgString(msg[0]));
-        auto correlationId = getArgString(msg[1]);
-        atoms.add(pd::Atom(processor->generateSymbol(canvasName)));
-        atoms.add(pd::Atom(processor->generateSymbol(correlationId)));
-
-        for (int i = 2; i < msg.size(); ++i) {
-            if (msg[i].isFloat32() || msg[i].isInt32()) {
-                atoms.add(pd::Atom(getArgFloat(msg[i])));
-            } else {
-                atoms.add(pd::Atom(processor->generateSymbol(getArgString(msg[i]))));
-            }
-        }
-        processor->receiveSysMessage("mcp_disconnect_batch_id", atoms);
-    }
-    return;
-}
-
-void MCPBridge::pdDeleteId(const juce::String& action, const juce::OSCMessage& msg)
-{
-    if (msg.size() >= 3 && processor) {
-        SmallArray<pd::Atom> atoms;
-        auto canvasName = normalizeCanvas(getArgString(msg[0]));
-        auto correlationId = getArgString(msg[1]);
-        auto objectId = getArgString(msg[2]);
-
-        atoms.add(pd::Atom(processor->generateSymbol(canvasName)));
-        atoms.add(pd::Atom(processor->generateSymbol(correlationId)));
-        atoms.add(pd::Atom(processor->generateSymbol(objectId)));
-
-        processor->receiveSysMessage("mcp_delete_id", atoms);
-    }
-    return;
-}
-
-void MCPBridge::pdDeleteBatchId(const juce::String& action, const juce::OSCMessage& msg)
-{
-    if (msg.size() >= 3 && processor) {
-        auto canvasName = normalizeCanvas(getArgString(msg[0]));
-        auto correlationId = getArgString(msg[1]);
-        int count = static_cast<int>(getArgFloat(msg[2]));
-
-        SmallArray<pd::Atom> atoms;
-        processor->receiveSysMessage("mcp_suspend_dsp", atoms);
-
-        int deleted = 0;
-        for (int i = 0; i < count && 3 + i < msg.size(); i++) {
-            auto id = getArgString(msg[3 + i]);
-            if (id.isNotEmpty() && id != "nil") {
-                SmallArray<pd::Atom> delAtoms;
-                delAtoms.add(pd::Atom(processor->generateSymbol(canvasName)));
-                delAtoms.add(pd::Atom(processor->generateSymbol(correlationId)));
-                delAtoms.add(pd::Atom(processor->generateSymbol(id)));
-                processor->receiveSysMessage("mcp_delete_id", delAtoms);
-                deleted++;
-            }
-        }
-
-        processor->receiveSysMessage("mcp_resume_dsp", atoms);
-        sendReply("/pd/delete_batch_id/reply/" + correlationId, static_cast<float>(deleted));
-    }
-    return;
-}
-
-void MCPBridge::pdEditId(const juce::String& action, const juce::OSCMessage& msg)
-{
-    if (msg.size() >= 4 && processor) {
-        SmallArray<pd::Atom> atoms;
-        auto canvasName = normalizeCanvas(getArgString(msg[0]));
-        auto correlationId = getArgString(msg[1]);
-        auto objectId = getArgString(msg[2]);
-        auto kind = getArgString(msg[3]);
-
-        atoms.add(pd::Atom(processor->generateSymbol(canvasName)));
-        atoms.add(pd::Atom(processor->generateSymbol(correlationId)));
-        atoms.add(pd::Atom(processor->generateSymbol(objectId)));
-        atoms.add(pd::Atom(processor->generateSymbol(kind)));
-
-        for (int i = 4; i < msg.size(); ++i) {
-            atoms.add(pd::Atom(processor->generateSymbol(getArgString(msg[i]))));
-        }
-        processor->receiveSysMessage("mcp_edit_id", atoms);
     }
     return;
 }

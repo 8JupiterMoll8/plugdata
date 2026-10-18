@@ -3,8 +3,9 @@
  // PluginProcessor::receiveSysMessage, moved verbatim (with `session.` / `processor.`
  // prefixes). PluginProcessor calls McpHost::handleSysMessage first; every other
  // selector returns false and falls through to plugdata's own switch as before.
- // Each selector is one row of McpSysVerbs.inc; the id-addressed forms are in
- // McpSysIdCommands.cpp.
+ // Each selector is one row of McpSysVerbs.inc. The id-addressed forms were removed
+ // with the legacy /pd verbs that sent them (P3.3 S9); mcp_move_batch_id stays because
+ // McpHost undo/redo replays a move transaction through it.
  */
 #include "Mcp/McpSysCommon.h"
 
@@ -239,20 +240,6 @@ void McpHost::sysClearUndo(SmallString const& selector, SmallArray<pd::Atom> con
         wipeCanvasUndo(root);
         clearMcpTransactions(root);
     }
-}
-
-void McpHost::sysSuspendDsp(SmallString const& selector, SmallArray<pd::Atom> const& list)
-{
-    sys_lock();
-    session.mcpSuspendedDspState = canvas_suspend_dsp();
-    sys_unlock();
-}
-
-void McpHost::sysResumeDsp(SmallString const& selector, SmallArray<pd::Atom> const& list)
-{
-    sys_lock();
-    canvas_resume_dsp(session.mcpSuspendedDspState);
-    sys_unlock();
 }
 
 void McpHost::sysRegisterId(SmallString const& selector, SmallArray<pd::Atom> const& list)
@@ -649,5 +636,68 @@ void McpHost::sysCensus(SmallString const& selector, SmallArray<pd::Atom> const&
         atoms.add(pd::Atom(gensym(jsonString.toRawUTF8())));
         sendMCPReply(String("/pd/census/reply/" + correlation_id), atoms);
         processor.sendMessagesFromQueue();
+    }
+}
+
+void McpHost::sysMoveBatchId(SmallString const& selector, SmallArray<pd::Atom> const& list)
+{
+    if (list.size() >= 2) {
+        auto canvas_symbol = list[0].toString();
+        auto correlation_id = list[1].toString();
+
+        int movedCount = 0;
+        struct MoveUndo { juce::String id; int oldX, oldY, newX, newY; };
+        std::vector<MoveUndo> moveUndo;
+        sys_lock();
+        t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
+        if (canvas) {
+            for (int i = 2; i + 2 < list.size(); i += 3) {
+                auto object_id = list[i].toString();
+                int x = (int)list[i+1].getFloat();
+                int y = (int)list[i+2].getFloat();
+
+                t_gobj* targetObj = resolveStableId(canvas_symbol, object_id);
+                if (targetObj) {
+                    int ox = 0, oy = 0, ow = 0, oh = 0;
+                    pd::Interface::getObjectBounds(canvas, targetObj, &ox, &oy, &ow, &oh);
+                    pd::Interface::moveObject(canvas, targetObj, x, y);
+                    movedCount++;
+                    if (ox != x || oy != y)
+                        moveUndo.push_back({ object_id, ox, oy, x, y });
+                }
+            }
+            if (movedCount > 0) {
+                canvas_dirty(canvas, 1);
+                canvas_undo_free(canvas);
+                if (auto* udo = canvas_undo_get(canvas)) {
+                    udo->u_queue = nullptr;
+                    udo->u_last = nullptr;
+                    udo->u_cleanstate = nullptr;
+                }
+            }
+        }
+        sys_unlock();
+
+        // Register an undoable move (message-delta, replayed via move_batch_id).
+        // Skipped while an undo/redo is replaying so we never push recursively.
+        if (canvas && !moveUndo.empty() && !session.isExecutingMcpUndoRedo) {
+            juce::OSCMessage fwd { juce::OSCAddressPattern("/pd/move_batch_id") };
+            juce::OSCMessage inv { juce::OSCAddressPattern("/pd/move_batch_id") };
+            fwd.addArgument(canvas_symbol);
+            inv.addArgument(canvas_symbol);
+            fwd.addArgument(correlation_id);
+            inv.addArgument(correlation_id);
+            for (auto const& m : moveUndo) {
+                fwd.addArgument(m.id); fwd.addArgument(static_cast<float>(m.newX)); fwd.addArgument(static_cast<float>(m.newY));
+                inv.addArgument(m.id); inv.addArgument(static_cast<float>(m.oldX)); inv.addArgument(static_cast<float>(m.oldY));
+            }
+            pushMcpTransaction(canvas, canvas_symbol, fwd, inv, "move_batch_id");
+        }
+
+        SmallArray<pd::Atom> atoms;
+        atoms.add(pd::Atom((float)movedCount));
+        sendMCPReply(String("/pd/mcp_move_batch_id/reply/" + correlation_id), atoms);
+        processor.sendMessagesFromQueue();
+        processor.enqueueFunctionAsync([this] { synchroniseCanvases(); });
     }
 }

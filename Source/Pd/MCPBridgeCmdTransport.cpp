@@ -252,10 +252,6 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
         reply.addArgument(juce::String("array_stats"));
         reply.addArgument(juce::String("get_mappings"));
         reply.addArgument(juce::String("move_batch_id"));
-        reply.addArgument(juce::String("connect_batch_id"));
-        reply.addArgument(juce::String("disconnect_batch_id"));
-        reply.addArgument(juce::String("create_batch_id"));
-        reply.addArgument(juce::String("delete_batch_id"));
         reply.addArgument(juce::String("meter"));
         reply.addArgument(juce::String("meter_query"));
         reply.addArgument(juce::String("meter_master"));
