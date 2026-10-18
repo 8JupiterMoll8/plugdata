@@ -35,7 +35,12 @@ or posted job. The reasons and the measurements behind each rule are in the TS r
    a `mcp::SysList`); `gensym` is for user patch names and fixed vocabulary only.
 8. **Probes and taps hold a topology epoch** (`ugen_getsortno()` at resolve): the audio thread reads a pointer only
    while the epoch is current and DSP is on.
-9. **An MCP mutation empties Pd's native undo queue through `resetNativeUndo`** (free, then `canvas_undo_init`):
+9. **No Pd `post()` outside the Pd context.** plugdata's print hook (console buffer, the MCP console tap's
+   `gensym`) is not thread-safe; from the worker or a timer use `mcpLogLine` (`MCPBridgeCmdCommon.h`: the console
+   queue plus the same `/pd/log` OSC line). Found by TSan in S11.
+10. **Lock order: the Pd lock before `mcpOverlayLock`** (the GUI's sync and paint take them in that order). Build
+   overlay data under the Pd lock, swap it in under the overlay lock.
+11. **An MCP mutation empties Pd's native undo queue through `resetNativeUndo`** (free, then `canvas_undo_init`):
    the UNDO_INIT head must stay (finding L6).
 
 ## Test tools
@@ -47,4 +52,7 @@ or posted job. The reasons and the measurements behind each rule are in the TS r
   `/pd/perf`).
 - `-DMCP_BRIDGE_TESTS=ON`: `mcp_bridge_tests`, real handlers on a headless processor
   (`scripts/run-mcp-bridge-tests.sh`).
-- Sanitizer clones and the live stress, stall and race scripts: `scripts/live/p34-*.ts` in the TS repo.
+- TSan: launch with `LD_PRELOAD=<tsan_clockwait_shim.so>` (`Tests/mcp/tsan_clockwait_shim.c`; GCC 11's libtsan does
+  not intercept `pthread_cond_clockwait`) and `suppressions=Tests/mcp/tsan.supp`, under `setarch x86_64 -R`.
+- Sanitizer clones and the live stress, stall and race scripts: `scripts/live/p34-*.ts` and `san-triage.py` in the
+  TS repo.
