@@ -340,7 +340,7 @@ void MCPBridge::pdEncapsulateToFile(const juce::String& action, const juce::OSCM
                 // ── Step 6: Reload abstractions so Pd registers the file ─
                 proc->reloadAbstractions(juce::File(filePath), cnv);
 
-                proc->enqueueFunctionAsync([p = proc] { p->getMcp()->synchroniseCanvases(); });
+                proc->getMcp()->enqueuePd([p = proc] { p->getMcp()->synchroniseCanvases(); });
 
                 // glist_delete + pasteDirect above freed/reordered objects
                 // on the parent canvas — flush the stale undo queue.
@@ -552,7 +552,7 @@ void MCPBridge::pdEncapsulateGop(const juce::String& action, const juce::OSCMess
                     if (newTempId.isEmpty()) return; // error reply already sent
 
                     // Sync GUI so plugdata displays the newly instantiated abstraction.
-                    proc->enqueueFunctionAsync([p = proc] { p->getMcp()->synchroniseCanvases(); });
+                    proc->getMcp()->enqueuePd([p = proc] { p->getMcp()->synchroniseCanvases(); });
 
                     juce::String receipt = "{\"ok\":true,\"tempId\":\"" + jsonEscape(newTempId)
                         + "\",\"inlets\":" + juce::String(static_cast<int>(inWires.size()))

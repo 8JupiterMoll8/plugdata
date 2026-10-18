@@ -17,7 +17,7 @@ The fork's AI bridge (`Source/Pd/MCPBridge*`, the overlay layer, the moodboard) 
 | Area | Hooks |
 |---|---|
 | audio | `prepare(sampleRate, blockSize)`, `audioBlock(buffer, midiHistory, sampleRate)`, `pdBlock(in, out, blockSize, numChannels)` |
-| Pd-thread command | `handleSysMessage(selector, list) -> bool` |
+| Pd-thread command | `handleSysMessage(selector, list) -> bool`; `drainPdQueue()` (P3.4 S2: the bridge's Pd jobs; called by `audioBlockStarted` and, tag `pdqueue`, in the backup loop when no device runs) |
 | save | `patchSaved(t_glist*, path)` |
 | telemetry | `consoleMessage(text, isError)`, `selectionChanged(selector, list)` |
 | overlay paint | `CanvasMcpLayer::paintUnderObjects`, `paintOverObjects`, `paintViewportFrame`, `paintScreenOverlay`, `updateOverlays(state)` (tag `overlayPaint`); `decorateObject` (tag `decorateObject`); `isTargeted(object\|connection)` (tag `overlayTarget`). Done in S7 |
@@ -160,6 +160,8 @@ gate: OK
 
 - **P3.3 (bridge command registry).** Fork-only files, so the seam gate did not move (170 hunks, +502). Every OSC verb of every domain is one row of `Source/Pd/MCPBridgeVerbs.inc` (`MCP_SOURCE` = where the verb of a domain comes from, `MCP_VERB`, `MCP_ALIAS`, `MCP_DOMAIN`), built into a `mcp::CommandTable` (`MCPBridgeRegistry.h`, JUCE-free) at startup; a duplicate or misplaced row throws. `MCPBridge::oscMessageReceived` only parses the address and calls `dispatchRegistered`; an address no row serves is answered with `/bridge/unknown_verb [address, domain, verb]` (capability `unknown_verb_reply`). The handlers live in `Source/Pd/MCPBridgeCmd<Area>.cpp` (System, Objects, Docs, Batch, Files, Render, Analysis, Layout, Encapsulate, Overlay, Identity, Legacy, Meter, Transport, Control, Array), shared helpers in `MCPBridgeCmdCommon.h`, `MCPBridgeInternal.h`, `MCPBridgeControlWindow.h`, `MCPBridgeObjectValues.h`, `MCPBridgeSpectral.cpp`. The 11 `mcp_*` Pd system selectors are rows of `Source/Mcp/McpSysVerbs.inc` (`McpHost::sysTable`, handlers in `McpSysCommands.cpp`). The id-addressed OSC verbs and their sys selectors were removed (batch_atomic covers them). `McpHost` undo/redo replays through `MCPBridge::replayPd` = the table. `scripts/mcp-move-verbs.py` did the moves and the line-multiset check; handler tests: see "Tests".
   - **Known size exceptions:** `MCPBridgeCmdBatch.cpp` (1,413 lines: `batch_atomic` is one handler of about 1,280 lines; splitting its stages is P3.4) and `MCPBridgeCmdOverlay.cpp` (776). Domains whose verbs share a prelude or an if/else chain keep one handler with several rows (array, telemetry, bridge, morph); `param`, `trigger` and `chat` are `MCP_DOMAIN` handlers because an unknown verb there is a valid call.
+
+- **P3.4 (single execution model).** S1: the OSC network thread only enqueues; one command worker (`mcp::SerialWorker`, `Source/Pd/MCPBridgeWorker.h`) runs the handlers in arrival order; `ReplyQueue` (in `MCPBridge.h`) owns the `OSCSender` and sends on its own thread. S2: the bridge's Pd jobs go to `McpSession::mcpPdQueue`, run by `McpHost::drainPdQueue()` under `sys_lock` at the start of each audio block (try-lock; after 8 busy blocks it waits), in the backup loop (one new tagged line `MCP-HOOK(pdqueue)` in `PluginProcessor.cpp`: 171 hunks, +503) and by the offline render; no MCP code drains upstream's `functionQueue` any more. Handlers that touch Pd directly do it under `sys_lock` on the command worker. Threading contract for new handlers: see `p3.4-steps.md` (TS repo) "Design".
 
 ## Known upstream behaviour
 

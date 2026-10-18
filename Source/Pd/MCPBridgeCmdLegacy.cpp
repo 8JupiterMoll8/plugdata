@@ -60,7 +60,7 @@ void MCPBridge::pdCreate(const juce::String& action, const juce::OSCMessage& msg
         }
         sys_unlock();
 
-        processor->enqueueFunctionAsync([p = processor] { p->getMcp()->synchroniseCanvases(); });
+        processor->getMcp()->enqueuePd([p = processor] { p->getMcp()->synchroniseCanvases(); });
     }
     return;
 }
@@ -96,7 +96,7 @@ void MCPBridge::pdCreateBatch(const juce::String& action, const juce::OSCMessage
         }
         sys_unlock();
 
-        processor->enqueueFunctionAsync([p = processor] { p->getMcp()->synchroniseCanvases(); });
+        processor->getMcp()->enqueuePd([p = processor] { p->getMcp()->synchroniseCanvases(); });
 
         sendReply("/pd/create_batch/reply/" + correlationId, static_cast<float>(created));
     }
@@ -132,7 +132,7 @@ void MCPBridge::pdConnectBatch(const juce::String& action, const juce::OSCMessag
         }
         sys_unlock();
 
-        processor->enqueueFunctionAsync([p = processor] { p->getMcp()->synchroniseCanvases(); });
+        processor->getMcp()->enqueuePd([p = processor] { p->getMcp()->synchroniseCanvases(); });
 
         if (action == "connect_batch") {
             sendReply("/pd/connect_batch/reply/" + correlationId, static_cast<float>(done));
@@ -162,7 +162,7 @@ void MCPBridge::pdDisconnect(const juce::String& action, const juce::OSCMessage&
         }
         sys_unlock();
 
-        processor->enqueueFunctionAsync([p = processor] { p->getMcp()->synchroniseCanvases(); });
+        processor->getMcp()->enqueuePd([p = processor] { p->getMcp()->synchroniseCanvases(); });
     }
     return;
 }
@@ -196,7 +196,7 @@ void MCPBridge::pdDisconnectBatch(const juce::String& action, const juce::OSCMes
         }
         sys_unlock();
 
-        processor->enqueueFunctionAsync([p = processor] { p->getMcp()->synchroniseCanvases(); });
+        processor->getMcp()->enqueuePd([p = processor] { p->getMcp()->synchroniseCanvases(); });
 
         sendReply("/pd/disconnect_batch/reply/" + correlationId, static_cast<float>(done));
     }
@@ -222,7 +222,7 @@ void MCPBridge::pdDelete(const juce::String& action, const juce::OSCMessage& msg
         }
         sys_unlock();
 
-        processor->enqueueFunctionAsync([p = processor] { p->getMcp()->synchroniseCanvases(); });
+        processor->getMcp()->enqueuePd([p = processor] { p->getMcp()->synchroniseCanvases(); });
     }
     return;
 }
@@ -253,7 +253,7 @@ void MCPBridge::pdDeleteBatch(const juce::String& action, const juce::OSCMessage
         }
         sys_unlock();
 
-        processor->enqueueFunctionAsync([p = processor] { p->getMcp()->synchroniseCanvases(); });
+        processor->getMcp()->enqueuePd([p = processor] { p->getMcp()->synchroniseCanvases(); });
 
         sendReply("/pd/delete_batch/reply/" + correlationId, static_cast<float>(indices.size()));
     }

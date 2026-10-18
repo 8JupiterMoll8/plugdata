@@ -68,6 +68,14 @@ public:
     // No-op when no tap is active. Non-destructive: the patch is untouched.
     void applyMonitorTap(float* out, int numSamples, int numChannels);
 
+    // The Pd context (Plan 3 P3.4 S2). enqueuePd: any thread, never waits; the job runs under sys_lock at
+    // the start of the next audio block. pdWait: the same, then waits up to timeoutMs; false = abandoned
+    // (the job never ran and never will, so it may capture the caller's frame by reference).
+    // drainPdQueue: the audio thread (audioBlockStarted), the backup loop and the offline render only.
+    void enqueuePd(std::function<void()> job);
+    bool pdWait(std::function<void()> const& job, int timeoutMs);
+    void drainPdQueue();
+
     // Audio hooks (Source/Mcp/McpAudio.cpp); each runs where its block used to be.
     void prepare(double sampleRate, int samplesPerBlock);
     void audioBlockStarted();

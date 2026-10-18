@@ -121,9 +121,8 @@ void MCPBridge::pdClear(const juce::String& action, const juce::OSCMessage& msg)
 void MCPBridge::pdClearUndo(const juce::String& action, const juce::OSCMessage& msg)
 {
     // /pd/clear_undo <canvasName>
-    // Routes through receiveSysMessage → mcp_clear_undo case which runs
-    // on the Pd scheduler thread — the only thread where canvas_undo_free
-    // (calls canvas_suspend_dsp internally) is safe to call.
+    // Routes through receiveSysMessage -> McpHost::sysClearUndo, which runs
+    // here (command worker) and takes the Pd lock canvas_undo_free needs.
     if (msg.size() >= 1 && processor) {
         auto canvasName = normalizeCanvas(getArgString(msg[0]));
         SmallArray<pd::Atom> atoms;

@@ -411,7 +411,7 @@ void MCPBridge::pdBatchAtomic(const juce::String& action, const juce::OSCMessage
         // canvas — name the failure instead of mutating the wrong patch.
         bool canvasNotFound = false;
 
-        processor->enqueueFunctionAsync([&, handoff]() {
+        processor->getMcp()->enqueuePd([&, handoff]() {
             if (!handoff->begin())
                 return; // the caller gave up: this frame may be gone, touch nothing
             mcp::OneShotHandoff::FinishGuard finishGuard(*handoff);

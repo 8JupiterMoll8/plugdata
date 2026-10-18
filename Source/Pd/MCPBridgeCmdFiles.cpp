@@ -168,7 +168,7 @@ void MCPBridge::pdLoadContent(const juce::String& action, const juce::OSCMessage
         // Synchronise canvas UI and restart DSP.
         // startDSP() is called directly here — same pattern as /pd/dsp
         // handler which also calls it from the OSC receiver thread.
-        processor->enqueueFunctionAsync([p = processor] { p->getMcp()->synchroniseCanvases(); });
+        processor->getMcp()->enqueuePd([p = processor] { p->getMcp()->synchroniseCanvases(); });
 
         if (objectCount > 0 && processor)
             processor->startDSP();
@@ -179,7 +179,7 @@ void MCPBridge::pdLoadContent(const juce::String& action, const juce::OSCMessage
         atoms.add(pd::Atom(processor->generateSymbol("0")));
         processor->receiveSysMessage("mcp_clear_ids", atoms);
 
-        processor->enqueueFunctionAsync([p = processor] { p->getMcp()->synchroniseCanvases(); });
+        processor->getMcp()->enqueuePd([p = processor] { p->getMcp()->synchroniseCanvases(); });
 
         // arg0 = objectCount, arg1 = undoReset (clear+rebuild flushed the
         // stale undo queue). Old TS clients read arg0 and ignore arg1.
@@ -278,7 +278,7 @@ void MCPBridge::pdSavePatch(const juce::String& action, const juce::OSCMessage& 
         // down before the lambda runs; the original code only compared it).
         const std::string oldKey = MCPBridge::canonicalCanvasKey(cnv).toStdString();
         const std::string newKey = juce::File(destFilePath).getFileName().toStdString();
-        processor->enqueueFunctionAsync([p = processor, cnv, destFilePath, oldKey, newKey]() {
+        processor->getMcp()->enqueuePd([p = processor, cnv, destFilePath, oldKey, newKey]() {
             juce::File f(destFilePath);
             if (oldKey != newKey && p->getMcp()->session.mcpStableObjectMap.count(oldKey)) {
                 p->getMcp()->session.mcpStableObjectMap[newKey] = std::move(p->getMcp()->session.mcpStableObjectMap[oldKey]);

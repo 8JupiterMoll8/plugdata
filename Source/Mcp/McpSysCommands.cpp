@@ -58,7 +58,6 @@ void McpHost::sysSelectionGate(SmallString const& selector, SmallArray<pd::Atom>
                     }
                     processor.sendMessage("mcp_telemetry_reply", "/mcp/telemetry/selected", atoms);
                     processor.logMessage("MCP_DEBUG: Dispatched to Pd: mcp_telemetry_reply");
-                    processor.sendMessagesFromQueue();
                     return; // Focus found, we are done!
                 }
             }
@@ -87,7 +86,6 @@ void McpHost::sysSelectionGate(SmallString const& selector, SmallArray<pd::Atom>
                     }
                     processor.sendMessage("mcp_telemetry_reply", "/mcp/telemetry/selected", atoms);
                     processor.logMessage("MCP_DEBUG: Dispatched to Pd: mcp_telemetry_reply");
-                    processor.sendMessagesFromQueue();
                     return;
                 }
             }
@@ -123,7 +121,6 @@ void McpHost::sysMove(SmallString const& selector, SmallArray<pd::Atom> const& l
         }
         sys_unlock();
 
-        processor.sendMessagesFromQueue();
     }
 }
 
@@ -172,7 +169,6 @@ void McpHost::sysMoveBatch(SmallString const& selector, SmallArray<pd::Atom> con
         SmallArray<pd::Atom> atoms;
         atoms.add(pd::Atom((float)movedCount));
         sendMCPReply(String("/pd/move_batch/reply/" + correlation_id), atoms);
-        processor.sendMessagesFromQueue();
     }
 }
 
@@ -197,15 +193,21 @@ void McpHost::sysClearIds(SmallString const& selector, SmallArray<pd::Atom> cons
         SmallArray<pd::Atom> atoms;
         atoms.add(pd::Atom(1.0f));
         sendMCPReply(String("/pd/mcp_clear_ids/reply/" + correlation_id), atoms);
-        processor.sendMessagesFromQueue();
     }
 }
 
 void McpHost::sysClearUndo(SmallString const& selector, SmallArray<pd::Atom> const& list)
 {
-    // Called from /pd/clear_undo handler via receiveSysMessage.
-    // Runs on the Pd scheduler thread — the only thread where
-    // canvas_undo_free (which calls canvas_suspend_dsp) is safe.
+    // Called from /pd/clear_undo, resetCanvasUndo and encapsulate_gop via
+    // receiveSysMessage, synchronously on the caller's thread (command worker,
+    // message thread or a Pd job). canvas_undo_free calls canvas_suspend_dsp,
+    // which needs the Pd lock: taken here (recursive when the caller holds it).
+    // While an MCP undo/redo replays its batch, that batch's own clear must leave the MCP stacks alone:
+    // the undo has just moved the transaction to the redo stack (and back), and wiping it here made every
+    // redo after an undo of a batch a no-op (P3.4 S2, found once L12 was fixed).
+    bool const replaying = session.isExecutingMcpUndoRedo.load();
+    processor.setThis();
+    sys_lock();
     auto wipeCanvasUndo = [](t_canvas* c) {
         if (!c) return;
         canvas_undo_free(c);
@@ -230,7 +232,8 @@ void McpHost::sysClearUndo(SmallString const& selector, SmallArray<pd::Atom> con
         if (!cnv && (canvas_symbol == "pd-main")) cnv = pd_this->pd_canvaslist;
         if (cnv) {
             wipeCanvasUndo(cnv);
-            clearMcpTransactions(cnv);
+            if (!replaying)
+                clearMcpTransactions(cnv);
         }
     }
 
@@ -238,8 +241,10 @@ void McpHost::sysClearUndo(SmallString const& selector, SmallArray<pd::Atom> con
     // so subpatch mutations never leave armed undo actions on the parent canvas.
     for (t_canvas* root = pd_this->pd_canvaslist; root; root = root->gl_next) {
         wipeCanvasUndo(root);
-        clearMcpTransactions(root);
+        if (!replaying)
+            clearMcpTransactions(root);
     }
+    sys_unlock();
 }
 
 void McpHost::sysRegisterId(SmallString const& selector, SmallArray<pd::Atom> const& list)
@@ -281,7 +286,6 @@ void McpHost::sysRegisterId(SmallString const& selector, SmallArray<pd::Atom> co
         SmallArray<pd::Atom> atoms;
         atoms.add(pd::Atom(success ? 1.0f : 0.0f));
         sendMCPReply(String("/pd/mcp_register_id/reply/" + correlation_id), atoms);
-        processor.sendMessagesFromQueue();
     }
 }
 
@@ -307,7 +311,6 @@ void McpHost::sysRenameId(SmallString const& selector, SmallArray<pd::Atom> cons
         SmallArray<pd::Atom> atoms;
         atoms.add(pd::Atom(success ? 1.0f : 0.0f));
         sendMCPReply(String("/pd/mcp_rename_id/reply/" + correlation_id), atoms);
-        processor.sendMessagesFromQueue();
     }
 }
 
@@ -342,7 +345,6 @@ void McpHost::sysGetMappings(SmallString const& selector, SmallArray<pd::Atom> c
         sys_unlock();
 
         sendMCPReply(String("/pd/mcp_get_mappings/reply/" + correlation_id), atoms);
-        processor.sendMessagesFromQueue();
     }
 }
 
@@ -635,7 +637,6 @@ void McpHost::sysCensus(SmallString const& selector, SmallArray<pd::Atom> const&
         SmallArray<pd::Atom> atoms;
         atoms.add(pd::Atom(gensym(jsonString.toRawUTF8())));
         sendMCPReply(String("/pd/census/reply/" + correlation_id), atoms);
-        processor.sendMessagesFromQueue();
     }
 }
 
@@ -697,7 +698,6 @@ void McpHost::sysMoveBatchId(SmallString const& selector, SmallArray<pd::Atom> c
         SmallArray<pd::Atom> atoms;
         atoms.add(pd::Atom((float)movedCount));
         sendMCPReply(String("/pd/mcp_move_batch_id/reply/" + correlation_id), atoms);
-        processor.sendMessagesFromQueue();
-        processor.enqueueFunctionAsync([this] { synchroniseCanvases(); });
+        enqueuePd([this] { synchroniseCanvases(); });
     }
 }

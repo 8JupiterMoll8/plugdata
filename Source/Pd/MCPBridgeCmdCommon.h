@@ -83,18 +83,20 @@ struct _outlet
 // "unsupported undo command <garbage int>" heap-corruption crash.
 //
 // Since MCP never contributes correct undo actions, the only safe state for
-// the queue after such a mutation is EMPTY. canvas_undo_free() must run on
-// the Pd scheduler thread, so this routes through
-// receiveSysMessage("mcp_clear_undo") — the exact proven-safe path used by
-// the /pd/clear_undo action (PluginProcessor mcp_clear_undo case).
+// the queue after such a mutation is EMPTY. Routes through
+// receiveSysMessage("mcp_clear_undo"), the path /pd/clear_undo uses; that
+// runs synchronously on the calling thread and takes the Pd lock itself
+// (canvas_undo_free -> canvas_suspend_dsp needs the lock, not a thread).
+// Plan 3 P3.4 S2: synchronous on purpose. Queued, the clear ran up to one
+// audio block later, after the caller had pushed its own MCP transaction
+// (finding L12: batch_atomic's undo never worked) or after the NEXT command
+// had pushed one (a move right after a batch lost its undo).
 inline void resetCanvasUndo(PluginProcessor* proc, juce::String const& canvasName)
 {
     if (!proc) return;
-    proc->enqueueFunctionAsync([proc, canvasName]() {
-        SmallArray<pd::Atom> atoms;
-        atoms.add(pd::Atom(proc->generateSymbol(canvasName)));
-        proc->receiveSysMessage("mcp_clear_undo", atoms);
-    });
+    SmallArray<pd::Atom> atoms;
+    atoms.add(pd::Atom(proc->generateSymbol(canvasName)));
+    proc->receiveSysMessage("mcp_clear_undo", atoms);
 }
 
 // ── PRD_OBJ_GET_SET P4: shadow of values posted to named buses (/param) ──────

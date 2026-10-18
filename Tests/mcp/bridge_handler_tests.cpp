@@ -161,6 +161,73 @@ void sleepMs(int ms)
     std::this_thread::sleep_for(std::chrono::milliseconds(ms));
 }
 
+// The Pd context (Plan 3 P3.4 S2): McpHost::enqueuePd / pdWait run jobs on the audio thread, under the Pd
+// lock, at the start of a block; a job the caller gave up on never runs; a held lock delays a job but the
+// drain does not let it starve.
+struct AudioControl {
+    std::atomic<bool> paused { false };
+    std::atomic<std::thread::id> threadId {};
+};
+
+void runPdContextCases(PluginProcessor& processor, AudioControl& audio)
+{
+    std::printf("pd context\n");
+    auto* host = processor.getMcp();
+
+    // 1. pdWait runs the job on the audio thread and returns once it ran.
+    {
+        std::atomic<bool> ran { false };
+        std::atomic<std::thread::id> where {};
+        CHECK(host->pdWait([&] { ran = true; where = std::this_thread::get_id(); }, 2000));
+        CHECK(ran.load());
+        CHECK(where.load() == audio.threadId.load());
+    }
+
+    // 2. The job holds the Pd lock while it runs: another thread cannot take it.
+    {
+        std::atomic<bool> inside { false };
+        std::atomic<bool> release { false };
+        host->enqueuePd([&] {
+            inside = true;
+            for (int i = 0; i < 200 && !release.load(); ++i)
+                sleepMs(1);
+        });
+        for (int i = 0; i < 500 && !inside.load(); ++i)
+            sleepMs(1);
+        CHECK(inside.load());
+        bool const got = processor.audioLock.tryEnter();
+        CHECK(!got);
+        if (got)
+            processor.audioLock.exit();
+        release = true;
+        sleepMs(30);
+    }
+
+    // 3. With the audio thread stalled, pdWait gives up and the job never runs afterwards.
+    {
+        audio.paused = true;
+        sleepMs(30);
+        std::atomic<bool> ran { false };
+        CHECK(!host->pdWait([&] { ran = true; }, 100));
+        audio.paused = false;
+        sleepMs(100);
+        CHECK(!ran.load());
+    }
+
+    // 4. A held Pd lock delays a job; the drain then waits for the lock instead of starving the job.
+    {
+        std::atomic<bool> ran { false };
+        processor.audioLock.enter();
+        host->enqueuePd([&] { ran = true; });
+        sleepMs(200); // ~25 blocks: past the busy limit, the drain now waits for us
+        CHECK(!ran.load());
+        processor.audioLock.exit();
+        for (int i = 0; i < 200 && !ran.load(); ++i)
+            sleepMs(1);
+        CHECK(ran.load());
+    }
+}
+
 void runCases(Harness& h)
 {
     // ── answers without a canvas ─────────────────────────────────────────────────────────────────
@@ -366,15 +433,19 @@ int main()
 
         std::atomic<bool> casesDone { false };
         std::atomic<bool> audioStop { false };
+        AudioControl audioControl;
 
-        // The audio callback: queued work (enqueueFunctionAsync) runs inside processBlock.
+        // The audio callback: queued work (enqueuePd, enqueueFunctionAsync) runs inside processBlock.
         std::thread audio([&] {
+            audioControl.threadId = std::this_thread::get_id();
             juce::AudioBuffer<float> buffer(2, 512);
             juce::MidiBuffer midi;
             while (!audioStop.load()) {
-                buffer.clear();
-                midi.clear();
-                processor.processBlock(buffer, midi);
+                if (!audioControl.paused.load()) {
+                    buffer.clear();
+                    midi.clear();
+                    processor.processBlock(buffer, midi);
+                }
                 sleepMs(8);
             }
         });
@@ -387,6 +458,7 @@ int main()
         std::thread worker([&] {
             Harness harness { *bridge, replies };
             runCases(harness);
+            runPdContextCases(processor, audioControl);
             casesDone.store(true);
             stopMessageLoop();
         });

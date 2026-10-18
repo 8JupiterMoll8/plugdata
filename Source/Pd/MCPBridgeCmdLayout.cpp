@@ -220,7 +220,7 @@ void MCPBridge::pdDeoverlap(const juce::String& action, const juce::OSCMessage& 
         }
         sys_unlock();
 
-        processor->enqueueFunctionAsync([p = processor] { p->getMcp()->synchroniseCanvases(); });
+        processor->getMcp()->enqueuePd([p = processor] { p->getMcp()->synchroniseCanvases(); });
         sendReply("/pd/deoverlap/reply/" + correlationId, 1.0f);
     }
     return;
@@ -259,7 +259,7 @@ void MCPBridge::pdLayoutGuard(const juce::String& action, const juce::OSCMessage
     if (moved > 0 || occlusions > 0) resetCanvasUndo(processor, canvasName);
     sys_unlock();
 
-    processor->enqueueFunctionAsync([p = processor] { p->getMcp()->synchroniseCanvases(); });
+    processor->getMcp()->enqueuePd([p = processor] { p->getMcp()->synchroniseCanvases(); });
     juce::Array<juce::var> guardReply;
     guardReply.add(static_cast<float>(moved));
     guardReply.add(static_cast<float>(occlusions));
@@ -286,7 +286,7 @@ void MCPBridge::pdCompose(const juce::String& action, const juce::OSCMessage& ms
     if (moved > 0) resetCanvasUndo(processor, canvasName);
     sys_unlock();
 
-    processor->enqueueFunctionAsync([p = processor] { p->getMcp()->synchroniseCanvases(); });
+    processor->getMcp()->enqueuePd([p = processor] { p->getMcp()->synchroniseCanvases(); });
     sendReply(replyAddr, static_cast<float>(moved));
     return;
 }
@@ -378,7 +378,7 @@ void MCPBridge::pdPillars(const juce::String& action, const juce::OSCMessage& ms
         }
         sys_unlock();
 
-        processor->enqueueFunctionAsync([p = processor] { p->getMcp()->synchroniseCanvases(); });
+        processor->getMcp()->enqueuePd([p = processor] { p->getMcp()->synchroniseCanvases(); });
         sendReply("/pd/pillars/reply/" + correlationId, 1.0f);
     }
     return;
@@ -599,7 +599,7 @@ void MCPBridge::pdFlow(const juce::String& action, const juce::OSCMessage& msg)
         }
         sys_unlock();
 
-        processor->enqueueFunctionAsync([p = processor] { p->getMcp()->synchroniseCanvases(); });
+        processor->getMcp()->enqueuePd([p = processor] { p->getMcp()->synchroniseCanvases(); });
         sendReply("/pd/flow/reply/" + correlationId, 1.0f);
     }
     return;

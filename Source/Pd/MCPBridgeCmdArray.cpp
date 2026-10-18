@@ -96,7 +96,7 @@ void MCPBridge::handleArrayDomain(const juce::String& arrayAction, const juce::O
                 }
                 if (garray) {
                     canvas_dirty(cnv, 1);
-                    processor->enqueueFunctionAsync([p = processor] { p->getMcp()->synchroniseCanvases(); });
+                    processor->getMcp()->enqueuePd([p = processor] { p->getMcp()->synchroniseCanvases(); });
                 }
             }
         }
@@ -173,7 +173,7 @@ void MCPBridge::handleArrayDomain(const juce::String& arrayAction, const juce::O
             }
             if (garray) {
                 canvas_dirty(cnv, 1);
-                processor->enqueueFunctionAsync([p = processor] { p->getMcp()->synchroniseCanvases(); });
+                processor->getMcp()->enqueuePd([p = processor] { p->getMcp()->synchroniseCanvases(); });
             }
         }
     }

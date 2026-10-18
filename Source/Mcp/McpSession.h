@@ -6,6 +6,8 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
+#include <concurrentqueue.h>
 #include <map>
 #include <unordered_map>
 #include <unordered_set>
@@ -425,4 +427,11 @@ struct McpSession {
     std::atomic<uint64_t> mcpArmBlocksAtArm { 0 };   // snapshot taken on arm
     std::atomic<uint64_t> mcpArmedTailRuns { 0 };    // armed-tail executions this window
     std::atomic<float>    mcpArmedTailPeak { 0.0f }; // peak seen at the tail this window
+
+    // --- The MCP Pd queue (Plan 3 P3.4 S2) ------------------------------------
+    // Every Pd job of the bridge (batch_atomic's mutation, the legacy verbs, layout moves, ...) is queued
+    // here and run by McpHost::drainPdQueue() at the start of an audio block (or in the backup loop when no
+    // device runs, or by the offline render loop), UNDER sys_lock. Upstream's functionQueue stays upstream's.
+    moodycamel::ConcurrentQueue<std::function<void()>> mcpPdQueue { 256 };
+    std::atomic<int> mcpPdQueueBusyBlocks { 0 }; // blocks in a row the drain found the Pd lock taken
 };

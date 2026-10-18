@@ -1706,6 +1706,7 @@ void PluginProcessor::runBackupLoop()
     setThis();
     ScopedTryLock const scopedAudioLock(backupLoopLock);
     if (scopedAudioLock.isLocked()) {
+        mcp->drainPdQueue(); // MCP-HOOK(pdqueue)
         keyHandler.sendKeyUpMessages();
         sendMessagesFromQueue();
         sendParameters();
