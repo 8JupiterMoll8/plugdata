@@ -20,6 +20,10 @@ MCPBridge::VerbTable const& MCPBridge::commandTable()
 #define MCP_ALIAS(domain, verb, handler) t.add(#domain, verb, &MCPBridge::handler);
 #define MCP_DOMAIN(domain, handler) t.addDomain(#domain, &MCPBridge::handler);
 #include "MCPBridgeVerbs.inc"
+        // Test-only (P3.4 S11): stalls the audio thread with the Pd lock held. Not in MCPBridgeVerbs.inc, so the
+        // wire inventory and the sweep never see it; without the audit switch it is an unknown verb.
+        if (mcp::audit::enabled())
+            t.add("pd", "debug_stall_audio", &MCPBridge::pdDebugStallAudio);
         return t;
     }();
     return table;

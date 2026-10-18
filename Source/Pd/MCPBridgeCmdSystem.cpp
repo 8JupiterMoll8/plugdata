@@ -211,3 +211,14 @@ void MCPBridge::pdRedo(const juce::String& action, const juce::OSCMessage& msg)
     }
     return;
 }
+
+// P3.4 S11 (test-only, registered only with PLUGDATA_MCP_AUDIT=1): the next audio block holds the Pd lock and
+// sleeps <ms> (clamped to 10 s), so the stall tests can check that waits time out cleanly.
+void MCPBridge::pdDebugStallAudio(const juce::String&, const juce::OSCMessage& msg)
+{
+    if (!processor || msg.size() < 1) return;
+    int const ms = juce::jlimit(1, 10000, static_cast<int>(getArgFloat(msg[0])));
+    auto const correlationId = msg.size() > 1 ? getArgString(msg[1]) : juce::String("0");
+    processor->getMcp()->session.mcpDebugStallMs.store(ms, std::memory_order_relaxed);
+    sendReply("/pd/debug_stall_audio/reply/" + correlationId, static_cast<float>(ms));
+}

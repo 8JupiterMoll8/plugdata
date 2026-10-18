@@ -404,6 +404,8 @@ private:
     void replyUnknownVerb(const juce::String& domain, const juce::String& pathVerb, const juce::OSCMessage& msg);
     // McpHost undo/redo replays a recorded /pd transaction (batch_atomic, move_batch_id) by its verb.
     void replayPd(const juce::String& action, const juce::OSCMessage& msg);
+    // P3.4 S11: /pd/debug_stall_audio <ms> <corrId>, a table row only with PLUGDATA_MCP_AUDIT=1 (see commandTable).
+    void pdDebugStallAudio(const juce::String& action, const juce::OSCMessage& msg);
 
 #define MCP_VERB(domain, verb, handler) void handler(const juce::String& action, const juce::OSCMessage& msg);
 #define MCP_DOMAIN(domain, handler) void handler(const juce::String& action, const juce::OSCMessage& msg);
