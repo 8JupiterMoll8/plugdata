@@ -666,7 +666,7 @@ void MCPBridge::pdScreenshotCanvas(const juce::String& action, const juce::OSCMe
                 std::unordered_map<t_gobj*, juce::String> ptrToId;
                 if (proc) {
                     McpHost::PdLockScope lock(*proc);
-                    auto const* canvasIds = proc->getMcp()->(liveCnv ? proc->getMcp()->identity.findCanvas(liveCnv) : nullptr);
+                    auto const* canvasIds = liveCnv ? proc->getMcp()->identity.findCanvas(liveCnv) : nullptr;
                     if (canvasIds)
                         for (auto& [tid, ptr] : *canvasIds)
                             if (ptr) ptrToId[ptr] = juce::String(tid);
