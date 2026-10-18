@@ -142,12 +142,12 @@ void MCPBridge::pdIdentityVersion(const juce::String& action, const juce::OSCMes
 void MCPBridge::pdClearIds(const juce::String& action, const juce::OSCMessage& msg)
 {
     if (msg.size() >= 2 && processor) {
-        SmallArray<pd::Atom> atoms;
+        mcp::SysList atoms; // P3.4 S7: plain values, no Pd symbols
         auto canvasName = normalizeCanvas(getArgString(msg[0]));
         auto correlationId = getArgString(msg[1]);
-        atoms.add(pd::Atom(processor->generateSymbol(canvasName)));
-        atoms.add(pd::Atom(processor->generateSymbol(correlationId)));
-        processor->receiveSysMessage("mcp_clear_ids", atoms);
+        atoms.add(juce::String(canvasName));
+        atoms.add(juce::String(correlationId));
+        processor->getMcp()->callSys("mcp_clear_ids", atoms);
     }
     return;
 }
@@ -155,18 +155,18 @@ void MCPBridge::pdClearIds(const juce::String& action, const juce::OSCMessage& m
 void MCPBridge::pdRegisterId(const juce::String& action, const juce::OSCMessage& msg)
 {
     if (msg.size() >= 4 && processor) {
-        SmallArray<pd::Atom> atoms;
+        mcp::SysList atoms; // P3.4 S7: plain values, no Pd symbols
         auto canvasName = normalizeCanvas(getArgString(msg[0]));
         auto correlationId = getArgString(msg[1]);
         float index = getArgFloat(msg[2]);
         auto objectId = getArgString(msg[3]);
 
-        atoms.add(pd::Atom(processor->generateSymbol(canvasName)));
-        atoms.add(pd::Atom(processor->generateSymbol(correlationId)));
-        atoms.add(pd::Atom(index));
-        atoms.add(pd::Atom(processor->generateSymbol(objectId)));
+        atoms.add(juce::String(canvasName));
+        atoms.add(juce::String(correlationId));
+        atoms.add(index);
+        atoms.add(juce::String(objectId));
 
-        processor->receiveSysMessage("mcp_register_id", atoms);
+        processor->getMcp()->callSys("mcp_register_id", atoms);
     }
     return;
 }
@@ -228,12 +228,12 @@ void MCPBridge::pdRenameIdBatch(const juce::String& action, const juce::OSCMessa
 void MCPBridge::pdGetMappings(const juce::String& action, const juce::OSCMessage& msg)
 {
     if (msg.size() >= 2 && processor) {
-        SmallArray<pd::Atom> atoms;
+        mcp::SysList atoms; // P3.4 S7: plain values, no Pd symbols
         auto canvasName = normalizeCanvas(getArgString(msg[0]));
         auto correlationId = getArgString(msg[1]);
-        atoms.add(pd::Atom(processor->generateSymbol(canvasName)));
-        atoms.add(pd::Atom(processor->generateSymbol(correlationId)));
-        processor->receiveSysMessage("mcp_get_mappings", atoms);
+        atoms.add(juce::String(canvasName));
+        atoms.add(juce::String(correlationId));
+        processor->getMcp()->callSys("mcp_get_mappings", atoms);
     }
     return;
 }

@@ -270,24 +270,24 @@ void MCPBridge::pdDeleteBatch(const juce::String& action, const juce::OSCMessage
 void MCPBridge::pdMoveBatchId(const juce::String& action, const juce::OSCMessage& msg)
 {
     if (msg.size() >= 3 && processor) {
-        SmallArray<pd::Atom> atoms;
+        mcp::SysList atoms; // P3.4 S7: plain values, no Pd symbols
         auto canvasName = normalizeCanvas(getArgString(msg[0]));
         auto correlationId = getArgString(msg[1]);
-        atoms.add(pd::Atom(processor->generateSymbol(canvasName)));
-        atoms.add(pd::Atom(processor->generateSymbol(correlationId)));
+        atoms.add(juce::String(canvasName));
+        atoms.add(juce::String(correlationId));
 
         for (int i = 2; i < msg.size(); ++i) {
             if (msg[i].isFloat32() || msg[i].isInt32()) {
-                atoms.add(pd::Atom(getArgFloat(msg[i])));
+                atoms.add(getArgFloat(msg[i]));
             } else {
-                atoms.add(pd::Atom(processor->generateSymbol(getArgString(msg[i]))));
+                atoms.add(juce::String(getArgString(msg[i])));
             }
         }
 
         if (action == "move_batch_id") {
-            processor->receiveSysMessage("mcp_move_batch_id", atoms);
+            processor->getMcp()->callSys("mcp_move_batch_id", atoms);
         } else {
-            processor->receiveSysMessage("mcp_move_batch", atoms);
+            processor->getMcp()->callSys("mcp_move_batch", atoms);
         }
     }
     return;

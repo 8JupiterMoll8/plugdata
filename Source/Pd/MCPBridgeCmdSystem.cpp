@@ -99,10 +99,10 @@ void MCPBridge::pdClear(const juce::String& action, const juce::OSCMessage& msg)
                 // objects we just freed.
                 if (cnv) proc->getMcp()->clearMcpTransactions(cnv);
 
-                SmallArray<pd::Atom> atoms;
-                atoms.add(pd::Atom(proc->generateSymbol(canvasName)));
-                atoms.add(pd::Atom(proc->generateSymbol("0")));
-                proc->receiveSysMessage("mcp_clear_ids", atoms);
+                mcp::SysList atoms; // P3.4 S7: plain values, no Pd symbols
+                atoms.add(juce::String(canvasName));
+                atoms.add(juce::String("0"));
+                proc->getMcp()->callSys("mcp_clear_ids", atoms);
 
                 proc->getMcp()->synchroniseCanvases();
 
@@ -125,9 +125,9 @@ void MCPBridge::pdClearUndo(const juce::String& action, const juce::OSCMessage& 
     // here (command worker) and takes the Pd lock canvas_undo_free needs.
     if (msg.size() >= 1 && processor) {
         auto canvasName = normalizeCanvas(getArgString(msg[0]));
-        SmallArray<pd::Atom> atoms;
-        atoms.add(pd::Atom(processor->generateSymbol(canvasName)));
-        processor->receiveSysMessage("mcp_clear_undo", atoms);
+        mcp::SysList atoms; // P3.4 S7: plain values, no Pd symbols
+        atoms.add(juce::String(canvasName));
+        processor->getMcp()->callSys("mcp_clear_undo", atoms);
         sendRawReply("/pd/clear_undo/reply");
     }
     return;
@@ -136,8 +136,8 @@ void MCPBridge::pdClearUndo(const juce::String& action, const juce::OSCMessage& 
 void MCPBridge::pdClearSelection(const juce::String& action, const juce::OSCMessage& msg)
 {
     if (processor) {
-        SmallArray<pd::Atom> atoms;
-        processor->receiveSysMessage("mcp_clear_selection", atoms);
+        mcp::SysList atoms; // P3.4 S7: plain values, no Pd symbols
+        processor->getMcp()->callSys("mcp_clear_selection", atoms);
     }
     return;
 }

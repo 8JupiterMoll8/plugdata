@@ -6,6 +6,10 @@
 
 #include "MCPBridgeCmdCommon.h"
 #include "Mcp/McpRtGuard.h"
+#include "Mcp/McpAudit.h"
+extern "C" {
+#include <m_imp.h> // SYMTABHASHSIZE (P3.4 S7 symbol count)
+}
 
 
 void MCPBridge::mcpCtrlCapture(t_symbol* selector, int argc, t_atom* argv)
@@ -1080,6 +1084,14 @@ juce::String MCPBridge::computePerfFacts(PluginProcessor* processor, t_canvas* c
     root->setProperty("dsp", pd_getdspstate() != 0);
     root->setProperty("cpu", static_cast<double>(cpu));
     root->setProperty("xruns", processor ? processor->getMcp()->xrunCount() : -1);
+    if (mcp::audit::enabled()) { // P3.4 S7: Pd's symbol table size (symbols are never freed); audit runs only
+        long symbols = 0;
+        if (pd_this && pd_this->pd_symhash)
+            for (int i = 0; i < SYMTABHASHSIZE; ++i)
+                for (t_symbol* sym = pd_this->pd_symhash[i]; sym; sym = sym->s_next)
+                    ++symbols;
+        root->setProperty("symbols", static_cast<juce::int64>(symbols));
+    }
     if (mcp::rt::guardLinked()) { // P3.4 S6: realtime-guard builds only
         root->setProperty("rtAllocs", static_cast<juce::int64>(mcp::rt::allocs()));
         root->setProperty("rtLocks", static_cast<juce::int64>(mcp::rt::locks()));

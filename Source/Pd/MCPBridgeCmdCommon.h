@@ -94,9 +94,9 @@ struct _outlet
 inline void resetCanvasUndo(PluginProcessor* proc, juce::String const& canvasName)
 {
     if (!proc) return;
-    SmallArray<pd::Atom> atoms;
-    atoms.add(pd::Atom(proc->generateSymbol(canvasName)));
-    proc->receiveSysMessage("mcp_clear_undo", atoms);
+    mcp::SysList atoms; // P3.4 S7: plain values, no Pd symbols
+    atoms.add(juce::String(canvasName));
+    proc->getMcp()->callSys("mcp_clear_undo", atoms);
 }
 
 // ── PRD_OBJ_GET_SET P4: shadow of values posted to named buses (/param) ──────

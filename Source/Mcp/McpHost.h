@@ -8,6 +8,7 @@
 
 #include "Mcp/McpSession.h"
 #include "Mcp/McpGuiHost.h"
+#include "Mcp/McpSysList.h"
 #include <juce_dsp/juce_dsp.h>
 
 #include "Pd/Instance.h"
@@ -36,7 +37,9 @@ public:
     // read straight from the bridge's own stable map — never from the TS mirror.
     juce::String getStableId(t_gobj* g) const;
     juce::String getOrAdoptStableId(t_canvas* canvas, t_gobj* g);
-    void sendMCPReply(const String& replyAddr, const SmallArray<pd::Atom>& atoms);
+    // P3.4 S7: straight to OSC (floats as floats, strings as strings, as before). The Pd-side
+    // "mcp_telemetry_reply" message it also sent had no receiver anywhere (the Lua bridge was retired).
+    void sendMCPReply(const String& replyAddr, mcp::SysList const& values);
 
     bool hasMcpTransaction(t_canvas* cnv) const;
     bool hasMcpRedoTransaction(t_canvas* cnv) const;
@@ -130,15 +133,17 @@ public:
     // The mcp_* Pd system messages (Source/Mcp/McpSysCommands.cpp). Returns false for
     // every other selector, which PluginProcessor::receiveSysMessage then handles.
     bool handleSysMessage(SmallString const& selector, SmallArray<pd::Atom> const& list);
+    // P3.4 S7: the bridge's way into an mcp_* command: plain strings and numbers, no Pd symbols made.
+    bool callSys(SmallString const& selector, mcp::SysList const& list);
 
 private:
     // Selector table (McpSysVerbs.inc): one private member function per row, built at
     // startup like the bridge's verb table.
-    using SysHandler = void (McpHost::*)(SmallString const& selector, SmallArray<pd::Atom> const& list);
+    using SysHandler = void (McpHost::*)(SmallString const& selector, mcp::SysList const& list);
     using SysTable = mcp::CommandTable<SysHandler>;
     static SysTable const& sysTable();
 
-#define MCP_SYS(name, handler) void handler(SmallString const& selector, SmallArray<pd::Atom> const& list);
+#define MCP_SYS(name, handler) void handler(SmallString const& selector, mcp::SysList const& list);
 #include "Mcp/McpSysVerbs.inc"
 
 public:

@@ -539,9 +539,9 @@ void MCPBridge::pdEncapsulateGop(const juce::String& action, const juce::OSCMess
                             canvas_update_dsp();
 
                             // Clear undo queue safely on Pd scheduler thread to prevent stale pointer crashes on Ctrl+Z.
-                            SmallArray<pd::Atom> undoAtoms;
-                            undoAtoms.add(pd::Atom(proc->generateSymbol(canvasName)));
-                            proc->receiveSysMessage("mcp_clear_undo", undoAtoms);
+                            mcp::SysList undoAtoms; // P3.4 S7: plain values, no Pd symbols
+                            undoAtoms.add(juce::String(canvasName));
+                            proc->getMcp()->callSys("mcp_clear_undo", undoAtoms);
                             for (auto& e : staleErrs) connErrs.add(e);
                             proc->getMcp()->session.mcpStableObjectMap[gopKey][safeName.toStdString()] = newObj;
                             proc->getMcp()->session.mcpSerialCounter++;

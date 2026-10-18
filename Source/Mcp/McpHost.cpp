@@ -466,12 +466,18 @@ void McpHost::reconcileIdentity(const String& canvasName)
     }
 }
 
-void McpHost::sendMCPReply(const String& replyAddr, const SmallArray<pd::Atom>& atoms)
+void McpHost::sendMCPReply(const String& replyAddr, mcp::SysList const& values)
 {
-    processor.sendMessage("mcp_telemetry_reply", replyAddr.toRawUTF8(), atoms);
-    if (mcpBridge) {
-        mcpBridge->sendSelectionTelemetry(replyAddr, atoms);
+    if (!mcpBridge)
+        return;
+    juce::Array<juce::var> args;
+    for (int i = 0; i < values.size(); ++i) {
+        if (values[i].isNumber)
+            args.add(static_cast<double>(values[i].number));
+        else
+            args.add(values[i].text);
     }
+    mcpBridge->sendReply(replyAddr, args);
 }
 
 bool McpHost::hasMcpTransaction(t_canvas* cnv) const

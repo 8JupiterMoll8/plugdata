@@ -376,12 +376,12 @@ void MCPBridge::pdObjGet(const juce::String& action, const juce::OSCMessage& msg
 void MCPBridge::pdCensus(const juce::String& action, const juce::OSCMessage& msg)
 {
     if (msg.size() >= 1 && processor) {
-        SmallArray<pd::Atom> atoms;
+        mcp::SysList atoms; // P3.4 S7: plain values, no Pd symbols
         auto canvasName = normalizeCanvas(getArgString(msg[0]));
         auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : "0";
-        atoms.add(pd::Atom(processor->generateSymbol(canvasName)));
-        atoms.add(pd::Atom(processor->generateSymbol(correlationId)));
-        processor->receiveSysMessage("mcp_census", atoms);
+        atoms.add(juce::String(canvasName));
+        atoms.add(juce::String(correlationId));
+        processor->getMcp()->callSys("mcp_census", atoms);
     }
     return;
 }

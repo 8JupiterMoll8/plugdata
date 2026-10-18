@@ -6,7 +6,7 @@
 //
 //   MCP_SYS("mcp_selector", handler)
 //
-// A handler is `void handler(SmallString const& selector, SmallArray<pd::Atom> const& list)`
+// A handler is `void handler(SmallString const& selector, mcp::SysList const& list)` (P3.4 S7)
 // and keeps the body it had as a case of McpHost::dispatchSysMessage. Every row is
 // reachable from Pd (a message to `pd` or to `mcp_host` ends in
 // PluginProcessor::receiveSysMessage); "bridge" names the OSC verbs of MCPBridge that

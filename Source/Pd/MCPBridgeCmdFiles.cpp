@@ -176,10 +176,10 @@ void MCPBridge::pdLoadContent(const juce::String& action, const juce::OSCMessage
             processor->startDSP();
 
         // 5. Clear identity map — PHASE 0 reconcile fires on next batch_atomic
-        SmallArray<pd::Atom> atoms;
-        atoms.add(pd::Atom(processor->generateSymbol(canvasName)));
-        atoms.add(pd::Atom(processor->generateSymbol("0")));
-        processor->receiveSysMessage("mcp_clear_ids", atoms);
+        mcp::SysList atoms; // P3.4 S7: plain values, no Pd symbols
+        atoms.add(juce::String(canvasName));
+        atoms.add(juce::String("0"));
+        processor->getMcp()->callSys("mcp_clear_ids", atoms);
 
         processor->getMcp()->enqueuePd([p = processor] { p->getMcp()->synchroniseCanvases(); });
 
@@ -522,12 +522,12 @@ void MCPBridge::pdOpenPatch(const juce::String& action, const juce::OSCMessage& 
                                 if (static_cast<int>(static_cast<double>(o->getProperty("i"))) != idx) continue;
                                 juce::String id = o->getProperty("id").toString();
                                 if (id.isEmpty()) break;
-                                SmallArray<pd::Atom> atoms;
-                                atoms.add(pd::Atom(p->generateSymbol(canvasKey)));
-                                atoms.add(pd::Atom(p->generateSymbol("0")));
-                                atoms.add(pd::Atom(static_cast<float>(idx)));
-                                atoms.add(pd::Atom(p->generateSymbol(id)));
-                                p->receiveSysMessage("mcp_register_id", atoms);
+                                mcp::SysList atoms; // P3.4 S7: plain values, no Pd symbols
+                                atoms.add(juce::String(canvasKey));
+                                atoms.add(juce::String("0"));
+                                atoms.add(static_cast<float>(idx));
+                                atoms.add(juce::String(id));
+                                p->getMcp()->callSys("mcp_register_id", atoms);
                                 queued++;
                                 break;
                             }

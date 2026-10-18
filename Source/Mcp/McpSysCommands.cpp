@@ -27,11 +27,20 @@ bool McpHost::handleSysMessage(SmallString const& selector, SmallArray<pd::Atom>
     if (handler == nullptr)
         return false;
 
+    (this->**handler)(selector, mcp::SysList(list));
+    return true;
+}
+
+bool McpHost::callSys(SmallString const& selector, mcp::SysList const& list)
+{
+    auto const* handler = sysTable().find("sys", selector.toString().toStdString());
+    if (handler == nullptr)
+        return false;
     (this->**handler)(selector, list);
     return true;
 }
 
-void McpHost::sysSelectionGate(SmallString const& selector, SmallArray<pd::Atom> const& list)
+void McpHost::sysSelectionGate(SmallString const& selector, mcp::SysList const& list)
 {
     // P3.4 S3: reads the editors' selections, so it runs on the message thread (Pd-only selector).
     if (!juce::MessageManager::getInstance()->isThisTheMessageThread()) {
@@ -98,7 +107,7 @@ void McpHost::sysSelectionGate(SmallString const& selector, SmallArray<pd::Atom>
     }
 }
 
-void McpHost::sysMove(SmallString const& selector, SmallArray<pd::Atom> const& list)
+void McpHost::sysMove(SmallString const& selector, mcp::SysList const& list)
 {
     if (list.size() >= 4) {
         auto canvas_symbol = list[0].toString();
@@ -129,7 +138,7 @@ void McpHost::sysMove(SmallString const& selector, SmallArray<pd::Atom> const& l
     }
 }
 
-void McpHost::sysClearSelection(SmallString const& selector, SmallArray<pd::Atom> const& list)
+void McpHost::sysClearSelection(SmallString const& selector, mcp::SysList const& list)
 {
     // P3.4 S3: editors are message-thread objects (from the command worker this was 57 of a sweep's 61
     // JUCE assertions). No reply follows, so a hop keeps the protocol as it was.
@@ -144,7 +153,7 @@ void McpHost::sysClearSelection(SmallString const& selector, SmallArray<pd::Atom
     }
 }
 
-void McpHost::sysMoveBatch(SmallString const& selector, SmallArray<pd::Atom> const& list)
+void McpHost::sysMoveBatch(SmallString const& selector, mcp::SysList const& list)
 {
     if (list.size() >= 2) {
         auto canvas_symbol = list[0].toString();
@@ -177,13 +186,13 @@ void McpHost::sysMoveBatch(SmallString const& selector, SmallArray<pd::Atom> con
         sys_unlock();
 
 
-        SmallArray<pd::Atom> atoms;
-        atoms.add(pd::Atom((float)movedCount));
+        mcp::SysList atoms; // P3.4 S7: plain values, no Pd symbols
+        atoms.add((float)movedCount);
         sendMCPReply(String("/pd/move_batch/reply/" + correlation_id), atoms);
     }
 }
 
-void McpHost::sysClearIds(SmallString const& selector, SmallArray<pd::Atom> const& list)
+void McpHost::sysClearIds(SmallString const& selector, mcp::SysList const& list)
 {
     if (list.size() >= 2) {
         auto canvas_symbol = list[0].toString();
@@ -201,13 +210,13 @@ void McpHost::sysClearIds(SmallString const& selector, SmallArray<pd::Atom> cons
             session.mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
         }
 
-        SmallArray<pd::Atom> atoms;
-        atoms.add(pd::Atom(1.0f));
+        mcp::SysList atoms; // P3.4 S7: plain values, no Pd symbols
+        atoms.add(1.0f);
         sendMCPReply(String("/pd/mcp_clear_ids/reply/" + correlation_id), atoms);
     }
 }
 
-void McpHost::sysClearUndo(SmallString const& selector, SmallArray<pd::Atom> const& list)
+void McpHost::sysClearUndo(SmallString const& selector, mcp::SysList const& list)
 {
     // Called from /pd/clear_undo, resetCanvasUndo and encapsulate_gop via
     // receiveSysMessage, synchronously on the caller's thread (command worker,
@@ -258,7 +267,7 @@ void McpHost::sysClearUndo(SmallString const& selector, SmallArray<pd::Atom> con
     sys_unlock();
 }
 
-void McpHost::sysRegisterId(SmallString const& selector, SmallArray<pd::Atom> const& list)
+void McpHost::sysRegisterId(SmallString const& selector, mcp::SysList const& list)
 {
     if (list.size() >= 4) {
         auto canvas_symbol = list[0].toString();
@@ -294,13 +303,13 @@ void McpHost::sysRegisterId(SmallString const& selector, SmallArray<pd::Atom> co
         }
         sys_unlock();
 
-        SmallArray<pd::Atom> atoms;
-        atoms.add(pd::Atom(success ? 1.0f : 0.0f));
+        mcp::SysList atoms; // P3.4 S7: plain values, no Pd symbols
+        atoms.add(success ? 1.0f : 0.0f);
         sendMCPReply(String("/pd/mcp_register_id/reply/" + correlation_id), atoms);
     }
 }
 
-void McpHost::sysRenameId(SmallString const& selector, SmallArray<pd::Atom> const& list)
+void McpHost::sysRenameId(SmallString const& selector, mcp::SysList const& list)
 {
     if (list.size() >= 4) {
         auto canvas_symbol = list[0].toString();
@@ -319,13 +328,13 @@ void McpHost::sysRenameId(SmallString const& selector, SmallArray<pd::Atom> cons
         success = renamed != mcp::identity::RenameResult::Missing;
         sys_unlock();
 
-        SmallArray<pd::Atom> atoms;
-        atoms.add(pd::Atom(success ? 1.0f : 0.0f));
+        mcp::SysList atoms; // P3.4 S7: plain values, no Pd symbols
+        atoms.add(success ? 1.0f : 0.0f);
         sendMCPReply(String("/pd/mcp_rename_id/reply/" + correlation_id), atoms);
     }
 }
 
-void McpHost::sysGetMappings(SmallString const& selector, SmallArray<pd::Atom> const& list)
+void McpHost::sysGetMappings(SmallString const& selector, mcp::SysList const& list)
 {
     if (list.size() >= 2) {
         auto canvas_symbol = list[0].toString();
@@ -333,7 +342,7 @@ void McpHost::sysGetMappings(SmallString const& selector, SmallArray<pd::Atom> c
 
         sys_lock();
         t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
-        SmallArray<pd::Atom> atoms;
+        mcp::SysList atoms; // P3.4 S7: plain values, no Pd symbols
         if (canvas) {
             auto canonStr = MCPBridge::canonicalCanvasKey(canvas).toStdString();
             auto& canvasMap = session.mcpStableObjectMap[canonStr];
@@ -344,8 +353,8 @@ void McpHost::sysGetMappings(SmallString const& selector, SmallArray<pd::Atom> c
                 int index = getObjectIndex(canvas, targetObj);
                 if (index != -1) {
                     // Object still exists on the canvas, add to atoms
-                    atoms.add(pd::Atom(gensym(it->first.c_str())));
-                    atoms.add(pd::Atom((float)index));
+                    atoms.add(juce::String::fromUTF8(it->first.c_str()));
+                    atoms.add((float)index);
                     ++it;
                 } else {
                     // Object was deleted/freed, erase from stable map
@@ -359,7 +368,7 @@ void McpHost::sysGetMappings(SmallString const& selector, SmallArray<pd::Atom> c
     }
 }
 
-void McpHost::sysCensus(SmallString const& selector, SmallArray<pd::Atom> const& list)
+void McpHost::sysCensus(SmallString const& selector, mcp::SysList const& list)
 {
     if (list.size() >= 2) {
         auto canvas_symbol = list[0].toString();
@@ -645,13 +654,13 @@ void McpHost::sysCensus(SmallString const& selector, SmallArray<pd::Atom> const&
         }
         sys_unlock();
 
-        SmallArray<pd::Atom> atoms;
-        atoms.add(pd::Atom(gensym(jsonString.toRawUTF8())));
+        mcp::SysList atoms; // P3.4 S7: plain values, no Pd symbols
+        atoms.add(jsonString); // P3.4 S7: was a permanent Pd symbol per census
         sendMCPReply(String("/pd/census/reply/" + correlation_id), atoms);
     }
 }
 
-void McpHost::sysMoveBatchId(SmallString const& selector, SmallArray<pd::Atom> const& list)
+void McpHost::sysMoveBatchId(SmallString const& selector, mcp::SysList const& list)
 {
     if (list.size() >= 2) {
         auto canvas_symbol = list[0].toString();
@@ -706,8 +715,8 @@ void McpHost::sysMoveBatchId(SmallString const& selector, SmallArray<pd::Atom> c
             pushMcpTransaction(canvas, canvas_symbol, fwd, inv, "move_batch_id");
         }
 
-        SmallArray<pd::Atom> atoms;
-        atoms.add(pd::Atom((float)movedCount));
+        mcp::SysList atoms; // P3.4 S7: plain values, no Pd symbols
+        atoms.add((float)movedCount);
         sendMCPReply(String("/pd/mcp_move_batch_id/reply/" + correlation_id), atoms);
         enqueuePd([this] { synchroniseCanvases(); });
     }
