@@ -156,10 +156,6 @@ inline void pasteDirect(t_canvas* cnv, char const* buf)
     binbuf_free(b);
 }
 
-// ── /pd/clusters — context grouping for layout ──────────────────────────
-// Connected components of the wire graph (signal + control), classified by
-// kind. One union-find pass over gl_list connections — read-only, fast.
-// Feeds context-aware layout (see PRD_CONTEXT_LAYOUT_GUARD.md).
 // Shared: the live object bounds of the JUCE Canvas showing a Pd canvas
 // (message thread; nullptr when no view shows it). Was mcpFindGuiCanvasFor.
 inline std::unique_ptr<McpGuiHost::LiveBounds> mcpLiveBounds(PluginProcessor* proc, t_canvas* c)

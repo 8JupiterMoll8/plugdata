@@ -60,6 +60,9 @@ void MCPBridge::pdDiagnose(const juce::String& action, const juce::OSCMessage& m
 }
 
     // ── /pd/clusters — context grouping (PRD_CONTEXT_LAYOUT_GUARD) ──────
+    // Connected components of the wire graph (signal + control), classified by
+    // kind. One union-find pass over gl_list connections — read-only, fast.
+    // Feeds context-aware layout.
     // /pd/clusters <canvasName> [corrId]
     // Reply: /pd/clusters/reply/<corrId> {"clusters":[{"id","kind","objects":[...]}]}
 void MCPBridge::pdClusters(const juce::String& action, const juce::OSCMessage& msg)
