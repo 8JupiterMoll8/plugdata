@@ -16,12 +16,14 @@ list what the handler does that matters for the execution model:
   capture  lambdas passed to enqueueFunctionAsync/callAsync that capture by
            reference ([&...]) or capture a raw Pd pointer local
   sys      mcp_* selectors reached through receiveSysMessage
+  ident    identity state touched: the session identity fields or the McpHost
+           identity methods (P3.5 S0; --identity prints only those rows)
 
 "direct" = in the handler body; "via" = reached through functions it calls,
 matched by NAME over every function defined in the MCP files (an
 over-approximation: a name defined twice counts both).
 
-Usage: scripts/mcp-thread-map.py [--json out.json] [--root .]
+Usage: scripts/mcp-thread-map.py [--json out.json] [--root .] [--identity]
 """
 import argparse
 import json
@@ -31,6 +33,9 @@ import sys
 
 PTR_TYPES = r"(?:t_canvas|t_glist|t_gobj|t_object|t_outconnect|t_signal|t_garray|t_text)"
 FILES_GLOBS = [("Source/Pd", r"^MCPBridge.*\.(cpp|h|inc)$"), ("Source/Mcp", r".*\.(cpp|h)$")]
+
+IDENT_RE = (r"\b(?:mcpStableObjectMap|mcpStableSerialMap|mcpSerialCounter|mcpIdentityVersion)\b"
+            r"|\b(?:getStableId|getOrAdoptStableId|resolveStableId|reconcileIdentity)\s*\(")
 
 KEYWORDS = {"if", "for", "while", "switch", "return", "sizeof", "catch", "static_cast",
             "reinterpret_cast", "const_cast", "dynamic_cast", "decltype", "alignof", "new",
@@ -172,6 +177,7 @@ def facts_of(body_code, body_raw, ptr_locals, off_methods):
         "drain": len(re.findall(r"\bsendMessagesFromQueue\s*\(", body_code)),
         "editors": len(re.findall(r"\bgetEditors\s*\(", body_code)),
         "sym": len(re.findall(r"\bgensym\s*\(|\bgenerateSymbol\s*\(", body_code)),
+        "ident": len(re.findall(IDENT_RE, body_code)),
         "gui": sorted(set(re.findall(r"gui\(\)\s*(?:->|\.)\s*(\w+)\s*\(", body_code))),
         "capture": [],
         "sys": sorted(set(re.findall(r'receiveSysMessage\s*\(\s*"(mcp_\w+)"', body_raw))),
@@ -189,7 +195,7 @@ def facts_of(body_code, body_raw, ptr_locals, off_methods):
 
 def merge(a, b):
     out = dict(a)
-    for k in ("lock", "pdq", "async", "wait", "drain", "editors", "sym", "msgEditors"):
+    for k in ("lock", "pdq", "async", "wait", "drain", "editors", "sym", "msgEditors", "ident"):
         out[k] = a.get(k, 0) + b.get(k, 0)
     for k in ("gui", "guiOff", "sys"):
         out[k] = sorted(set(a[k]) | set(b[k]))
@@ -198,7 +204,7 @@ def merge(a, b):
 
 
 def empty():
-    return {"lock": 0, "pdq": 0, "async": 0, "wait": 0, "drain": 0, "editors": 0, "sym": 0, "msgEditors": 0,
+    return {"lock": 0, "pdq": 0, "async": 0, "wait": 0, "drain": 0, "editors": 0, "sym": 0, "msgEditors": 0, "ident": 0,
             "gui": [], "guiOff": [], "capture": [], "sys": []}
 
 
@@ -206,6 +212,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default=".")
     ap.add_argument("--json")
+    ap.add_argument("--identity", action="store_true")
     args = ap.parse_args()
     root = args.root
 
@@ -300,6 +307,8 @@ def main():
                     "file": ents[0]["file"] if ents else None,
                     "direct": direct, "total": total})
 
+    if args.identity:
+        out = [r for r in out if r["total"]["ident"]]
     if args.json:
         with open(args.json, "w") as fh:
             json.dump({"offThreadMethods": sorted(off_methods), "rows": out}, fh, indent=1, default=list)
@@ -307,7 +316,7 @@ def main():
     # Human summary: one line per row (aliases skipped: same handler).
     def short(f):
         bits = []
-        for k in ("lock", "pdq", "async", "wait", "drain", "editors", "sym"):
+        for k in ("lock", "pdq", "async", "wait", "drain", "editors", "sym", "ident"):
             if f[k]:
                 bits.append(f"{k}{f[k]}")
         if f["guiOff"]:
