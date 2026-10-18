@@ -516,6 +516,17 @@ void MCPBridge::meterMaster(const juce::String& meterAction, const juce::OSCMess
     }
     sys_unlock();
 
+    // Bug #83 (P3.4 S10): this reads the dac~'s Pd signal vectors, which keep the last block when the audio
+    // callback stops (device lost, a second instance on the device). That stale level was reported as live
+    // while every armed read, which needs processBlock, was silent. No block for 250 ms: say so instead.
+    auto const lastBlockMs = processor->getMcp()->session.mcpLastBlockMs.load(std::memory_order_relaxed);
+    if (lastBlockMs == 0 || juce::Time::getMillisecondCounter() - lastBlockMs > 250) {
+        post("MCP meter: the audio callback has not run for 250 ms, the master level is not live");
+        res.peakDb = -100.0f;
+        res.rmsDb = -100.0f;
+        res.masterType = "audio_not_running";
+    }
+
     juce::OSCMessage rep { juce::OSCAddressPattern("/meter/master/reply/" + correlationId) };
     rep.addArgument(res.peakDb);
     rep.addArgument(res.rmsDb);

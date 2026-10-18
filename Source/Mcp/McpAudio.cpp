@@ -35,6 +35,7 @@ void McpHost::audioBlockStarted()
 {
     mcp::rt::Scope const rtScope; // P3.4 S6: realtime guard (counts only in a -DMCP_RT_GUARD=ON build)
     session.mcpAudioBlocks.fetch_add(1, std::memory_order_relaxed); // #83 audio-thread liveness
+    session.mcpLastBlockMs.store(juce::Time::getMillisecondCounter(), std::memory_order_relaxed);
     mcp::audit::markAudioThread(); // P3.4 S0: no-op unless PLUGDATA_MCP_AUDIT=1
 }
 

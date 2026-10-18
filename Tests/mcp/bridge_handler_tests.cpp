@@ -248,6 +248,45 @@ void runNativeUndoCases(PluginProcessor& processor)
     CHECK(headIsInit);
 }
 
+// Bug #83 (P3.4 S10): with the audio callback stopped, Pd's signal vectors keep the last block. /meter/master
+// read them and reported that stale level as live, while every armed read (which needs processBlock) was
+// silent: the "master audible, armed silent" split of the bug report. The test's audio loop stands in for
+// the device and is paused here.
+void runAudioStallCases(Harness& h, AudioControl& audio)
+{
+    std::printf("master meter with the audio callback stopped (#83)\n");
+    auto made = h.call("/pd/batch_atomic",
+        { "main", "s83", 0, 0, 0, 2, 2,
+            "s83o", 400, 40, "obj", "osc~", 1, "440",
+            "s83d", 400, 100, "obj", "dac~", 0,
+            "s83o", 0, "s83d", 0,
+            "s83o", 0, "s83d", 1,
+            0, 5, 10, 0 },
+        "/pd/batch_atomic/reply/s83");
+    CHECK(made.has_value() && made->num(0) == 2);
+    h.fire("/pd/dsp", { 1 });
+    sleepMs(300);
+    auto live = h.call("/meter/master", { "main", "s83m1" }, "/meter/master/reply/s83m1");
+    CHECK(live.has_value() && live->num(0) > -60.0);
+
+    audio.paused = true;
+    sleepMs(400);
+    h.call("/meter/arm", { "s83a" }, "/meter/arm/reply/s83a");
+    sleepMs(100);
+    auto armed = h.call("/meter/read", { "s83r" }, "/meter/read/reply/s83r");
+    CHECK(armed.has_value() && armed->num(2) == 0); // blocksElapsed: the audio thread is not ticking
+    auto stalled = h.call("/meter/master", { "main", "s83m2" }, "/meter/master/reply/s83m2");
+    CHECK(stalled.has_value() && stalled->num(0) <= -99.0);
+    CHECK(stalled.has_value() && stalled->str(3) == "audio_not_running");
+
+    audio.paused = false;
+    sleepMs(300);
+    auto again = h.call("/meter/master", { "main", "s83m3" }, "/meter/master/reply/s83m3");
+    CHECK(again.has_value() && again->num(0) > -60.0);
+    h.fire("/pd/dsp", { 0 });
+    h.call("/pd/batch_atomic", { "main", "s83x", 2, 0, 0, 0, 0, "s83o", "s83d", 0, 5, 10, 0 }, "/pd/batch_atomic/reply/s83x");
+}
+
 // MIDI capture (P3.4 S6): the audio thread only queues raw note on/off; the bridge pairs them off the audio
 // thread. Three notes played through processBlock come back as three closed notes.
 void runMidiCaptureCases(PluginProcessor& processor, AudioControl& audio)
@@ -531,6 +570,7 @@ int main()
             runCases(harness);
             runPdContextCases(processor, audioControl);
             runNativeUndoCases(processor);
+            runAudioStallCases(harness, audioControl);
             runMidiCaptureCases(processor, audioControl);
             startRenderForTeardown(harness); // last: the processor is destroyed with the render running
             casesDone.store(true);

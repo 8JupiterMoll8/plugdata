@@ -427,6 +427,9 @@ struct McpSession {
     //   blocksElapsed > 0, armedTailRuns == 0 → the armed tail isn't reached
     //   armedTailRuns > 0, tailPeak ~ 0       → the JUCE output buffer is silent
     std::atomic<uint64_t> mcpAudioBlocks { 0 };      // ++ every processBlock
+    // #83 (P3.4 S10): getMillisecondCounter() at the last processBlock. Pd's signal vectors keep the last
+    // block when the callback stops, so the Pd-side meters check this before trusting them.
+    std::atomic<juce::uint32> mcpLastBlockMs { 0 };
     std::atomic<uint64_t> mcpArmBlocksAtArm { 0 };   // snapshot taken on arm
     std::atomic<uint64_t> mcpArmedTailRuns { 0 };    // armed-tail executions this window
     std::atomic<float>    mcpArmedTailPeak { 0.0f }; // peak seen at the tail this window
