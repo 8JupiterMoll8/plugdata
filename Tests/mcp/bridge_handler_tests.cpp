@@ -370,6 +370,89 @@ void runIdentityValidityCases(PluginProcessor& processor)
     CHECK(reloadRan && reloadRebound);
 }
 
+// P3.5 S7: identity sidecar v2 on a scratch subpatch: round trip, an edited .pd detected by its hash, entries whose
+// class no longer matches get fresh names (owner decision O2), a truncated sidecar is ignored, v1 is still read.
+void runSidecarCases(PluginProcessor& processor)
+{
+    std::printf("identity sidecar v2\n");
+    auto* host = processor.getMcp();
+    juce::File dir = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("mcp_s7_sidecar");
+    dir.createDirectory();
+    auto pdFile = dir.getChildFile("s7.pd");
+    bool roundTrip = false, editedSeen = false, classRejected = false, truncatedIgnored = false, v1Read = false;
+    CHECK(host->pdWait([&] {
+        t_canvas* cnv = host->getCanvasBySymbol("main");
+        if (!cnv) return;
+        auto obj = [](t_canvas* c, char const* cls, int x) {
+            t_atom a[3];
+            SETFLOAT(a, x);
+            SETFLOAT(a + 1, 400);
+            SETSYMBOL(a + 2, gensym(cls));
+            pd_typedmess(&c->gl_pd, gensym("obj"), 3, a);
+            return pd::Interface::getNewest(c);
+        };
+        t_atom sa[4];
+        SETFLOAT(sa, 900);
+        SETFLOAT(sa + 1, 400);
+        SETSYMBOL(sa + 2, gensym("pd"));
+        SETSYMBOL(sa + 3, gensym("s7sub"));
+        pd_typedmess(&cnv->gl_pd, gensym("obj"), 4, sa);
+        auto* sub = reinterpret_cast<t_canvas*>(pd::Interface::getNewest(cnv));
+        t_gobj* osc = obj(sub, "osc~", 10);
+        t_gobj* mul = obj(sub, "*~", 80);
+        host->identity.bind(sub, "s7osc", osc);
+        host->identity.bind(sub, "s7mul", mul);
+        auto& identity = host->identity;
+
+        pdFile.replaceWithText("#N canvas 0 50 450 300 12;\n#X obj 10 10 osc~;\n");
+        auto sidecar = MCPBridge::buildIdentitySidecar(&processor, sub);
+        CHECK(MCPBridge::writeIdentitySidecarFile(sidecar, pdFile).isEmpty());
+        juce::String note;
+        auto read = MCPBridge::readIdentitySidecar(pdFile, note);
+        if (auto* o = read.getDynamicObject()) {
+            auto stats = MCPBridge::mcpApplyIdentitySidecar(&processor, o, sub, pdFile);
+            roundTrip = stats.fileMatches && stats.restored == 2 && stats.renamed == 0
+                && identity.resolve(sub, "s7osc") == osc && identity.resolve(sub, "s7mul") == mul;
+        }
+
+        pdFile.appendText("#X obj 10 40 dac~;\n"); // edited behind the sidecar's back
+        read = MCPBridge::readIdentitySidecar(pdFile, note);
+        if (auto* o = read.getDynamicObject()) {
+            auto stats = MCPBridge::mcpApplyIdentitySidecar(&processor, o, sub, pdFile);
+            editedSeen = !stats.fileMatches && stats.restored == 2; // the objects still match by place and class
+        }
+
+        // The saved classes no longer match the objects at those places: no stale names, fresh ones instead.
+        auto text = juce::File(pdFile.getFullPathName() + ".mcpids.json").loadFileAsString();
+        juce::File(pdFile.getFullPathName() + ".mcpids.json").replaceWithText(text.replace("\"osc~\"", "\"lop~\"").replace("\"*~\"", "\"hip~\""));
+        read = MCPBridge::readIdentitySidecar(pdFile, note);
+        if (auto* o = read.getDynamicObject()) {
+            auto stats = MCPBridge::mcpApplyIdentitySidecar(&processor, o, sub, pdFile);
+            classRejected = stats.restored == 0 && stats.renamed == 2 && identity.resolve(sub, "s7osc") == nullptr
+                && !identity.idOf(osc).empty() && !identity.idOf(mul).empty();
+            CHECK(MCPBridge::sidecarReport(pdFile, stats, {}).contains("fresh names"));
+        }
+
+        auto full = juce::File(pdFile.getFullPathName() + ".mcpids.json").loadFileAsString();
+        juce::File(pdFile.getFullPathName() + ".mcpids.json").replaceWithText(full.substring(0, full.length() / 2));
+        note.clear();
+        truncatedIgnored = MCPBridge::readIdentitySidecar(pdFile, note).isVoid() && note.contains("truncated");
+
+        juce::File(pdFile.getFullPathName() + ".mcpids.json")
+            .replaceWithText("{\"format\":\"MCP-IDENTITY\",\"v\":1,\"root\":[{\"i\":0,\"id\":\"v1osc\"},{\"i\":1,\"id\":\"v1mul\"}],\"sub\":{}}");
+        read = MCPBridge::readIdentitySidecar(pdFile, note);
+        if (auto* o = read.getDynamicObject()) {
+            auto stats = MCPBridge::mcpApplyIdentitySidecar(&processor, o, sub, pdFile);
+            v1Read = stats.restored == 2 && identity.resolve(sub, "v1osc") == osc && identity.resolve(sub, "v1mul") == mul;
+        }
+        glist_delete(cnv, &sub->gl_gobj);
+    }, 10000));
+    dir.deleteRecursively();
+    std::printf("  round trip %d, edited .pd seen %d, class mismatch renamed %d, truncated ignored %d, v1 read %d\n",
+        roundTrip, editedSeen, classRejected, truncatedIgnored, v1Read);
+    CHECK(roundTrip && editedSeen && classRejected && truncatedIgnored && v1Read);
+}
+
 // Bug #83 (P3.4 S10): with the audio callback stopped, Pd's signal vectors keep the last block. /meter/master
 // read them and reported that stale level as live, while every armed read (which needs processBlock) was
 // silent: the "master audible, armed silent" split of the bug report. The test's audio loop stands in for
@@ -698,6 +781,7 @@ int main()
             runMidiCaptureCases(processor, audioControl);
             runStampCostCases(processor);
             runIdentityValidityCases(processor);
+            runSidecarCases(processor);
             startRenderForTeardown(harness); // last: the processor is destroyed with the render running
             casesDone.store(true);
             stopMessageLoop();

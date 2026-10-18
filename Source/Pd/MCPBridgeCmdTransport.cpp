@@ -353,6 +353,8 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
         reply.addArgument(juce::String("render"));
         // An address the bridge has no verb for is answered with /bridge/unknown_verb [address, domain, verb]
         reply.addArgument(juce::String("unknown_verb_reply"));
+        // P3.5: per-canvas identity_version, snapshot canvasKey/canvasVersion, rename_id error, sidecar v2.
+        reply.addArgument(juce::String("identity_v2"));
         reply.addArgument(juce::String("boot:" + bootToken));
         sender.send(reply);
     }

@@ -260,18 +260,26 @@ public:
     explicit MCPBridge(PluginProcessor* processor, int listenPort = 9000, int sendPort = 19010);
     ~MCPBridge() override;
 
-    // PRD Phase 3 §2.2: re-registers identity-sidecar tempIds (root + named
-    // subcanvases) for a freshly loaded/opened canvas. Caller holds sys_lock.
-    static int mcpApplyIdentitySidecar(PluginProcessor* processor, juce::DynamicObject* sidecarObj,
-                                       const juce::String& rootKey, t_canvas* cnv);
-
-    // Identity sidecar (<file>.mcpids.json) writer, shared by the MCP save and
-    // by plugdata's own GUI save (via Instance::onCanvasSaved). It MUST be
-    // written in the same operation as the .pd: the sidecar is index-keyed, so
-    // a stale copy would map tempIds onto the wrong objects.
-    // buildIdentitySidecar: CALLER HOLDS sys_lock.
+    // Identity sidecar (<file>.mcpids.json), P3.5 S7: format v2 with each entry's class and the SHA-256 of the
+    // .pd written beside it (see MCPBridge.cpp). Written by the MCP save and by plugdata's GUI save hook.
+    struct SidecarStats {
+        int restored = 0; // names bound again
+        int renamed = 0;  // objects whose saved name no longer fits (fresh name), or saved indices out of range
+        int skipped = 0;  // saved names already used by another live object (#38)
+        bool fileMatches = false;
+    };
+    // The one applier (load_patch and open_patch). Caller holds the Pd lock.
+    static SidecarStats mcpApplyIdentitySidecar(PluginProcessor* processor, juce::DynamicObject* sidecarObj,
+                                                t_canvas* cnv, juce::File const& pdFile);
+    // Reads and checks <pdFile>.mcpids.json; void (with `note` set) when it is truncated or unreadable.
+    static juce::var readIdentitySidecar(juce::File const& pdFile, juce::String& note);
+    static juce::String sidecarReport(juce::File const& pdFile, SidecarStats const& stats, juce::String const& note);
+    static juce::String sidecarPdHash(juce::File const& pdFile);
+    // buildIdentitySidecar: CALLER HOLDS the Pd lock.
     static juce::var buildIdentitySidecar(PluginProcessor* processor, t_canvas* cnv);
-    // Takes sys_lock itself. Returns "" on success, an error string otherwise.
+    // Adds the hash of the .pd on disk and writes the sidecar (temp + rename). "" on success, else an error.
+    static juce::String writeIdentitySidecarFile(juce::var sidecar, juce::File const& pdFile);
+    // Takes the Pd lock itself. Returns "" on success, an error string otherwise.
     static juce::String writeIdentitySidecar(PluginProcessor* processor, t_canvas* cnv,
                                              const juce::String& destFilePath);
 

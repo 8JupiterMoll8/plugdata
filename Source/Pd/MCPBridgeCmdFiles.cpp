@@ -262,9 +262,11 @@ void MCPBridge::pdSavePatch(const juce::String& action, const juce::OSCMessage& 
             sendReply(replyAddr, juce::String("error: could not write to " + destFilePath));
             return;
         }
-        // Sidecar next to the .pd — engine-private, invisible to vanilla Pd
-        juce::File sidecarFile(destFilePath + ".mcpids.json");
-        sidecarFile.replaceWithText(juce::JSON::toString(sidecar, true));
+        // Sidecar next to the .pd — engine-private, invisible to vanilla Pd. P3.5 S7: v2 with the .pd's hash; a
+        // failed write is reported in the reply (arg1) instead of ignored.
+        auto const sidecarError = MCPBridge::writeIdentitySidecarFile(sidecar, destFile);
+        if (sidecarError.isNotEmpty())
+            processor->logMessage("MCP save_patch: " + sidecarError);
 
         // PRD Phase 3 §2.5 (save-binding): bind the file to the canvas the
         // way native Save-As does — tab title + current path update.
@@ -289,7 +291,14 @@ void MCPBridge::pdSavePatch(const juce::String& action, const juce::OSCMessage& 
             });
         });
 
-        sendReply(replyAddr, destFilePath);
+        if (sidecarError.isEmpty()) {
+            sendReply(replyAddr, destFilePath);
+        } else {
+            juce::Array<juce::var> args;
+            args.add(destFilePath);
+            args.add("ids not saved: " + sidecarError);
+            sendReply(replyAddr, args);
+        }
     }
     return;
 }
@@ -319,17 +328,9 @@ void MCPBridge::pdLoadPatch(const juce::String& action, const juce::OSCMessage& 
             return;
         }
 
-        // Sidecar read OUTSIDE sys_lock (small file, best-effort)
-        juce::var sidecar;
-        juce::File sidecarFile(srcFilePath + ".mcpids.json");
-        if (sidecarFile.existsAsFile()) {
-            auto parsed = juce::JSON::parse(sidecarFile.loadFileAsString());
-            if (auto* parsedObj = parsed.getDynamicObject()) {
-                if (parsedObj->getProperty("format") == juce::String("MCP-IDENTITY")) {
-                    sidecar = parsed;
-                }
-            }
-        }
+        // Sidecar read OUTSIDE sys_lock (small file); P3.5 S7: a truncated or unreadable one is ignored with a note.
+        juce::String sidecarNote;
+        juce::var sidecar = MCPBridge::readIdentitySidecar(srcFile, sidecarNote);
 
         auto fileDir  = srcFile.getParentDirectory().getFullPathName();
         auto fileName = srcFile.getFileName();
@@ -369,12 +370,11 @@ void MCPBridge::pdLoadPatch(const juce::String& action, const juce::OSCMessage& 
         // the message thread is illegal and was the intermittent load
         // crash. Same callAsync pattern as the native encapsulate handlers.
         postMessage(
-            [proc = processor, canvasName, bodyText, sidecar, replyAddr, bridge = this]() {
+            [proc = processor, canvasName, bodyText, sidecar, sidecarNote, srcFile, replyAddr, bridge = this]() {
                 int objectCount = 0;
                 sys_lock();
                 t_canvas* cnv = proc->getMcp()->getCanvasBySymbol(canvasName);
                 if (cnv) {
-                    auto canonKey = MCPBridge::canonicalCanvasKey(cnv);
                     // 0. Reset identity for this canvas tree BEFORE re-registering
                     proc->getMcp()->identity.clearCanvas(cnv);
 
@@ -394,9 +394,13 @@ void MCPBridge::pdLoadPatch(const juce::String& action, const juce::OSCMessage& 
                     // 4. DSP graph recompile
                     canvas_update_dsp();
 
-                    // 5. Re-register sidecar identities
+                    // 5. Re-register sidecar identities (P3.5 S7: the one validating applier)
+                    MCPBridge::SidecarStats stats;
                     if (auto* sidecarObj = sidecar.getDynamicObject())
-                        MCPBridge::mcpApplyIdentitySidecar(proc, sidecarObj, canonKey, cnv);
+                        stats = MCPBridge::mcpApplyIdentitySidecar(proc, sidecarObj, cnv, srcFile);
+                    auto const report = MCPBridge::sidecarReport(srcFile, stats, sidecarNote);
+                    if (report.isNotEmpty())
+                        proc->logMessage(report);
 
                     for (t_gobj* g = cnv->gl_list; g; g = g->g_next)
                         objectCount++;
@@ -486,23 +490,16 @@ void MCPBridge::pdOpenPatch(const juce::String& action, const juce::OSCMessage& 
             return;
         }
 
-        // Sidecar read outside the message-thread hop
-        juce::var sidecar;
-        juce::File sidecarFile(srcFile.getFullPathName() + ".mcpids.json");
-        if (sidecarFile.existsAsFile()) {
-            auto parsed = juce::JSON::parse(sidecarFile.loadFileAsString());
-            if (auto* parsedObj = parsed.getDynamicObject()) {
-                if (parsedObj->getProperty("format") == juce::String("MCP-IDENTITY"))
-                    sidecar = parsed;
-            }
-        }
+        // Sidecar read outside the message-thread hop (P3.5 S7: checked; a truncated one is ignored with a note)
+        juce::String sidecarNote;
+        juce::var sidecar = MCPBridge::readIdentitySidecar(srcFile, sidecarNote);
 
         // Acknowledge immediately — the tab-open runs on the message
         // thread (fire-and-forget); TS verifies via `tabs`/census.
         sendReply(replyAddr, juce::String("opening: " + srcFile.getFullPathName()));
 
         postMessage(
-            [p = processor, fileStr = srcFile.getFullPathName(), sidecar, inFlight]() {
+            [p = processor, fileStr = srcFile.getFullPathName(), sidecar, sidecarNote, inFlight]() {
             bool opened = p->getMcp()->gui().openPatch(juce::File(fileStr));
             if (!opened) {
                 p->logMessage("MCP open_patch: no editor");
@@ -514,57 +511,20 @@ void MCPBridge::pdOpenPatch(const juce::String& action, const juce::OSCMessage& 
             juce::File f(fileStr);
             p->getMcp()->gui().closeDuplicateTabs(f);
 
-            // PRD Phase 3 §2.5: sidecar registration via the async mcp_register_id path. P3.5 S2: the gl_list walk
-            // runs under the Pd lock (the old "no sys_lock here" note predates P3.4's execution model: the
-            // audio thread never waits for the message thread now).
-            int queued = 0;
+            // P3.5 S7: the one validating applier (same as load_patch), in place under the Pd lock. It replaced a
+            // queue of mcp_register_id calls per entry that checked nothing (an edited .pd got the old ids at the
+            // old indices).
+            MCPBridge::SidecarStats stats;
             if (auto* sidecarObj = sidecar.getDynamicObject()) {
                 McpHost::PdLockScope lock(*p);
-                auto queueRegisters = [&p, &queued](juce::var const& idArray, juce::String const& canvasKey, t_canvas* target) {
-                    const auto* arr = idArray.getArray();
-                    if (arr == nullptr) return;
-                    int idx = 0;
-                    for (t_gobj* g = target->gl_list; g; g = g->g_next, ++idx) {
-                        // find the sidecar entry for this index
-                        for (auto const& v : *arr) {
-                            if (auto* o = v.getDynamicObject()) {
-                                if (static_cast<int>(static_cast<double>(o->getProperty("i"))) != idx) continue;
-                                juce::String id = o->getProperty("id").toString();
-                                if (id.isEmpty()) break;
-                                mcp::SysList atoms; // P3.4 S7: plain values, no Pd symbols
-                                atoms.add(juce::String(canvasKey));
-                                atoms.add(juce::String("0"));
-                                atoms.add(static_cast<float>(idx));
-                                atoms.add(juce::String(id));
-                                p->getMcp()->callSys("mcp_register_id", atoms);
-                                queued++;
-                                break;
-                            }
-                        }
-                    }
-                };
-
-                juce::File f(fileStr);
-                if (auto* cnv = p->getMcp()->gui().findOpenPatch(f)) {
-                    juce::String canonKey = MCPBridge::canonicalCanvasKey(cnv);
-                    queueRegisters(sidecarObj->getProperty("root"), canonKey, cnv);
-                    // named subcanvases
-                    if (auto* subObj = sidecarObj->getProperty("sub").getDynamicObject()) {
-                        for (t_gobj* g = cnv->gl_list; g; g = g->g_next) {
-                            if (pd_class(&g->g_pd) != canvas_class) continue;
-                            auto* child = reinterpret_cast<t_canvas*>(g);
-                            if (!child->gl_name) continue;
-                            juce::String childName = juce::String::fromUTF8(child->gl_name->s_name);
-                            auto childIds = subObj->getProperty(juce::Identifier(childName));
-                            if (childIds.getArray() != nullptr && childIds.getArray()->size() > 0)
-                                queueRegisters(childIds, MCPBridge::canonicalCanvasKey(child), child);
-                        }
-                    }
-                }
+                if (auto* cnv = p->getMcp()->gui().findOpenPatch(f))
+                    stats = MCPBridge::mcpApplyIdentitySidecar(p, sidecarObj, cnv, f);
             }
-
+            auto const report = MCPBridge::sidecarReport(f, stats, sidecarNote);
             p->logMessage(juce::String("MCP open_patch: ") + fileStr
-                + (queued > 0 ? " (" + juce::String(queued) + " identities queued)" : ""));
+                + (stats.restored > 0 ? " (" + juce::String(stats.restored) + " names restored)" : ""));
+            if (report.isNotEmpty())
+                p->logMessage(report);
             (void)opened;
         });
     }

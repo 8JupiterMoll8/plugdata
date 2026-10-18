@@ -7,6 +7,8 @@
 #include "MCPBridgeCmdCommon.h"
 #include "Mcp/McpRtGuard.h"
 #include "Mcp/McpAudit.h"
+#include <juce_cryptography/juce_cryptography.h> // SHA-256 of the .pd in the identity sidecar (P3.5 S7)
+#include <map>
 extern "C" {
 #include <m_imp.h> // SYMTABHASHSIZE (P3.4 S7 symbol count)
 }
@@ -1548,35 +1550,69 @@ void MCPBridge::oscBundleReceived(const juce::OSCBundle& bundle)
     }
 }
 
-// ─── PRD Phase 3 §2.2: identity sidecar applier ──────────────────────────
-// Re-registers sidecar identities (root + named subcanvases) for a freshly
-// loaded/opened canvas. Caller must hold sys_lock. Returns tempIds restored.
-// ─── Identity sidecar writer (shared by the MCP save + plugdata's GUI save) ──
-// The sidecar is index-keyed ({i, id} per canvas), so it is only valid for the
-// exact object order of the .pd written beside it. That is why it is written in
-// the SAME operation as the file, from BOTH save paths. A manual Ctrl+S used to
-// leave it stale, so every object added since the last MCP save lost its
-// semantic tempId on reload (auto-adopt re-minted <class>_<canvas>_<n>).
-// buildIdentitySidecar: CALLER MUST HOLD sys_lock.
+// ─── Identity sidecar (<file>.mcpids.json), P3.5 S7 ─────────────────────────────────────────────────────────
+// Written beside the .pd by BOTH save paths (the MCP save and plugdata's GUI save hook). Format v2:
+//   {format:"MCP-IDENTITY", v:2, objectCount, pdHash, root:[{i,id,c}], sub:{<name>[#k]:{objectCount, ids:[{i,id,c}]}}}
+// pdHash is the SHA-256 of the .pd bytes written beside it; c is each object's class (an abstraction's file name,
+// "pd" for a subpatch); sub keys are the subpatch's name, "#k" for its k-th namesake in that canvas (k >= 2).
+// v1 ({i,id} only, sub keyed by name) is still read. One applier for load_patch and open_patch validates:
+// same hash -> every entry; a changed .pd (or v1) -> only entries whose index exists and whose class (v2)
+// matches; the rest get fresh names (owner decision O2) and one console line says how many.
+
+// The class recorded per entry (and checked on load).
+static juce::String sidecarClassOf(t_gobj* g)
+{
+    if (!g) return {};
+    if (pd_class(&g->g_pd) == canvas_class) {
+        juce::String absName;
+        return pd::getAbstractionFileName(g, absName) ? absName : juce::String("pd");
+    }
+    char const* name = class_getname(pd_class(&g->g_pd));
+    return name ? juce::String::fromUTF8(name) : juce::String();
+}
+
+// Sub keys: the subpatch's name, "<name>#k" for its k-th namesake in the same canvas.
+static std::vector<std::pair<juce::String, t_canvas*>> sidecarSubKeys(t_canvas* cnv)
+{
+    std::vector<std::pair<juce::String, t_canvas*>> keys;
+    std::map<juce::String, int> seen;
+    for (t_gobj* g = cnv->gl_list; g; g = g->g_next) {
+        if (pd_class(&g->g_pd) != canvas_class) continue;
+        auto* child = reinterpret_cast<t_canvas*>(g);
+        if (!child->gl_name) continue;
+        auto const name = juce::String::fromUTF8(child->gl_name->s_name);
+        int const k = ++seen[name];
+        keys.emplace_back(k == 1 ? name : name + "#" + juce::String(k), child);
+    }
+    return keys;
+}
+
+juce::String MCPBridge::sidecarPdHash(juce::File const& pdFile)
+{
+    if (!pdFile.existsAsFile()) return {};
+    return juce::SHA256(pdFile).toHexString();
+}
+
+// buildIdentitySidecar: CALLER MUST HOLD sys_lock. pdHash is added by the caller once the .pd is on disk.
 juce::var MCPBridge::buildIdentitySidecar(PluginProcessor* processor, t_canvas* cnv)
 {
     if (!processor || !cnv) return {};
+    auto& identity = processor->getMcp()->identity;
 
-    auto buildIdArray = [&](const juce::String& mapKey, t_canvas* c) -> juce::var {
+    auto buildIds = [&](t_canvas* c, int& count) -> juce::var {
         juce::Array<juce::var> arr;
         std::unordered_map<t_gobj*, juce::String> ptrToId;
-        auto const* canvasIds = processor->getMcp()->identity.findCanvas(c);
-        if (canvasIds) {
-            for (auto const& [id, ptr] : *canvasIds)
-                if (ptr) ptrToId[ptr] = juce::String(id);
-        }
-        int idx = 0;
-        for (t_gobj* g = c->gl_list; g; g = g->g_next, ++idx) {
+        if (auto const* ids = identity.findCanvas(c))
+            for (auto const& [id, ptr] : *ids)
+                if (ptr && identity.valid(c, id)) ptrToId[ptr] = juce::String(id);
+        count = 0;
+        for (t_gobj* g = c->gl_list; g; g = g->g_next, ++count) {
             auto it = ptrToId.find(g);
             if (it == ptrToId.end()) continue;
             auto* o = new juce::DynamicObject();
-            o->setProperty("i", idx);
+            o->setProperty("i", count);
             o->setProperty("id", it->second);
+            o->setProperty("c", sidecarClassOf(g));
             arr.add(juce::var(o));
         }
         return juce::var(arr);
@@ -1584,96 +1620,140 @@ juce::var MCPBridge::buildIdentitySidecar(PluginProcessor* processor, t_canvas* 
 
     auto* root = new juce::DynamicObject();
     root->setProperty("format", juce::String("MCP-IDENTITY"));
-    root->setProperty("v", 1);
-    root->setProperty("identity_version",
-        (double)processor->getMcp()->identity.version());
-    root->setProperty("root", buildIdArray(canonicalCanvasKey(cnv), cnv));
-
-    // Named subcanvases: canonicalCanvasKey matches the map keys the bridge uses
-    // for subpatch census/mutations ("pd-<gl_name>").
+    root->setProperty("v", 2);
+    int rootCount = 0;
+    auto rootIds = buildIds(cnv, rootCount);
+    root->setProperty("objectCount", rootCount);
+    root->setProperty("root", rootIds);
     auto* subObj = new juce::DynamicObject();
-    for (t_gobj* g = cnv->gl_list; g; g = g->g_next) {
-        if (pd_class(&g->g_pd) != canvas_class) continue;
-        t_canvas* child = reinterpret_cast<t_canvas*>(g);
-        if (!child->gl_name) continue;
-        juce::String childName = juce::String::fromUTF8(child->gl_name->s_name);
-        auto childIds = buildIdArray(canonicalCanvasKey(child), child);
-        if (childIds.getArray() != nullptr && childIds.getArray()->size() > 0)
-            subObj->setProperty(childName, childIds);
+    for (auto const& [key, child] : sidecarSubKeys(cnv)) {
+        int childCount = 0;
+        auto childIds = buildIds(child, childCount);
+        if (childIds.getArray() == nullptr || childIds.getArray()->isEmpty()) continue;
+        auto* entry = new juce::DynamicObject();
+        entry->setProperty("objectCount", childCount);
+        entry->setProperty("ids", childIds);
+        subObj->setProperty(key, juce::var(entry));
     }
     root->setProperty("sub", juce::var(subObj));
     return juce::var(root);
+}
+
+juce::String MCPBridge::writeIdentitySidecarFile(juce::var sidecar, juce::File const& pdFile)
+{
+    if (auto* o = sidecar.getDynamicObject())
+        o->setProperty("pdHash", sidecarPdHash(pdFile));
+    else
+        return "error: could not build identity sidecar";
+    // replaceWithText writes a temp file and renames it: a crash leaves the old sidecar or the new one, never half.
+    juce::File sidecarFile(pdFile.getFullPathName() + ".mcpids.json");
+    if (!sidecarFile.replaceWithText(juce::JSON::toString(sidecar, true)))
+        return "error: could not write " + sidecarFile.getFullPathName();
+    return {};
 }
 
 juce::String MCPBridge::writeIdentitySidecar(PluginProcessor* processor, t_canvas* cnv,
                                              const juce::String& destFilePath)
 {
     if (!processor || !cnv) return "error: canvas not found";
-
     juce::var sidecar;
-    sys_lock();
-    sidecar = buildIdentitySidecar(processor, cnv);
-    sys_unlock();
-
-    if (sidecar.isVoid()) return "error: could not build identity sidecar";
-
-    // Sidecar next to the .pd — engine-private, invisible to vanilla Pd
-    juce::File sidecarFile(destFilePath + ".mcpids.json");
-    if (!sidecarFile.replaceWithText(juce::JSON::toString(sidecar, true)))
-        return "error: could not write " + destFilePath + ".mcpids.json";
-    return {};
+    {
+        McpHost::PdLockScope lock(*processor);
+        sidecar = buildIdentitySidecar(processor, cnv);
+    }
+    return writeIdentitySidecarFile(sidecar, juce::File(destFilePath));
 }
 
-int MCPBridge::mcpApplyIdentitySidecar(PluginProcessor* processor, juce::DynamicObject* sidecarObj,
-                                   const juce::String& rootKey, t_canvas* cnv)
+juce::var MCPBridge::readIdentitySidecar(juce::File const& pdFile, juce::String& note)
 {
-    if (!processor || !sidecarObj || !cnv) return 0;
+    juce::File sidecarFile(pdFile.getFullPathName() + ".mcpids.json");
+    if (!sidecarFile.existsAsFile()) return {};
+    auto const text = sidecarFile.loadFileAsString().trim();
+    // JUCE's JSON parser returns the part it read of a truncated file: refuse anything that does not end the object.
+    if (!text.endsWithChar('}')) {
+        note = "ignored a truncated " + sidecarFile.getFileName();
+        return {};
+    }
+    auto parsed = juce::JSON::parse(text);
+    auto* o = parsed.getDynamicObject();
+    if (!o || o->getProperty("format") != juce::String("MCP-IDENTITY")) {
+        note = "ignored an unreadable " + sidecarFile.getFileName();
+        return {};
+    }
+    if (static_cast<int>(o->getProperty("v")) >= 2 && !o->hasProperty("pdHash")) {
+        note = "ignored " + sidecarFile.getFileName() + " (no file hash)";
+        return {};
+    }
+    return parsed;
+}
 
-    auto registerArray = [&](juce::var const& idArray, juce::String const& mapKey, t_canvas* target) -> int {
-        const auto* arr = idArray.getArray();
-        if (arr == nullptr) return 0;
-        std::unordered_map<int, juce::String> idxToId;
+MCPBridge::SidecarStats MCPBridge::mcpApplyIdentitySidecar(PluginProcessor* processor, juce::DynamicObject* sidecarObj,
+                                                         t_canvas* cnv, juce::File const& pdFile)
+{
+    SidecarStats stats;
+    if (!processor || !sidecarObj || !cnv) return stats;
+    auto& identity = processor->getMcp()->identity;
+    int const version = sidecarObj->hasProperty("v") ? static_cast<int>(sidecarObj->getProperty("v")) : 1;
+    stats.fileMatches = version >= 2 && sidecarObj->getProperty("pdHash").toString() == sidecarPdHash(pdFile);
+
+    auto applyIds = [&](juce::var const& idArray, t_canvas* target) {
+        auto const* arr = idArray.getArray();
+        if (arr == nullptr) return;
+        std::vector<t_gobj*> byIndex;
+        for (t_gobj* g = target->gl_list; g; g = g->g_next) byIndex.push_back(g);
+        std::vector<t_gobj*> rejected;
         for (auto const& v : *arr) {
-            if (auto* o = v.getDynamicObject()) {
-                int i = static_cast<int>(static_cast<double>(o->getProperty("i")));
-                juce::String id = o->getProperty("id").toString();
-                if (id.isNotEmpty()) idxToId[i] = id;
+            auto* o = v.getDynamicObject();
+            if (!o) continue;
+            int const i = static_cast<int>(static_cast<double>(o->getProperty("i")));
+            auto const id = o->getProperty("id").toString();
+            if (id.isEmpty()) continue;
+            if (i < 0 || i >= static_cast<int>(byIndex.size())) { ++stats.renamed; continue; }
+            t_gobj* g = byIndex[static_cast<size_t>(i)];
+            // A v2 entry names its class: an edited .pd (another object at that index) keeps no stale name (O2).
+            if (o->hasProperty("c") && o->getProperty("c").toString() != sidecarClassOf(g)) {
+                rejected.push_back(g);
+                continue;
             }
+            if (identity.bind(target, id.toStdString(), g) == mcp::IdentityService::BindResult::Refused)
+                ++stats.skipped; // the id already names another live object (#38)
+            else
+                ++stats.restored;
         }
-        int restored = 0;
-        int idx = 0;
-        for (t_gobj* g = target->gl_list; g; g = g->g_next, ++idx) {
-            auto it = idxToId.find(idx);
-            if (it == idxToId.end()) continue;
-            // P3.5 S4 (#38): an id already naming another live object is skipped, not stolen.
-            if (processor->getMcp()->identity.bind(target, it->second.toStdString(), g) != mcp::IdentityService::BindResult::Refused)
-                restored++;
+        for (t_gobj* g : rejected) { // fresh names for the objects whose saved name no longer fits
+            identity.mint(target, g, McpHost::mintPrefix(g).toStdString());
+            ++stats.renamed;
         }
-        return restored;
     };
 
-    juce::String canonRoot = canonicalCanvasKey(cnv);
-    if (canonRoot.isEmpty()) canonRoot = rootKey;
-    int restored = registerArray(sidecarObj->getProperty("root"), canonRoot, cnv);
-
-    // Named subcanvases: canonicalCanvasKey matches bridge map-key convention ("pd-<gl_name>")
+    identity.clearCanvas(cnv);
+    applyIds(sidecarObj->getProperty("root"), cnv);
     if (auto* subObj = sidecarObj->getProperty("sub").getDynamicObject()) {
-        for (t_gobj* g = cnv->gl_list; g; g = g->g_next) {
-            if (pd_class(&g->g_pd) != canvas_class) continue;
-            auto* child = reinterpret_cast<t_canvas*>(g);
-            if (!child->gl_name) continue;
-            juce::String childName = juce::String::fromUTF8(child->gl_name->s_name);
-            auto childIds = subObj->getProperty(juce::Identifier(childName));
-            if (childIds.getArray() != nullptr && childIds.getArray()->size() > 0) {
-                juce::String childKey = canonicalCanvasKey(child);
-                processor->getMcp()->identity.clearCanvas(child);
-                restored += registerArray(childIds, childKey, child);
-            }
+        for (auto const& [key, child] : sidecarSubKeys(cnv)) {
+            auto entry = subObj->getProperty(juce::Identifier(key));
+            if (entry.isVoid()) continue;
+            identity.clearCanvas(child);
+            // v2: {objectCount, ids}; v1: the array itself (keyed by name only)
+            applyIds(entry.getDynamicObject() ? entry.getDynamicObject()->getProperty("ids") : entry, child);
         }
     }
+    identity.bumpVersion(cnv);
+    return stats;
+}
 
-    processor->getMcp()->identity.bumpVersion(cnv);
-    return restored;
+// The console line of one sidecar apply (empty when all ids came back unchanged).
+juce::String MCPBridge::sidecarReport(juce::File const& pdFile, SidecarStats const& stats, juce::String const& note)
+{
+    juce::String line;
+    if (note.isNotEmpty())
+        line = note;
+    if (stats.renamed > 0 || stats.skipped > 0) {
+        if (line.isNotEmpty()) line << "; ";
+        line << pdFile.getFileName() << ": restored " << stats.restored << " names, gave " << stats.renamed
+             << " objects fresh names (the patch changed since its names were saved)";
+        if (stats.skipped > 0) line << ", skipped " << stats.skipped << " names already in use";
+    }
+    return line.isEmpty() ? line : "MCP identity: " + line;
 }
 
 void MCPBridge::advanceSequencer(int blockSize)
