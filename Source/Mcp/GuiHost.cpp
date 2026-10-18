@@ -182,6 +182,12 @@ public:
         sys_lock();
         for (auto* g : ptrs) {
             if (!g) continue;
+            // This runs later on the message thread: an object created in the batch may be deleted again by then
+            // (lookup_pd_library audit creates a probe offscreen and removes it at once). Only walk live objects.
+            bool live = false;
+            for (t_gobj* y = cnv->gl_list; y && !live; y = y->g_next)
+                live = (y == g);
+            if (!live) continue;
             int x = 0, y = 0, w = 0, h = 0;
             pd::Interface::getObjectBounds(cnv, g, &x, &y, &w, &h);
             juce::Rectangle<float> r((float) x, (float) y, (float) w, (float) h);
