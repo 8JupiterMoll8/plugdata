@@ -139,6 +139,8 @@ void MCPBridge::meterTap(const juce::String& meterAction, const juce::OSCMessage
     processor->getMcp()->session.mcpTapSig.store(static_cast<void*>(signal), std::memory_order_release);
     processor->getMcp()->session.mcpTapMode.store(mode, std::memory_order_release); // publish LAST
     processor->getMcp()->session.mcpTapGeneration.fetch_add(1, std::memory_order_relaxed);
+    if (!isTimerRunning())
+        startTimer(15); // P3.4 S6: the timer re-resolves the tap after a DSP rebuild
     sendReply("/meter/tap/reply/" + correlationId,
               juce::String(mode == McpSession::mcpTapMute ? "mute " : "solo ") + tempId
               + " " + juce::String(static_cast<int>(juce::jlimit(1000.0f, 120000.0f, holdMs))) + "ms");

@@ -5,6 +5,7 @@
 */
 
 #include "MCPBridgeCmdCommon.h"
+#include "Mcp/McpRtGuard.h"
 
 
 void MCPBridge::mcpCtrlCapture(t_symbol* selector, int argc, t_atom* argv)
@@ -1079,6 +1080,10 @@ juce::String MCPBridge::computePerfFacts(PluginProcessor* processor, t_canvas* c
     root->setProperty("dsp", pd_getdspstate() != 0);
     root->setProperty("cpu", static_cast<double>(cpu));
     root->setProperty("xruns", processor ? processor->getMcp()->xrunCount() : -1);
+    if (mcp::rt::guardLinked()) { // P3.4 S6: realtime-guard builds only
+        root->setProperty("rtAllocs", static_cast<juce::int64>(mcp::rt::allocs()));
+        root->setProperty("rtLocks", static_cast<juce::int64>(mcp::rt::locks()));
+    }
     root->setProperty("canvases", static_cast<int>(nodes.size()));
     root->setProperty("signalObjects", totalSignal);
     root->setProperty("estimatedWeight", totalWeight);
@@ -1619,7 +1624,12 @@ void MCPBridge::advanceSequencer(int blockSize)
 {
     double const sampleRate = (processor && processor->getSampleRate() > 0.0) ? processor->getSampleRate() : 44100.0;
 
-    juce::ScopedLock sl(seqLock);
+    {
+    juce::ScopedTryLock const sl(seqLock); // P3.4 S6: never wait; a busy block fires one sub-block later
+    if (!sl.isLocked()) {
+        flushSeqFires(); // fires collected earlier still go out
+        return;
+    }
     for (auto& job : seqJobs) {
         if (!job.active) continue;
 
@@ -1643,7 +1653,7 @@ void MCPBridge::advanceSequencer(int blockSize)
                 int const ti = job.stepIndex % (int)track.steps.size();
                 float const val = track.steps[ti];
                 if (val == 0.0f) continue;
-                enqueueSeqFire(track.isBang, track.name, val);
+                enqueueSeqFire(track.isBang, track.sym, val);
             }
 
             job.stepIndex = (job.stepIndex + 1) % job.patternLength;
@@ -1654,18 +1664,42 @@ void MCPBridge::advanceSequencer(int blockSize)
             job.nextStepSample += (int64_t)len;
         }
     }
+    }
+    flushSeqFires();
 }
 
-void MCPBridge::enqueueSeqFire(bool isBang, const juce::String& name, float value)
+void MCPBridge::enqueueSeqFire(bool isBang, t_symbol* sym, float value)
 {
-    PluginProcessor* p = processor;
-    std::string const n = name.toStdString();
-    // Defer the actual libpd dispatch to the message phase (sendMessagesFromQueue)
-    // before the next block's performDSP — safe + block-accurate, zero UDP.
-    p->enqueueFunctionAsync([p, isBang, n, value] {
-        if (isBang) p->sendBang(n.c_str());
-        else p->sendFloat(n.c_str(), value);
-    });
+    if (sym == nullptr)
+        return;
+    if (seqPendingCount >= kMaxSeqFires) {
+        seqFiresDropped.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    seqPendingFires[static_cast<size_t>(seqPendingCount++)] = { sym, value, isBang };
+}
+
+// Audio thread, after a Pd sub-block: send the collected step fires before the next performDSP (where the
+// old functionQueue route ran them). Under the Pd lock, tried only: if another thread holds it, the fires
+// stay and go out after the next sub-block.
+void MCPBridge::flushSeqFires()
+{
+    if (seqPendingCount == 0 || processor == nullptr)
+        return;
+    juce::ScopedTryLock const pdLock(processor->audioLock);
+    if (!pdLock.isLocked())
+        return;
+    mcp::rt::Pause const patchWork; // what the patch does with the message is not the bridge's (realtime guard)
+    for (int i = 0; i < seqPendingCount; ++i) {
+        auto const& f = seqPendingFires[static_cast<size_t>(i)];
+        if (auto* target = f.sym->s_thing) {
+            if (f.isBang)
+                pd_bang(target);
+            else
+                pd_float(target, f.value);
+        }
+    }
+    seqPendingCount = 0;
 }
 
 void MCPBridge::audioTick()
@@ -1812,9 +1846,8 @@ void MCPBridge::voiceInputTick(float const* inputSamples, int numSamples)
         // manual stop. Do NOT pre-clear voiceCapturing here: the old code
         // cleared it first, so stopVoiceCaptureAndAnalyze()'s own
         // exchange(false) early-returned and the take vanished unstaged.
-        if (voiceCapturing.exchange(false, std::memory_order_acq_rel)) {
-            juce::MessageManager::callAsync([this] { analyzeCapturedVoice(); });
-        }
+        if (voiceCapturing.exchange(false, std::memory_order_acq_rel))
+            voiceAnalyzePending.store(true, std::memory_order_release); // P3.4 S6: the timer analyses it
         return;
     }
 
@@ -1843,6 +1876,8 @@ void MCPBridge::startVoiceCapture(int maxSeconds, int mode)
     voiceLiveLevel.store(0.0f, std::memory_order_release);
     voiceCaptureMode.store(mode, std::memory_order_release);
     voiceCapturing.store(true, std::memory_order_release);
+    if (!isTimerRunning())
+        startTimer(15); // P3.4 S6: the timer runs the analysis when the buffer fills
     if (mode == 1)
         sendConsoleLog("MCP: Recording MELODY - sing! (tap the mic again to stop)", false);
     else if (mode == 2)
@@ -1960,7 +1995,13 @@ void MCPBridge::startMidiCapture(int maxSeconds, const juce::String& voiceBindin
 
     juce::ScopedLock sl(midiCaptureLock);
     midiCaptureEvents.clear();
+    MidiRawEvent stale;
+    while (midiCaptureRing.try_dequeue(stale)) { }
+    midiCaptureDropped.store(0, std::memory_order_relaxed);
+    midiCaptureAutoStopPending.store(false, std::memory_order_relaxed);
     midiCapturing.store(false, std::memory_order_relaxed);
+    if (!isTimerRunning())
+        startTimer(15); // P3.4 S6: the timer pairs the ring's events and acts on auto-stop
 
     int const sr = processor ? static_cast<int>(processor->getSampleRate()) : 48000;
     midiCaptureSamples.store(0, std::memory_order_release);
@@ -1990,77 +2031,60 @@ void MCPBridge::midiInputTick(const juce::MidiBuffer& midi, int numSamples, juce
     double const effectiveSr = (sampleRate > 1000.0) ? sampleRate : 48000.0;
 
     // ── 1. Recording Live Input ──────────────────────────────
+    // P3.4 S6: raw events into a preallocated ring (no lock, no allocation); the timer pairs them.
     if (capturing) {
         juce::int64 const blockStart = midiCaptureSamples.fetch_add(numSamples, std::memory_order_acq_rel);
         int const maxSamples = midiCaptureMaxSamples.load(std::memory_order_relaxed);
-        bool autoStop = false;
 
-        {
-            juce::ScopedLock sl(midiCaptureLock);
-            for (auto const meta : midi) {
-                auto const msg = meta.getMessage();
-                double const tSec = (blockStart + meta.samplePosition) / effectiveSr;
+        for (auto const meta : midi) {
+            auto const msg = meta.getMessage();
+            if (msg.isNoteOn() || msg.isNoteOff()) {
+                MidiRawEvent const raw { msg.isNoteOn(), msg.getNoteNumber(), msg.getVelocity(), msg.getChannel(),
+                                         blockStart + meta.samplePosition };
+                if (!midiCaptureRing.try_enqueue(raw))
+                    midiCaptureDropped.fetch_add(1, std::memory_order_relaxed);
+            }
 
-                if (msg.isNoteOn()) {
-                    MidiNoteEvent e;
-                    e.pitch = msg.getNoteNumber();
-                    e.velocity = msg.getVelocity();
-                    e.channel = msg.getChannel();
-                    e.sampleTime = blockStart + meta.samplePosition;
-                    midiCaptureEvents.push_back(e);
-
-                    // Option B: Auto-Monitor-Through voice allocation for immediate auditory feedback
-                    if (monitorThroughEnabled.load(std::memory_order_relaxed)) {
-                        int voiceIdx = -1;
-                        float lowestEnv = 100.0f;
-                        for (int i = 0; i < kMaxMonitorVoices; ++i) {
-                            if (!monitorVoices[i].active) {
-                                voiceIdx = i;
-                                break;
-                            }
-                            if (monitorVoices[i].env < lowestEnv) {
-                                lowestEnv = monitorVoices[i].env;
-                                voiceIdx = i;
-                            }
-                        }
-                        if (voiceIdx >= 0) {
-                            auto& v = monitorVoices[voiceIdx];
-                            v.pitch = msg.getNoteNumber();
-                            v.velocity = static_cast<float>(msg.getVelocity()) / 127.0f;
-                            float const freq = 440.0f * std::pow(2.0f, static_cast<float>(v.pitch - 69) / 12.0f);
-                            v.phaseInc = static_cast<float>(2.0 * juce::MathConstants<double>::pi * freq / effectiveSr);
-                            v.phase = 0.0f;
-                            v.env = v.velocity;
-                            v.active = true;
-                            v.released = false;
-                        }
-                    }
-                } else if (msg.isNoteOff()) {
-                    for (auto it = midiCaptureEvents.rbegin(); it != midiCaptureEvents.rend(); ++it) {
-                        if (!it->closed && it->pitch == msg.getNoteNumber()) {
-                            it->closed = true;
-                            it->durationSec = tSec - (it->sampleTime / effectiveSr);
+            if (msg.isNoteOn()) {
+                // Option B: Auto-Monitor-Through voice allocation for immediate auditory feedback
+                if (monitorThroughEnabled.load(std::memory_order_relaxed)) {
+                    int voiceIdx = -1;
+                    float lowestEnv = 100.0f;
+                    for (int i = 0; i < kMaxMonitorVoices; ++i) {
+                        if (!monitorVoices[i].active) {
+                            voiceIdx = i;
                             break;
                         }
+                        if (monitorVoices[i].env < lowestEnv) {
+                            lowestEnv = monitorVoices[i].env;
+                            voiceIdx = i;
+                        }
                     }
-
-                    if (monitorThroughEnabled.load(std::memory_order_relaxed)) {
-                        for (int i = 0; i < kMaxMonitorVoices; ++i) {
-                            if (monitorVoices[i].active && monitorVoices[i].pitch == msg.getNoteNumber()) {
-                                monitorVoices[i].released = true;
-                            }
+                    if (voiceIdx >= 0) {
+                        auto& v = monitorVoices[voiceIdx];
+                        v.pitch = msg.getNoteNumber();
+                        v.velocity = static_cast<float>(msg.getVelocity()) / 127.0f;
+                        float const freq = 440.0f * std::pow(2.0f, static_cast<float>(v.pitch - 69) / 12.0f);
+                        v.phaseInc = static_cast<float>(2.0 * juce::MathConstants<double>::pi * freq / effectiveSr);
+                        v.phase = 0.0f;
+                        v.env = v.velocity;
+                        v.active = true;
+                        v.released = false;
+                    }
+                }
+            } else if (msg.isNoteOff()) {
+                if (monitorThroughEnabled.load(std::memory_order_relaxed)) {
+                    for (int i = 0; i < kMaxMonitorVoices; ++i) {
+                        if (monitorVoices[i].active && monitorVoices[i].pitch == msg.getNoteNumber()) {
+                            monitorVoices[i].released = true;
                         }
                     }
                 }
             }
-            if (blockStart >= maxSamples) {
-                autoStop = true;
-            }
         }
 
-        if (autoStop) {
-            juce::MessageManager::callAsync([this] { stopMidiCaptureAndStage(); });
-        }
+        if (blockStart >= maxSamples)
+            midiCaptureAutoStopPending.store(true, std::memory_order_release); // the timer stops and stages
     }
 
     // ── 2. Playback of Staged Take ───────────────────────────
@@ -2069,8 +2093,9 @@ void MCPBridge::midiInputTick(const juce::MidiBuffer& midi, int numSamples, juce
         juce::int64 const pEnd = pStart + numSamples;
         juce::int64 const totalEnd = midiPlaybackEndSample.load(std::memory_order_relaxed);
 
-        {
-            juce::ScopedLock sl(midiPlaybackLock);
+        // P3.4 S6: never wait for the take's writer (it fills the notes before setting midiPlaying).
+        juce::ScopedTryLock const sl(midiPlaybackLock);
+        if (sl.isLocked()) {
             for (auto const& pn : midiPlaybackNotes) {
                 // Note-on within this block
                 if (pn.startSample >= pStart && pn.startSample < pEnd) {
@@ -2109,9 +2134,9 @@ void MCPBridge::midiInputTick(const juce::MidiBuffer& midi, int numSamples, juce
             }
         }
 
-        if (pEnd >= totalEnd) {
-            juce::MessageManager::callAsync([this] { stopMidiTake(); });
-        }
+        // P3.4 S6: past the end nothing more sounds; the callAfterDelay set in startMidiTake stops the take
+        // (the audio thread used to callAsync stopMidiTake on every block after the end until it landed).
+        ignoreUnused(totalEnd);
     }
 
     // ── 3. Synth Audio Generation (Warm EPiano on Blank Canvas) ──
@@ -2160,8 +2185,36 @@ void MCPBridge::midiInputTick(const juce::MidiBuffer& midi, int numSamples, juce
 
 int MCPBridge::getMidiCaptureNoteCount() const
 {
-    juce::ScopedLock sl(const_cast<juce::CriticalSection&>(midiCaptureLock));
+    auto* self = const_cast<MCPBridge*>(this);
+    juce::ScopedLock sl(self->midiCaptureLock);
+    self->drainMidiCaptureRing();
     return static_cast<int>(midiCaptureEvents.size());
+}
+
+// Pairs the raw on/off events the audio thread queued (P3.4 S6). Caller holds midiCaptureLock. A note-off
+// closes the newest open note of its pitch, as the audio thread used to do in place.
+void MCPBridge::drainMidiCaptureRing()
+{
+    double const sr = (processor && processor->getSampleRate() > 1000.0) ? processor->getSampleRate() : 48000.0;
+    MidiRawEvent raw;
+    while (midiCaptureRing.try_dequeue(raw)) {
+        if (raw.on) {
+            MidiNoteEvent e;
+            e.pitch = raw.pitch;
+            e.velocity = raw.velocity;
+            e.channel = raw.channel;
+            e.sampleTime = raw.sampleTime;
+            midiCaptureEvents.push_back(e);
+        } else {
+            for (auto it = midiCaptureEvents.rbegin(); it != midiCaptureEvents.rend(); ++it) {
+                if (!it->closed && it->pitch == raw.pitch) {
+                    it->closed = true;
+                    it->durationSec = static_cast<double>(raw.sampleTime - it->sampleTime) / sr;
+                    break;
+                }
+            }
+        }
+    }
 }
 
 void MCPBridge::stopMidiCaptureAndStage()
@@ -2180,6 +2233,7 @@ void MCPBridge::stopMidiCaptureAndStage()
     std::vector<MidiNoteEvent> events;
     {
         juce::ScopedLock sl(midiCaptureLock);
+        drainMidiCaptureRing();
         events = midiCaptureEvents;
         midiCaptureEvents.clear();
     }
@@ -3185,6 +3239,16 @@ t_outconnect* MCPBridge::resolveProbeTarget(const juce::String& canvasName, cons
 
 void MCPBridge::timerCallback()
 {
+    // P3.4 S6: what the audio thread only flags (it used to callAsync these from the callback).
+    if (voiceAnalyzePending.exchange(false, std::memory_order_acq_rel))
+        analyzeCapturedVoice();
+    if (midiCaptureAutoStopPending.exchange(false, std::memory_order_acq_rel))
+        stopMidiCaptureAndStage();
+    if (midiCapturing.load(std::memory_order_relaxed)) {
+        juce::ScopedLock sl(midiCaptureLock);
+        drainMidiCaptureRing(); // keeps the ring short during a long take
+    }
+
     probeManager.collectResults();
 
     // Monitor tap (solo/mute): re-resolve the target each tick so a deleted or
@@ -3242,7 +3306,12 @@ void MCPBridge::timerCallback()
 
     {
         const juce::ScopedLock sl(morphLock);
-        if (morphJobs.empty() && probeManager.getActiveProbeCount() == 0) {
+        // P3.4 S6: also keep ticking while a capture or the monitor tap needs it (the tap's re-resolve after
+        // a DSP rebuild runs here too; /meter/tap never started the timer before).
+        bool const tapOn = processor && processor->getMcp()->session.mcpTapMode.load(std::memory_order_relaxed) != McpSession::mcpTapOff;
+        if (morphJobs.empty() && probeManager.getActiveProbeCount() == 0 && !tapOn
+            && !midiCapturing.load(std::memory_order_relaxed) && !voiceCapturing.load(std::memory_order_relaxed)
+            && !voiceAnalyzePending.load(std::memory_order_relaxed) && !midiCaptureAutoStopPending.load(std::memory_order_relaxed)) {
             stopTimer();
         }
     }

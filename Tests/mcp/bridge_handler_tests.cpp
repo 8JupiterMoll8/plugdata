@@ -166,6 +166,8 @@ void sleepMs(int ms)
 // job until it is released.
 struct AudioControl {
     std::atomic<bool> paused { false };
+    std::atomic<int> notePitch { -1 };   // P3.4 S6: >= 0 = the next block carries a note-on of this pitch
+    std::atomic<int> noteOffPitch { -1 }; // >= 0 = the next block carries a note-off
     std::atomic<std::thread::id> threadId {};
     std::atomic<std::thread::id> messageThreadId {};
 };
@@ -226,6 +228,28 @@ void runPdContextCases(PluginProcessor& processor, AudioControl& audio)
             sleepMs(1);
         CHECK(ran.load());
     }
+}
+
+// MIDI capture (P3.4 S6): the audio thread only queues raw note on/off; the bridge pairs them off the audio
+// thread. Three notes played through processBlock come back as three closed notes.
+void runMidiCaptureCases(PluginProcessor& processor, AudioControl& audio)
+{
+    std::printf("midi capture\n");
+    auto* bridge = processor.getMcp()->mcpBridge.get();
+    auto* host = processor.getMcp();
+    CHECK(host->onMessageThread([bridge] { bridge->startMidiCapture(10, "canvas"); return true; }, 2000, "test").has_value());
+    sleepMs(50);
+    for (int p : { 60, 64, 67 }) {
+        audio.notePitch = p;
+        sleepMs(40);
+        audio.noteOffPitch = p;
+        sleepMs(40);
+    }
+    sleepMs(100);
+    CHECK(bridge->isMidiCapturing());
+    CHECK(bridge->getMidiCaptureNoteCount() == 3);
+    host->onMessageThread([bridge] { bridge->stopMidiCaptureAndStage(); return true; }, 2000, "test");
+    CHECK(!bridge->isMidiCapturing());
 }
 
 void runCases(Harness& h)
@@ -444,6 +468,10 @@ int main()
                 if (!audioControl.paused.load()) {
                     buffer.clear();
                     midi.clear();
+                    if (int const p = audioControl.notePitch.exchange(-1); p >= 0)
+                        midi.addEvent(juce::MidiMessage::noteOn(1, p, static_cast<juce::uint8>(100)), 0);
+                    if (int const p = audioControl.noteOffPitch.exchange(-1); p >= 0)
+                        midi.addEvent(juce::MidiMessage::noteOff(1, p), 0);
                     processor.processBlock(buffer, midi);
                 }
                 sleepMs(8);
@@ -459,6 +487,7 @@ int main()
             Harness harness { *bridge, replies };
             runCases(harness);
             runPdContextCases(processor, audioControl);
+            runMidiCaptureCases(processor, audioControl);
             casesDone.store(true);
             stopMessageLoop();
         });

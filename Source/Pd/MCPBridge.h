@@ -396,7 +396,17 @@ private:
 #include "Pd/MCPBridgeVerbs.inc"
 
     void advanceSequencer(int blockSize);
-    void enqueueSeqFire(bool isBang, const juce::String& name, float value);
+    void enqueueSeqFire(bool isBang, t_symbol* sym, float value);
+    void flushSeqFires();
+    struct SeqFire {
+        t_symbol* sym = nullptr;
+        float value = 0.0f;
+        bool isBang = true;
+    };
+    static constexpr int kMaxSeqFires = 256;
+    std::array<SeqFire, kMaxSeqFires> seqPendingFires {}; // audio thread only
+    int seqPendingCount = 0;                               // audio thread only
+    std::atomic<uint32_t> seqFiresDropped { 0 };
 
     t_outconnect* resolveProbeTarget(const juce::String& canvasName, const juce::String& targetId, int outletIndex, juce::String& errorOut);
     bool activateProbing();
@@ -470,13 +480,17 @@ private:
     // bang track: 0 = rest, 1/number = hit (velocity); param track: raw float.
     struct SeqTrack {
         juce::String name;
+        t_symbol* sym = nullptr; // P3.4 S6: resolved by seqStart under the Pd lock, never on the audio thread
         bool isBang = true;
         std::vector<float> steps;
     };
 
     // Native sample-accurate drum/note sequencer. Scheduling state is advanced in
-    // audioTick(); fires are deferred to sendMessagesFromQueue() (the message phase
-    // before performDSP) via enqueueFunctionAsync — zero UDP round-trips, block-accurate.
+    // audioTick() (after a Pd sub-block); the step's fires are sent right there,
+    // before the next performDSP, as the old functionQueue route did. P3.4 S6: no
+    // blocking lock and no allocation on the audio thread: the job list is read
+    // under a try-lock (busy: the steps fire one sub-block later), fires collect in
+    // a fixed array and go out under a try-locked Pd lock (busy: next sub-block).
     struct SeqJob {
         juce::String jobId;
         std::vector<SeqTrack> tracks;
@@ -567,6 +581,21 @@ private:
 
     std::vector<MidiNoteEvent> midiCaptureEvents;
     juce::CriticalSection midiCaptureLock;
+    // P3.4 S6: the audio thread only queues raw note on/off here (preallocated: it never allocates or blocks);
+    // drainMidiCaptureRing() pairs them into midiCaptureEvents, under midiCaptureLock, off the audio thread.
+    struct MidiRawEvent {
+        bool on = true;
+        int pitch = 0;
+        int velocity = 0;
+        int channel = 1;
+        juce::int64 sampleTime = 0;
+    };
+    moodycamel::ReaderWriterQueue<MidiRawEvent> midiCaptureRing { 4096 };
+    std::atomic<uint32_t> midiCaptureDropped { 0 };
+    void drainMidiCaptureRing(); // caller holds midiCaptureLock
+    // Raised by the audio thread instead of a callAsync there; the bridge timer acts on them.
+    std::atomic<bool> midiCaptureAutoStopPending { false };
+    std::atomic<bool> voiceAnalyzePending { false };
     std::atomic<bool> midiCapturing { false };
     std::atomic<juce::int64> midiCaptureSamples { 0 }; // running sample clock
     std::atomic<int> midiCaptureMaxSamples { 0 };

@@ -14,6 +14,7 @@
 #include "PluginEditor.h"
 #include "Utility/Config.h"
 #include "Mcp/McpAudit.h"
+#include "Mcp/McpRtGuard.h"
 
 extern "C" int ugen_getsortno(void); // d_ugen.c (P3.4 S5)
 
@@ -197,6 +198,7 @@ void McpHost::mcpCloseRecorder()
 // final output buffer directly, no canvas objects needed.
 void McpHost::writeRecorderTap(dsp::AudioBlock<float> const& buffer)
 {
+    mcp::rt::Scope const rtScope; // P3.4 S6
     if (!session.mcpRecording.load(std::memory_order_acquire))
         return;
 

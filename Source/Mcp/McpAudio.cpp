@@ -10,6 +10,7 @@
 #include "Mcp/McpHost.h"
 #include "Pd/MCPBridge.h"
 #include "Mcp/McpAudit.h"
+#include "Mcp/McpRtGuard.h"
 #include "Pd/MCPBridgeHandoff.h"
 
 // prepareToPlay, after the Pd/JUCE setup.
@@ -32,6 +33,7 @@ void McpHost::prepare(double const sampleRate, int const samplesPerBlock)
 // First line of processBlock: counts blocks, the proof that the audio thread runs (#83).
 void McpHost::audioBlockStarted()
 {
+    mcp::rt::Scope const rtScope; // P3.4 S6: realtime guard (counts only in a -DMCP_RT_GUARD=ON build)
     session.mcpAudioBlocks.fetch_add(1, std::memory_order_relaxed); // #83 audio-thread liveness
     mcp::audit::markAudioThread(); // P3.4 S0: no-op unless PLUGDATA_MCP_AUDIT=1
 }
@@ -39,6 +41,7 @@ void McpHost::audioBlockStarted()
 // processBlock, after the MIDI input history is filled and before the toolbar sees it.
 void McpHost::midiTick(MidiBuffer& midiInputHistory, AudioBuffer<float>& buffer, double const sampleRate)
 {
+    mcp::rt::Scope const rtScope; // P3.4 S6: realtime guard (counts only in a -DMCP_RT_GUARD=ON build)
     // MIDI melodic-intent capture & playback tap
     if (mcpBridge && (mcpBridge->isMidiCapturing() || mcpBridge->isMidiPlaying()))
         mcpBridge->midiInputTick(midiInputHistory, buffer.getNumSamples(), &buffer, sampleRate);
@@ -47,6 +50,7 @@ void McpHost::midiTick(MidiBuffer& midiInputHistory, AudioBuffer<float>& buffer,
 // End of processBlock, on the FINAL output (after gain and limiter).
 void McpHost::audioBlockFinished(AudioBuffer<float>& buffer)
 {
+    mcp::rt::Scope const rtScope; // P3.4 S6: realtime guard (counts only in a -DMCP_RT_GUARD=ON build)
     // Armed peak-hold (trigger verification): track the loudest sample of the FINAL
     // output (post-gain/limiter) while armed. Placed at the common end of
     // processBlock so it runs for BOTH constant and variable block sizes. The window
@@ -99,6 +103,7 @@ void McpHost::audioBlockFinished(AudioBuffer<float>& buffer)
 // Every Pd sub-block, right after performDSP and before the output copy.
 void McpHost::pdBlock(float* audioVectorIn, float* audioVectorOut, int const pdBlockSize, int const numChannels)
 {
+    mcp::rt::Scope const rtScope; // P3.4 S6: realtime guard (counts only in a -DMCP_RT_GUARD=ON build)
     if (mcpBridge) {
         mcpBridge->audioTick();
         mcpBridge->voiceInputTick(audioVectorIn, pdBlockSize);

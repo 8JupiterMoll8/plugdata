@@ -173,19 +173,30 @@ void MCPBridge::seqStart(const juce::String& action, const juce::OSCMessage& msg
 
     if (job.patternLength <= 0 || job.tracks.empty()) { sendReply(replyAddr, 0.0f); return; }
 
+    // P3.4 S6: the receive symbols are made here, under the Pd lock (gensym is not thread-safe), so the audio
+    // thread only follows pointers.
+    if (!processor) { sendReply(replyAddr, 0.0f); return; }
+    processor->setThis();
+    sys_lock();
+    for (auto& track : job.tracks)
+        track.sym = gensym(track.name.toRawUTF8());
+    sys_unlock();
+
     {
         juce::ScopedLock sl(seqLock);
+        bool replaced = false;
         for (auto& existing : seqJobs) {
             if (existing.jobId == jobId) {
                 existing.active = false;
                 existing = job;
-                sendReply(replyAddr, 1.0f);
-                return;
+                replaced = true;
+                break;
             }
         }
-        seqJobs.push_back(job);
+        if (!replaced)
+            seqJobs.push_back(job);
     }
-    sendReply(replyAddr, 1.0f);
+    sendReply(replyAddr, 1.0f); // P3.4 S6: after the lock (it was sent while holding seqLock)
     return;
 }
 
