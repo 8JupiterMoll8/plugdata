@@ -145,10 +145,11 @@ void MCPBridge::pdAiGhost(const juce::String& action, const juce::OSCMessage& ms
 
     postMessage([proc = processor, cnv, canvasName, correlationId, bridge = this, parsed]() {
         if (mcpCanvasGone(cnv)) { bridge->sendReply("/pd/ai_ghost/reply/" + correlationId, 0.0f); return; } // P3.4 S4: closed since the handler ran
+        // P3.4 S11 (TSan): the Pd lock before the overlay lock, the order the GUI's sync and paint use.
+        sys_lock();
         juce::ScopedLock overlaySl(proc->getMcp()->session.mcpOverlayLock);
         proc->getMcp()->session.mcpGhosts.clear();
         if (auto* arr = parsed.getArray()) {
-            sys_lock();
             for (auto const& v : *arr) {
                 auto* o = v.getDynamicObject();
                 if (!o) continue;
@@ -173,8 +174,8 @@ void MCPBridge::pdAiGhost(const juce::String& action, const juce::OSCMessage& ms
                 }
                 proc->getMcp()->session.mcpGhosts.push_back(g);
             }
-            sys_unlock();
         }
+        sys_unlock();
         proc->getMcp()->gui().repaintView(cnv);
         bridge->sendReply("/pd/ai_ghost/reply/" + correlationId, static_cast<float>(proc->getMcp()->session.mcpGhosts.size()));
     });
@@ -201,10 +202,11 @@ void MCPBridge::pdAiAnnotate(const juce::String& action, const juce::OSCMessage&
 
     postMessage([proc = processor, cnv, canvasName, correlationId, bridge = this, parsed]() {
         if (mcpCanvasGone(cnv)) { bridge->sendReply("/pd/ai_annotate/reply/" + correlationId, 0.0f); return; } // P3.4 S4: closed since the handler ran
+        // P3.4 S11 (TSan): the Pd lock before the overlay lock, the order the GUI's sync and paint use.
+        sys_lock();
         juce::ScopedLock overlaySl(proc->getMcp()->session.mcpOverlayLock);
         proc->getMcp()->session.mcpAnnotations.clear();
         if (auto* arr = parsed.getArray()) {
-            sys_lock();
             for (auto const& v : *arr) {
                 auto* o = v.getDynamicObject();
                 if (!o) continue;
@@ -264,8 +266,8 @@ void MCPBridge::pdAiAnnotate(const juce::String& action, const juce::OSCMessage&
                 }
                 proc->getMcp()->session.mcpAnnotations.push_back(a);
             }
-            sys_unlock();
         }
+        sys_unlock();
         proc->getMcp()->gui().repaintView(cnv);
         juce::var details = juce::Array<juce::var>();
         for (auto const& an : proc->getMcp()->session.mcpAnnotations) {

@@ -328,7 +328,7 @@ void MCPBridge::meterRead(const juce::String& meterAction, const juce::OSCMessag
                                   - processor->getMcp()->session.mcpArmBlocksAtArm.load(std::memory_order_relaxed));
         armedTailRuns = (int64_t)processor->getMcp()->session.mcpArmedTailRuns.load(std::memory_order_relaxed);
         tailPeak = processor->getMcp()->session.mcpArmedTailPeak.load(std::memory_order_relaxed);
-        processor->logMessage(juce::String::formatted("MCP-ARM-DIAG read: peak=%.6f blocksElapsed=%lld armedTailRuns=%lld tailPeak=%.6f",
+        mcpLogLine(*this, processor, juce::String::formatted("MCP-ARM-DIAG read: peak=%.6f blocksElapsed=%lld armedTailRuns=%lld tailPeak=%.6f",
              (double)peak, (long long)blocksElapsed, (long long)armedTailRuns, (double)tailPeak));
     }
     juce::OSCMessage rep { juce::OSCAddressPattern("/meter/read/reply/" + correlationId) };
@@ -465,7 +465,7 @@ void MCPBridge::meterReadSpectral(const juce::String& meterAction, const juce::O
     juce::String diag = ",\"blocksElapsed\":" + juce::String((int)blocksElapsed)
                       + ",\"armedTailRuns\":" + juce::String((int)armedTailRuns)
                       + ",\"tailPeak\":" + juce::String(tailPeak, 6);
-    processor->logMessage(juce::String::formatted("MCP-ARM-DIAG read_spectral: samples=%d blocksElapsed=%lld armedTailRuns=%lld tailPeak=%.6f",
+    mcpLogLine(*this, processor, juce::String::formatted("MCP-ARM-DIAG read_spectral: samples=%d blocksElapsed=%lld armedTailRuns=%lld tailPeak=%.6f",
          n, (long long)blocksElapsed, (long long)armedTailRuns, (double)tailPeak));
     juce::String json = armedSpectralJson(processor->getMcp()->session.mcpSpecBuffer.data(), n, sr);
     processor->getMcp()->session.mcpSpecWritePos.store(0, std::memory_order_relaxed);

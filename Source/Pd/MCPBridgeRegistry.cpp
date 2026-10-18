@@ -76,6 +76,9 @@ void MCPBridge::replyUnknownVerb(const juce::String& domain, const juce::String&
 // stack by the caller; say so instead of dropping it silently (P3.4 S9, S5 review note (b)).
 void MCPBridge::replayPd(const juce::String& action, const juce::OSCMessage& msg)
 {
-    if (!dispatchRegistered("pd", action, msg))
-        if (processor) processor->logWarning("MCP undo/redo: no handler for /pd/" + action + ", the step was not replayed");
+    if (!dispatchRegistered("pd", action, msg)) {
+        juce::String const line = "MCP undo/redo: no handler for /pd/" + action + ", the step was not replayed";
+        if (processor) processor->logWarning(line);
+        sendConsoleLog(line, false);
+    }
 }

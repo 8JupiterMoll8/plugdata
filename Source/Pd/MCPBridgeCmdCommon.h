@@ -91,6 +91,20 @@ struct _outlet
 // audio block later, after the caller had pushed its own MCP transaction
 // (finding L12: batch_atomic's undo never worked) or after the NEXT command
 // had pushed one (a move right after a batch lost its undo).
+// P3.4 S11: a diagnostic line from a thread that is not the Pd thread. Pd's post() runs plugdata's print hook,
+// which is not thread-safe there (TSan: console buffer and gensym races); this queues the line for the console
+// and sends the same /pd/log message the print hook used to send.
+inline void mcpLogLine(MCPBridge& bridge, PluginProcessor* proc, juce::String const& text, bool warning = false)
+{
+    if (proc) {
+        if (warning)
+            proc->logWarning(text);
+        else
+            proc->logMessage(text);
+    }
+    bridge.sendConsoleLog(text, false);
+}
+
 inline void resetCanvasUndo(PluginProcessor* proc, juce::String const& canvasName)
 {
     if (!proc) return;

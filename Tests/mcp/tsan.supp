@@ -1,9 +1,10 @@
 # ThreadSanitizer suppressions for the P3.4 S11 sanitizer runs (TSAN_OPTIONS=suppressions=<this file>).
 # Only upstream, JUCE and system-library reports; never MCP code. Each line says why.
-# Run with detect_deadlocks=0 as well: with libstdc++ std::mutex (trivial destructor, no pthread_mutex_destroy)
-# reused heap addresses confuse TSan's deadlock detector ("double lock ... Mutex is already destroyed" on JUCE's
-# WaitableEvent and on mcp::OneShotHandoff, whose state is only touched under its own mutex); the detector's
-# per-thread lock list then overflows and aborts the run (CHECK n_all_locks_ < 64, seen in S11).
+# Launch the app with LD_PRELOAD=<tsan_clockwait_shim.so> (Tests/mcp/tsan_clockwait_shim.c): GCC 11's libtsan does
+# not intercept pthread_cond_clockwait (libstdc++ 11 condition_variable::wait_for), so without the shim every
+# condition-variable handoff shows as "double lock of a mutex" plus data races (1,885 reports in S11's second run,
+# 2 with the shim) and the deadlock detector's per-thread lock list overflows (CHECK n_all_locks_ < 64 aborted
+# the first run).
 
 # moodycamel::ReaderWriterQueue synchronises with std::atomic_thread_fence, which TSan does not model; the
 # queues are used single-producer/single-consumer (audio tick -> bridge timer), the queue's documented contract.
@@ -13,6 +14,6 @@ race:moodycamel::ReaderWriterQueue
 called_from_lib:libpulsecommon-15.99.so
 called_from_lib:libpulse.so.0
 
-# JUCE TimeSliceThread lock vs the WaitableEvent mutex a condition wait releases (JUCE internal; seen through
-# AudioFormatWriter::ThreadedWriter in the recorder).
-deadlock:juce::TimeSliceThread
+# Upstream plugdata (finding L26): pd::Instance::KeyHandler's SmallArray is filled on the message thread
+# (ModifierKeyBroadcaster timer) and read by sendKeyUpMessages on the audio thread without a lock.
+race:pd::Instance::KeyHandler

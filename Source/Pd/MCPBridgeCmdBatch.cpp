@@ -98,7 +98,7 @@ void mcp::BatchJob::runLayoutGuard(MCPBridge& bridge)
             });
             if (layoutHandoff->waitOrAbandon(std::chrono::milliseconds(6000))
                 == mcp::OneShotHandoff::Result::Abandoned)
-                processor->logWarning("batch_atomic: layout guard skipped, message thread busy for 6000ms");
+                mcpLogLine(bridge, processor, "batch_atomic: layout guard skipped, message thread busy for 6000ms", true);
         }
     } else {
         if (juce::MessageManager::getInstance()->isThisTheMessageThread()) {
@@ -227,12 +227,12 @@ void MCPBridge::pdBatchAtomic(const juce::String& action, const juce::OSCMessage
         bool const waitOk = handoff->waitOrAbandon(std::chrono::milliseconds(2000))
             == mcp::OneShotHandoff::Result::Finished;
         if (waitOk && handoff->wasLate())
-            processor->logMessage("batch_atomic: finished after the 2000ms budget (the Pd context was busy)");
+            mcpLogLine(*this, processor, "batch_atomic: finished after the 2000ms budget (the Pd context was busy)");
         auto tWaitEnd = std::chrono::high_resolution_clock::now();
         auto waitUs = std::chrono::duration_cast<std::chrono::microseconds>(tWaitEnd - tWaitStart).count();
         // P3.4 S11 (TSan): Pd's post() runs plugdata's print hook; from the worker, unlocked, it raced with the
-        // Pd thread. logMessage queues the line thread-safely.
-        processor->logMessage(juce::String::formatted("batch_atomic: done.wait() took %lld us (%.1f ms)", (long long)waitUs, waitUs / 1000.0f));
+        // Pd thread. mcpLogLine queues it thread-safely and sends the same /pd/log line.
+        mcpLogLine(*this, processor, juce::String::formatted("batch_atomic: done.wait() took %lld us (%.1f ms)", (long long)waitUs, waitUs / 1000.0f));
         // R3b + Report F3: !waitOk now means the lambda was abandoned before
         // it began, so NOTHING was applied (a started batch is always waited
         // for). Say so plainly; the TS side classifies this as "rejected".
