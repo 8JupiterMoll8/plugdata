@@ -358,7 +358,7 @@ Canvas::~Canvas()
     editor->removeModifierKeyListener(this);
     pd->unregisterMessageListener(this);
 
-    mcpLayer->canvasDestroyed(); // MCP-HOOK(canvasLifecycle)
+    mcpLayer->canvasDestroyed(); mcpLayer.reset(); // MCP-HOOK(canvasLifecycle) L28: gone before the objects, whose teardown can deselect
 
     if (getValue<bool>(isGraphChild) && isGraph)
     patch.setVisible(false);
@@ -1658,7 +1658,7 @@ void Canvas::deselectAll(bool const broadcastChange)
     selectedComponents.deselectAll();
     if (auto* s = editor->getSidebarForPanel(Sidebar::InspectorPanel))
         s->hideParameters();
-    mcpLayer->updateSelectionPill(); // MCP-HOOK(canvasLifecycle): the pill follows the selection
+    if (mcpLayer) mcpLayer->updateSelectionPill(); // MCP-HOOK(canvasLifecycle): the pill follows the selection (L28: none while the canvas dies)
 
     if (!broadcastChange) {
         MessageManager::callAsync([_this = SafePointer(this)] {
