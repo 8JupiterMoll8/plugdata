@@ -104,7 +104,7 @@ Object* findObjectComponent(Canvas* canvasComp, t_gobj* g)
 // Was the tab match of /pd/focus_tab and /pd/close_tab.
 bool tabMatches(Canvas* canvas, juce::File const& f, juce::String const& target)
 {
-    return canvas->patch.getCurrentFile() == f
+    return (f != juce::File() && canvas->patch.getCurrentFile() == f) // an unsaved tab has no file either
         || canvas->patch.getCurrentFile().getFileName() == target
         || canvas->patch.getTitle() == target
         || canvas->patch.getTitle().equalsIgnoreCase(target);
@@ -426,7 +426,7 @@ public:
 
     std::optional<juce::String> focusTab(juce::String const& target) override
     {
-        juce::File f(target);
+        juce::File const f = juce::File::isAbsolutePath(target) ? juce::File(target) : juce::File(); // L27: a tab name is no path
         for (auto* editor : proc->getEditors()) {
             if (!editor) continue;
             for (auto* canvas : editor->getCanvases()) {
@@ -444,7 +444,7 @@ public:
 
     CloseResult closeTab(juce::String const& target, bool force) override
     {
-        juce::File f(target);
+        juce::File const f = juce::File::isAbsolutePath(target) ? juce::File(target) : juce::File(); // L27: a tab name is no path
         for (auto* editor : proc->getEditors()) {
             if (!editor) continue;
             for (auto* canvas : editor->getCanvases()) {

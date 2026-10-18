@@ -445,17 +445,32 @@ void MCPBridge::pdOpenPatch(const juce::String& action, const juce::OSCMessage& 
             return;
         }
 
-        // Phase 3.1 bugfix: the open lambda was observed to deliver twice
-        // (two tabs for one request). Once-guard per file — any repeat
-        // within 2s is ignored (idempotent open, root cause independent).
-        static std::unordered_map<juce::String, juce::int64> lastOpenAtMs;
-        auto nowMs = juce::Time::getMillisecondCounter();
-        auto& lastRef = lastOpenAtMs[srcFile.getFullPathName()];
-        if (nowMs - lastRef < 2000) {
-            sendReply(replyAddr, juce::String("ignored: open already in progress for " + srcFilePath));
-            return;
+        // Phase 3.1 bugfix: the open lambda was observed to deliver twice (two tabs for one request). P3.5 S2b
+        // (L27): the guard holds while the open is in flight (cleared when the posted open finishes), not for a
+        // fixed 2 s: a time window swallowed a real reopen right after a close, and the patch came back neither
+        // open nor with its ids. A repeat after the open finished meets the already-open check below.
+        static std::mutex openInFlightLock;
+        static std::unordered_set<juce::String> openInFlight;
+        {
+            std::lock_guard<std::mutex> g(openInFlightLock);
+            if (!openInFlight.insert(srcFile.getFullPathName()).second) {
+                sendReply(replyAddr, juce::String("ignored: open already in progress for " + srcFilePath));
+                return;
+            }
         }
-        lastRef = nowMs;
+        struct InFlightRelease {
+            explicit InFlightRelease(juce::String p) : path(std::move(p)) { }
+            InFlightRelease(InFlightRelease const&) = delete;
+            InFlightRelease& operator=(InFlightRelease const&) = delete;
+            juce::String path;
+            ~InFlightRelease()
+            {
+                std::lock_guard<std::mutex> g(openInFlightLock);
+                openInFlight.erase(path);
+            }
+        };
+        // Released when the last owner goes: this handler on an early return, else the posted open lambda.
+        auto inFlight = std::make_shared<InFlightRelease>(srcFile.getFullPathName());
 
         // PRD Phase 3 §2.5: duplicate-tab guard — PlugData focuses the
         // existing tab instead of duplicating a patch (by design). Reply
@@ -491,7 +506,7 @@ void MCPBridge::pdOpenPatch(const juce::String& action, const juce::OSCMessage& 
         sendReply(replyAddr, juce::String("opening: " + srcFile.getFullPathName()));
 
         postMessage(
-            [p = processor, fileStr = srcFile.getFullPathName(), sidecar]() {
+            [p = processor, fileStr = srcFile.getFullPathName(), sidecar, inFlight]() {
             bool opened = p->getMcp()->gui().openPatch(juce::File(fileStr));
             if (!opened) {
                 p->logMessage("MCP open_patch: no editor");
