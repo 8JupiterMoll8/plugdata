@@ -2978,7 +2978,7 @@ void ProbeManager::audioTick()
     int const sortNo = ugen_getsortno();
 
     for (auto& probe : probes) {
-        if (!probe.active.load(std::memory_order_relaxed)) continue;
+        if (!probe.active.load(std::memory_order_acquire)) continue; // pairs with startProbe's release (P3.4 S11, TSan)
         if (probe.epoch.load(std::memory_order_acquire) != sortNo) {
             probe.needsResolve.store(true, std::memory_order_release);
             continue;
@@ -3017,7 +3017,7 @@ void ProbeManager::audioTick()
 int ProbeManager::startProbe(t_outconnect* oc, int const epoch, const juce::String& canvasName, const juce::String& tempId, int outletIndex, const juce::String& correlationId, int durationMs)
 {
     for (auto& probe : probes) {
-        if (!probe.active.load(std::memory_order_relaxed)) {
+        if (!probe.active.load(std::memory_order_acquire)) {
             ProbeResult discard;
             while (probe.resultQueue.try_dequeue(discard)) {}
 
@@ -3047,7 +3047,7 @@ int ProbeManager::startProbe(t_outconnect* oc, int const epoch, const juce::Stri
 void ProbeManager::stopProbe(uint32_t probeId, const juce::String& correlationId)
 {
     for (auto& probe : probes) {
-        if (probe.active.load(std::memory_order_relaxed) && probe.probeId == probeId) {
+        if (probe.active.load(std::memory_order_acquire) && probe.probeId == probeId) {
             ProbeResult item;
             while (probe.resultQueue.try_dequeue(item)) {
                 probe.accRms += item.rms * item.rms;
@@ -3088,7 +3088,7 @@ void ProbeManager::stopProbe(uint32_t probeId, const juce::String& correlationId
 void ProbeManager::stopAllProbes(const juce::String& correlationId)
 {
     for (auto& probe : probes) {
-        if (probe.active.load(std::memory_order_relaxed)) {
+        if (probe.active.load(std::memory_order_acquire)) {
             probe.active.store(false, std::memory_order_release);
             probe.outconnect.store(nullptr, std::memory_order_release);
             if (probe.correlationId.isNotEmpty() && bridge) {
@@ -3110,7 +3110,7 @@ void ProbeManager::collectResults()
     }
 
     for (auto& probe : probes) {
-        if (!probe.active.load(std::memory_order_relaxed)) continue;
+        if (!probe.active.load(std::memory_order_acquire)) continue; // pairs with startProbe's release (P3.4 S11, TSan)
 
         // P3.4 S5: the DSP chain was rebuilt since the probe was resolved: resolve it again under the Pd lock,
         // or end it with an error when its source is gone (it used to read freed memory).
@@ -3209,7 +3209,7 @@ int ProbeManager::getActiveProbeCount() const
 {
     int count = 0;
     for (auto const& probe : probes) {
-        if (probe.active.load(std::memory_order_relaxed)) {
+        if (probe.active.load(std::memory_order_acquire)) {
             count++;
         }
     }

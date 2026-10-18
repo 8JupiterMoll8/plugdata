@@ -518,6 +518,9 @@ int main()
     juce::ScopedJuceInitialiser_GUI const juceInitialiser;
 
     {
+        // Declared before the processor so it outlives it: the teardown case destroys the processor while a render
+        // still runs, and the bridge's last replies arrive during that destruction (P3.4 S11, TSan).
+        Replies replies;
         PluginProcessor processor;
         processor.setRateAndBufferSizeDetails(44100.0, 512);
         processor.prepareToPlay(44100.0, 512);
@@ -534,7 +537,6 @@ int main()
             return 2;
         }
         bridge->stop(); // the processor started it on the configured UDP port: nothing may listen here
-        Replies replies;
         bridge->setReplySinkForTests([&replies](juce::OSCMessage const& msg) { replies.push(msg); });
 
         std::atomic<bool> casesDone { false };
