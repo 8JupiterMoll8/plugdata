@@ -670,12 +670,12 @@ void MCPBridge::pdScreenshotCanvas(const juce::String& action, const juce::OSCMe
                     if (g) liveCnv = reinterpret_cast<t_canvas*>(g);
                 }
 
-                // ptrToId from mcpStableObjectMap for tempId fallback naming
+                // ptrToId from the identity map for tempId fallback naming
                 std::unordered_map<t_gobj*, juce::String> ptrToId;
                 if (proc) {
-                    auto mapIt = proc->getMcp()->session.mcpStableObjectMap.find((liveCnv ? canonicalCanvasKey(liveCnv) : canvasName).toStdString());
-                    if (mapIt != proc->getMcp()->session.mcpStableObjectMap.end())
-                        for (auto& [tid, ptr] : mapIt->second)
+                    auto const* canvasIds = proc->getMcp()->identity.findCanvas((liveCnv ? canonicalCanvasKey(liveCnv) : canvasName).toStdString());
+                    if (canvasIds)
+                        for (auto& [tid, ptr] : *canvasIds)
                             if (ptr) ptrToId[ptr] = juce::String(tid);
                 }
 

@@ -7,6 +7,7 @@
 #pragma once
 
 #include "Mcp/McpSession.h"
+#include "Mcp/McpIdentity.h"
 #include "Mcp/McpGuiHost.h"
 #include "Mcp/McpSysList.h"
 #include <juce_dsp/juce_dsp.h>
@@ -98,7 +99,7 @@ public:
 
     t_gobj* resolveStableId(const String& canvasName, const String& objectId);
     // Full identity reconcile against the live canvas (gl_list): evict entries whose
-    // gobj is gone, adopt untracked objects (gui_<class>_<n>), bump mcpIdentityVersion.
+    // gobj is gone, adopt untracked objects (gui_<class>_<n>), bump the identity version.
     // Caller must be on the message thread / hold the Pd lock (same context as
     // resolveStableId). Makes the tempId cache equal gl_list truth before any op that
     // resolves ids — so a stale id can never silently map to the wrong object.
@@ -160,6 +161,8 @@ public:
 
     PluginProcessor& processor;
     McpSession session;
+    // tempIds, serials and the identity version (P3.5: the only identity state).
+    mcp::IdentityService identity;
     // Declared before the bridge, so it outlives it.
     std::unique_ptr<McpGuiHost> guiHost;
     // Declared after the session, so it is destroyed first: its threads stop

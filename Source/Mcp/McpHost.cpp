@@ -340,13 +340,7 @@ void McpHost::synchroniseCanvases()
 
 juce::String McpHost::getStableId(t_gobj* g) const
 {
-    if (!g) return {};
-    for (auto const& [canvasKey, canvasMap] : session.mcpStableObjectMap) {
-        for (auto const& [id, ptr] : canvasMap) {
-            if (ptr == g) return juce::String(id);
-        }
-    }
-    return {};
+    return juce::String(identity.idOf(g));
 }
 
 juce::String McpHost::getOrAdoptStableId(t_canvas* canvas, t_gobj* g)
@@ -385,12 +379,10 @@ juce::String McpHost::getOrAdoptStableId(t_canvas* canvas, t_gobj* g)
             juce::String minted = pd::sanitizeClassNameForTempId(classSrc)
                                       + "_" + canvasKey + "_" + juce::String(objectIndex);
 
-            auto& canvasIdMap = session.mcpStableObjectMap[canonStr];
+            auto& canvasIdMap = identity.canvasMap(canonStr);
             canvasIdMap[minted.toStdString()] = y_obj;
-            if (session.mcpStableSerialMap.find(y_obj) == session.mcpStableSerialMap.end()) {
-                session.mcpStableSerialMap[y_obj] = session.mcpSerialCounter++;
-            }
-            session.mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+            identity.ensureSerial(y_obj);
+            identity.bumpVersion();
             return minted;
         }
     }
@@ -406,13 +398,13 @@ t_gobj* McpHost::resolveStableId(const String& canvasName, const String& objectI
     auto canvasStr = (canvas ? MCPBridge::canonicalCanvasKey(canvas) : canvasName).toStdString();
     auto idStr = objectId.toStdString();
     
-    auto& canvasMap = session.mcpStableObjectMap[canvasStr];
+    auto& canvasMap = identity.canvasMap(canvasStr);
     auto it = canvasMap.find(idStr);
     if (it != canvasMap.end()) {
         if (canvas) {
             // KNOWN GAP (Report F3): this cannot detect a freed object whose
             // address Pd's allocator recycled for a new object on the same
-            // canvas. The old "serial" check compared mcpStableSerialMap[ptr]
+            // canvas. The old "serial" check compared the serial map[ptr]
             // with itself (y_obj == it->second), so it never fired and was
             // removed. A real check needs a serial recorded per stable ID at
             // registration (14 sites); that belongs to the identity service
@@ -427,7 +419,7 @@ t_gobj* McpHost::resolveStableId(const String& canvasName, const String& objectI
         t_gobj* const stale = it->second;
         canvasMap.erase(it);
         if (stale)
-            session.mcpStableSerialMap.erase(stale);
+            identity.eraseSerial(stale);
     }
 
     // Index-based fallback: "0", "1", "obj_0", "obj_1", etc.
@@ -454,7 +446,7 @@ void McpHost::reconcileIdentity(const String& canvasName)
         return;
 
     auto canvasStr = MCPBridge::canonicalCanvasKey(canvas).toStdString();
-    auto& canvasMap = session.mcpStableObjectMap[canvasStr];
+    auto& canvasMap = identity.canvasMap(canvasStr);
 
     // Step A: live pointer set from gl_list (the ground truth).
     std::unordered_set<t_gobj*> livePointers;
@@ -464,9 +456,9 @@ void McpHost::reconcileIdentity(const String& canvasName)
     // Step B: evict entries whose gobj no longer exists on the canvas.
     for (auto it = canvasMap.begin(); it != canvasMap.end();) {
         if (livePointers.find(it->second) == livePointers.end()) {
-            session.mcpStableSerialMap.erase(it->second);
+            identity.eraseSerial(it->second);
             it = canvasMap.erase(it);
-            session.mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+            identity.bumpVersion();
         } else {
             ++it;
         }
@@ -485,8 +477,8 @@ void McpHost::reconcileIdentity(const String& canvasName)
             while (canvasMap.count(autoId))
                 autoId = ("gui_" + className + "_" + juce::String(adoptIdx++)).toStdString();
             canvasMap[autoId] = y;
-            session.mcpStableSerialMap[y] = session.mcpSerialCounter++;
-            session.mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+            identity.assignSerial(y);
+            identity.bumpVersion();
         }
     }
 }

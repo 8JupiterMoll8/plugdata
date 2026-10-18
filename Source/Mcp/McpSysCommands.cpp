@@ -214,15 +214,9 @@ void McpHost::sysClearIds(SmallString const& selector, mcp::SysList const& list)
 
         t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
         auto canvasStr = (canvas ? MCPBridge::canonicalCanvasKey(canvas) : canvas_symbol).toStdString();
-        // Purge serials for this canvas entries before erasing the map
-        auto it = session.mcpStableObjectMap.find(canvasStr);
-        if (it != session.mcpStableObjectMap.end()) {
-            for (auto& kv : it->second) {
-                session.mcpStableSerialMap.erase(kv.second);
-            }
-            session.mcpStableObjectMap.erase(it);
-            session.mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
-        }
+        // Drops the canvas's ids and their serials.
+        if (identity.eraseCanvas(canvasStr))
+            identity.bumpVersion();
 
         mcp::SysList atoms; // P3.4 S7: plain values, no Pd symbols
         atoms.add(1.0f);
@@ -301,9 +295,9 @@ void McpHost::sysRegisterId(SmallString const& selector, mcp::SysList const& lis
             }
 
             if (targetObj) {
-                session.mcpStableObjectMap[canonStr][object_id.toStdString()] = targetObj;
-                session.mcpStableSerialMap[targetObj] = session.mcpSerialCounter++;
-                session.mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+                identity.canvasMap(canonStr)[object_id.toStdString()] = targetObj;
+                identity.assignSerial(targetObj);
+                identity.bumpVersion();
                 success = true;
             }
         }
@@ -327,10 +321,10 @@ void McpHost::sysRenameId(SmallString const& selector, mcp::SysList const& list)
         bool success = false;
         t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
         auto canvasStr = (canvas ? MCPBridge::canonicalCanvasKey(canvas) : canvas_symbol).toStdString();
-        auto& map = session.mcpStableObjectMap[canvasStr];
+        auto& map = identity.canvasMap(canvasStr);
         auto const renamed = mcp::identity::renameStableId(map, old_id.toStdString(), new_id.toStdString());
         if (renamed == mcp::identity::RenameResult::Applied)
-            session.mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+            identity.bumpVersion();
         success = renamed != mcp::identity::RenameResult::Missing;
         sys_unlock();
 
@@ -351,7 +345,7 @@ void McpHost::sysGetMappings(SmallString const& selector, mcp::SysList const& li
         mcp::SysList atoms; // P3.4 S7: plain values, no Pd symbols
         if (canvas) {
             auto canonStr = MCPBridge::canonicalCanvasKey(canvas).toStdString();
-            auto& canvasMap = session.mcpStableObjectMap[canonStr];
+            auto& canvasMap = identity.canvasMap(canonStr);
 
             // For each ID in the map, find its current index in gl_list
             for (auto it = canvasMap.begin(); it != canvasMap.end();) {
@@ -401,8 +395,8 @@ void McpHost::sysCensus(SmallString const& selector, mcp::SysList const& list)
 
             // Build reverse map of gobj* -> tempId
             std::unordered_map<t_gobj*, String> ptrToId;
-            if (session.mcpStableObjectMap.count(canonStr)) {
-                for (auto const& [id, ptr] : session.mcpStableObjectMap[canonStr]) {
+            if (auto const* canvasIds = identity.findCanvas(canonStr)) {
+                for (auto const& [id, ptr] : *canvasIds) {
                     if (ptr) ptrToId[ptr] = String(id);
                 }
             }
@@ -595,13 +589,11 @@ void McpHost::sysCensus(SmallString const& selector, mcp::SysList const& list)
                     juce::String minted = pd::sanitizeClassNameForTempId(classSrc)
                                               + "_" + canvasKey + "_" + String(objectIndex);
 
-                    auto& canvasIdMap = session.mcpStableObjectMap[canonStr];
+                    auto& canvasIdMap = identity.canvasMap(canonStr);
                     auto existing = canvasIdMap.find(minted.toStdString());
                     if (existing == canvasIdMap.end()) {
                         canvasIdMap[minted.toStdString()] = y_obj;
-                        if (session.mcpStableSerialMap.find(y_obj) == session.mcpStableSerialMap.end()) {
-                            session.mcpStableSerialMap[y_obj] = session.mcpSerialCounter++;
-                        }
+                        identity.ensureSerial(y_obj);
                         tempId = minted;
                         adoptedAny = true;
                     } else if (existing->second == y_obj) {
@@ -618,7 +610,7 @@ void McpHost::sysCensus(SmallString const& selector, mcp::SysList const& list)
             // One version bump per census that adopted anything — the
             // identity map changed, so identity_snapshot consumers resync.
             if (adoptedAny) {
-                session.mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+                identity.bumpVersion();
             }
             rootObj->setProperty("objectCount", objectIndex);
             rootObj->setProperty("objects", objArray);

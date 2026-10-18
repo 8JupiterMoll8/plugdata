@@ -282,10 +282,7 @@ void MCPBridge::pdSavePatch(const juce::String& action, const juce::OSCMessage& 
         const std::string newKey = juce::File(destFilePath).getFileName().toStdString();
         processor->getMcp()->enqueuePd([p = processor, cnv, destFilePath, oldKey, newKey]() {
             juce::File f(destFilePath);
-            if (oldKey != newKey && p->getMcp()->session.mcpStableObjectMap.count(oldKey)) {
-                p->getMcp()->session.mcpStableObjectMap[newKey] = std::move(p->getMcp()->session.mcpStableObjectMap[oldKey]);
-                p->getMcp()->session.mcpStableObjectMap.erase(oldKey);
-            }
+            p->getMcp()->identity.moveCanvas(oldKey, newKey);
             // P3.4 S3: the tab title is GUI state: set it on the message thread, if the canvas still exists.
             p->getMcp()->postMessage([p, cnv, f] {
                 sys_lock();
@@ -383,7 +380,7 @@ void MCPBridge::pdLoadPatch(const juce::String& action, const juce::OSCMessage& 
                 if (cnv) {
                     auto canonKey = MCPBridge::canonicalCanvasKey(cnv);
                     // 0. Reset identity for this canvas tree BEFORE re-registering
-                    proc->getMcp()->session.mcpStableObjectMap[canonKey.toStdString()].clear();
+                    proc->getMcp()->identity.canvasMap(canonKey.toStdString()).clear();
 
                     // 1. Clear existing objects (message-thread-safe)
                     mcp::PdOps::clearCanvas(cnv);

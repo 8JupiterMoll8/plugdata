@@ -202,9 +202,7 @@ void MCPBridge::pdParams(const juce::String& action, const juce::OSCMessage& msg
                 // OWNING module tempId so callers (auto_map) can scope to a
                 // single module — C++ is the truth, TS must not re-derive.
                 auto findTempId = [&](t_gobj* y) -> juce::String {
-                    for (auto& [key, m] : processor->getMcp()->session.mcpStableObjectMap)
-                        for (auto& [id, ptr] : m) if (ptr == y) return id;
-                    return {};
+                    return juce::String(processor->getMcp()->identity.idOf(y));
                 };
                 std::function<void(t_canvas*, int, juce::String)> collect =
                     [&](t_canvas* c, int depth, juce::String owner) {
@@ -262,9 +260,7 @@ void MCPBridge::pdParamSetName(const juce::String& action, const juce::OSCMessag
                 // Descend into placed subpatches/abstractions so a param
                 // INSIDE a GOP/MERDA module can be set by name (#43).
                 auto findTempId = [&](t_gobj* y) -> juce::String {
-                    for (auto& [key, m] : processor->getMcp()->session.mcpStableObjectMap)
-                        for (auto& [id, ptr] : m) if (ptr == y) return id;
-                    return {};
+                    return juce::String(processor->getMcp()->identity.idOf(y));
                 };
                 std::function<void(t_canvas*, int, juce::String)> applyParam =
                     [&](t_canvas* c, int depth, juce::String owner) {
@@ -582,8 +578,8 @@ void MCPBridge::pdConnections(const juce::String& action, const juce::OSCMessage
         // Build reverse identity map (ptr → tempId)
         auto canvasStr = canvasName.toStdString();
         std::unordered_map<t_gobj*, juce::String> ptrToId;
-        if (processor->getMcp()->session.mcpStableObjectMap.count(canvasStr)) {
-            for (auto const& [id, ptr] : processor->getMcp()->session.mcpStableObjectMap[canvasStr]) {
+        if (auto const* canvasIds = processor->getMcp()->identity.findCanvas(canvasStr)) {
+            for (auto const& [id, ptr] : *canvasIds) {
                 if (ptr) ptrToId[ptr] = juce::String(id);
             }
         }

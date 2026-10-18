@@ -43,8 +43,8 @@ void MCPBridge::pdIdentitySnapshot(const juce::String& action, const juce::OSCMe
         // Step 2: Walk the identity map and validate each entry (O(m))
         auto canonKey = canonicalCanvasKey(cnv);
         auto canvasStr = canonKey.toStdString();
-        auto& canvasMap = processor->getMcp()->session.mcpStableObjectMap[canvasStr];
-        uint64_t version = processor->getMcp()->session.mcpIdentityVersion.load(std::memory_order_relaxed);
+        auto& canvasMap = processor->getMcp()->identity.canvasMap(canvasStr);
+        uint64_t version = processor->getMcp()->identity.version();
 
         auto* rootObj = new juce::DynamicObject();
         rootObj->setProperty("version", static_cast<juce::int64>(version));
@@ -63,8 +63,7 @@ void MCPBridge::pdIdentitySnapshot(const juce::String& action, const juce::OSCMe
             }
 
             // Serial verification (UAF defense)
-            auto serialIt = processor->getMcp()->session.mcpStableSerialMap.find(ptr);
-            if (serialIt == processor->getMcp()->session.mcpStableSerialMap.end()) {
+            if (!processor->getMcp()->identity.hasSerial(ptr)) {
                 toEvict.push_back(tempId);
                 continue;
             }
@@ -98,13 +97,13 @@ void MCPBridge::pdIdentitySnapshot(const juce::String& action, const juce::OSCMe
         for (auto& staleId : toEvict) {
             auto staleIt = canvasMap.find(staleId);
             if (staleIt != canvasMap.end()) {
-                processor->getMcp()->session.mcpStableSerialMap.erase(staleIt->second);
+                processor->getMcp()->identity.eraseSerial(staleIt->second);
                 canvasMap.erase(staleIt);
             }
         }
         if (!toEvict.empty()) {
-            processor->getMcp()->session.mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
-            version = processor->getMcp()->session.mcpIdentityVersion.load(std::memory_order_relaxed);
+            processor->getMcp()->identity.bumpVersion();
+            version = processor->getMcp()->identity.version();
             rootObj->setProperty("version", static_cast<juce::int64>(version));
             rootObj->setProperty("evicted", static_cast<int>(toEvict.size()));
         }
@@ -130,7 +129,7 @@ void MCPBridge::pdIdentityVersion(const juce::String& action, const juce::OSCMes
     // Node.js uses this to decide if a full snapshot fetch is needed.
     if (msg.size() >= 1 && processor) {
         auto correlationId = getArgString(msg[0]);
-        uint64_t version = processor->getMcp()->session.mcpIdentityVersion.load(std::memory_order_relaxed);
+        uint64_t version = processor->getMcp()->identity.version();
 
         juce::OSCMessage reply { juce::OSCAddressPattern("/pd/identity_version/reply/" + correlationId) };
         reply.addArgument(static_cast<int32>(static_cast<int>(version & 0x7FFFFFFF)));
@@ -182,10 +181,10 @@ void MCPBridge::pdRenameId(const juce::String& action, const juce::OSCMessage& m
         bool success = false;
         t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
         auto mapKey = (cnv ? canonicalCanvasKey(cnv) : canvasName).toStdString();
-        auto& map = processor->getMcp()->session.mcpStableObjectMap[mapKey];
+        auto& map = processor->getMcp()->identity.canvasMap(mapKey);
         auto const renamed = mcp::identity::renameStableId(map, oldId, newId);
         if (renamed == mcp::identity::RenameResult::Applied)
-            processor->getMcp()->session.mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+            processor->getMcp()->identity.bumpVersion();
         success = renamed != mcp::identity::RenameResult::Missing;
 
         sendReply("/pd/rename_id/reply/" + correlationId, success ? 1.0f : 0.0f);
@@ -194,7 +193,7 @@ void MCPBridge::pdRenameId(const juce::String& action, const juce::OSCMessage& m
 }
 
     // /pd/rename_id_batch <canvas> <count> <old0> <new0> <old1> <new1> ... <corrId>
-    // Batch rename with a reply — renames directly in mcpStableObjectMap
+    // Batch rename with a reply — renames directly in the identity map
     // (inline, synchronous — no receiveSysMessage async queue).
 void MCPBridge::pdRenameIdBatch(const juce::String& action, const juce::OSCMessage& msg)
 {
@@ -205,10 +204,10 @@ void MCPBridge::pdRenameIdBatch(const juce::String& action, const juce::OSCMessa
         int renamed = 0;
         bool changed = false;
 
-        // Inline rename — directly mutates mcpStableObjectMap, no queue.
+        // Inline rename — directly mutates the identity map, no queue.
         t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
         auto mapKey = (cnv ? canonicalCanvasKey(cnv) : canvasName).toStdString();
-        auto& map = processor->getMcp()->session.mcpStableObjectMap[mapKey];
+        auto& map = processor->getMcp()->identity.canvasMap(mapKey);
         for (int i = 0; i < count && (cursor + 1) < msg.size(); i++) {
             auto oldId = getArgString(msg[cursor++]).toStdString();
             auto newId = getArgString(msg[cursor++]).toStdString();
@@ -217,7 +216,7 @@ void MCPBridge::pdRenameIdBatch(const juce::String& action, const juce::OSCMessa
             if (result == mcp::identity::RenameResult::Applied) changed = true;
         }
         if (changed)
-            processor->getMcp()->session.mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+            processor->getMcp()->identity.bumpVersion();
 
         auto correlationId = (cursor < msg.size()) ? getArgString(msg[cursor]) : "0";
         sendReply("/pd/rename_id_batch/reply/" + correlationId, static_cast<float>(renamed));

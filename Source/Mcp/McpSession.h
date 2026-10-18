@@ -349,17 +349,10 @@ struct McpSession {
     mutable juce::CriticalSection mcpOverlayLock;
 
 
-    std::unordered_map<std::string, std::unordered_map<std::string, t_gobj*>> mcpStableObjectMap;
-    std::unordered_map<t_gobj*, uint64_t> mcpStableSerialMap;
     // PRD overlay: per-object AI state for the canvas AI overlay
     // (state 1 = changed, 2 = proposed, 3 = error) + set-time so a *transient*
     // auto-clear can never erase a later *persistent* mark. Message-thread only.
     std::unordered_map<t_gobj*, AiMark> mcpAiOverlay;
-    uint64_t mcpSerialCounter = 1;
-    // Monotonic version counter — incremented on every identity mutation
-    // (create, delete, rename, register, clear). Node.js can poll this cheaply
-    // to decide whether a full snapshot fetch is needed.
-    std::atomic<uint64_t> mcpIdentityVersion { 0 };
     int mcpSuspendedDspState = 0;
     std::map<t_canvas*, std::vector<McpTransaction>> mcpUndoStack;
     std::map<t_canvas*, std::vector<McpTransaction>> mcpRedoStack;

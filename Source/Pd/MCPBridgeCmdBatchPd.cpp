@@ -71,7 +71,7 @@ void mcp::BatchJob::reconcile(const std::string& canonStr)
     // zero audio dropout (runs inside the same audio-thread lambda).
     {
         auto canvasStr = canonStr;
-        auto& canvasMap = processor->getMcp()->session.mcpStableObjectMap[canvasStr];
+        auto& canvasMap = processor->getMcp()->identity.canvasMap(canvasStr);
 
         // Step A: Build set of all live pointers from gl_list (O(n))
         std::unordered_set<t_gobj*> livePointers;
@@ -83,12 +83,12 @@ void mcp::BatchJob::reconcile(const std::string& canonStr)
         for (auto& [tempId, ptr] : canvasMap) {
             if (livePointers.find(ptr) == livePointers.end()) {
                 toEvict.push_back(tempId);
-                processor->getMcp()->session.mcpStableSerialMap.erase(ptr);
+                processor->getMcp()->identity.eraseSerial(ptr);
             }
         }
         for (auto& id : toEvict) {
             canvasMap.erase(id);
-            processor->getMcp()->session.mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+            processor->getMcp()->identity.bumpVersion();
             reconcileEvicted++;
         }
 
@@ -136,8 +136,8 @@ void mcp::BatchJob::reconcile(const std::string& canonStr)
                             + juce::String(adoptIdx++)).toStdString();
                 }
                 canvasMap[autoId] = y;
-                processor->getMcp()->session.mcpStableSerialMap[y] = processor->getMcp()->session.mcpSerialCounter++;
-                processor->getMcp()->session.mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+                processor->getMcp()->identity.assignSerial(y);
+                processor->getMcp()->identity.bumpVersion();
                 reconcileAdopted++;
             }
         }
@@ -150,7 +150,7 @@ void mcp::BatchJob::reconcile(const std::string& canonStr)
          // connect/edit/delete so the receipt is always current.
          // (linetraverser walks every wire on the canvas in O(wires);
          // both endpoints have tempIds — new creates are registered
-         // in mcpStableObjectMap by PHASE 4 before PHASE 5 wiring.)
+         // in the identity map by PHASE 4 before PHASE 5 wiring.)
          // Build reverse ptr→tempId map (O(m)) — kept for the
          // post-mutation Step D scan below (bug #5 move).
     }
@@ -184,7 +184,7 @@ void mcp::BatchJob::deletePhase(const std::string& canonStr)
     // Capture each doomed object's creation text + bounds + wires
     // FIRST so the inverse can recreate it (message-delta, no pointers).
     {
-        auto& delMap = processor->getMcp()->session.mcpStableObjectMap[canonStr];
+        auto& delMap = processor->getMcp()->identity.canvasMap(canonStr);
         std::unordered_map<t_gobj*, std::string> ptrToTempId;
         for (auto& [tid, ptr] : delMap)
             if (ptr) ptrToTempId[ptr] = tid;
@@ -245,9 +245,9 @@ void mcp::BatchJob::deletePhase(const std::string& canonStr)
     for (auto& pd : preDeletes) {
         t_gobj* obj = processor->getMcp()->resolveStableId(canvasName, pd.objectId);
         if (obj) {
-            processor->getMcp()->session.mcpStableObjectMap[canonStr].erase(pd.objectId.toStdString());
-            processor->getMcp()->session.mcpStableSerialMap.erase(obj);
-            processor->getMcp()->session.mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+            processor->getMcp()->identity.canvasMap(canonStr).erase(pd.objectId.toStdString());
+            processor->getMcp()->identity.eraseSerial(obj);
+            processor->getMcp()->identity.bumpVersion();
             toDelete.add(obj);
             deleted++;
         }
@@ -284,10 +284,10 @@ void mcp::BatchJob::editPhase(const std::string& canonStr)
                     if (y == obj) { still = true; break; }
                 newObj = still ? obj : pd::Interface::getNewest(cnv);
                 if (newObj) {
-                    processor->getMcp()->session.mcpStableObjectMap[canonStr][pe.objectId.toStdString()] = newObj;
-                    if (newObj != obj) processor->getMcp()->session.mcpStableSerialMap.erase(obj);
-                    processor->getMcp()->session.mcpStableSerialMap[newObj] = processor->getMcp()->session.mcpSerialCounter++;
-                    processor->getMcp()->session.mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+                    processor->getMcp()->identity.canvasMap(canonStr)[pe.objectId.toStdString()] = newObj;
+                    if (newObj != obj) processor->getMcp()->identity.eraseSerial(obj);
+                    processor->getMcp()->identity.assignSerial(newObj);
+                    processor->getMcp()->identity.bumpVersion();
                     // C++ truth: when a class can't be instantiated Pd
                     // substitutes text_class (g_text.c canvas_objtext,
                     // "... couldn't create") and leaves an ERROR BOX — the
@@ -451,9 +451,9 @@ void mcp::BatchJob::createPhase(const std::string& canonStr)
                 redBoxes.add(no.ptr);
             } else {
                 // Map the stable tempId to the live gobj pointer
-                processor->getMcp()->session.mcpStableObjectMap[canonStr][pc.tempId.toStdString()] = no.ptr;
-                processor->getMcp()->session.mcpStableSerialMap[no.ptr] = processor->getMcp()->session.mcpSerialCounter++;
-                processor->getMcp()->session.mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+                processor->getMcp()->identity.canvasMap(canonStr)[pc.tempId.toStdString()] = no.ptr;
+                processor->getMcp()->identity.assignSerial(no.ptr);
+                processor->getMcp()->identity.bumpVersion();
 
                 // Auto-seed line~/vline~ init value (fork ignores creation args)
                 if (pc.seedInit) {

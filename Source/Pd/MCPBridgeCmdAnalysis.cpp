@@ -121,9 +121,9 @@ void MCPBridge::pdBounds(const juce::String& action, const juce::OSCMessage& msg
     if (cnv) {
         hasCanvas = true;
         std::unordered_map<t_gobj*, juce::String> ptrToId;
-        auto mapIt = processor->getMcp()->session.mcpStableObjectMap.find(canonicalCanvasKey(cnv).toStdString());
-        if (mapIt != processor->getMcp()->session.mcpStableObjectMap.end())
-            for (auto& [tid, ptr] : mapIt->second)
+        auto const* canvasIds = processor->getMcp()->identity.findCanvas(canonicalCanvasKey(cnv).toStdString());
+        if (canvasIds)
+            for (auto& [tid, ptr] : *canvasIds)
                 if (ptr) ptrToId[ptr] = juce::String(tid);
 
         auto guiCanvas = guiFacts.boundsFor(cnv);
@@ -238,9 +238,9 @@ void MCPBridge::pdCollisions(const juce::String& action, const juce::OSCMessage&
         struct R { juce::String tid; int x, y, w, h; };
         std::vector<R> rects;
         std::unordered_map<t_gobj*, juce::String> ptrToId;
-        auto mapIt = processor->getMcp()->session.mcpStableObjectMap.find(canonicalCanvasKey(cnv).toStdString());
-        if (mapIt != processor->getMcp()->session.mcpStableObjectMap.end())
-            for (auto& [tid, ptr] : mapIt->second)
+        auto const* canvasIds = processor->getMcp()->identity.findCanvas(canonicalCanvasKey(cnv).toStdString());
+        if (canvasIds)
+            for (auto& [tid, ptr] : *canvasIds)
                 if (ptr) ptrToId[ptr] = juce::String(tid);
 
         auto guiCanvas = guiFacts.boundsFor(cnv);
@@ -318,9 +318,9 @@ void MCPBridge::pdWireOcclusions(const juce::String& action, const juce::OSCMess
 std::vector<juce::String> classNames;
         std::unordered_map<t_gobj*, int> ptrToIdx;
         std::unordered_map<t_gobj*, juce::String> ptrToId;
-        auto mapIt = processor->getMcp()->session.mcpStableObjectMap.find(canonicalCanvasKey(cnv).toStdString());
-        if (mapIt != processor->getMcp()->session.mcpStableObjectMap.end())
-            for (auto& [tid, ptr] : mapIt->second)
+        auto const* canvasIds = processor->getMcp()->identity.findCanvas(canonicalCanvasKey(cnv).toStdString());
+        if (canvasIds)
+            for (auto& [tid, ptr] : *canvasIds)
                 if (ptr) ptrToId[ptr] = juce::String(tid);
 
         int idx = 0;

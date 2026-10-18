@@ -147,7 +147,7 @@ void mcp::BatchJob::parse(const juce::OSCMessage& msg)
 
         // tempId theft guard (authoritative — the bridge OWNS the id map).
         // A create whose tempId already resolves to a LIVE object would
-        // silently overwrite mcpStableObjectMap (below), orphaning the
+        // silently overwrite the identity map (below), orphaning the
         // original as gui_* and misrouting every later op on that id.
         // Refuse it here; skip the paste + registration entirely.
         // resolveStableId walks gl_list and edits the identity maps: under the Pd lock taken above (an MCP undo

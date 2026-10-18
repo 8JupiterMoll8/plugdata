@@ -107,15 +107,15 @@ void MCPBridge::pdEncapsulate(const juce::String& action, const juce::OSCMessage
                 }
 
                 if (newestObj) {
-                    proc->getMcp()->session.mcpStableObjectMap[canonicalCanvasKey(cnv).toStdString()][subpatchName.toStdString()] = newestObj;
-                    proc->getMcp()->session.mcpStableSerialMap[newestObj] = proc->getMcp()->session.mcpSerialCounter++;
-                    proc->getMcp()->session.mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+                    proc->getMcp()->identity.canvasMap(canonicalCanvasKey(cnv).toStdString())[subpatchName.toStdString()] = newestObj;
+                    proc->getMcp()->identity.assignSerial(newestObj);
+                    proc->getMcp()->identity.bumpVersion();
 
                     // Re-attach the original tempIds to the recreated inner
                     // objects (match by class + object text; greedy, best-effort).
                     auto* innerCnv = reinterpret_cast<t_canvas*>(newestObj);
-                    auto& parentMap = proc->getMcp()->session.mcpStableObjectMap[canonicalCanvasKey(cnv).toStdString()];
-                    auto& childMap = proc->getMcp()->session.mcpStableObjectMap[canonicalCanvasKey(innerCnv).toStdString()];
+                    auto& parentMap = proc->getMcp()->identity.canvasMap(canonicalCanvasKey(cnv).toStdString());
+                    auto& childMap = proc->getMcp()->identity.canvasMap(canonicalCanvasKey(innerCnv).toStdString());
                     for (t_gobj* y = innerCnv->gl_list; y; y = y->g_next) {
                         juce::String cls = juce::String::fromUTF8(class_getname(pd_class(&y->g_pd)));
                         juce::String txt;
@@ -130,8 +130,8 @@ void MCPBridge::pdEncapsulate(const juce::String& action, const juce::OSCMessage
                             r.used = true;
                             childMap[r.id.toStdString()] = y;
                             parentMap.erase(r.id.toStdString());
-                            proc->getMcp()->session.mcpStableSerialMap[y] = proc->getMcp()->session.mcpSerialCounter++;
-                            proc->getMcp()->session.mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+                            proc->getMcp()->identity.assignSerial(y);
+                            proc->getMcp()->identity.bumpVersion();
                             break;
                         }
                     }
@@ -334,9 +334,9 @@ void MCPBridge::pdEncapsulateToFile(const juce::String& action, const juce::OSCM
                 // ── Step 5: Register new abstraction object in identity map
                 t_gobj* newObj = pd::Interface::getNewest(cnv);
                 if (newObj) {
-                    proc->getMcp()->session.mcpStableObjectMap[canonicalCanvasKey(cnv).toStdString()][abstrName.toStdString()] = newObj;
-                    proc->getMcp()->session.mcpStableSerialMap[newObj] = proc->getMcp()->session.mcpSerialCounter++;
-                    proc->getMcp()->session.mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+                    proc->getMcp()->identity.canvasMap(canonicalCanvasKey(cnv).toStdString())[abstrName.toStdString()] = newObj;
+                    proc->getMcp()->identity.assignSerial(newObj);
+                    proc->getMcp()->identity.bumpVersion();
                 }
 
                 // ── Step 6: Reload abstractions so Pd registers the file ─
@@ -508,16 +508,16 @@ void MCPBridge::pdEncapsulateGop(const juce::String& action, const juce::OSCMess
                             // remover. removeObjects() clears selection first (noselect),
                             // opens UNDO_SEQUENCE_START, records UNDO_CUT, and suspends DSP around free.
                             for (auto* g : toDelete) {
-                                proc->getMcp()->session.mcpStableObjectMap[gopKey].erase(
+                                proc->getMcp()->identity.canvasMap(gopKey).erase(
                                     [&]() -> std::string {
-                                        for (auto& [tid, ptr] : proc->getMcp()->session.mcpStableObjectMap[gopKey])
+                                        for (auto& [tid, ptr] : proc->getMcp()->identity.canvasMap(gopKey))
                                             if (ptr == g) return tid;
                                         return "";
                                     }());
-                                proc->getMcp()->session.mcpStableSerialMap.erase(g);
+                                proc->getMcp()->identity.eraseSerial(g);
                             }
                             mcp::PdOps::removeObjectsAudioThread(cnv, toDelete);
-                            proc->getMcp()->session.mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+                            proc->getMcp()->identity.bumpVersion();
 
                             // 3. Rewire parent boundary through the new box with createConnection.
                             for (auto& w : inWires) {
@@ -543,10 +543,9 @@ void MCPBridge::pdEncapsulateGop(const juce::String& action, const juce::OSCMess
                             undoAtoms.add(juce::String(canvasName));
                             proc->getMcp()->callSys("mcp_clear_undo", undoAtoms);
                             for (auto& e : staleErrs) connErrs.add(e);
-                            proc->getMcp()->session.mcpStableObjectMap[gopKey][safeName.toStdString()] = newObj;
-                            proc->getMcp()->session.mcpSerialCounter++;
-                            proc->getMcp()->session.mcpStableSerialMap[newObj] = proc->getMcp()->session.mcpSerialCounter;
-                            proc->getMcp()->session.mcpIdentityVersion.fetch_add(1, std::memory_order_relaxed);
+                            proc->getMcp()->identity.canvasMap(gopKey)[safeName.toStdString()] = newObj;
+                            proc->getMcp()->identity.assignSerial(newObj);
+                            proc->getMcp()->identity.bumpVersion();
                             newTempId = safeName;
                         }
                     }
