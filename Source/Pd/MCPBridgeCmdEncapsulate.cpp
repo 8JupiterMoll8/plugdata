@@ -366,7 +366,14 @@ void MCPBridge::pdEncapsulateToFile(const juce::String& action, const juce::OSCM
                 }
 
                 // ── Step 6: Reload abstractions so Pd registers the file ─
+                // P3.5 S5 (L9): the reload recreates the new box (and any other instance of the file): tombstone
+                // their ids first and rebind them right after (the old getNewest pointer was freed by the reload).
+                auto absFile = juce::File(filePath).getFileName();
+                if (absFile.endsWith(".m~.pd"))
+                    absFile = absFile.dropLastCharacters(3);
+                proc->getMcp()->tombstoneAbstractionInstances(absFile);
                 proc->reloadAbstractions(juce::File(filePath), cnv);
+                proc->getMcp()->rebindTombstones();
 
                 proc->getMcp()->enqueuePd([p = proc] { p->getMcp()->synchroniseCanvases(); });
 

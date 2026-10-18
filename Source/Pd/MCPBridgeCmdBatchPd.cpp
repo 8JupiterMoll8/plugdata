@@ -80,8 +80,7 @@ void mcp::BatchJob::reconcile(const std::string& canonStr)
         std::vector<std::string> toEvict;
         for (auto& [tempId, ptr] : canvasMap) {
             if (livePointers.find(ptr) == livePointers.end()) {
-                toEvict.push_back(tempId);
-                processor->getMcp()->identity.eraseSerial(ptr);
+                toEvict.push_back(tempId); // P3.5 S5: serial kept (the address may be reused by a bound object)
             }
         }
         for (auto& id : toEvict) {

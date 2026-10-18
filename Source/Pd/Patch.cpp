@@ -347,7 +347,9 @@ t_gobj* Patch::renameObject(t_object* obj, String const& name)
 
     if (auto patch = ptr.get<t_glist>()) {
         pd::Interface::renameObject(patch.get(), &obj->te_g, newName.toRawUTF8(), newName.getNumBytesAsUTF8());
-        return pd::Interface::getNewest(patch.get());
+        auto* renamed = pd::Interface::getNewest(patch.get());
+        if (instance->onObjectRetyped) instance->onObjectRetyped(&obj->te_g, renamed); // MCP-HOOK(retype)
+        return renamed;
     }
 
     return nullptr;

@@ -40,6 +40,11 @@ McpHost::McpHost(PluginProcessor& p)
             if (y == g) return true;
         return false;
     };
+    // S5: a weak reference per bound object, so an id never resolves to another object at a reused address.
+    hooks.objectGuard = [this](t_gobj* g) {
+        pd::WeakReference ref(g, &processor);
+        return std::function<bool()>([ref] { return ref.isValid(); });
+    };
     identity.setHooks(std::move(hooks));
 }
 
@@ -96,6 +101,68 @@ void McpHost::registerOpenCanvases()
         roots.push_back(c);
     for (auto it = roots.rbegin(); it != roots.rend(); ++it)
         walk(*it);
+    rebindTombstones();
+}
+
+// P3.5 S5 (L9): before an abstraction reload (a save of that abstraction, or encapsulate_to_file) every id bound to
+// one of its instances leaves a tombstone {id, index, file}; the reload recreates the instance at the same index
+// (glist_doreload restores it, P3.5 S0 read 2).
+void McpHost::tombstoneAbstractionInstances(juce::String const& fileName)
+{
+    PdLockScope lock(processor);
+    if (!pd_this || fileName.isEmpty())
+        return;
+    std::function<void(t_canvas*)> walk = [&](t_canvas* c) {
+        int index = 0;
+        for (t_gobj* g = c->gl_list; g; g = g->g_next, ++index) {
+            if (pd_class(&g->g_pd) != canvas_class)
+                continue;
+            juce::String absName;
+            pd::getAbstractionFileName(g, absName);
+            if (absName == fileName) {
+                auto const id = identity.idOf(g);
+                if (!id.empty())
+                    identity.addTombstone(c, id, index, absName.toStdString());
+            }
+            walk(reinterpret_cast<t_canvas*>(g));
+        }
+    };
+    for (t_canvas* c = pd_this->pd_canvaslist; c; c = c->gl_next)
+        walk(c);
+}
+
+// ... and afterwards each such id is bound to the object at that index if it is an instance of the same file.
+void McpHost::rebindTombstones()
+{
+    PdLockScope lock(processor);
+    if (!identity.anyTombstones())
+        return;
+    std::function<void(t_canvas*)> walk = [&](t_canvas* c) {
+        for (auto const& stone : identity.tombstones(c)) {
+            if (identity.valid(c, stone.id)) {
+                identity.dropTombstone(c, stone.id); // never died: nothing to do
+                continue;
+            }
+            int index = 0;
+            for (t_gobj* g = c->gl_list; g; g = g->g_next, ++index) {
+                if (index != stone.index)
+                    continue;
+                juce::String absName;
+                if (pd_class(&g->g_pd) == canvas_class)
+                    pd::getAbstractionFileName(g, absName);
+                if (absName.toStdString() == stone.tag && identity.idOf(g).empty()) {
+                    identity.bind(c, stone.id, g);
+                    identity.dropTombstone(c, stone.id);
+                }
+                break;
+            }
+        }
+        for (t_gobj* g = c->gl_list; g; g = g->g_next)
+            if (pd_class(&g->g_pd) == canvas_class)
+                walk(reinterpret_cast<t_canvas*>(g));
+    };
+    for (t_canvas* c = pd_this ? pd_this->pd_canvaslist : nullptr; c; c = c->gl_next)
+        walk(c);
 }
 
 McpHost::PdLockScope::PdLockScope(PluginProcessor& p)
@@ -443,28 +510,15 @@ t_gobj* McpHost::resolveStableId(const String& canvasName, const String& objectI
     if (!canvas) return nullptr; // P3.5 S3: no canvas, no id
     auto idStr = objectId.toStdString();
     
-    auto& canvasMap = identity.canvasMap(canvas);
-    auto it = canvasMap.find(idStr);
-    if (it != canvasMap.end()) {
-        if (canvas) {
-            // KNOWN GAP (Report F3): this cannot detect a freed object whose
-            // address Pd's allocator recycled for a new object on the same
-            // canvas. The old "serial" check compared the serial map[ptr]
-            // with itself (y_obj == it->second), so it never fired and was
-            // removed. A real check needs a serial recorded per stable ID at
-            // registration (14 sites); that belongs to the identity service
-            // (Plan 3 Phase 5), not a local patch.
-            for (t_gobj* y_obj = canvas->gl_list; y_obj; y_obj = y_obj->g_next) {
-                if (y_obj == it->second)
-                    return it->second;
-            }
-        }
-        // Evict the stale id and its orphaned serial. P3.4 S4: read the pointer BEFORE erasing (the old code
-        // read it->second from the erased iterator: undefined behaviour on every eviction).
-        t_gobj* const stale = it->second;
-        canvasMap.erase(it);
-        if (stale)
-            identity.eraseSerial(stale);
+    // P3.5 S5: IdentityCore::resolve checks the binding itself (the object it was bound to still lives: its weak
+    // reference, not just an address; this closes Report F3, address reuse) and drops a stale entry. The
+    // gl_list walk keeps the old guarantee that the object is still in THIS canvas.
+    if (t_gobj* bound = identity.resolve(canvas, idStr)) {
+        for (t_gobj* y_obj = canvas->gl_list; y_obj; y_obj = y_obj->g_next)
+            if (y_obj == bound)
+                return bound;
+        if (auto* ids = identity.findCanvas(canvas)) // moved out of this canvas: forget it here
+            ids->erase(idStr);
     }
 
     // Index-based fallback: "0", "1", "obj_0", "obj_1", etc.
@@ -498,8 +552,7 @@ void McpHost::reconcileIdentity(const String& canvasName)
     // Step B: evict entries whose gobj no longer exists on the canvas.
     for (auto it = canvasMap.begin(); it != canvasMap.end();) {
         if (livePointers.find(it->second) == livePointers.end()) {
-            identity.eraseSerial(it->second);
-            it = canvasMap.erase(it);
+            it = canvasMap.erase(it); // P3.5 S5: serial kept (the address may be reused by a bound object)
             identity.bumpVersion();
         } else {
             ++it;

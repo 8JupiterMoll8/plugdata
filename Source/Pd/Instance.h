@@ -268,6 +268,7 @@ public:
     // this hook a manual save left the sidecar stale, and on reload every
     // object added since the last MCP save lost its semantic tempId.
     std::function<void(t_glist*, juce::String const&)> onCanvasSaved; // MCP-HOOK(save)
+    std::function<void(t_gobj*, t_gobj*)> onObjectRetyped;           // MCP-HOOK(retype)
 
     // Enqueue a message to an pd::WeakReference
     // This will first check if the weakreference is valid before triggering the callback

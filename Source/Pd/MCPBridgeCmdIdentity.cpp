@@ -62,7 +62,7 @@ void MCPBridge::pdIdentitySnapshot(const juce::String& action, const juce::OSCMe
             }
 
             // Serial verification (UAF defense)
-            if (!processor->getMcp()->identity.hasSerial(ptr)) {
+            if (!processor->getMcp()->identity.valid(cnv, tempId)) { // P3.5 S5: the bound object itself still lives
                 toEvict.push_back(tempId);
                 continue;
             }
@@ -95,10 +95,8 @@ void MCPBridge::pdIdentitySnapshot(const juce::String& action, const juce::OSCMe
         // Evict stale entries
         for (auto& staleId : toEvict) {
             auto staleIt = canvasMap.find(staleId);
-            if (staleIt != canvasMap.end()) {
-                processor->getMcp()->identity.eraseSerial(staleIt->second);
-                canvasMap.erase(staleIt);
-            }
+            if (staleIt != canvasMap.end())
+                canvasMap.erase(staleIt); // P3.5 S5: keep the serial: the address may belong to a new, bound object
         }
         if (!toEvict.empty()) {
             processor->getMcp()->identity.bumpVersion();

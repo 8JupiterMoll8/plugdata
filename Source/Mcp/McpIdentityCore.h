@@ -24,6 +24,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 namespace mcp::identity {
 
@@ -39,6 +40,16 @@ public:
         std::function<std::function<bool()>(Canvas)> liveness;
         // S4: whether `obj` is still a live object of canvas `c` (the theft check). Unset = always live.
         std::function<bool(Canvas, Obj)> objectLive;
+        // S5: called when an object gets a serial: the returned check answers whether THAT object still lives
+        // (a weak reference: false once it is freed, even if a new object later gets the same address).
+        // Unset = always live.
+        std::function<std::function<bool()>(Obj)> objectGuard;
+    };
+
+    struct Tombstone {
+        std::string id;
+        int index = -1;
+        std::string tag; // the adapter's match key (an abstraction's file name)
     };
     void setHooks(Hooks h) { hooks = std::move(h); }
 
@@ -90,7 +101,7 @@ public:
         return found;
     }
 
-    // Drops a canvas's ids and their serials; the record and its key stay. True when the canvas had a record.
+    // Drops a canvas's ids; the record and its key stay. True when the canvas had a record.
     // No version bump.
     bool clearCanvas(Canvas c)
     {
@@ -98,9 +109,8 @@ public:
         auto* r = live(c);
         if (!r)
             return false;
-        for (auto const& entry : r->ids)
-            serials.erase(entry.second);
         r->ids.clear();
+        r->boundSerial.clear();
         return true;
     }
 
@@ -115,18 +125,47 @@ public:
         r->key = freeKey(baseOf(c));
     }
 
-    // Drops every record whose canvas is gone, with its serials.
+    // Drops every record whose canvas is gone and (S5) every entry of a live canvas whose object is gone (one
+    // version bump when any entry went), then the serials of freed objects.
     void prune()
     {
         check("prune");
+        bool dropped = false;
         for (auto it = records.begin(); it != records.end();) {
-            if (it->second.isAlive()) {
-                ++it;
+            if (!it->second.isAlive()) {
+                it = records.erase(it);
                 continue;
             }
-            dropSerials(it->second);
-            it = records.erase(it);
+            auto& r = it->second;
+            for (auto e = r.ids.begin(); e != r.ids.end();) {
+                if (entryValid(r, e->first, e->second)) {
+                    ++e;
+                    continue;
+                }
+                r.boundSerial.erase(e->first);
+                e = r.ids.erase(e);
+                dropped = true;
+            }
+            ++it;
         }
+        // S5: serials are collected only here, by their own weak reference: dropping a record or an entry must
+        // not erase a serial by address (the address may already belong to a new object bound elsewhere).
+        if (hooks.objectGuard)
+            for (auto s = serials.begin(); s != serials.end();)
+                s = s->second.isAlive() ? std::next(s) : serials.erase(s);
+        if (dropped)
+            bumpVersion();
+    }
+
+    // S5: whether `id` names a live binding on canvas `c` (no side effects).
+    bool valid(Canvas c, std::string const& id) const
+    {
+        check("valid");
+        auto it = records.find(c);
+        if (it == records.end() || !it->second.isAlive())
+            return false;
+        auto e = it->second.ids.find(id);
+        return e != it->second.ids.end() && entryValid(it->second, id, e->second);
     }
 
     size_t recordCount() const { return records.size(); }
@@ -161,14 +200,14 @@ public:
         auto& r = ensure(c);
         auto it = r.ids.find(id);
         if (it != r.ids.end()) {
-            if (it->second == obj)
+            if (it->second == obj && entryValid(r, id, obj))
                 return BindResult::Same;
-            if (objectAlive(c, it->second))
+            if (it->second != obj && objectAlive(c, it->second) && entryValid(r, id, it->second))
                 return BindResult::Refused;
-            serials.erase(it->second);
         }
         r.ids[id] = obj;
         assignSerial(obj);
+        r.boundSerial[id] = serials[obj].serial;
         bumpVersion();
         return BindResult::Bound;
     }
@@ -181,7 +220,7 @@ public:
         check("mint");
         auto& r = ensure(c);
         for (auto const& [id, bound] : r.ids)
-            if (bound == obj)
+            if (bound == obj && entryValid(r, id, obj))
                 return id;
         if (r.nextMint == 0) {
             uint64_t highest = 0;
@@ -197,19 +236,105 @@ public:
         r.nextMint = n;
         r.ids[id] = obj;
         ensureSerial(obj);
+        r.boundSerial[id] = serials[obj].serial;
         bumpVersion();
         return id;
+    }
+
+    // S5: the object `id` names on canvas `c` while that binding is valid: the object it was bound to still
+    // lives (not merely something at the same address). A stale entry is dropped and answers nullptr.
+    Obj resolve(Canvas c, std::string const& id)
+    {
+        check("resolve");
+        auto* r = live(c);
+        if (!r)
+            return Obj {};
+        auto it = r->ids.find(id);
+        if (it == r->ids.end())
+            return Obj {};
+        if (entryValid(*r, id, it->second))
+            return it->second;
+        r->boundSerial.erase(id);
+        r->ids.erase(it);
+        return Obj {};
+    }
+
+    // S5: the retype hook. Pd recreated `from` as `to` (maybe at the same address): the id bound to `from`
+    // follows, on whichever canvas it lives. Answers that id, or "" when `from` had none.
+    std::string moveId(Obj from, Obj to)
+    {
+        check("moveId");
+        for (auto& [c, r] : records) {
+            if (!r.isAlive())
+                continue;
+            for (auto& [id, bound] : r.ids) {
+                if (bound != from)
+                    continue;
+                if (entryValid(r, id, from))
+                    return {}; // nothing was recreated (e.g. the same text): the id stays on its object
+                serials.erase(from);
+                bound = to;
+                assignSerial(to);
+                r.boundSerial[id] = serials[to].serial;
+                bumpVersion();
+                return id;
+            }
+        }
+        return {};
+    }
+
+    // S5 (L9): an abstraction reload frees and recreates its instances at the same index. Before a reload the
+    // adapter leaves a tombstone per id bound to an instance; afterwards it rebinds the id to the object at that
+    // index with the same tag and drops the tombstone. A dead canvas has none.
+    void addTombstone(Canvas c, std::string const& id, int index, std::string const& tag)
+    {
+        check("addTombstone");
+        auto& stones = ensure(c).tombstones;
+        for (auto& s : stones)
+            if (s.id == id) {
+                s = { id, index, tag };
+                return;
+            }
+        if (stones.size() < 4096)
+            stones.push_back({ id, index, tag });
+    }
+    bool anyTombstones() const
+    {
+        check("anyTombstones");
+        for (auto const& entry : records)
+            if (!entry.second.tombstones.empty())
+                return true;
+        return false;
+    }
+    std::vector<Tombstone> tombstones(Canvas c)
+    {
+        check("tombstones");
+        auto* r = live(c);
+        return r ? r->tombstones : std::vector<Tombstone> {};
+    }
+    void dropTombstone(Canvas c, std::string const& id)
+    {
+        check("dropTombstone");
+        if (auto* r = live(c))
+            r->tombstones.erase(std::remove_if(r->tombstones.begin(), r->tombstones.end(),
+                                    [&](Tombstone const& s) { return s.id == id; }),
+                r->tombstones.end());
     }
 
     void assignSerial(Obj obj)
     {
         check("assignSerial");
-        serials[obj] = nextSerial++;
+        auto& s = serials[obj];
+        s.serial = nextSerial++;
+        s.alive = hooks.objectGuard ? hooks.objectGuard(obj) : std::function<bool()>();
     }
+    // A serial for `obj` unless it has one from its own lifetime (a dead one belongs to a freed predecessor
+    // at the same address).
     void ensureSerial(Obj obj)
     {
         check("ensureSerial");
-        if (serials.find(obj) == serials.end())
+        auto it = serials.find(obj);
+        if (it == serials.end() || !it->second.isAlive())
             assignSerial(obj);
     }
     void eraseSerial(Obj obj)
@@ -226,7 +351,7 @@ public:
     {
         check("serialOf");
         auto it = serials.find(obj);
-        return it == serials.end() ? 0 : it->second;
+        return it == serials.end() ? 0 : it->second.serial;
     }
 
     // Monotonic, bumped on every identity change; TS polls it to skip snapshot fetches. Atomic: readable without
@@ -245,8 +370,29 @@ private:
         IdMap ids;
         std::function<bool()> alive;
         uint64_t nextMint = 0; // 0 = not seeded yet (see mint)
+        std::unordered_map<std::string, uint64_t> boundSerial; // S5: id -> its object's serial at bind time
+        std::vector<Tombstone> tombstones;                     // S5 (L9)
         bool isAlive() const { return !alive || alive(); }
     };
+
+    struct SerialInfo {
+        uint64_t serial = 0;
+        std::function<bool()> alive; // S5: this object's weak reference
+        bool isAlive() const { return !alive || alive(); }
+    };
+
+    // S5: the binding id -> obj is valid while obj (of the lifetime it was bound in) lives. Entries written
+    // without bind/mint have no bound serial: then only the object's own guard counts.
+    bool entryValid(Record const& r, std::string const& id, Obj obj) const
+    {
+        auto s = serials.find(obj);
+        if (s == serials.end())
+            return !hooks.objectGuard; // never given a serial: unknown, live only without guards (tests)
+        if (!s->second.isAlive())
+            return false;
+        auto b = r.boundSerial.find(id);
+        return b == r.boundSerial.end() || b->second == s->second.serial;
+    }
 
     bool objectAlive(Canvas c, Obj obj) const { return !hooks.objectLive || hooks.objectLive(c, obj); }
 
@@ -289,12 +435,6 @@ private:
         }
     }
 
-    void dropSerials(Record const& r)
-    {
-        for (auto const& entry : r.ids)
-            serials.erase(entry.second);
-    }
-
     Record* live(Canvas c)
     {
         auto it = records.find(c);
@@ -302,8 +442,7 @@ private:
             return nullptr;
         if (it->second.isAlive())
             return &it->second;
-        dropSerials(it->second); // dead (maybe a new canvas at the same address): never lend its ids
-        records.erase(it);
+        records.erase(it); // dead (maybe a new canvas at the same address): never lend its ids
         return nullptr;
     }
 
@@ -321,7 +460,7 @@ private:
     AccessCheck accessCheck = nullptr;
     Hooks hooks;
     std::unordered_map<Canvas, Record> records;
-    std::unordered_map<Obj, uint64_t> serials;
+    std::unordered_map<Obj, SerialInfo> serials;
     uint64_t nextSerial = 1;
     std::atomic<uint64_t> identityVersion { 0 };
 };

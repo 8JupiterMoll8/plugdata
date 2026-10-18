@@ -22,7 +22,8 @@ static int failures = 0;
 
 struct Obj {
     int n;
-    bool alive = true;
+    bool alive = true;    // in its canvas (objectLive)
+    int generation = 0;   // bumped when "freed and reallocated at the same address"
 };
 struct Cnv {
     std::string base; // what the adapter's key function answers
@@ -36,6 +37,11 @@ static void hook(Core& core)
     hooks.baseKey = [](Cnv* c) { return c->base; };
     hooks.liveness = [](Cnv* c) { return std::function<bool()>([c] { return c->alive; }); };
     hooks.objectLive = [](Cnv*, Obj* o) { return o->alive; };
+    // S5: a per-object weak reference: valid while the object of THIS generation lives.
+    hooks.objectGuard = [](Obj* o) {
+        int const gen = o->generation;
+        return std::function<bool()>([o, gen] { return o->alive && o->generation == gen; });
+    };
     core.setHooks(hooks);
 }
 
@@ -76,7 +82,6 @@ int main()
         core2.bind(&song, "x", &dead);
         CHECK(core2.bind(&song, "x", &b) == Core::BindResult::Bound);
         CHECK(core2.findCanvas(&song)->at("x") == &b);
-        CHECK(!core2.hasSerial(&dead));
     }
 
     // ── one minter (S4, owner decision O1): <prefix>_<n>, n counts per canvas, never reused, skips taken names,
@@ -148,7 +153,7 @@ int main()
         song.alive = true; // "another canvas" allocated at the same address
         CHECK(core.findCanvas(&song) == nullptr);
         CHECK(core.canvasMap(&song).empty());
-        CHECK(!core.hasSerial(&a));
+        CHECK(core.resolve(&song, "osc1") == nullptr);
     }
 
     // ── prune drops dead records with their serials ──
@@ -160,9 +165,14 @@ int main()
         core.bind(&y, "b", &b);
         x.alive = false;
         core.prune();
+        CHECK(core.recordCount() == 1);
+        CHECK(core.idOf(&a).empty());
+        CHECK(core.idOf(&b) == "b");
+        a.generation++; // a is freed: prune collects its serial
+        core.prune();
         CHECK(!core.hasSerial(&a));
         CHECK(core.hasSerial(&b));
-        CHECK(core.recordCount() == 1);
+        a.generation = 0;
     }
 
     // ── canvasByKey: exact key, or the "pd-" spelling of a root / a bare subpatch name ──
@@ -191,8 +201,8 @@ int main()
         CHECK(core.clearCanvas(&x2));
         CHECK(core.findCanvas(&x2) && core.findCanvas(&x2)->empty());
         CHECK(core.keyOf(&x2) == "pd-voice#2");
-        CHECK(!core.hasSerial(&c));
-        CHECK(core.hasSerial(&a) && core.hasSerial(&b));
+        CHECK(core.idOf(&c).empty());
+        CHECK(core.idOf(&a) == "a" && core.idOf(&b) == "b");
         Cnv never { "z.pd" };
         CHECK(!core.clearCanvas(&never));
     }
@@ -294,6 +304,92 @@ int main()
         Cnv x { "a.pd" };
         bare.bind(&x, "x", &a);
         CHECK(bare.idOf(&a) == "x");
+    }
+
+    // ── S5: an id never resolves to a different object that later sits at the same address ──
+    {
+        Cnv song { "song.pd" };
+        Obj o { 1 };
+        Core core;
+        hook(core);
+        core.bind(&song, "osc1", &o);
+        CHECK(core.resolve(&song, "osc1") == &o);
+        o.generation++; // freed, and a new object allocated at the same address (still "in the canvas")
+        CHECK(core.resolve(&song, "osc1") == nullptr);
+        CHECK(core.findCanvas(&song)->count("osc1") == 0); // the stale entry is dropped
+        // The new object gets its own id; the old id stays gone.
+        auto const id = core.mint(&song, &o, "osc_sig");
+        CHECK(id != "osc1");
+        CHECK(core.resolve(&song, id) == &o);
+        CHECK(core.resolve(&song, "osc1") == nullptr);
+        CHECK(core.resolve(&song, "nope") == nullptr);
+    }
+
+    // ── S5: moveId (the retype hook): the id follows the object Pd recreated ──
+    {
+        Cnv song { "song.pd" };
+        Obj before { 1 }, after { 2 };
+        Core core;
+        hook(core);
+        core.bind(&song, "osc1", &before);
+        before.alive = false; // retype frees the old box
+        CHECK(core.moveId(&before, &after) == "osc1");
+        CHECK(core.resolve(&song, "osc1") == &after);
+        CHECK(core.moveId(&before, &after).empty()); // nothing bound to `before` any more
+        // Same address (the allocator handed the freed memory to the new box): the id still follows.
+        Obj same { 3 };
+        core.bind(&song, "dac1", &same);
+        same.generation++;
+        CHECK(core.moveId(&same, &same) == "dac1");
+        CHECK(core.resolve(&song, "dac1") == &same);
+        // A retype that recreated nothing (same text): the old binding is still valid, the id stays put.
+        Obj kept { 4 }, unrelated { 5 };
+        core.bind(&song, "lop1", &kept);
+        CHECK(core.moveId(&kept, &unrelated).empty());
+        CHECK(core.resolve(&song, "lop1") == &kept);
+    }
+
+    // ── S5: prune also drops stale entries of live canvases (and bumps the version when it does) ──
+    {
+        Cnv song { "song.pd" };
+        Obj p1 { 1 }, p2 { 2 };
+        Core core;
+        hook(core);
+        core.bind(&song, "a", &p1);
+        core.bind(&song, "b", &p2);
+        auto const v = core.version();
+        core.prune();
+        CHECK(core.version() == v); // nothing stale: no bump
+        p1.generation++;
+        core.prune();
+        CHECK(core.findCanvas(&song)->count("a") == 0);
+        CHECK(core.findCanvas(&song)->count("b") == 1);
+        CHECK(core.version() == v + 1);
+        CHECK(core.valid(&song, "b"));
+        CHECK(!core.valid(&song, "a"));
+    }
+
+    // ── S5 (L9): tombstones: an abstraction reload recreates the box at the same index; the id is rebound ──
+    {
+        Cnv song { "song.pd" };
+        Obj absOld { 1 }, absNew { 2 };
+        Core core;
+        hook(core);
+        core.bind(&song, "voice1", &absOld);
+        core.addTombstone(&song, "voice1", 3, "voice.pd");
+        CHECK(core.tombstones(&song).size() == 1);
+        absOld.alive = false; // the reload freed it
+        // the adapter finds the object at index 3 with the same tag and rebinds:
+        auto stones = core.tombstones(&song);
+        CHECK(stones[0].id == "voice1" && stones[0].index == 3 && stones[0].tag == "voice.pd");
+        CHECK(core.bind(&song, "voice1", &absNew) == Core::BindResult::Bound);
+        core.dropTombstone(&song, "voice1");
+        CHECK(core.tombstones(&song).empty());
+        CHECK(core.resolve(&song, "voice1") == &absNew);
+        // A tombstone for an id that resolved again is dropped by the adapter; a dead canvas drops them all.
+        core.addTombstone(&song, "x", 0, "t");
+        song.alive = false;
+        CHECK(core.tombstones(&song).empty());
     }
 
     if (failures == 0)

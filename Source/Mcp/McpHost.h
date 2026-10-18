@@ -113,6 +113,10 @@ public:
     void registerOpenCanvases();
     // P3.5 S3: a canvas's wire key before any "#n" (root: file name; subcanvas: pd-<name>; unnamed: pd-anon).
     static juce::String identityBaseKey(t_canvas* cnv);
+    // P3.5 S5 (L9): tombstones for the ids of every instance of abstraction `fileName` (call before a reload),
+    // and their rebind to the recreated instances (registerOpenCanvases calls it; so does encapsulate_to_file).
+    void tombstoneAbstractionInstances(juce::String const& fileName);
+    void rebindTombstones();
     // P3.5 S4: the prefix of a minted tempId (owner decision O1: type + number).
     static juce::String mintPrefix(t_gobj* g);
 

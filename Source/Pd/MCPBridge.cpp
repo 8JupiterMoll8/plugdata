@@ -35,7 +35,19 @@ MCPBridge::MCPBridge(PluginProcessor* proc, int inPort, int outPort)
     // MCP save. Without this a manual save left the sidecar stale and every
     // object added since the last MCP save lost its tempId on reload.
     if (processor) {
+        // P3.5 S5: a GUI retype recreates the box (text_setto appends it, so no index rule can follow it): the
+        // id moves to the new box. The old pointer is only a key here; moveId does nothing if the box survived.
+        processor->onObjectRetyped = [p = processor](t_gobj* from, t_gobj* to) {
+            McpHost::PdLockScope lock(*p);
+            p->getMcp()->identity.moveId(from, to);
+        };
         processor->onCanvasSaved = [p = processor](t_glist* g, juce::String const& path) {
+            // P3.5 S5 (L9): plugdata reloads every instance of a saved abstraction right after this hook; leave a
+            // tombstone per bound instance so the ids rebind to the recreated boxes.
+            auto fileName = juce::File(path).getFileName();
+            if (fileName.endsWith(".m~.pd"))
+                fileName = fileName.dropLastCharacters(3); // getAbstractionFileName's spelling
+            p->getMcp()->tombstoneAbstractionInstances(fileName);
             writeIdentitySidecar(p, reinterpret_cast<t_canvas*>(g), path);
         };
     }
