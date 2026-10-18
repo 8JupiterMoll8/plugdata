@@ -35,6 +35,7 @@ void MCPBridge::meterStart(const juce::String& meterAction, const juce::OSCMessa
     sys_lock();
     juce::String errorOut;
     t_outconnect* oc = resolveProbeTarget(canvasName, tempId, outletIndex, errorOut);
+    int const epoch = ugen_getsortno(); // P3.4 S5: read with the resolve, under the same lock
     sys_unlock();
 
     if (!oc) {
@@ -42,7 +43,7 @@ void MCPBridge::meterStart(const juce::String& meterAction, const juce::OSCMessa
         return;
     }
 
-    int probeId = probeManager.startProbe(oc, canvasName, tempId, outletIndex, correlationId, durationMs);
+    int probeId = probeManager.startProbe(oc, epoch, canvasName, tempId, outletIndex, correlationId, durationMs);
     if (probeId <= 0) {
         sendReply("/meter/error/" + correlationId, "Max active probes exceeded (limit: " + juce::String(MAX_PROBES) + ")");
         return;
@@ -64,7 +65,9 @@ void MCPBridge::meterStop(const juce::String& meterAction, const juce::OSCMessag
     if (msg.size() < 1) return;
     uint32_t probeId = static_cast<uint32_t>(getArgFloat(msg[0]));
     juce::String correlationId = msg.size() > 1 ? getArgString(msg[1]) : "";
-    probeManager.stopProbe(probeId, correlationId);
+    // P3.4 S5: on the message thread, where the timer collects results: one consumer per result queue
+    // (TSan in S0: try_dequeue raced between the command thread and the timer).
+    juce::MessageManager::callAsync([this, probeId, correlationId] { probeManager.stopProbe(probeId, correlationId); });
     return;
 }
 
@@ -114,6 +117,7 @@ void MCPBridge::meterTap(const juce::String& meterAction, const juce::OSCMessage
     t_signal* signal = oc ? outconnect_get_signal(oc) : nullptr;
     float* vec = (signal && signal->s_vec) ? signal->s_vec : nullptr;
     int n = (signal && signal->s_vec) ? signal->s_n : 0;
+    int const tapEpoch = ugen_getsortno(); // P3.4 S5: with the resolve, under the same lock
     sys_unlock();
 
     if (!vec || n <= 0) {
@@ -131,8 +135,9 @@ void MCPBridge::meterTap(const juce::String& meterAction, const juce::OSCMessage
     auto const until = juce::Time::getMillisecondCounter()
                      + static_cast<juce::uint32>(juce::jlimit(1000.0f, 120000.0f, holdMs));
     processor->getMcp()->session.mcpTapUntilMs.store(until, std::memory_order_relaxed);
-    processor->getMcp()->session.mcpTapSig.store(static_cast<void*>(signal), std::memory_order_relaxed);
-    processor->getMcp()->session.mcpTapMode.store(mode, std::memory_order_relaxed); // publish LAST
+    processor->getMcp()->session.mcpTapEpoch.store(tapEpoch, std::memory_order_relaxed);
+    processor->getMcp()->session.mcpTapSig.store(static_cast<void*>(signal), std::memory_order_release);
+    processor->getMcp()->session.mcpTapMode.store(mode, std::memory_order_release); // publish LAST
     processor->getMcp()->session.mcpTapGeneration.fetch_add(1, std::memory_order_relaxed);
     sendReply("/meter/tap/reply/" + correlationId,
               juce::String(mode == McpSession::mcpTapMute ? "mute " : "solo ") + tempId
@@ -235,6 +240,7 @@ void MCPBridge::meterSpectral(const juce::String& meterAction, const juce::OSCMe
     sys_lock();
     juce::String errorOut;
     t_outconnect* oc = resolveProbeTarget(canvasName, tempId, outletIndex, errorOut);
+    int const epoch = ugen_getsortno(); // P3.4 S5: read with the resolve, under the same lock
     sys_unlock();
 
     if (!oc) {
@@ -242,7 +248,7 @@ void MCPBridge::meterSpectral(const juce::String& meterAction, const juce::OSCMe
         return;
     }
 
-    int probeId = probeManager.startProbe(oc, canvasName, tempId, outletIndex, correlationId, durationMs);
+    int probeId = probeManager.startProbe(oc, epoch, canvasName, tempId, outletIndex, correlationId, durationMs);
     if (probeId <= 0) {
         sendReply("/meter/spectral/error/" + correlationId, "Max active probes exceeded");
         return;

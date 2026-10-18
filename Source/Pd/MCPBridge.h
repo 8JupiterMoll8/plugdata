@@ -141,6 +141,11 @@ static constexpr int MAX_PROBES = 16;
 struct ActiveProbe {
     std::atomic<bool> active { false };
     std::atomic<t_outconnect*> outconnect { nullptr };
+    // P3.4 S5: the DSP-sort number (ugen_getsortno) when `outconnect` was resolved, under the Pd lock. Pd frees
+    // connections and signals only with a DSP rebuild, which bumps that number; the audio thread reads the probe
+    // only while the two agree (and under the lock), else it asks the timer to resolve it again.
+    std::atomic<int> epoch { 0 };
+    std::atomic<bool> needsResolve { false };
     uint32_t probeId = 0;
     juce::String correlationId;
     juce::String canvasName;
@@ -165,7 +170,7 @@ public:
     explicit ProbeManager(MCPBridge* owner);
 
     void audioTick();
-    int startProbe(t_outconnect* oc, const juce::String& canvasName, const juce::String& tempId, int outletIndex, const juce::String& correlationId, int durationMs);
+    int startProbe(t_outconnect* oc, int epoch, const juce::String& canvasName, const juce::String& tempId, int outletIndex, const juce::String& correlationId, int durationMs);
     void stopProbe(uint32_t probeId, const juce::String& correlationId = {});
     void stopAllProbes(const juce::String& correlationId = {});
     void collectResults();

@@ -169,6 +169,11 @@ inline std::unique_ptr<McpGuiHost::LiveBounds> mcpLiveBounds(PluginProcessor* pr
     return got ? std::move(*got) : nullptr;
 }
 
+// d_ugen.c: the number of DSP sortings so far. Pd frees connections' signals only
+// with a DSP rebuild, which bumps it: probes and the monitor tap remember it with
+// their pointers and are read only while it is unchanged (P3.4 S5). Read under sys_lock.
+extern "C" int ugen_getsortno(void);
+
 // P3.4 S3: true while `target` is an open canvas: a root patch or a canvas
 // (subpatch, abstraction, GOP) anywhere inside one. CALLER HOLDS sys_lock. For
 // async work that kept a t_canvas* across a thread hop: compare, never trust.

@@ -2848,6 +2848,8 @@ void MCPBridge::parseVoiceBufferToJson(float const* buffer, int totalSamples, do
     // The artist commits explicitly (Enter / ⚡), and the rail carries the take.
 }
 
+extern "C" int ugen_getsortno(void); // d_ugen.c: number of DSP sortings so far (P3.4 S5)
+
 ProbeManager::ProbeManager(MCPBridge* owner)
     : bridge(owner)
 {
@@ -2855,8 +2857,25 @@ ProbeManager::ProbeManager(MCPBridge* owner)
 
 void ProbeManager::audioTick()
 {
+    bool any = false;
+    for (auto& probe : probes)
+        any = any || probe.active.load(std::memory_order_relaxed);
+    if (!any || !bridge || !bridge->processor)
+        return;
+    // P3.4 S5: read the probed connections only under the Pd lock (nothing frees them meanwhile) and only
+    // while the DSP sort number still equals the one they were resolved at (a rebuild may have freed them).
+    // A busy lock skips this block's reading; it never makes the audio thread wait.
+    juce::ScopedTryLock const pdLock(bridge->processor->audioLock);
+    if (!pdLock.isLocked() || pd_getdspstate() == 0)
+        return;
+    int const sortNo = ugen_getsortno();
+
     for (auto& probe : probes) {
         if (!probe.active.load(std::memory_order_relaxed)) continue;
+        if (probe.epoch.load(std::memory_order_acquire) != sortNo) {
+            probe.needsResolve.store(true, std::memory_order_release);
+            continue;
+        }
 
         auto* oc = probe.outconnect.load(std::memory_order_acquire);
         if (!oc) continue;
@@ -2888,7 +2907,7 @@ void ProbeManager::audioTick()
     }
 }
 
-int ProbeManager::startProbe(t_outconnect* oc, const juce::String& canvasName, const juce::String& tempId, int outletIndex, const juce::String& correlationId, int durationMs)
+int ProbeManager::startProbe(t_outconnect* oc, int const epoch, const juce::String& canvasName, const juce::String& tempId, int outletIndex, const juce::String& correlationId, int durationMs)
 {
     for (auto& probe : probes) {
         if (!probe.active.load(std::memory_order_relaxed)) {
@@ -2908,6 +2927,8 @@ int ProbeManager::startProbe(t_outconnect* oc, const juce::String& canvasName, c
             probe.accBlocks = 0;
             probe.ringWritePos.store(0, std::memory_order_relaxed);
             probe.ringBuffer.fill(0.0f);
+            probe.needsResolve.store(false, std::memory_order_relaxed);
+            probe.epoch.store(epoch, std::memory_order_release);
             probe.outconnect.store(oc, std::memory_order_release);
             probe.active.store(true, std::memory_order_release);
             return static_cast<int>(probe.probeId);
@@ -2981,6 +3002,30 @@ void ProbeManager::collectResults()
 
     for (auto& probe : probes) {
         if (!probe.active.load(std::memory_order_relaxed)) continue;
+
+        // P3.4 S5: the DSP chain was rebuilt since the probe was resolved: resolve it again under the Pd lock,
+        // or end it with an error when its source is gone (it used to read freed memory).
+        if (probe.needsResolve.load(std::memory_order_acquire) && bridge) {
+            juce::String err;
+            sys_lock();
+            t_outconnect* oc = bridge->resolveProbeTarget(probe.canvasName, probe.tempId, probe.outletIndex, err);
+            int const sortNo = ugen_getsortno();
+            if (oc) {
+                probe.outconnect.store(oc, std::memory_order_release);
+                probe.epoch.store(sortNo, std::memory_order_release);
+                probe.needsResolve.store(false, std::memory_order_release);
+            } else {
+                probe.active.store(false, std::memory_order_release);
+                probe.outconnect.store(nullptr, std::memory_order_release);
+            }
+            sys_unlock();
+            if (!oc) {
+                bridge->sendReply((probe.spectral ? "/meter/spectral/error/" : "/meter/error/") + probe.correlationId,
+                                  "probe target deleted: " + (err.isNotEmpty() ? err : probe.tempId));
+                probe.spectral = false;
+                continue;
+            }
+        }
 
         ProbeResult item;
         while (probe.resultQueue.try_dequeue(item)) {
@@ -3148,11 +3193,17 @@ void MCPBridge::timerCallback()
     if (processor && processor->getMcp()->session.mcpTapMode.load(std::memory_order_relaxed) != McpSession::mcpTapOff
         && mcpTapTempId.isNotEmpty()) {
         juce::String err;
+        // P3.4 S5: under the Pd lock (this ran unlocked), with the DSP sort number of the same moment.
+        sys_lock();
         t_outconnect* oc = resolveProbeTarget(mcpTapCanvas, mcpTapTempId, mcpTapOutlet, err);
         t_signal* sig = oc ? outconnect_get_signal(oc) : nullptr;
-        if (sig && sig->s_vec) {
-            processor->getMcp()->session.mcpTapSig.store(static_cast<void*>(sig), std::memory_order_relaxed);
-        } else {
+        bool const ok = sig && sig->s_vec;
+        if (ok) {
+            processor->getMcp()->session.mcpTapEpoch.store(ugen_getsortno(), std::memory_order_relaxed);
+            processor->getMcp()->session.mcpTapSig.store(static_cast<void*>(sig), std::memory_order_release);
+        }
+        sys_unlock();
+        if (!ok) {
             processor->getMcp()->session.mcpTapMode.store(McpSession::mcpTapOff, std::memory_order_relaxed);
             processor->getMcp()->session.mcpTapSig.store(nullptr, std::memory_order_relaxed);
             mcpTapTempId.clear();

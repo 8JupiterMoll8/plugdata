@@ -411,6 +411,9 @@ struct McpSession {
     // outlet's s_vec per DSP block, so the audio thread must re-read
     // sig->s_vec every block — a captured s_vec pointer goes stale.
     std::atomic<void*> mcpTapSig { nullptr };
+    // P3.4 S5: ugen_getsortno() when mcpTapSig was resolved (under the Pd lock); the audio thread applies the
+    // tap only while the two agree. Pd frees signals only on a DSP rebuild, which bumps that number.
+    std::atomic<int> mcpTapEpoch { 0 };
     std::atomic<float> mcpTapGain { 1.0f }; // unity — the master chain applies the level
     std::atomic<juce::uint32> mcpTapUntilMs { 0 };
     std::atomic<juce::uint32> mcpTapGeneration { 0 }; // bumped on every set/clear

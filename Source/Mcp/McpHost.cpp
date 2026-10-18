@@ -15,6 +15,8 @@
 #include "Utility/Config.h"
 #include "Mcp/McpAudit.h"
 
+extern "C" int ugen_getsortno(void); // d_ugen.c (P3.4 S5)
+
 McpHost::McpHost(PluginProcessor& p)
     : processor(p)
     , guiHost(createMcpGuiHost(p))
@@ -102,9 +104,16 @@ void McpHost::applyMonitorTap(float* out, int numSamples, int numChannels)
         session.mcpTapSig.store(nullptr, std::memory_order_relaxed);
         return;
     }
+    // P3.4 S5: touch the signal only under the Pd lock and only while the DSP chain it was resolved in is
+    // still the current one (a rebuild frees signals; the timer then resolves the tap again). A busy lock or
+    // an old chain leaves this block untouched rather than wait or read freed memory.
+    juce::ScopedTryLock const pdLock(processor.audioLock);
+    if (!pdLock.isLocked() || pd_getdspstate() == 0
+        || session.mcpTapEpoch.load(std::memory_order_relaxed) != ugen_getsortno())
+        return;
     // Re-read s_vec EVERY sub-block: Pd swaps outlet buffers per DSP tick, so a
     // captured vector goes stale after one block.
-    auto* sig = static_cast<t_signal*>(session.mcpTapSig.load(std::memory_order_relaxed));
+    auto* sig = static_cast<t_signal*>(session.mcpTapSig.load(std::memory_order_acquire));
     float* vec = (sig != nullptr && sig->s_vec != nullptr) ? sig->s_vec : nullptr;
     int const n = (vec != nullptr) ? sig->s_n : 0;
     if (vec == nullptr || n <= 0) {
