@@ -10,6 +10,7 @@
 #include "MCPBridge.h"
 #include "MCPBridgeInternal.h"
 #include "Mcp/McpAudit.h"
+#include "PluginProcessor.h" // logWarning in replayPd
 
 MCPBridge::VerbTable const& MCPBridge::commandTable()
 {
@@ -76,5 +77,5 @@ void MCPBridge::replyUnknownVerb(const juce::String& domain, const juce::String&
 void MCPBridge::replayPd(const juce::String& action, const juce::OSCMessage& msg)
 {
     if (!dispatchRegistered("pd", action, msg))
-        post("MCP undo/redo: no handler for /pd/%s, the step was not replayed", action.toRawUTF8());
+        if (processor) processor->logWarning("MCP undo/redo: no handler for /pd/" + action + ", the step was not replayed");
 }

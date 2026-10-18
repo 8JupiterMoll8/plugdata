@@ -3008,7 +3008,7 @@ void ProbeManager::audioTick()
 
         int writePos = probe.ringWritePos.load(std::memory_order_relaxed);
         for (int i = 0; i < n; i++) {
-            probe.ringBuffer[(writePos + i) % PROBE_RING_SIZE] = vec[i];
+            probe.ringBuffer[(writePos + i) % PROBE_RING_SIZE].store(vec[i], std::memory_order_relaxed);
         }
         probe.ringWritePos.store((writePos + n) % PROBE_RING_SIZE, std::memory_order_release);
     }
@@ -3033,7 +3033,7 @@ int ProbeManager::startProbe(t_outconnect* oc, int const epoch, const juce::Stri
             probe.accPeak = 0.0f;
             probe.accBlocks = 0;
             probe.ringWritePos.store(0, std::memory_order_relaxed);
-            probe.ringBuffer.fill(0.0f);
+            for (auto& s : probe.ringBuffer) s.store(0.0f, std::memory_order_relaxed);
             probe.needsResolve.store(false, std::memory_order_relaxed);
             probe.epoch.store(epoch, std::memory_order_release);
             probe.outconnect.store(oc, std::memory_order_release);
@@ -3064,7 +3064,9 @@ void ProbeManager::stopProbe(uint32_t probeId, const juce::String& correlationId
             if (bridge && bridge->processor) {
                 sampleRate = static_cast<float>(bridge->processor->getSampleRate());
             }
-            float freq = estimateFrequency(probe.ringBuffer.data(), PROBE_RING_SIZE, sampleRate);
+            std::array<float, PROBE_RING_SIZE> ring;
+            for (int i = 0; i < PROBE_RING_SIZE; i++) ring[i] = probe.ringBuffer[i].load(std::memory_order_relaxed);
+            float freq = estimateFrequency(ring.data(), PROBE_RING_SIZE, sampleRate);
 
             auto corr = correlationId.isNotEmpty() ? correlationId : probe.correlationId;
             if (corr.isNotEmpty() && bridge) {
@@ -3162,7 +3164,7 @@ void ProbeManager::collectResults()
             std::array<float, PROBE_RING_SIZE> linearBuf;
             int wPos = probe.ringWritePos.load(std::memory_order_acquire);
             for (int i = 0; i < PROBE_RING_SIZE; i++) {
-                linearBuf[i] = probe.ringBuffer[(wPos + i) % PROBE_RING_SIZE];
+                linearBuf[i] = probe.ringBuffer[(wPos + i) % PROBE_RING_SIZE].load(std::memory_order_relaxed);
             }
             float freq = estimateFrequency(linearBuf.data(), PROBE_RING_SIZE, sampleRate);
 

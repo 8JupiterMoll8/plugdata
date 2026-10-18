@@ -158,7 +158,8 @@ struct ActiveProbe {
 
     moodycamel::ReaderWriterQueue<ProbeResult> resultQueue { 256 };
 
-    std::array<float, PROBE_RING_SIZE> ringBuffer {};
+    // P3.4 S11 (TSan): written by the audio tick while the timer may copy it: relaxed atomics, no tearing UB.
+    std::array<std::atomic<float>, PROBE_RING_SIZE> ringBuffer {};
     std::atomic<int> ringWritePos { 0 };
 
     float accRms = 0.0f;
