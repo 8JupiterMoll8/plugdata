@@ -9,6 +9,7 @@
 #include "PluginProcessor.h"
 #include "Mcp/McpHost.h"
 #include "Pd/MCPBridge.h"
+#include "Mcp/McpAudit.h"
 
 // prepareToPlay, after the Pd/JUCE setup.
 void McpHost::prepare(double const sampleRate, int const samplesPerBlock)
@@ -31,6 +32,7 @@ void McpHost::prepare(double const sampleRate, int const samplesPerBlock)
 void McpHost::audioBlockStarted()
 {
     session.mcpAudioBlocks.fetch_add(1, std::memory_order_relaxed); // #83 audio-thread liveness
+    mcp::audit::markAudioThread(); // P3.4 S0: no-op unless PLUGDATA_MCP_AUDIT=1
 }
 
 // processBlock, after the MIDI input history is filled and before the toolbar sees it.

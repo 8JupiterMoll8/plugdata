@@ -26,6 +26,7 @@ public:
     void createBridge();
 
     MCPBridge* getMCPBridge() const { return mcpBridge.get(); }
+    int xrunCount() const;
     juce::String getMcpBridgeStatus() const;
     // Reverse identity lookup (C++ truth): the stable tempId for a live pd object,
     // read straight from the bridge's own stable map — never from the TS mirror.

@@ -12,6 +12,8 @@
 #include "Utility/SettingsFile.h"
 #include "Canvas.h"
 #include "PluginEditor.h"
+#include "Utility/Config.h"
+#include "Mcp/McpAudit.h"
 
 McpHost::McpHost(PluginProcessor& p)
     : processor(p)
@@ -22,11 +24,25 @@ McpHost::McpHost(PluginProcessor& p)
 
 McpHost::~McpHost() = default;
 
+// Audio-device xruns since the device opened; -1 when unknown (no device, a
+// plugin build, or a backend that does not count them). P3.4 S0: lets live
+// gates prove "zero dropouts" by measurement. Reads the device manager only.
+int McpHost::xrunCount() const
+{
+    if (auto* dm = ProjectInfo::getDeviceManager())
+        if (auto* dev = dm->getCurrentAudioDevice())
+            return dev->getXRunCount();
+    return -1;
+}
+
 void McpHost::createBridge()
 {
     auto const mcpEnabled = processor.settingsFile->getProperty<bool>("mcp_bridge_enabled");
     auto const mcpListen = processor.settingsFile->getProperty<int>("mcp_bridge_listen_port");
     auto const mcpSend = processor.settingsFile->getProperty<int>("mcp_bridge_send_port");
+    // P3.4 S0: with PLUGDATA_MCP_AUDIT=1, time every Pd-lock hold (no-op otherwise).
+    processor.setThis();
+    mcp::audit::installLock(&processor.audioLock);
     mcpBridge = std::make_unique<MCPBridge>(&processor, mcpListen, mcpSend);
     if (!mcpEnabled) {
         mcpBridge->stop();

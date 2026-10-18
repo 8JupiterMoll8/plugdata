@@ -9,6 +9,7 @@
 
 #include "MCPBridge.h"
 #include "MCPBridgeInternal.h"
+#include "Mcp/McpAudit.h"
 
 MCPBridge::VerbTable const& MCPBridge::commandTable()
 {
@@ -39,7 +40,9 @@ bool MCPBridge::dispatchRegistered(const juce::String& domain, const juce::Strin
     if (handler == nullptr)
         return false;
 
+    mcp::audit::commandBegin(msg.getAddressPattern().toString().toRawUTF8());
     (this->**handler)(juce::String::fromUTF8(verb.c_str()), msg);
+    mcp::audit::commandEnd();
     return true;
 }
 

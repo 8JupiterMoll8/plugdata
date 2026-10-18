@@ -1075,6 +1075,7 @@ juce::String MCPBridge::computePerfFacts(PluginProcessor* processor, t_canvas* c
     auto* root = new juce::DynamicObject();
     root->setProperty("dsp", pd_getdspstate() != 0);
     root->setProperty("cpu", static_cast<double>(cpu));
+    root->setProperty("xruns", processor ? processor->getMcp()->xrunCount() : -1);
     root->setProperty("canvases", static_cast<int>(nodes.size()));
     root->setProperty("signalObjects", totalSignal);
     root->setProperty("estimatedWeight", totalWeight);
