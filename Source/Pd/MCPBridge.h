@@ -334,6 +334,8 @@ private:
     using VerbTable = mcp::CommandTable<VerbHandler>;
     static VerbTable const& commandTable();
     bool dispatchRegistered(const juce::String& domain, const juce::String& pathVerb, const juce::OSCMessage& msg);
+    // A message no row serves gets /bridge/unknown_verb [address, domain, verb] (capability unknown_verb_reply).
+    void replyUnknownVerb(const juce::String& domain, const juce::String& pathVerb, const juce::OSCMessage& msg);
     // McpHost undo/redo replays a recorded /pd transaction (batch_atomic, move_batch_id) by its verb.
     void replayPd(const juce::String& action, const juce::OSCMessage& msg);
 

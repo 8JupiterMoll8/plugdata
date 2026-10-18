@@ -15,6 +15,7 @@
 #pragma once
 
 #include <algorithm>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -128,5 +129,28 @@ private:
     std::unordered_map<std::string, Handler> verbs;
     std::unordered_map<std::string, Handler> domainHandlers;
 };
+
+// What the bridge reports back for a message no row serves:
+// /bridge/unknown_verb [address, domain, verb] (capability unknown_verb_reply).
+struct UnknownVerb {
+    std::string domain;
+    std::string verb;
+};
+
+// The report for one inbound message, or nullopt when the table serves it (or when it is the
+// report itself: a client that points the bridge at its own port must not start a loop).
+// `verb` is the one the table looked up. An undeclared domain has no verb source, so it
+// reports the path verb only ("" for /foo).
+template<typename Handler>
+std::optional<UnknownVerb> unknownVerbOf(CommandTable<Handler> const& table, std::string const& domain,
+    std::string const& pathVerb, std::string const& arg0)
+{
+    auto const verb = table.hasDomain(domain) ? resolveVerb(table.sourceOf(domain), pathVerb, arg0) : pathVerb;
+    if (table.find(domain, verb) != nullptr)
+        return std::nullopt;
+    if (domain == "bridge" && verb == "unknown_verb")
+        return std::nullopt;
+    return UnknownVerb { domain, verb };
+}
 
 } // namespace mcp

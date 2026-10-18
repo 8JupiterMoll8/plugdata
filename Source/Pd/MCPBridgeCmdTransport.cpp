@@ -344,6 +344,8 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
         reply.addArgument(juce::String("screenshot_labels"));
         // Offline faster-than-realtime render to WAV (background DSP bake)
         reply.addArgument(juce::String("render"));
+        // An address the bridge has no verb for is answered with /bridge/unknown_verb [address, domain, verb]
+        reply.addArgument(juce::String("unknown_verb_reply"));
         reply.addArgument(juce::String("boot:" + bootToken));
         sender.send(reply);
     }

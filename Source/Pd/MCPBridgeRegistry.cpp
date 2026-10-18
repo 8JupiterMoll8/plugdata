@@ -43,6 +43,27 @@ bool MCPBridge::dispatchRegistered(const juce::String& domain, const juce::Strin
     return true;
 }
 
+// The caller has found no row for the message. Where the arguments are the verb source,
+// the first one is read the same way dispatchRegistered reads it.
+void MCPBridge::replyUnknownVerb(const juce::String& domain, const juce::String& pathVerb, const juce::OSCMessage& msg)
+{
+    auto const& table = commandTable();
+    auto const domainKey = domain.toStdString();
+    auto const arg0 = (table.sourceOf(domainKey) != mcp::VerbSource::Path && msg.size() > 0) ? getArgString(msg[0]) : juce::String();
+
+    auto const unknown = mcp::unknownVerbOf(table, domainKey, pathVerb.toStdString(), arg0.toStdString());
+    if (!unknown)
+        return;
+
+    if (!active.load())
+        return;
+    juce::OSCMessage reply { juce::OSCAddressPattern("/bridge/unknown_verb") };
+    reply.addArgument(msg.getAddressPattern().toString());
+    reply.addArgument(juce::String::fromUTF8(unknown->domain.c_str()));
+    reply.addArgument(juce::String::fromUTF8(unknown->verb.c_str()));
+    sender.send(reply);
+}
+
 void MCPBridge::replayPd(const juce::String& action, const juce::OSCMessage& msg)
 {
     dispatchRegistered("pd", action, msg);

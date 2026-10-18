@@ -78,6 +78,48 @@ int main()
         CHECK(mcp::resolveVerb(VerbSource::Arg0, "ignored", "").empty());
     }
 
+    // 2b. What is reported for a message no row serves (/bridge/unknown_verb).
+    {
+        Table t;
+        t.setSource("pd", VerbSource::Path);
+        t.setSource("array", VerbSource::PathOrArg0);
+        t.setSource("telemetry", VerbSource::Arg0);
+        t.setSource("chat", VerbSource::PathOrArg0);
+        t.setSource("bridge", VerbSource::PathOrArg0);
+        t.add("pd", "ping", "pdPing");
+        t.add("array", "stats", "arr");
+        t.add("telemetry", "dsp", "tele");
+        t.add("bridge", "connect", "bridgeConnect");
+        t.addDomain("chat", "chatMsg");
+
+        auto const miss = [&](char const* domain, char const* pathVerb, char const* arg0 = "") {
+            return mcp::unknownVerbOf(t, domain, pathVerb, arg0);
+        };
+        auto const is = [](std::optional<mcp::UnknownVerb> const& m, char const* domain, char const* verb) {
+            return m.has_value() && m->domain == domain && m->verb == verb;
+        };
+
+        CHECK(!miss("pd", "ping"));                       // a row serves it
+        CHECK(is(miss("pd", "nope"), "pd", "nope"));      // unknown verb of a known domain
+        CHECK(is(miss("pd", ""), "pd", ""));              // /pd alone: Path source, no verb
+        CHECK(is(miss("pd", "", "ping"), "pd", ""));      // a Path domain never reads the arguments
+        CHECK(is(miss("zzz", "foo"), "zzz", "foo"));      // unknown domain: the path verb
+        CHECK(is(miss("zzz", ""), "zzz", ""));            // /zzz alone: verb ""
+        CHECK(is(miss("zzz", "", "stats"), "zzz", ""));   // an undeclared domain has no flat form
+        CHECK(!miss("array", "stats"));                   // path form
+        CHECK(!miss("array", "", "stats"));               // flat form: /array ["stats", ...]
+        CHECK(is(miss("array", "", "bogus"), "array", "bogus"));
+        CHECK(is(miss("array", "bogus", "stats"), "array", "bogus")); // the path verb wins over argument 0
+        CHECK(!miss("telemetry", "anything", "dsp"));     // Arg0 domain: the path is ignored
+        CHECK(is(miss("telemetry", "dsp", "other"), "telemetry", "other"));
+        CHECK(!miss("chat", "whatever"));                 // verb-agnostic domain takes every verb
+        CHECK(!miss("chat", ""));
+        CHECK(!miss("bridge", "connect"));
+        CHECK(!miss("bridge", "unknown_verb"));           // the report itself: no echo, no loop
+        CHECK(!miss("bridge", "", "unknown_verb"));
+        CHECK(is(miss("bridge", "unknown_verbs"), "bridge", "unknown_verbs"));
+    }
+
     // 3. The committed verb table (MCPBridgeVerbs.inc), read with test macros.
     {
         struct Row { std::string domain, verb, handler; };
@@ -112,6 +154,22 @@ int main()
             built = false;
         }
         CHECK(built);
+
+        // The reply for the committed table: the sweep's made-up addresses, a dropped verb, a served flat form.
+        auto const reported = [&](char const* domain, char const* pathVerb, char const* arg0 = "") {
+            return mcp::unknownVerbOf(t, domain, pathVerb, arg0).has_value();
+        };
+        CHECK(reported("pd", "no_such_verb"));
+        CHECK(reported("pd", "agent"));                   // /pd/agent/response is sent by the TS server, never served
+        CHECK(reported("no_such_domain", "no_such_verb"));
+        CHECK(!reported("pd", "ping"));
+        CHECK(!reported("trigger", "no_such_verb"));      // domain handlers take every verb
+        CHECK(!reported("param", "any_bus"));
+        CHECK(!reported("chat", ""));
+        CHECK(!reported("array", "", "stats"));
+        CHECK(!reported("telemetry", "", "dsp"));
+        CHECK(reported("telemetry", "", "no_such_verb"));
+        CHECK(!reported("bridge", "unknown_verb"));
 
         // One handler per verb row: a second name for a handler is an MCP_ALIAS.
         std::set<std::string> handlers;

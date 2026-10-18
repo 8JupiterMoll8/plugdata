@@ -1437,10 +1437,12 @@ void MCPBridge::oscMessageReceived(const juce::OSCMessage& message)
 
     auto const domain = parts[0];
 
-    if (dispatchRegistered(domain, parts.size() > 1 ? parts[1] : juce::String(), message))
+    auto const pathVerb = parts.size() > 1 ? parts[1] : juce::String();
+    if (dispatchRegistered(domain, pathVerb, message))
         return;
 
-    // Every verb of every domain is a table row (dispatchRegistered above); an unknown one gets no reply yet (P3.3 S8).
+    // Every verb of every domain is a table row (dispatchRegistered above); an unknown one is reported.
+    replyUnknownVerb(domain, pathVerb, message);
 }
 
 void MCPBridge::oscBundleReceived(const juce::OSCBundle& bundle)
