@@ -9,6 +9,18 @@
  */
 #include "Mcp/McpSysCommon.h"
 
+// Empties a canvas's native undo queue. Caller holds the Pd lock. Pd keeps an UNDO_INIT action at the
+// head of every queue (canvas_undo_init at canvas creation, g_canvas.c) and canvas_undo_undo walks back
+// to it; canvas_undo_free drops it too, so it is put back here. Without it the first GUI action after an
+// MCP flush became the head, undoing it walked off the queue and left u_last NULL, and the next GUI edit
+// crashed in canvas_undo_init (finding L6, P3.4 S9).
+static void resetNativeUndo(t_canvas* c)
+{
+    if (!c) return;
+    canvas_undo_free(c);
+    canvas_undo_init(c);
+}
+
 McpHost::SysTable const& McpHost::sysTable()
 {
     static SysTable const table = [] {
@@ -228,15 +240,7 @@ void McpHost::sysClearUndo(SmallString const& selector, mcp::SysList const& list
     bool const replaying = session.isExecutingMcpUndoRedo.load();
     processor.setThis();
     sys_lock();
-    auto wipeCanvasUndo = [](t_canvas* c) {
-        if (!c) return;
-        canvas_undo_free(c);
-        if (auto* udo = canvas_undo_get(c)) {
-            udo->u_queue = nullptr;
-            udo->u_last = nullptr;
-            udo->u_cleanstate = nullptr;
-        }
-    };
+    auto wipeCanvasUndo = [](t_canvas* c) { resetNativeUndo(c); };
 
     // #28b: the MCP transaction stacks are a SEPARATE undo layer from the
     // native canvas undo. Wiping only the native queue (canvas_undo_free)
@@ -689,12 +693,7 @@ void McpHost::sysMoveBatchId(SmallString const& selector, mcp::SysList const& li
             }
             if (movedCount > 0) {
                 canvas_dirty(canvas, 1);
-                canvas_undo_free(canvas);
-                if (auto* udo = canvas_undo_get(canvas)) {
-                    udo->u_queue = nullptr;
-                    udo->u_last = nullptr;
-                    udo->u_cleanstate = nullptr;
-                }
+                resetNativeUndo(canvas);
             }
         }
         sys_unlock();

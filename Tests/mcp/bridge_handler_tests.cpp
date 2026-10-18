@@ -33,6 +33,7 @@
 #include "PluginProcessor.h"
 #include "Mcp/McpHost.h"
 #include "Pd/MCPBridge.h"
+#include "Pd/Interface.h" // g_undo.h: the native undo queue (L6 check)
 
 namespace {
 
@@ -228,6 +229,23 @@ void runPdContextCases(PluginProcessor& processor, AudioControl& audio)
             sleepMs(1);
         CHECK(ran.load());
     }
+}
+
+// L6 (P3.4 S9): an MCP flush of the native undo queue (every batch does one) must leave Pd's UNDO_INIT
+// head action in place: canvas_undo_undo walks back to it, and without it the first GUI action after an
+// AI edit could be undone off the end of the queue, after which the next GUI edit crashed.
+void runNativeUndoCases(PluginProcessor& processor)
+{
+    std::printf("native undo queue after an MCP flush\n");
+    auto* host = processor.getMcp();
+    bool headIsInit = false;
+    CHECK(host->pdWait([&] {
+        t_canvas* cnv = host->getCanvasBySymbolStrict("main");
+        if (!cnv) cnv = pd_this->pd_canvaslist;
+        t_undo* udo = cnv ? canvas_undo_get(cnv) : nullptr;
+        headIsInit = udo && udo->u_queue && udo->u_queue->type == UNDO_INIT;
+    }, 2000));
+    CHECK(headIsInit);
 }
 
 // MIDI capture (P3.4 S6): the audio thread only queues raw note on/off; the bridge pairs them off the audio
@@ -512,6 +530,7 @@ int main()
             Harness harness { *bridge, replies };
             runCases(harness);
             runPdContextCases(processor, audioControl);
+            runNativeUndoCases(processor);
             runMidiCaptureCases(processor, audioControl);
             startRenderForTeardown(harness); // last: the processor is destroyed with the render running
             casesDone.store(true);
