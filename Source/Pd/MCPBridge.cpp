@@ -1633,9 +1633,9 @@ int MCPBridge::mcpApplyIdentitySidecar(PluginProcessor* processor, juce::Dynamic
         for (t_gobj* g = target->gl_list; g; g = g->g_next, ++idx) {
             auto it = idxToId.find(idx);
             if (it == idxToId.end()) continue;
-            processor->getMcp()->identity.canvasMap(target)[it->second.toStdString()] = g;
-            processor->getMcp()->identity.ensureSerial(g);
-            restored++;
+            // P3.5 S4 (#38): an id already naming another live object is skipped, not stolen.
+            if (processor->getMcp()->identity.bind(target, it->second.toStdString(), g) != mcp::IdentityService::BindResult::Refused)
+                restored++;
         }
         return restored;
     };

@@ -17,6 +17,7 @@
 // check fails (the canvas was freed, even if a new canvas now sits at the same address) is dropped on sight
 // with its serials, so it never lends its ids.
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <functional>
@@ -36,6 +37,8 @@ public:
         std::function<std::string(Canvas)> baseKey;
         // Called once when a record is made: the returned check answers whether THAT canvas still lives.
         std::function<std::function<bool()>(Canvas)> liveness;
+        // S4: whether `obj` is still a live object of canvas `c` (the theft check). Unset = always live.
+        std::function<bool(Canvas, Obj)> objectLive;
     };
     void setHooks(Hooks h) { hooks = std::move(h); }
 
@@ -144,13 +147,58 @@ public:
         return {};
     }
 
-    // Binds `id` to `obj` on canvas `c` (overwriting), gives the object a new serial, bumps the version.
-    void bind(Canvas c, std::string const& id, Obj obj)
+    enum class BindResult {
+        Bound,  // the id now names obj (new serial, version bumped)
+        Same,   // it already did: nothing changed
+        Refused // #38 (S4): the id names another live object, which keeps it
+    };
+
+    // Binds `id` to `obj` on canvas `c`. An id held by a dead object is taken over; one held by another live
+    // object is refused (theft would orphan that object and misroute every later op on the id).
+    BindResult bind(Canvas c, std::string const& id, Obj obj)
     {
         check("bind");
-        ensure(c).ids[id] = obj;
+        auto& r = ensure(c);
+        auto it = r.ids.find(id);
+        if (it != r.ids.end()) {
+            if (it->second == obj)
+                return BindResult::Same;
+            if (objectAlive(c, it->second))
+                return BindResult::Refused;
+            serials.erase(it->second);
+        }
+        r.ids[id] = obj;
         assignSerial(obj);
         bumpVersion();
+        return BindResult::Bound;
+    }
+
+    // S4: the only minter, for objects nobody named (hand-made, or adopted on load): "<prefix>_<n>" (owner
+    // decision O1). n counts per canvas and is never reused; it starts above the highest number any id of the
+    // canvas already ends in, and skips taken names. An object that already has an id here keeps it.
+    std::string mint(Canvas c, Obj obj, std::string const& prefix)
+    {
+        check("mint");
+        auto& r = ensure(c);
+        for (auto const& [id, bound] : r.ids)
+            if (bound == obj)
+                return id;
+        if (r.nextMint == 0) {
+            uint64_t highest = 0;
+            for (auto const& entry : r.ids)
+                highest = std::max(highest, trailingNumber(entry.first));
+            r.nextMint = highest + 1;
+        }
+        uint64_t n = r.nextMint;
+        std::string id;
+        do
+            id = prefix + "_" + std::to_string(n++);
+        while (r.ids.count(id));
+        r.nextMint = n;
+        r.ids[id] = obj;
+        ensureSerial(obj);
+        bumpVersion();
+        return id;
     }
 
     void assignSerial(Obj obj)
@@ -196,8 +244,26 @@ private:
         std::string key;
         IdMap ids;
         std::function<bool()> alive;
+        uint64_t nextMint = 0; // 0 = not seeded yet (see mint)
         bool isAlive() const { return !alive || alive(); }
     };
+
+    bool objectAlive(Canvas c, Obj obj) const { return !hooks.objectLive || hooks.objectLive(c, obj); }
+
+    // "osc_sig_12" -> 12; 0 when the id does not end in "_<digits>".
+    static uint64_t trailingNumber(std::string const& id)
+    {
+        auto const us = id.rfind('_');
+        if (us == std::string::npos || us + 1 >= id.size() || id.size() - us > 19)
+            return 0;
+        uint64_t n = 0;
+        for (size_t i = us + 1; i < id.size(); ++i) {
+            if (id[i] < '0' || id[i] > '9')
+                return 0;
+            n = n * 10 + static_cast<uint64_t>(id[i] - '0');
+        }
+        return n;
+    }
 
     void check(char const* where) const
     {

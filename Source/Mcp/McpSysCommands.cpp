@@ -295,12 +295,9 @@ void McpHost::sysRegisterId(SmallString const& selector, mcp::SysList const& lis
                 }
             }
 
-            if (targetObj) {
-                identity.canvasMap(canvas)[object_id.toStdString()] = targetObj;
-                identity.assignSerial(targetObj);
-                identity.bumpVersion();
-                success = true;
-            }
+            // P3.5 S4 (#38): an id that names another live object is refused (answers 0).
+            if (targetObj)
+                success = identity.bind(canvas, object_id.toStdString(), targetObj) != mcp::IdentityService::BindResult::Refused;
         }
         sys_unlock();
 
@@ -325,7 +322,7 @@ void McpHost::sysRenameId(SmallString const& selector, mcp::SysList const& list)
             auto const renamed = mcp::identity::renameStableId(identity.canvasMap(canvas), old_id.toStdString(), new_id.toStdString());
             if (renamed == mcp::identity::RenameResult::Applied)
                 identity.bumpVersion();
-            success = renamed != mcp::identity::RenameResult::Missing;
+            success = renamed == mcp::identity::RenameResult::Applied || renamed == mcp::identity::RenameResult::NoOp; // Taken refused (C5)
         }
         sys_unlock();
 
@@ -572,37 +569,10 @@ void McpHost::sysCensus(SmallString const& selector, mcp::SysList const& list)
                 // exactly: sanitize(node_class || type)_<canvas>_<index>.
                 // Never overwrites an existing (possibly artist-renamed)
                 // registration.
+                // P3.5 S4: the one minter; every object gets an id (a taken name takes the next number).
                 if (tempId.isEmpty()) {
-                    juce::String classSrc = abstractName.isNotEmpty() ? abstractName : type;
-                    // Minted tempIds use the CANONICAL canvas key as their
-                    // base — never the caller's raw alias — so a miss after
-                    // a focus switch reads sig_ident_test_pd_3, never
-                    // sig_main_3. Subcanvases drop the "pd-" prefix to keep
-                    // names clean (pd-mysub → mysub).
-                    juce::String canvasKeySymbol = canonKey;
-                    if (canvasKeySymbol.startsWith("pd-"))
-                        canvasKeySymbol = canvasKeySymbol.substring(3);
-                    juce::String canvasKey;
-                    for (auto ch : canvasKeySymbol)
-                        canvasKey << (juce::CharacterFunctions::isLetterOrDigit(ch) || ch == '_'
-                                           ? juce::String::charToString(ch)
-                                           : juce::String("_"));
-                    juce::String minted = pd::sanitizeClassNameForTempId(classSrc)
-                                              + "_" + canvasKey + "_" + String(objectIndex);
-
-                    auto& canvasIdMap = identity.canvasMap(canvas);
-                    auto existing = canvasIdMap.find(minted.toStdString());
-                    if (existing == canvasIdMap.end()) {
-                        canvasIdMap[minted.toStdString()] = y_obj;
-                        identity.ensureSerial(y_obj);
-                        tempId = minted;
-                        adoptedAny = true;
-                    } else if (existing->second == y_obj) {
-                        // Already registered under exactly this minted name
-                        tempId = minted;
-                    }
-                    // else: minted name collides with a different object —
-                    // leave unregistered (artist rename territory).
+                    tempId = juce::String(identity.mint(canvas, y_obj, mintPrefix(y_obj).toStdString()));
+                    adoptedAny = true;
                     o->setProperty("id", tempId);
                 }
 

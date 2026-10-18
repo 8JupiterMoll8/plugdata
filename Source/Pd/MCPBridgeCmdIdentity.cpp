@@ -178,6 +178,7 @@ void MCPBridge::pdRenameId(const juce::String& action, const juce::OSCMessage& m
         auto newId = getArgString(msg[3]).toStdString();
 
         bool success = false;
+        bool taken = false;
         {
             McpHost::PdLockScope lock(*processor); // P3.5 S2: was unlocked on the command worker
             t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
@@ -186,8 +187,13 @@ void MCPBridge::pdRenameId(const juce::String& action, const juce::OSCMessage& m
                 auto const renamed = mcp::identity::renameStableId(map, oldId, newId);
                 if (renamed == mcp::identity::RenameResult::Applied)
                     processor->getMcp()->identity.bumpVersion();
-                success = renamed != mcp::identity::RenameResult::Missing;
+                taken = renamed == mcp::identity::RenameResult::Taken;
+                success = renamed == mcp::identity::RenameResult::Applied || renamed == mcp::identity::RenameResult::NoOp;
             }
+        }
+        if (taken) { // P3.5 S4 (C5): renaming onto an id that names another object is refused
+            sendReply("/pd/rename_id/error/" + correlationId, juce::String("id taken: " + juce::String(newId)));
+            return;
         }
 
         sendReply("/pd/rename_id/reply/" + correlationId, success ? 1.0f : 0.0f);
@@ -206,6 +212,7 @@ void MCPBridge::pdRenameIdBatch(const juce::String& action, const juce::OSCMessa
         int cursor = 2;
         int renamed = 0;
         bool changed = false;
+        std::vector<std::string> takenIds;
 
         // Inline rename — directly mutates the identity map, no queue. P3.5 S2: under the Pd lock.
         {
@@ -216,15 +223,25 @@ void MCPBridge::pdRenameIdBatch(const juce::String& action, const juce::OSCMessa
                 auto newId = getArgString(msg[cursor++]).toStdString();
                 if (!cnv) continue; // P3.5 S3: an unknown canvas renames nothing
                 auto const result = mcp::identity::renameStableId(processor->getMcp()->identity.canvasMap(cnv), oldId, newId);
-                if (result != mcp::identity::RenameResult::Missing) renamed++;
+                if (result == mcp::identity::RenameResult::Applied || result == mcp::identity::RenameResult::NoOp) renamed++;
                 if (result == mcp::identity::RenameResult::Applied) changed = true;
+                if (result == mcp::identity::RenameResult::Taken) takenIds.push_back(newId); // P3.5 S4 (C5)
             }
             if (changed)
                 processor->getMcp()->identity.bumpVersion();
         }
 
         auto correlationId = (cursor < msg.size()) ? getArgString(msg[cursor]) : "0";
-        sendReply("/pd/rename_id_batch/reply/" + correlationId, static_cast<float>(renamed));
+        if (takenIds.empty()) {
+            sendReply("/pd/rename_id_batch/reply/" + correlationId, static_cast<float>(renamed));
+        } else {
+            // P3.5 S4 (C5): the count, then each refused target (it names another object).
+            juce::OSCMessage reply { juce::OSCAddressPattern("/pd/rename_id_batch/reply/" + correlationId) };
+            reply.addFloat32(static_cast<float>(renamed));
+            for (auto const& id : takenIds)
+                reply.addString(juce::String(id));
+            sender.send(reply);
+        }
     }
     return;
 }

@@ -34,7 +34,32 @@ McpHost::McpHost(PluginProcessor& p)
         pd::WeakReference ref(c, &processor);
         return std::function<bool()>([ref] { return ref.isValid(); });
     };
+    // S4: the theft check. An id held by an object that is no longer in its canvas may be taken over.
+    hooks.objectLive = [](t_canvas* c, t_gobj* g) {
+        for (t_gobj* y = c ? c->gl_list : nullptr; y; y = y->g_next)
+            if (y == g) return true;
+        return false;
+    };
     identity.setHooks(std::move(hooks));
+}
+
+// P3.5 S4: the prefix of a minted id (owner decision O1: type + number): an abstraction's file name, "pd" for
+// a subpatch, "table" for an array, else the class; sanitized ("osc~" -> "osc_sig", "plate.rev.m~" -> "plate_rev").
+juce::String McpHost::mintPrefix(t_gobj* g)
+{
+    if (!g)
+        return "obj";
+    t_class* cl = pd_class(&g->g_pd);
+    char const* clName = class_getname(cl);
+    juce::String type = clName ? juce::String::fromUTF8(clName) : juce::String("obj");
+    if (cl == canvas_class) {
+        juce::String abstractName;
+        pd::getAbstractionFileName(g, abstractName);
+        type = abstractName.isNotEmpty() ? abstractName : juce::String("pd");
+    } else if (cl == garray_class) {
+        type = "table";
+    }
+    return pd::sanitizeClassNameForTempId(type);
 }
 
 // P3.5 S3: a canvas's wire key before any "#n": a root is its file name, a subcanvas "pd-<name>", an unnamed
@@ -391,42 +416,10 @@ juce::String McpHost::getOrAdoptStableId(t_canvas* canvas, t_gobj* g)
     if (existing.isNotEmpty()) return existing;
     if (!canvas) return {};
 
-    juce::String canonKey = MCPBridge::canonicalCanvasKey(canvas);
-    auto canonStr = canonKey.toStdString();
-
-    int objectIndex = 0;
-    for (t_gobj* y_obj = canvas->gl_list; y_obj; y_obj = y_obj->g_next, ++objectIndex) {
-        if (y_obj == g) {
-            t_class* cl = pd_class(&y_obj->g_pd);
-            const char* clName = class_getname(cl);
-            juce::String className = clName ? juce::String::fromUTF8(clName) : juce::String("unknown");
-            juce::String type = className;
-            juce::String abstractName;
-            if (cl == canvas_class) {
-                type = "pd";
-                pd::getAbstractionFileName(y_obj, abstractName);
-            } else if (cl == garray_class) {
-                type = "table";
-            }
-            juce::String classSrc = abstractName.isNotEmpty() ? abstractName : type;
-            juce::String canvasKeySymbol = canonKey;
-            if (canvasKeySymbol.startsWith("pd-"))
-                canvasKeySymbol = canvasKeySymbol.substring(3);
-            juce::String canvasKey;
-            for (auto ch : canvasKeySymbol)
-                canvasKey << (juce::CharacterFunctions::isLetterOrDigit(ch) || ch == '_'
-                                   ? juce::String::charToString(ch)
-                                   : juce::String("_"));
-            juce::String minted = pd::sanitizeClassNameForTempId(classSrc)
-                                      + "_" + canvasKey + "_" + juce::String(objectIndex);
-
-            auto& canvasIdMap = identity.canvasMap(canvas);
-            canvasIdMap[minted.toStdString()] = y_obj;
-            identity.ensureSerial(y_obj);
-            identity.bumpVersion();
-            return minted;
-        }
-    }
+    // P3.5 S4: one minter (IdentityCore::mint), only for an object of this canvas.
+    for (t_gobj* y = canvas->gl_list; y; y = y->g_next)
+        if (y == g)
+            return juce::String(identity.mint(canvas, g, mintPrefix(g).toStdString()));
     return {};
 }
 
@@ -485,7 +478,6 @@ void McpHost::reconcileIdentity(const String& canvasName)
     if (!canvas)
         return;
 
-    auto canvasStr = MCPBridge::canonicalCanvasKey(canvas).toStdString();
     auto& canvasMap = identity.canvasMap(canvas);
 
     // Step A: live pointer set from gl_list (the ground truth).
@@ -509,17 +501,9 @@ void McpHost::reconcileIdentity(const String& canvasName)
     for (auto& [_, ptr] : canvasMap)
         trackedPointers.insert(ptr);
 
-    int adoptIdx = 0;
     for (t_gobj* y = canvas->gl_list; y; y = y->g_next) {
-        if (trackedPointers.find(y) == trackedPointers.end()) {
-            juce::String className = juce::String::fromUTF8(class_getname(pd_class(&y->g_pd))).replace("~", "_t");
-            std::string autoId = ("gui_" + className + "_" + juce::String(adoptIdx++)).toStdString();
-            while (canvasMap.count(autoId))
-                autoId = ("gui_" + className + "_" + juce::String(adoptIdx++)).toStdString();
-            canvasMap[autoId] = y;
-            identity.assignSerial(y);
-            identity.bumpVersion();
-        }
+        if (trackedPointers.find(y) == trackedPointers.end())
+            identity.mint(canvas, y, mintPrefix(y).toStdString()); // P3.5 S4: one minter
     }
 }
 

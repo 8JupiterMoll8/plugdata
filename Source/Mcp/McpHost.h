@@ -113,10 +113,12 @@ public:
     void registerOpenCanvases();
     // P3.5 S3: a canvas's wire key before any "#n" (root: file name; subcanvas: pd-<name>; unnamed: pd-anon).
     static juce::String identityBaseKey(t_canvas* cnv);
+    // P3.5 S4: the prefix of a minted tempId (owner decision O1: type + number).
+    static juce::String mintPrefix(t_gobj* g);
 
     t_gobj* resolveStableId(const String& canvasName, const String& objectId);
     // Full identity reconcile against the live canvas (gl_list): evict entries whose
-    // gobj is gone, adopt untracked objects (gui_<class>_<n>), bump the identity version.
+    // gobj is gone, adopt untracked objects (minted <type>_<n>, S4), bump the identity version.
     // Takes the Pd lock itself (P3.5 S2). Makes the tempId cache equal gl_list truth before any op that
     // resolves ids — so a stale id can never silently map to the wrong object.
     void reconcileIdentity(const String& canvasName);

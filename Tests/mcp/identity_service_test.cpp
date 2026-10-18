@@ -22,6 +22,7 @@ static int failures = 0;
 
 struct Obj {
     int n;
+    bool alive = true;
 };
 struct Cnv {
     std::string base; // what the adapter's key function answers
@@ -34,6 +35,7 @@ static void hook(Core& core)
     Core::Hooks hooks;
     hooks.baseKey = [](Cnv* c) { return c->base; };
     hooks.liveness = [](Cnv* c) { return std::function<bool()>([c] { return c->alive; }); };
+    hooks.objectLive = [](Cnv*, Obj* o) { return o->alive; };
     core.setHooks(hooks);
 }
 
@@ -58,15 +60,46 @@ int main()
         CHECK(core.keyOf(&song) == "song.pd");
     }
 
-    // ── a rebind of the same id overwrites (theft refusal comes in S4) ──
+    // ── #38 (S4): binding an id that names another LIVE object is refused; a dead holder is replaced ──
     {
         Cnv song { "song.pd" };
         Core core;
         hook(core);
-        core.bind(&song, "osc1", &a);
-        core.bind(&song, "osc1", &b);
-        CHECK(core.findCanvas(&song)->at("osc1") == &b);
-        CHECK(core.version() == 2);
+        CHECK(core.bind(&song, "osc1", &a) == Core::BindResult::Bound);
+        CHECK(core.bind(&song, "osc1", &a) == Core::BindResult::Same);
+        CHECK(core.bind(&song, "osc1", &b) == Core::BindResult::Refused);
+        CHECK(core.findCanvas(&song)->at("osc1") == &a);
+        CHECK(core.version() == 1); // neither the repeat nor the refusal bumps
+        Obj dead { 9, false };
+        Core core2;
+        hook(core2);
+        core2.bind(&song, "x", &dead);
+        CHECK(core2.bind(&song, "x", &b) == Core::BindResult::Bound);
+        CHECK(core2.findCanvas(&song)->at("x") == &b);
+        CHECK(!core2.hasSerial(&dead));
+    }
+
+    // ── one minter (S4, owner decision O1): <prefix>_<n>, n counts per canvas, never reused, skips taken names,
+    //    starts above the highest number already in use ──
+    {
+        Cnv song { "song.pd" }, other { "other.pd" };
+        Obj d { 4 }, e { 5 }, f { 6 };
+        Core core;
+        hook(core);
+        CHECK(core.mint(&song, &a, "osc_sig") == "osc_sig_1");
+        CHECK(core.mint(&song, &b, "hsl") == "hsl_2");
+        CHECK(core.idOf(&b) == "hsl_2");
+        CHECK(core.mint(&song, &b, "hsl") == "hsl_2"); // already named: its id, no new mint
+        CHECK(core.mint(&other, &c, "osc_sig") == "osc_sig_1"); // another canvas counts on its own
+        core.findCanvas(&song)->erase("osc_sig_1");             // deleted: the number is not reused
+        CHECK(core.mint(&song, &d, "osc_sig") == "osc_sig_3");
+        core.bind(&song, "dac_4", &e);                          // a name that would collide is skipped
+        CHECK(core.mint(&song, &f, "dac") == "dac_5");
+        Cnv loaded { "loaded.pd" };
+        Obj g { 7 }, h { 8 };
+        core.bind(&loaded, "osc_sig_12", &g); // ids restored from a saved patch: the counter starts above them
+        CHECK(core.mint(&loaded, &h, "osc_sig") == "osc_sig_13");
+        CHECK(core.version() > 0);
     }
 
     // ── findCanvas never creates; canvasMap does ──

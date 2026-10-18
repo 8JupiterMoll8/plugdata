@@ -8,6 +8,17 @@
 
 #include "MCPBridgeCmdCommon.h"
 
+// P3.5 S4 (#38): the encapsulate verbs give their new box the requested name. True when that name already
+// belongs to a live object outside the selection (a selected object moves into the new box, so its id frees up).
+template <typename Ids>
+static bool mcpIdTakenOutside(PluginProcessor* proc, juce::String const& canvasName, juce::String const& id, Ids const& selection)
+{
+    for (auto const& s : selection)
+        if (s == id)
+            return false;
+    return proc->getMcp()->resolveStableId(canvasName, id) != nullptr;
+}
+
 void MCPBridge::pdEncapsulate(const juce::String& action, const juce::OSCMessage& msg)
 {
     if (msg.size() >= 3 && processor) {
@@ -38,6 +49,13 @@ void MCPBridge::pdEncapsulate(const juce::String& action, const juce::OSCMessage
                 // Phase 3: reconcile identity BEFORE resolving tempIds so a stale id
                 // can't resolve to the wrong object. Shared routine.
                 proc->getMcp()->reconcileIdentity(canvasName);
+
+                // P3.5 S4 (#38): the new [pd] takes the name `subpatchName`; if that names a live object that is not
+                // being encapsulated, refuse before anything changes (it used to steal the id).
+                if (mcpIdTakenOutside(proc, canvasName, subpatchName, targetIds)) {
+                    bridge->sendReply("/pd/encapsulate/reply/" + correlationId, 0.0f);
+                    return;
+                }
 
                 // SELECTION-FREE: resolve ids straight to Object* and hand the
                 // explicit list to the native encapsulate. The GUI selection is
@@ -110,10 +128,6 @@ void MCPBridge::pdEncapsulate(const juce::String& action, const juce::OSCMessage
                 }
 
                 if (newestObj) {
-                    proc->getMcp()->identity.canvasMap(cnv)[subpatchName.toStdString()] = newestObj;
-                    proc->getMcp()->identity.assignSerial(newestObj);
-                    proc->getMcp()->identity.bumpVersion();
-
                     // Re-attach the original tempIds to the recreated inner
                     // objects (match by class + object text; greedy, best-effort).
                     auto* innerCnv = reinterpret_cast<t_canvas*>(newestObj);
@@ -138,6 +152,8 @@ void MCPBridge::pdEncapsulate(const juce::String& action, const juce::OSCMessage
                             break;
                         }
                     }
+                    // After the re-attach (which drops the moved ids from the parent): the new [pd] takes its name.
+                    proc->getMcp()->identity.bind(cnv, subpatchName.toStdString(), newestObj);
                 }
 
                 // Encapsulation removed objects from the parent canvas and
@@ -184,6 +200,10 @@ void MCPBridge::pdEncapsulateToFile(const juce::String& action, const juce::OSCM
                 // P3.5 S2: identity and gl_list work under the Pd lock, released before the file write (Step 3).
                 auto identityLock = std::make_unique<McpHost::PdLockScope>(*proc);
                 proc->getMcp()->reconcileIdentity(canvasName);
+                if (mcpIdTakenOutside(proc, canvasName, abstrName, targetIds)) { // P3.5 S4 (#38)
+                    bridge->sendReply("/pd/encapsulate_to_file/reply/" + correlationId, 0.0f);
+                    return;
+                }
 
                 std::vector<t_gobj*> toEncapsulate;
                 for (const auto& id : targetIds)
@@ -341,9 +361,7 @@ void MCPBridge::pdEncapsulateToFile(const juce::String& action, const juce::OSCM
                     McpHost::PdLockScope lock(*proc); // P3.5 S2
                     t_gobj* newObj = pd::Interface::getNewest(cnv);
                     if (newObj) {
-                        proc->getMcp()->identity.canvasMap(cnv)[abstrName.toStdString()] = newObj;
-                        proc->getMcp()->identity.assignSerial(newObj);
-                        proc->getMcp()->identity.bumpVersion();
+                        proc->getMcp()->identity.bind(cnv, abstrName.toStdString(), newObj);
                     }
                 }
 
@@ -442,6 +460,10 @@ void MCPBridge::pdEncapsulateGop(const juce::String& action, const juce::OSCMess
                     // can't resolve to a live-but-wrong object (same guarantee as
                     // /pd/encapsulate). GOP already fails closed on missing ids.
                     proc->getMcp()->reconcileIdentity(canvasName);
+                    if (mcpIdTakenOutside(proc, canvasName, safeName, targetIds)) { // P3.5 S4 (#38)
+                        bridge->sendReply(replyAddr, juce::String("{\"ok\":false,\"error\":\"GOP_ID_TAKEN\",\"detail\":\"tempId '" + safeName + "' already names a live object\"}"));
+                        return;
+                    }
 
                     // Resolve everything BEFORE touching the canvas.
                     SmallArray<t_gobj*> toDelete;
@@ -550,9 +572,7 @@ void MCPBridge::pdEncapsulateGop(const juce::String& action, const juce::OSCMess
                             undoAtoms.add(juce::String(canvasName));
                             proc->getMcp()->callSys("mcp_clear_undo", undoAtoms);
                             for (auto& e : staleErrs) connErrs.add(e);
-                            proc->getMcp()->identity.canvasMap(cnv)[safeName.toStdString()] = newObj;
-                            proc->getMcp()->identity.assignSerial(newObj);
-                            proc->getMcp()->identity.bumpVersion();
+                            proc->getMcp()->identity.bind(cnv, safeName.toStdString(), newObj);
                             newTempId = safeName;
                         }
                     }

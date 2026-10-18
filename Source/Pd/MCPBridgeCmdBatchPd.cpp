@@ -111,7 +111,6 @@ void mcp::BatchJob::reconcile(const std::string& canonStr)
         }
         size_t evictedEditIdx = 0;
 
-        int adoptIdx = 0;
         for (t_gobj* y = cnv->gl_list; y; y = y->g_next) {
             if (trackedPointers.find(y) == trackedPointers.end()) {
                 // Untracked object — auto-assign a tempId
@@ -123,19 +122,13 @@ void mcp::BatchJob::reconcile(const std::string& canonStr)
                 std::string autoId;
                 if (evictedEditIdx < evictedEditIds.size()) {
                     autoId = evictedEditIds[evictedEditIdx++];
+                    canvasMap[autoId] = y;
+                    processor->getMcp()->identity.assignSerial(y);
+                    processor->getMcp()->identity.bumpVersion();
                 } else {
-                    juce::String className = juce::String::fromUTF8(
-                        class_getname(pd_class(&y->g_pd)));
-                    className = className.replace("~", "_t");
-                    autoId = ("gui_" + className + "_"
-                        + juce::String(adoptIdx++)).toStdString();
-                    while (canvasMap.count(autoId))
-                        autoId = ("gui_" + className + "_"
-                            + juce::String(adoptIdx++)).toStdString();
+                    // P3.5 S4: the one minter (it binds and bumps).
+                    processor->getMcp()->identity.mint(cnv, y, McpHost::mintPrefix(y).toStdString());
                 }
-                canvasMap[autoId] = y;
-                processor->getMcp()->identity.assignSerial(y);
-                processor->getMcp()->identity.bumpVersion();
                 reconcileAdopted++;
             }
         }
@@ -282,10 +275,9 @@ void mcp::BatchJob::editPhase(const std::string& canonStr)
                     if (y == obj) { still = true; break; }
                 newObj = still ? obj : pd::Interface::getNewest(cnv);
                 if (newObj) {
-                    processor->getMcp()->identity.canvasMap(cnv)[pe.objectId.toStdString()] = newObj;
-                    if (newObj != obj) processor->getMcp()->identity.eraseSerial(obj);
-                    processor->getMcp()->identity.assignSerial(newObj);
-                    processor->getMcp()->identity.bumpVersion();
+                    // The retyped object takes over its id (the old one is freed, so this is no theft).
+                    if (processor->getMcp()->identity.bind(cnv, pe.objectId.toStdString(), newObj) == mcp::IdentityService::BindResult::Same)
+                        processor->getMcp()->identity.bumpVersion(); // the edit itself is an identity change
                     // C++ truth: when a class can't be instantiated Pd
                     // substitutes text_class (g_text.c canvas_objtext,
                     // "... couldn't create") and leaves an ERROR BOX — the
@@ -449,9 +441,7 @@ void mcp::BatchJob::createPhase(const std::string& canonStr)
                 redBoxes.add(no.ptr);
             } else {
                 // Map the stable tempId to the live gobj pointer
-                processor->getMcp()->identity.canvasMap(cnv)[pc.tempId.toStdString()] = no.ptr;
-                processor->getMcp()->identity.assignSerial(no.ptr);
-                processor->getMcp()->identity.bumpVersion();
+                processor->getMcp()->identity.bind(cnv, pc.tempId.toStdString(), no.ptr); // parse refused theft already
 
                 // Auto-seed line~/vline~ init value (fork ignores creation args)
                 if (pc.seedInit) {

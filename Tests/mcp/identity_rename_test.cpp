@@ -51,12 +51,13 @@ int main()
         CHECK(map.count("b") == 0);
     }
 
-    // ── no clash check here (that is C5, P3.5): an existing target is replaced, as before ──
+    // ── C5 (P3.5 S4): a taken target is refused, both entries stay ──
     {
         std::unordered_map<std::string, int> map { { "a", 1 }, { "b", 2 } };
-        CHECK(renameStableId(map, "a", "b") == RenameResult::Applied);
-        CHECK(map.size() == 1);
-        CHECK(map.at("b") == 1);
+        CHECK(renameStableId(map, "a", "b") == RenameResult::Taken);
+        CHECK(map.size() == 2);
+        CHECK(map.at("a") == 1);
+        CHECK(map.at("b") == 2);
     }
 
     // ── ids with quotes and backslashes are just keys ──
