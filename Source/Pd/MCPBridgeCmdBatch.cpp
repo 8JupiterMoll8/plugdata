@@ -1133,6 +1133,7 @@ void MCPBridge::pdBatchAtomic(const juce::String& action, const juce::OSCMessage
         // compose the canvas by role (proven collision-free).
         if (cnv && autoLayout) {
             auto runLayout = [&]() {
+                if (mcpCanvasGone(cnv)) return; // P3.4 S4: closed between the batch and the guard
                 const int guardPad = layoutPad + 15;
                 for (int round = 0; round < 8; round++) {
                     sys_lock();
@@ -1185,6 +1186,7 @@ void MCPBridge::pdBatchAtomic(const juce::String& action, const juce::OSCMessage
         // creation inside the view never moves the camera.
         if (cnv && created > 0 && !canvasNotFound) {
             auto frameIfCreateOffscreen = [p = processor, cnv, ptrs = createdPtrs]() {
+                if (mcpCanvasGone(cnv)) return; // P3.4 S4 (frameCreatedObjects checks the objects: L18)
                 p->getMcp()->gui().frameCreatedObjects(cnv, ptrs);
             };
             if (juce::MessageManager::getInstance()->isThisTheMessageThread()) {

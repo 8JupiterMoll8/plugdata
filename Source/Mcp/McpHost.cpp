@@ -386,11 +386,12 @@ t_gobj* McpHost::resolveStableId(const String& canvasName, const String& objectI
                     return it->second;
             }
         }
+        // Evict the stale id and its orphaned serial. P3.4 S4: read the pointer BEFORE erasing (the old code
+        // read it->second from the erased iterator: undefined behaviour on every eviction).
+        t_gobj* const stale = it->second;
         canvasMap.erase(it);
-        // Clean up orphaned serial on eviction
-        if (it->second) {
-            session.mcpStableSerialMap.erase(it->second);
-        }
+        if (stale)
+            session.mcpStableSerialMap.erase(stale);
     }
 
     // Index-based fallback: "0", "1", "obj_0", "obj_1", etc.

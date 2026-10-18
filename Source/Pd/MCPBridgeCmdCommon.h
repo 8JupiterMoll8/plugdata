@@ -187,6 +187,19 @@ inline bool mcpCanvasIsLive(t_canvas* target)
     return false;
 }
 
+// P3.4 S4: for work posted to another thread that kept a t_canvas*: true when
+// that canvas has been closed (freed) since, so the pointer must not be used.
+// Takes the Pd lock briefly; never call it while holding the lock is fine too
+// (recursive). A canvas freed and another allocated at the same address passes
+// (P3.5's identity versions close that).
+inline bool mcpCanvasGone(t_canvas* cnv)
+{
+    sys_lock();
+    bool const live = mcpCanvasIsLive(cnv);
+    sys_unlock();
+    return !live;
+}
+
 // Message thread: repaint the view of `cnv` if the canvas still exists (it may
 // open a tab for it: ensureView). Posts itself when called from another thread.
 inline void mcpRepaintViewLater(PluginProcessor* proc, t_canvas* cnv)

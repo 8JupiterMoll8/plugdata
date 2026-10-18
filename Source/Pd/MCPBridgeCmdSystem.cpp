@@ -153,6 +153,7 @@ void MCPBridge::pdUndo(const juce::String& action, const juce::OSCMessage& msg)
 
         if (cnv) {
             juce::MessageManager::callAsync([proc = processor, cnv, correlationId, bridge = this]() {
+                if (mcpCanvasGone(cnv)) { bridge->sendReply("/pd/undo/reply/" + correlationId, 0.0f); return; } // P3.4 S4: closed since the handler ran
                 if (proc->getMcp()->hasMcpTransaction(cnv)) {
                     proc->getMcp()->undoMcpTransaction(cnv);
                     proc->getMcp()->synchroniseCanvases();
@@ -191,6 +192,7 @@ void MCPBridge::pdRedo(const juce::String& action, const juce::OSCMessage& msg)
 
         if (cnv) {
             juce::MessageManager::callAsync([proc = processor, cnv, correlationId, bridge = this]() {
+                if (mcpCanvasGone(cnv)) { bridge->sendReply("/pd/redo/reply/" + correlationId, 0.0f); return; } // P3.4 S4: closed since the handler ran
                 if (proc->getMcp()->hasMcpRedoTransaction(cnv)) {
                     proc->getMcp()->redoMcpTransaction(cnv);
                     proc->getMcp()->synchroniseCanvases();
