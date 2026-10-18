@@ -28,6 +28,7 @@
 
 class PluginProcessor;
 class MCPBridge;
+namespace mcp { struct BatchJob; }
 
 // PRD_MEASUREMENT_WINDOWS Phase 4 — armed CONTROL-message window. A native Pd
 // receiver is bound to the requested name on arm; every message dispatched to
@@ -389,6 +390,7 @@ public:
 
     friend class ProbeManager;
     friend class McpHost; // replays undo/redo transactions through replayPd
+    friend struct mcp::BatchJob; // batch_atomic stages (P3.4 S9) use the layout and diagnose helpers
 
 private:
     // Verb table (MCPBridgeVerbs.inc): one private member function per row, built
