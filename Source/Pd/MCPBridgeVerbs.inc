@@ -200,14 +200,14 @@ MCP_VERB(telemetry, "dsp", handleTelemetryDomain)
 MCP_ALIAS(telemetry, "delete", handleTelemetryDomain)
 MCP_ALIAS(telemetry, "delete_on", handleTelemetryDomain)
 
-// ── array: one handler for the seven verbs (a shared prelude holds sys_lock across stages; splitting it is P3.4) ──
-MCP_VERB(array, "load", handleArrayDomain)
-MCP_ALIAS(array, "write", handleArrayDomain)
-MCP_ALIAS(array, "read", handleArrayDomain)
-MCP_ALIAS(array, "write_bulk", handleArrayDomain)
-MCP_ALIAS(array, "read_bulk", handleArrayDomain)
-MCP_ALIAS(array, "mutate", handleArrayDomain)
-MCP_ALIAS(array, "stats", handleArrayDomain)
+// ── array: one handler per verb (P3.4 S9; the shared lookup is resolveArrayTarget) ──
+MCP_VERB(array, "load", arrayLoad)
+MCP_VERB(array, "write", arrayWrite)
+MCP_VERB(array, "read", arrayRead)
+MCP_VERB(array, "write_bulk", arrayWriteBulk)
+MCP_VERB(array, "read_bulk", arrayReadBulk)
+MCP_VERB(array, "mutate", arrayMutate)
+MCP_VERB(array, "stats", arrayStats)
 
 // ── bridge: connect and capabilities share one handler ──
 MCP_VERB(bridge, "connect", handleBridgeDomain)
