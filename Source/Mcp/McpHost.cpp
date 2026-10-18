@@ -96,6 +96,7 @@ void McpHost::registerOpenCanvases()
     bool edited = false;
     std::function<void(t_canvas*)> walk = [&](t_canvas* c) {
         identity.canvasMap(c);
+        identity.refreshKey(c); // review M3: renamed behind our back (GUI Save-As, subpatch rename)
         uint64_t stamp = 1469598103934665603ull;
         uint64_t count = 0;
         for (t_gobj* g = c->gl_list; g; g = g->g_next, ++count) {
@@ -112,6 +113,7 @@ void McpHost::registerOpenCanvases()
         walk(*it);
     if (edited)
         identity.prune(); // drop the entries of objects deleted by hand
+    identity.expireTombstones(); // review M2
     rebindTombstones();
 }
 
@@ -151,7 +153,10 @@ void McpHost::rebindTombstones()
     std::function<void(t_canvas*)> walk = [&](t_canvas* c) {
         for (auto const& stone : identity.tombstones(c)) {
             if (identity.valid(c, stone.id)) {
-                identity.dropTombstone(c, stone.id); // never died: nothing to do
+                // Review M1: plugdata's Ctrl+S reloads AFTER a callAsync: a box still alive right after the save may
+                // die a moment later. Only a stone older than 5 s whose box still lives is done with.
+                if (mcp::IdentityService::nowMs() > stone.bornMs + 5000)
+                    identity.dropTombstone(c, stone.id);
                 continue;
             }
             int index = 0;
@@ -444,7 +449,6 @@ t_canvas* McpHost::getCanvasBySymbol(const String& canvas_symbol)
     // is nothing (it used to be the first canvas: Pd's float-array template).
     if (canvas_symbol == "pd-main" || canvas_symbol == "main" || canvas_symbol.isEmpty()) {
         PdLockScope lock(processor);
-        registerOpenCanvases();
         if (auto* root = session.mcpFocusedRoot.load(std::memory_order_acquire)) {
             for (t_canvas* c = pd_this ? pd_this->pd_canvaslist : nullptr; c; c = c->gl_next)
                 if (c == root) return root;
@@ -455,9 +459,14 @@ t_canvas* McpHost::getCanvasBySymbol(const String& canvas_symbol)
     // P3.5 S3 (#62): every other name is a wire key of the identity records ("song.pd", "pd-voice", "pd-voice#2",
     // or the "pd-" spelling of either). Unknown names answer nullptr: no fallback to the first canvas, no
     // per-request Pd symbol.
+    // Review H4: the records already known answer first (no walk on the hot path: batch connects resolve per
+    // wire); only an unknown name walks every open canvas (new canvases, renamed ones) and asks again.
     PdLockScope lock(processor);
+    auto const key = canvas_symbol.toStdString();
+    if (auto* known = identity.canvasByKey(key))
+        return known;
     registerOpenCanvases();
-    return identity.canvasByKey(canvas_symbol.toStdString());
+    return identity.canvasByKey(key);
 }
 
 t_canvas* McpHost::getCanvasBySymbolStrict(const String& canvas_symbol)
@@ -528,8 +537,7 @@ t_gobj* McpHost::resolveStableId(const String& canvasName, const String& objectI
         for (t_gobj* y_obj = canvas->gl_list; y_obj; y_obj = y_obj->g_next)
             if (y_obj == bound)
                 return bound;
-        if (auto* ids = identity.findCanvas(canvas)) // moved out of this canvas: forget it here
-            ids->erase(idStr);
+        identity.eraseId(canvas, idStr); // moved out of this canvas: forget it here
     }
 
     // Index-based fallback: "0", "1", "obj_0", "obj_1", etc.
@@ -560,15 +568,16 @@ void McpHost::reconcileIdentity(const String& canvasName)
     for (t_gobj* y = canvas->gl_list; y; y = y->g_next)
         livePointers.insert(y);
 
-    // Step B: evict entries whose gobj no longer exists on the canvas.
-    for (auto it = canvasMap.begin(); it != canvasMap.end();) {
-        if (livePointers.find(it->second) == livePointers.end()) {
-            it = canvasMap.erase(it); // P3.5 S5: serial kept (the address may be reused by a bound object)
-            identity.bumpVersion(canvas);
-        } else {
-            ++it;
-        }
-    }
+    // Step B: evict entries whose gobj no longer exists on the canvas (eraseId keeps the bound serials in step;
+    // the object's serial stays: the address may be reused by a bound object).
+    std::vector<std::string> gone;
+    for (auto const& [id, ptr] : canvasMap)
+        if (livePointers.find(ptr) == livePointers.end())
+            gone.push_back(id);
+    for (auto const& id : gone)
+        identity.eraseId(canvas, id);
+    if (!gone.empty())
+        identity.bumpVersion(canvas);
 
     // Step C: adopt objects the identity map doesn't track yet (GUI-created).
     std::unordered_set<t_gobj*> trackedPointers;

@@ -84,7 +84,7 @@ void mcp::BatchJob::reconcile(const std::string& canonStr)
             }
         }
         for (auto& id : toEvict) {
-            canvasMap.erase(id);
+            processor->getMcp()->identity.eraseId(cnv, id); // review H3: keeps the bound serials in step
             processor->getMcp()->identity.bumpVersion(cnv);
             reconcileEvicted++;
         }
@@ -121,9 +121,7 @@ void mcp::BatchJob::reconcile(const std::string& canonStr)
                 std::string autoId;
                 if (evictedEditIdx < evictedEditIds.size()) {
                     autoId = evictedEditIds[evictedEditIdx++];
-                    canvasMap[autoId] = y;
-                    processor->getMcp()->identity.assignSerial(y);
-                    processor->getMcp()->identity.bumpVersion(cnv);
+                    processor->getMcp()->identity.bind(cnv, autoId, y); // review H3: with its bound serial
                 } else {
                     // P3.5 S4: the one minter (it binds and bumps).
                     processor->getMcp()->identity.mint(cnv, y, McpHost::mintPrefix(y).toStdString());
@@ -235,8 +233,8 @@ void mcp::BatchJob::deletePhase(const std::string& canonStr)
     for (auto& pd : preDeletes) {
         t_gobj* obj = processor->getMcp()->resolveStableId(canvasName, pd.objectId);
         if (obj) {
-            processor->getMcp()->identity.canvasMap(cnv).erase(pd.objectId.toStdString());
-            processor->getMcp()->identity.eraseSerial(obj);
+            processor->getMcp()->identity.eraseId(cnv, pd.objectId.toStdString());
+            processor->getMcp()->identity.eraseSerial(obj); // the object is deleted next: its other ids die with it
             processor->getMcp()->identity.bumpVersion(cnv);
             toDelete.add(obj);
             deleted++;
@@ -440,7 +438,9 @@ void mcp::BatchJob::createPhase(const std::string& canonStr)
                 redBoxes.add(no.ptr);
             } else {
                 // Map the stable tempId to the live gobj pointer
-                processor->getMcp()->identity.bind(cnv, pc.tempId.toStdString(), no.ptr); // parse refused theft already
+                // Parse refused theft already; a refusal here (a race) leaves the object to the minter, said in the log.
+                if (processor->getMcp()->identity.bind(cnv, pc.tempId.toStdString(), no.ptr) == mcp::IdentityService::BindResult::Refused)
+                    processor->logMessage("batch_atomic: tempId '" + pc.tempId + "' already names another object; the new one gets a minted id");
 
                 // Auto-seed line~/vline~ init value (fork ignores creation args)
                 if (pc.seedInit) {

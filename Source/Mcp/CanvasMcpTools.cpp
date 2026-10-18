@@ -127,6 +127,9 @@ void CanvasMcpLayer::createTextNoteAt(Point<int> canvasPos)
 {
     if (!canvas.pd) return;
 
+    // Review H5 (THREADING rule 10): the selection's ids take the Pd lock, so read them BEFORE the overlay lock.
+    auto const selIds = getSelectionStableIds();
+
     // Drop any abandoned empty artist note first so note indices never drift.
     {
         juce::ScopedLock sl(canvas.pd->getMcp()->session.mcpOverlayLock);
@@ -141,7 +144,6 @@ void CanvasMcpLayer::createTextNoteAt(Point<int> canvasPos)
         ann.t = juce::Time::getMillisecondCounterHiRes() / 1000.0;
         // Surgical lane: a selection turns the note into an attachment bound to it
         // (renders anchored beside the object with a leader tick).
-        auto const selIds = getSelectionStableIds();
         if (selIds.size() > 0) {
             ann.targetId = selIds[0];
             ann.targetIds = selIds;

@@ -319,9 +319,7 @@ void McpHost::sysRenameId(SmallString const& selector, mcp::SysList const& list)
         bool success = false;
         t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
         if (canvas) { // P3.5 S3: an unknown canvas renames nothing
-            auto const renamed = mcp::identity::renameStableId(identity.canvasMap(canvas), old_id.toStdString(), new_id.toStdString());
-            if (renamed == mcp::identity::RenameResult::Applied)
-                identity.bumpVersion(canvas);
+            auto const renamed = identity.rename(canvas, old_id.toStdString(), new_id.toStdString()); // bumps on Applied
             success = renamed == mcp::identity::RenameResult::Applied || renamed == mcp::identity::RenameResult::NoOp; // Taken refused (C5)
         }
         sys_unlock();
@@ -345,20 +343,19 @@ void McpHost::sysGetMappings(SmallString const& selector, mcp::SysList const& li
             auto canonStr = MCPBridge::canonicalCanvasKey(canvas).toStdString();
             auto& canvasMap = identity.canvasMap(canvas);
 
-            // For each ID in the map, find its current index in gl_list
-            for (auto it = canvasMap.begin(); it != canvasMap.end();) {
-                t_gobj* targetObj = it->second;
-                int index = getObjectIndex(canvas, targetObj);
+            // For each valid ID, its current index in gl_list; ids of objects that are gone are dropped (eraseId).
+            std::vector<std::string> gone;
+            for (auto const& [id, targetObj] : canvasMap) {
+                int index = identity.valid(canvas, id) ? getObjectIndex(canvas, targetObj) : -1;
                 if (index != -1) {
-                    // Object still exists on the canvas, add to atoms
-                    atoms.add(juce::String::fromUTF8(it->first.c_str()));
+                    atoms.add(juce::String::fromUTF8(id.c_str()));
                     atoms.add((float)index);
-                    ++it;
                 } else {
-                    // Object was deleted/freed, erase from stable map
-                    it = canvasMap.erase(it);
+                    gone.push_back(id);
                 }
             }
+            for (auto const& id : gone)
+                identity.eraseId(canvas, id);
         }
         sys_unlock();
 
@@ -378,6 +375,7 @@ void McpHost::sysCensus(SmallString const& selector, mcp::SysList const& list)
         // root canvas (that returned the root's objects under a bogus
         // subpatch label with re-minted tempIds, e.g.
         // osc_sig_pd_<typo>_0). 'main'/'pd-main'/'' aliases still resolve.
+        registerOpenCanvases(); // S6/H4: take the structure stamps (a GUI edit bumps here)
         t_canvas* canvas = getCanvasBySymbolStrict(canvas_symbol);
 
         if (canvas) {

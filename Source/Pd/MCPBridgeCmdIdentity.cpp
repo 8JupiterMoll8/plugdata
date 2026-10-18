@@ -23,6 +23,7 @@ void MCPBridge::pdIdentitySnapshot(const juce::String& action, const juce::OSCMe
         auto correlationId = getArgString(msg[1]);
 
         sys_lock();
+        processor->getMcp()->registerOpenCanvases(); // S6/H4: take the structure stamps (a GUI edit bumps here)
         t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
 
         if (!cnv) {
@@ -98,7 +99,7 @@ void MCPBridge::pdIdentitySnapshot(const juce::String& action, const juce::OSCMe
         for (auto& staleId : toEvict) {
             auto staleIt = canvasMap.find(staleId);
             if (staleIt != canvasMap.end())
-                canvasMap.erase(staleIt); // P3.5 S5: keep the serial: the address may belong to a new, bound object
+                processor->getMcp()->identity.eraseId(cnv, staleId); // the serial stays: the address may belong to a new, bound object
         }
         if (!toEvict.empty()) {
             processor->getMcp()->identity.bumpVersion(cnv);
@@ -130,6 +131,7 @@ void MCPBridge::pdIdentityVersion(const juce::String& action, const juce::OSCMes
     if (msg.size() >= 1 && processor) {
         auto correlationId = getArgString(msg[0]);
         uint64_t version = 0;
+        juce::String canvasKey;
         {
             McpHost::PdLockScope lock(*processor);
             processor->getMcp()->registerOpenCanvases();
@@ -140,6 +142,7 @@ void MCPBridge::pdIdentityVersion(const juce::String& action, const juce::OSCMes
                     return;
                 }
                 version = processor->getMcp()->identity.canvasVersion(cnv);
+                canvasKey = juce::String(processor->getMcp()->identity.keyOf(cnv));
             } else {
                 version = processor->getMcp()->identity.version();
             }
@@ -147,6 +150,8 @@ void MCPBridge::pdIdentityVersion(const juce::String& action, const juce::OSCMes
 
         juce::OSCMessage reply { juce::OSCAddressPattern("/pd/identity_version/reply/" + correlationId) };
         reply.addArgument(static_cast<int32>(static_cast<int>(version & 0x7FFFFFFF)));
+        if (canvasKey.isNotEmpty())
+            reply.addArgument(canvasKey); // P3.5 S9: which canvas the name meant ("main" follows the focus)
         sender.send(reply);
     }
     return;
@@ -198,10 +203,7 @@ void MCPBridge::pdRenameId(const juce::String& action, const juce::OSCMessage& m
             McpHost::PdLockScope lock(*processor); // P3.5 S2: was unlocked on the command worker
             t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
             if (cnv) { // P3.5 S3: an unknown canvas renames nothing (it used to rename in a map named after the request)
-                auto& map = processor->getMcp()->identity.canvasMap(cnv);
-                auto const renamed = mcp::identity::renameStableId(map, oldId, newId);
-                if (renamed == mcp::identity::RenameResult::Applied)
-                    processor->getMcp()->identity.bumpVersion(cnv);
+                auto const renamed = processor->getMcp()->identity.rename(cnv, oldId, newId); // bumps on Applied
                 taken = renamed == mcp::identity::RenameResult::Taken;
                 success = renamed == mcp::identity::RenameResult::Applied || renamed == mcp::identity::RenameResult::NoOp;
             }
@@ -237,7 +239,7 @@ void MCPBridge::pdRenameIdBatch(const juce::String& action, const juce::OSCMessa
                 auto oldId = getArgString(msg[cursor++]).toStdString();
                 auto newId = getArgString(msg[cursor++]).toStdString();
                 if (!cnv) continue; // P3.5 S3: an unknown canvas renames nothing
-                auto const result = mcp::identity::renameStableId(processor->getMcp()->identity.canvasMap(cnv), oldId, newId);
+                auto const result = processor->getMcp()->identity.rename(cnv, oldId, newId);
                 if (result == mcp::identity::RenameResult::Applied || result == mcp::identity::RenameResult::NoOp) renamed++;
                 if (result == mcp::identity::RenameResult::Applied) changed = true;
                 if (result == mcp::identity::RenameResult::Taken) takenIds.push_back(newId); // P3.5 S4 (C5)

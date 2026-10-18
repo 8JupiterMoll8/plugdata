@@ -420,6 +420,83 @@ int main()
         CHECK(core.canvasVersion(&y) == 1);
     }
 
+    // ── review H2: a second bind on a live object keeps its serial, so its other id stays valid; idOf skips invalid ──
+    {
+        Cnv song { "song.pd" };
+        Obj o { 1 };
+        Core core;
+        hook(core);
+        auto const minted = core.mint(&song, &o, "osc_sig");
+        CHECK(core.bind(&song, "lead", &o) == Core::BindResult::Bound);
+        CHECK(core.resolve(&song, minted) == &o);
+        CHECK(core.resolve(&song, "lead") == &o);
+        o.generation++; // freed, a new object at the same address, before any prune
+        CHECK(core.idOf(&o).empty());
+    }
+
+    // ── review H1: moveId moves only the ids of the lifetime that just ended, never a live box's ──
+    {
+        Cnv song { "song.pd" };
+        Obj o { 1 }, other { 2 };
+        Core core;
+        hook(core);
+        core.bind(&song, "lead", &o);
+        CHECK(core.moveId(&o, &other).empty()); // o still lives: nothing moves
+        CHECK(core.resolve(&song, "lead") == &o);
+        core.bind(&song, "x", &other);
+        o.alive = false;
+        CHECK(core.moveId(&o, &other).empty()); // `to` already has a valid id: refuse
+        CHECK(core.resolve(&song, "x") == &other);
+    }
+
+    // ── review H3: eraseId and rename keep the bound serials in step; a dead target counts as free ──
+    {
+        Cnv song { "song.pd" };
+        Obj dead { 1 }, fresh { 2 }, keep { 3 };
+        Core core;
+        hook(core);
+        core.bind(&song, "lfo", &dead);
+        core.eraseId(&song, "lfo");
+        auto const m = core.mint(&song, &fresh, "osc_sig");
+        CHECK(core.rename(&song, m, "lfo") == mcp::identity::RenameResult::Applied);
+        CHECK(core.resolve(&song, "lfo") == &fresh);
+        core.bind(&song, "gone", &dead);
+        dead.alive = false;
+        core.bind(&song, "k", &keep);
+        CHECK(core.rename(&song, "k", "gone") == mcp::identity::RenameResult::Applied); // dead holder: free
+        CHECK(core.resolve(&song, "gone") == &keep);
+        Obj live2 { 4 };
+        core.bind(&song, "taken", &live2);
+        CHECK(core.rename(&song, "gone", "taken") == mcp::identity::RenameResult::Taken);
+        CHECK(core.rename(&song, "nope", "x") == mcp::identity::RenameResult::Missing);
+        CHECK(core.rename(&song, "taken", "taken") == mcp::identity::RenameResult::NoOp);
+    }
+
+    // ── review M1/M2: tombstones age; a fresh one survives a "still valid" look, an old one is dropped ──
+    {
+        Cnv song { "song.pd" };
+        Core core;
+        hook(core);
+        core.addTombstone(&song, "v", 0, "t", 1000);
+        CHECK(core.tombstones(&song).size() == 1);
+        core.expireTombstones(1000 + 29000);
+        CHECK(core.tombstones(&song).size() == 1);
+        core.expireTombstones(1000 + 31000);
+        CHECK(core.tombstones(&song).empty());
+    }
+
+    // ── review M3: refreshKey follows a canvas renamed behind the identity layer ──
+    {
+        Cnv song { "old.pd" };
+        Core core;
+        hook(core);
+        core.canvasMap(&song);
+        song.base = "new.pd";
+        core.refreshKey(&song);
+        CHECK(core.keyOf(&song) == "new.pd");
+        CHECK(core.canvasByKey("new.pd") == &song);
+    }
+
     if (failures == 0)
         std::printf("identity_service_test: all passed\n");
     return failures == 0 ? 0 : 1;

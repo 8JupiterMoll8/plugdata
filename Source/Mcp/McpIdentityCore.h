@@ -18,6 +18,7 @@
 // with its serials, so it never lends its ids.
 
 #include <algorithm>
+#include <chrono>
 #include <atomic>
 #include <cstdint>
 #include <functional>
@@ -25,6 +26,8 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
+#include "../Pd/MCPIdentity.h" // RenameResult
 
 namespace mcp::identity {
 
@@ -50,7 +53,15 @@ public:
         std::string id;
         int index = -1;
         std::string tag; // the adapter's match key (an abstraction's file name)
+        uint64_t bornMs = 0;
     };
+
+    // Milliseconds on a steady clock (tombstone ages).
+    static uint64_t nowMs()
+    {
+        return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
     void setHooks(Hooks h) { hooks = std::move(h); }
 
     // The id map of a live canvas; makes its record (and wire key) when missing.
@@ -122,7 +133,18 @@ public:
         if (!r)
             return;
         r->key.clear();
-        r->key = freeKey(baseOf(c));
+        r->base = baseOf(c);
+        r->key = freeKey(r->base);
+    }
+
+    // Review M3: a canvas renamed behind the identity layer (GUI Save-As, a subpatch renamed by hand) gets a new
+    // key when the adapter next walks it.
+    void refreshKey(Canvas c)
+    {
+        check("refreshKey");
+        auto* r = live(c);
+        if (r && baseOf(c) != r->base)
+            rekey(c);
     }
 
     // Drops every record whose canvas is gone and (S5) every entry of a live canvas whose object is gone (one
@@ -184,7 +206,7 @@ public:
             if (!r.isAlive())
                 continue;
             for (auto const& [id, bound] : r.ids)
-                if (bound == obj)
+                if (bound == obj && entryValid(r, id, obj)) // review H2: a stale entry at a reused address is no id
                     return id;
         }
         return {};
@@ -210,10 +232,52 @@ public:
                 return BindResult::Refused;
         }
         r.ids[id] = obj;
-        assignSerial(obj);
+        ensureSerial(obj); // review H2: a live object keeps its serial, so its other ids stay valid
         r.boundSerial[id] = serials[obj].serial;
         bump(r);
         return BindResult::Bound;
+    }
+
+    // Review H3: drop one id (and its bound serial). True when it was there.
+    bool eraseId(Canvas c, std::string const& id)
+    {
+        check("eraseId");
+        auto* r = live(c);
+        if (!r)
+            return false;
+        r->boundSerial.erase(id);
+        return r->ids.erase(id) > 0;
+    }
+
+    // Review H3: rename `from` to `to` on canvas c, keeping the bound serial with the id. A target held by a dead
+    // object counts as free; one held by a live object is Taken (C5).
+    RenameResult rename(Canvas c, std::string const& from, std::string const& to)
+    {
+        check("rename");
+        auto* r = live(c);
+        if (!r)
+            return RenameResult::Missing;
+        auto it = r->ids.find(from);
+        if (it == r->ids.end())
+            return RenameResult::Missing;
+        if (from == to)
+            return RenameResult::NoOp;
+        auto target = r->ids.find(to);
+        if (target != r->ids.end() && objectAlive(c, target->second) && entryValid(*r, to, target->second))
+            return RenameResult::Taken;
+        Obj const obj = it->second;
+        auto bs = r->boundSerial.find(from);
+        bool const hadSerial = bs != r->boundSerial.end();
+        uint64_t const serial = hadSerial ? bs->second : 0;
+        r->ids.erase(it);
+        r->boundSerial.erase(from);
+        r->ids[to] = obj;
+        if (hadSerial)
+            r->boundSerial[to] = serial;
+        else
+            r->boundSerial.erase(to);
+        bump(*r);
+        return RenameResult::Applied;
     }
 
     // S4: the only minter, for objects nobody named (hand-made, or adopted on load): "<prefix>_<n>" (owner
@@ -268,16 +332,26 @@ public:
     std::string moveId(Obj from, Obj to)
     {
         check("moveId");
+        // Review H1: decide once. A `from` whose own lifetime still lives was not recreated (the same text, or a
+        // subpatch rename in place): nothing moves.
+        auto s = serials.find(from);
+        if (s != serials.end() && s->second.isAlive())
+            return {};
+        uint64_t const ended = s != serials.end() ? s->second.serial : 0;
+        if (!idOf(to).empty())
+            return {}; // the new box already has an id: never stack a second one on it
         for (auto& [c, r] : records) {
             if (!r.isAlive())
                 continue;
             for (auto& [id, bound] : r.ids) {
                 if (bound != from)
                     continue;
-                if (entryValid(r, id, from))
-                    return {}; // nothing was recreated (e.g. the same text): the id stays on its object
-                serials.erase(from);
+                auto b = r.boundSerial.find(id);
+                if (b != r.boundSerial.end() && b->second != ended)
+                    continue; // bound in another lifetime of this address: not the box that was just retyped
                 bound = to;
+                if (from != to)
+                    serials.erase(from); // dead: its lifetime ended
                 assignSerial(to);
                 r.boundSerial[id] = serials[to].serial;
                 bump(r);
@@ -290,17 +364,26 @@ public:
     // S5 (L9): an abstraction reload frees and recreates its instances at the same index. Before a reload the
     // adapter leaves a tombstone per id bound to an instance; afterwards it rebinds the id to the object at that
     // index with the same tag and drops the tombstone. A dead canvas has none.
-    void addTombstone(Canvas c, std::string const& id, int index, std::string const& tag)
+    void addTombstone(Canvas c, std::string const& id, int index, std::string const& tag, uint64_t now = nowMs())
     {
         check("addTombstone");
         auto& stones = ensure(c).tombstones;
         for (auto& s : stones)
             if (s.id == id) {
-                s = { id, index, tag };
+                s = { id, index, tag, now };
                 return;
             }
         if (stones.size() < 4096)
-            stones.push_back({ id, index, tag });
+            stones.push_back({ id, index, tag, now });
+    }
+    // Review M2: a tombstone that never found its box (the instance was deleted before the reload) goes after 30 s.
+    void expireTombstones(uint64_t now = nowMs())
+    {
+        check("expireTombstones");
+        for (auto& [c, r] : records)
+            r.tombstones.erase(std::remove_if(r.tombstones.begin(), r.tombstones.end(),
+                                   [now](Tombstone const& s) { return now > s.bornMs + 30000; }),
+                r.tombstones.end());
     }
     bool anyTombstones() const
     {
@@ -402,6 +485,7 @@ public:
 private:
     struct Record {
         std::string key;
+        std::string base; // the adapter's key before "#n", to notice a rename
         IdMap ids;
         std::function<bool()> alive;
         uint64_t nextMint = 0; // 0 = not seeded yet (see mint)
@@ -495,7 +579,8 @@ private:
         if (auto* r = live(c))
             return *r;
         Record r;
-        r.key = freeKey(baseOf(c));
+        r.base = baseOf(c);
+        r.key = freeKey(r.base);
         if (hooks.liveness)
             r.alive = hooks.liveness(c);
         return records.emplace(c, std::move(r)).first->second;

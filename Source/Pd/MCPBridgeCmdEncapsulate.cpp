@@ -131,8 +131,6 @@ void MCPBridge::pdEncapsulate(const juce::String& action, const juce::OSCMessage
                     // Re-attach the original tempIds to the recreated inner
                     // objects (match by class + object text; greedy, best-effort).
                     auto* innerCnv = reinterpret_cast<t_canvas*>(newestObj);
-                    auto& parentMap = proc->getMcp()->identity.canvasMap(cnv);
-                    auto& childMap = proc->getMcp()->identity.canvasMap(innerCnv);
                     for (t_gobj* y = innerCnv->gl_list; y; y = y->g_next) {
                         juce::String cls = juce::String::fromUTF8(class_getname(pd_class(&y->g_pd)));
                         juce::String txt;
@@ -145,10 +143,8 @@ void MCPBridge::pdEncapsulate(const juce::String& action, const juce::OSCMessage
                             if (r.used || r.cls != cls) continue;
                             if (r.text.isNotEmpty() && txt.isNotEmpty() && r.text != txt) continue;
                             r.used = true;
-                            childMap[r.id.toStdString()] = y;
-                            parentMap.erase(r.id.toStdString());
-                            proc->getMcp()->identity.assignSerial(y);
-                            proc->getMcp()->identity.bumpVersion(innerCnv);
+                            proc->getMcp()->identity.eraseId(cnv, r.id.toStdString());
+                            proc->getMcp()->identity.bind(innerCnv, r.id.toStdString(), y); // review H3
                             break;
                         }
                     }
@@ -463,6 +459,9 @@ void MCPBridge::pdEncapsulateGop(const juce::String& action, const juce::OSCMess
             } else {
                 postMessage([proc = processor, cnv, canvasName, safeName, filePath, targetIds, inbound, outbound, posX, posY, correlationId, replyAddr, bridge = this]() {
                     if (mcpCanvasGone(cnv)) { bridge->sendReply(replyAddr, juce::String("{\"ok\":false,\"error\":\"GOP_NO_CANVAS\",\"detail\":\"canvas closed\"}")); return; } // P3.4 S4: closed since the handler ran
+                    // Review M4: one Pd lock from the reconcile through the mutation, so the resolved pointers stay
+                    // valid (the inner sys_lock/sys_unlock pairs nest: the lock is recursive).
+                    McpHost::PdLockScope gopLock(*proc);
                     // Phase 3: reconcile identity BEFORE resolving so a stale id
                     // can't resolve to a live-but-wrong object (same guarantee as
                     // /pd/encapsulate). GOP already fails closed on missing ids.
@@ -539,17 +538,15 @@ void MCPBridge::pdEncapsulateGop(const juce::String& action, const juce::OSCMess
                             canvas_update_dsp();
                             bridge->sendReply(replyAddr, "{\"ok\":false,\"error\":\"GOP_CREATE_FAILED\",\"detail\":\"[" + jsonEscape(safeName) + "] couldn't create (red box)\"}");
                         } else {
-                            auto gopKey = canonicalCanvasKey(cnv).toStdString();
                             // 2. Delete originals via the message-thread-safe
                             // remover. removeObjects() clears selection first (noselect),
                             // opens UNDO_SEQUENCE_START, records UNDO_CUT, and suspends DSP around free.
                             for (auto* g : toDelete) {
-                                proc->getMcp()->identity.canvasMap(cnv).erase(
-                                    [&]() -> std::string {
-                                        for (auto& [tid, ptr] : proc->getMcp()->identity.canvasMap(cnv))
-                                            if (ptr == g) return tid;
-                                        return "";
-                                    }());
+                                std::vector<std::string> ids; // review H3: every id the box has on this canvas
+                                for (auto const& [tid, ptr] : proc->getMcp()->identity.canvasMap(cnv))
+                                    if (ptr == g) ids.push_back(tid);
+                                for (auto const& tid : ids)
+                                    proc->getMcp()->identity.eraseId(cnv, tid);
                                 proc->getMcp()->identity.eraseSerial(g);
                             }
                             mcp::PdOps::removeObjectsAudioThread(cnv, toDelete);

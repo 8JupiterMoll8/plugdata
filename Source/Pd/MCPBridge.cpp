@@ -50,7 +50,18 @@ MCPBridge::MCPBridge(PluginProcessor* proc, int inPort, int outPort)
             if (fileName.endsWith(".m~.pd"))
                 fileName = fileName.dropLastCharacters(3); // getAbstractionFileName's spelling
             p->getMcp()->tombstoneAbstractionInstances(fileName);
-            writeIdentitySidecar(p, reinterpret_cast<t_canvas*>(g), path);
+            // Review M5: build the sidecar now (the hook runs inside plugdata's save, under the Pd lock), hash the .pd
+            // and write it after the save returned, off the lock.
+            juce::var sidecar;
+            {
+                McpHost::PdLockScope lock(*p);
+                sidecar = buildIdentitySidecar(p, reinterpret_cast<t_canvas*>(g));
+            }
+            juce::MessageManager::callAsync([p, sidecar, path] {
+                auto const error = writeIdentitySidecarFile(sidecar, juce::File(path));
+                if (error.isNotEmpty())
+                    p->logMessage("MCP identity: " + error);
+            });
         };
     }
 
@@ -1705,10 +1716,12 @@ MCPBridge::SidecarStats MCPBridge::mcpApplyIdentitySidecar(PluginProcessor* proc
         for (auto const& v : *arr) {
             auto* o = v.getDynamicObject();
             if (!o) continue;
-            int const i = static_cast<int>(static_cast<double>(o->getProperty("i")));
+            auto const iv = o->getProperty("i");
             auto const id = o->getProperty("id").toString();
             if (id.isEmpty()) continue;
-            if (i < 0 || i >= static_cast<int>(byIndex.size())) { ++stats.renamed; continue; }
+            double const di = (iv.isInt() || iv.isInt64() || iv.isDouble()) ? static_cast<double>(iv) : -1.0;
+            if (!(di >= 0.0 && di < static_cast<double>(byIndex.size()))) { ++stats.renamed; continue; } // missing, non-finite or out of range
+            int const i = static_cast<int>(di);
             t_gobj* g = byIndex[static_cast<size_t>(i)];
             // A v2 entry names its class: an edited .pd (another object at that index) keeps no stale name (O2).
             if (o->hasProperty("c") && o->getProperty("c").toString() != sidecarClassOf(g)) {
