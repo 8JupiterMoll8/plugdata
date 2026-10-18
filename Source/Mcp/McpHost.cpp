@@ -25,7 +25,30 @@ McpHost::McpHost(PluginProcessor& p)
     sysTable(); // a bad selector table fails here, at startup
 }
 
-McpHost::~McpHost() = default;
+McpHost::~McpHost()
+{
+    shutdown();
+}
+
+void McpHost::postMessage(std::function<void()> fn)
+{
+    juce::MessageManager::callAsync([weak = juce::WeakReference<McpHost>(this), fn = std::move(fn)] {
+        if (weak.get() != nullptr)
+            fn();
+    });
+}
+
+void McpHost::shutdown()
+{
+    if (session.mcpShuttingDown.exchange(true))
+        return;
+    focusTimer.stopTimer();
+    if (mcpBridge)
+        mcpBridge->shutdown();
+    std::function<void()> job;
+    while (session.mcpPdQueue.try_dequeue(job))
+        job = nullptr; // never run: the patches they would touch are about to go
+}
 
 // Audio-device xruns since the device opened; -1 when unknown (no device, a
 // plugin build, or a backend that does not count them). P3.4 S0: lets live
@@ -84,8 +107,10 @@ void McpHost::mcpSettingsChanged(String const& name, var const& value)
         auto const enabled = processor.settingsFile->getProperty<bool>("mcp_bridge_enabled");
         auto const listen = processor.settingsFile->getProperty<int>("mcp_bridge_listen_port");
         auto const send = processor.settingsFile->getProperty<int>("mcp_bridge_send_port");
-        mcpBridge->stop();
-        mcpBridge.reset(new MCPBridge(&processor, listen, send));
+        // P3.4 S8: the same object on new ports. Rebuilding it here destroyed the bridge while the audio
+        // thread could be inside its audioTick or midiInputTick.
+        mcpBridge->rebind(listen, send);
+        if (enabled && !mcpBridge->isConnected()) mcpBridge->start();
         if (!enabled) mcpBridge->stop();
         processor.logMessage("MCP bridge ports updated (listen " + String(listen) + ", send " + String(send) + ")");
     }
@@ -292,7 +317,7 @@ void McpHost::synchroniseCanvases()
 {
     if (auto* mm = juce::MessageManager::getInstanceWithoutCreating()) {
         if (!mm->isThisTheMessageThread()) {
-            mm->callAsync([this] { synchroniseCanvases(); });
+            postMessage([this] { synchroniseCanvases(); });
             return;
         }
     } else {
@@ -504,7 +529,7 @@ void McpHost::pushMcpTransaction(t_canvas* cnv, const juce::String& canvasName, 
         }
         session.mcpRedoStack[cnv].clear();
     }
-    juce::MessageManager::callAsync([this] {
+    postMessage([this] {
         for (auto* editor : processor.getEditors()) {
             editor->triggerAsyncUpdate();
         }
@@ -533,7 +558,7 @@ void McpHost::undoMcpTransaction(t_canvas* cnv)
         mcpBridge->replayPd(tx->replayAction, tx->inverse);
         session.isExecutingMcpUndoRedo = false;
     }
-    juce::MessageManager::callAsync([this] {
+    postMessage([this] {
         for (auto* editor : processor.getEditors()) {
             editor->triggerAsyncUpdate();
         }
@@ -558,7 +583,7 @@ void McpHost::redoMcpTransaction(t_canvas* cnv)
         mcpBridge->replayPd(tx->replayAction, tx->forward);
         session.isExecutingMcpUndoRedo = false;
     }
-    juce::MessageManager::callAsync([this] {
+    postMessage([this] {
         for (auto* editor : processor.getEditors()) {
             editor->triggerAsyncUpdate();
         }
@@ -572,7 +597,7 @@ void McpHost::clearMcpTransactions(t_canvas* cnv)
         session.mcpUndoStack.erase(cnv);
         session.mcpRedoStack.erase(cnv);
     }
-    juce::MessageManager::callAsync([this] {
+    postMessage([this] {
         for (auto* editor : processor.getEditors()) {
             editor->triggerAsyncUpdate();
         }

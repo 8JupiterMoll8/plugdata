@@ -65,7 +65,7 @@ void MCPBridge::pdAlign(const juce::String& action, const juce::OSCMessage& msg)
         if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
 
         if (cnv) {
-            juce::MessageManager::callAsync([proc = processor, cnv, canvasName, alignStr, targetIds, correlationId, bridge = this]() {
+            postMessage([proc = processor, cnv, canvasName, alignStr, targetIds, correlationId, bridge = this]() {
                 if (mcpCanvasGone(cnv)) { bridge->sendReply("/pd/align/reply/" + correlationId, 0.0f); return; } // P3.4 S4: closed since the handler ran
                 std::vector<t_gobj*> targets;
                 for (const auto& id : targetIds) {
@@ -97,7 +97,7 @@ void MCPBridge::pdZoomToFit(const juce::String& action, const juce::OSCMessage& 
         t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
         if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
 
-        juce::MessageManager::callAsync([proc = processor, cnv, correlationId, bridge = this]() {
+        postMessage([proc = processor, cnv, correlationId, bridge = this]() {
             if (mcpCanvasGone(cnv)) { bridge->sendReply("/pd/zoom_to_fit/reply/" + correlationId, 0.0f); return; } // P3.4 S4: closed since the handler ran
             if (proc->getMcp()->gui().zoomToFit(cnv)) {
                 bridge->sendReply("/pd/zoom_to_fit/reply/" + correlationId, 1.0f);

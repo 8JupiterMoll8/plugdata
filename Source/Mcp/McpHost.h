@@ -55,6 +55,13 @@ public:
     // no command thread touches an editor. Message thread only.
     void refreshFocusedRoot();
 
+    // P3.4 S8: callAsync that runs `fn` only while this host still exists (checked on the message thread,
+    // where the host is destroyed). Every callback the host posts goes through it.
+    void postMessage(std::function<void()> fn);
+    // P3.4 S8: called first in ~PluginProcessor (MCP-HOOK(teardown)), before the patches are freed: stops the
+    // bridge (receiver, command worker, background jobs) and drops the queued Pd jobs.
+    void shutdown();
+
     // P3.4 S3: run `fn` on the JUCE message thread and return its result (inline when already there).
     // Empty when the message thread did not start it within timeoutMs; it then never runs, so `fn` may
     // capture the caller's frame by reference. NEVER call it while holding sys_lock: the message thread may
@@ -169,5 +176,6 @@ private:
     FocusTimer focusTimer { *this };
 
 public:
+    JUCE_DECLARE_WEAK_REFERENCEABLE(McpHost)
     JUCE_DECLARE_NON_COPYABLE(McpHost)
 };

@@ -44,7 +44,7 @@ void McpHost::sysSelectionGate(SmallString const& selector, mcp::SysList const& 
 {
     // P3.4 S3: reads the editors' selections, so it runs on the message thread (Pd-only selector).
     if (!juce::MessageManager::getInstance()->isThisTheMessageThread()) {
-        juce::MessageManager::callAsync([this, selector, list] { sysSelectionGate(selector, list); });
+        postMessage([this, selector, list] { sysSelectionGate(selector, list); });
         return;
     }
     String msgStr(selector.toString());
@@ -143,7 +143,7 @@ void McpHost::sysClearSelection(SmallString const& selector, mcp::SysList const&
     // P3.4 S3: editors are message-thread objects (from the command worker this was 57 of a sweep's 61
     // JUCE assertions). No reply follows, so a hop keeps the protocol as it was.
     if (!juce::MessageManager::getInstance()->isThisTheMessageThread()) {
-        juce::MessageManager::callAsync([this, selector, list] { sysClearSelection(selector, list); });
+        postMessage([this, selector, list] { sysClearSelection(selector, list); });
         return;
     }
     for (auto* editor : processor.getEditors()) {

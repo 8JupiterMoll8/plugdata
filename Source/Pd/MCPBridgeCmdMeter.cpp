@@ -67,7 +67,7 @@ void MCPBridge::meterStop(const juce::String& meterAction, const juce::OSCMessag
     juce::String correlationId = msg.size() > 1 ? getArgString(msg[1]) : "";
     // P3.4 S5: on the message thread, where the timer collects results: one consumer per result queue
     // (TSan in S0: try_dequeue raced between the command thread and the timer).
-    juce::MessageManager::callAsync([this, probeId, correlationId] { probeManager.stopProbe(probeId, correlationId); });
+    postMessage([this, probeId, correlationId] { probeManager.stopProbe(probeId, correlationId); });
     return;
 }
 

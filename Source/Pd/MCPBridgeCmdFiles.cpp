@@ -287,7 +287,7 @@ void MCPBridge::pdSavePatch(const juce::String& action, const juce::OSCMessage& 
                 p->getMcp()->session.mcpStableObjectMap.erase(oldKey);
             }
             // P3.4 S3: the tab title is GUI state: set it on the message thread, if the canvas still exists.
-            juce::MessageManager::callAsync([p, cnv, f] {
+            p->getMcp()->postMessage([p, cnv, f] {
                 sys_lock();
                 bool const live = mcpCanvasIsLive(cnv);
                 sys_unlock();
@@ -374,7 +374,7 @@ void MCPBridge::pdLoadPatch(const juce::String& action, const juce::OSCMessage& 
         // GOP [cnv] — which instantiate JUCE Components. Creating those off
         // the message thread is illegal and was the intermittent load
         // crash. Same callAsync pattern as the native encapsulate handlers.
-        juce::MessageManager::callAsync(
+        postMessage(
             [proc = processor, canvasName, bodyText, sidecar, replyAddr, bridge = this]() {
                 int objectCount = 0;
                 sys_lock();
@@ -493,7 +493,7 @@ void MCPBridge::pdOpenPatch(const juce::String& action, const juce::OSCMessage& 
         // thread (fire-and-forget); TS verifies via `tabs`/census.
         sendReply(replyAddr, juce::String("opening: " + srcFile.getFullPathName()));
 
-        juce::MessageManager::callAsync(
+        postMessage(
             [p = processor, fileStr = srcFile.getFullPathName(), sidecar]() {
             bool opened = p->getMcp()->gui().openPatch(juce::File(fileStr));
             if (!opened) {
@@ -571,7 +571,7 @@ void MCPBridge::pdListTabs(const juce::String& action, const juce::OSCMessage& m
     auto correlationId = msg.size() > 0 ? getArgString(msg[0]) : "0";
     juce::String replyAddr = "/pd/list_tabs/reply/" + correlationId;
 
-    juce::MessageManager::callAsync([p = processor, bridge = this, replyAddr]() {
+    postMessage([p = processor, bridge = this, replyAddr]() {
         juce::Array<juce::var> list;
         for (auto const& tab : p->getMcp()->gui().listTabs()) {
             auto* o = new juce::DynamicObject();
@@ -609,7 +609,7 @@ void MCPBridge::pdFocusTab(const juce::String& action, const juce::OSCMessage& m
     auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : "0";
     juce::String replyAddr = "/pd/focus_tab/reply/" + correlationId;
 
-    juce::MessageManager::callAsync([p = processor, bridge = this, target, replyAddr]() {
+    postMessage([p = processor, bridge = this, target, replyAddr]() {
         if (auto title = p->getMcp()->gui().focusTab(target)) {
             bridge->sendReply(replyAddr, juce::String("focused: ") + *title);
             return;
@@ -630,7 +630,7 @@ void MCPBridge::pdCloseTab(const juce::String& action, const juce::OSCMessage& m
     auto correlationId = msg.size() > 2 ? getArgString(msg[2]) : "0";
     juce::String replyAddr = "/pd/close_tab/reply/" + correlationId;
 
-    juce::MessageManager::callAsync([p = processor, bridge = this, target, force, replyAddr]() {
+    postMessage([p = processor, bridge = this, target, force, replyAddr]() {
         auto const closed = p->getMcp()->gui().closeTab(target, force >= 0.5f);
         if (closed.status == McpGuiHost::CloseResult::Dirty) {
             bridge->sendReply(replyAddr, juce::String(

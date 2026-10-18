@@ -1157,7 +1157,7 @@ void MCPBridge::pdBatchAtomic(const juce::String& action, const juce::OSCMessage
             } else {
                 // Report F3: runLayout captures this frame by reference.
                 auto layoutHandoff = std::make_shared<mcp::OneShotHandoff>();
-                juce::MessageManager::callAsync([&runLayout, layoutHandoff]() {
+                postMessage([&runLayout, layoutHandoff]() {
                     if (!layoutHandoff->begin())
                         return; // abandoned: the frame may be gone
                     mcp::OneShotHandoff::FinishGuard finishGuard(*layoutHandoff);
@@ -1172,7 +1172,7 @@ void MCPBridge::pdBatchAtomic(const juce::String& action, const juce::OSCMessage
                 if (processor) processor->getMcp()->synchroniseCanvases();
             } else {
                 // Decoupled UI viewport sync - non-blocking async idle dispatch
-                juce::MessageManager::callAsync([p = processor] {
+                postMessage([p = processor] {
                     if (p) p->getMcp()->synchroniseCanvases();
                 });
             }
@@ -1192,7 +1192,7 @@ void MCPBridge::pdBatchAtomic(const juce::String& action, const juce::OSCMessage
             if (juce::MessageManager::getInstance()->isThisTheMessageThread()) {
                 frameIfCreateOffscreen();
             } else {
-                juce::MessageManager::callAsync(frameIfCreateOffscreen);
+                postMessage(frameIfCreateOffscreen);
             }
         }
 

@@ -17,7 +17,7 @@ void MCPBridge::pdPing(const juce::String& action, const juce::OSCMessage& msg)
 void MCPBridge::pdClearConsole(const juce::String& action, const juce::OSCMessage& msg)
 {
     if (processor) {
-        juce::MessageManager::callAsync([proc = processor] {
+        postMessage([proc = processor] {
             proc->getConsoleMessages().clear();
             proc->getMcp()->gui().clearConsole();
         });
@@ -83,7 +83,7 @@ void MCPBridge::pdClear(const juce::String& action, const juce::OSCMessage& msg)
         // Clear on the JUCE message thread. Deleting GUI/abstraction/GOP
         // objects off the message thread crashes (same class as the load
         // bug). clearCanvas() deselects the editor + glist_delete.
-        juce::MessageManager::callAsync(
+        postMessage(
             [proc = processor, canvasName, correlationId, bridge = this]() {
                 sys_lock();
                 t_canvas* cnv = proc->getMcp()->getCanvasBySymbol(canvasName);
@@ -152,7 +152,7 @@ void MCPBridge::pdUndo(const juce::String& action, const juce::OSCMessage& msg)
         if (!cnv && (canvasName == "pd-main" || canvasName == "main" || canvasName.isEmpty())) cnv = pd_this->pd_canvaslist;
 
         if (cnv) {
-            juce::MessageManager::callAsync([proc = processor, cnv, correlationId, bridge = this]() {
+            postMessage([proc = processor, cnv, correlationId, bridge = this]() {
                 if (mcpCanvasGone(cnv)) { bridge->sendReply("/pd/undo/reply/" + correlationId, 0.0f); return; } // P3.4 S4: closed since the handler ran
                 if (proc->getMcp()->hasMcpTransaction(cnv)) {
                     proc->getMcp()->undoMcpTransaction(cnv);
@@ -191,7 +191,7 @@ void MCPBridge::pdRedo(const juce::String& action, const juce::OSCMessage& msg)
         if (!cnv && (canvasName == "pd-main" || canvasName == "main" || canvasName.isEmpty())) cnv = pd_this->pd_canvaslist;
 
         if (cnv) {
-            juce::MessageManager::callAsync([proc = processor, cnv, correlationId, bridge = this]() {
+            postMessage([proc = processor, cnv, correlationId, bridge = this]() {
                 if (mcpCanvasGone(cnv)) { bridge->sendReply("/pd/redo/reply/" + correlationId, 0.0f); return; } // P3.4 S4: closed since the handler ran
                 if (proc->getMcp()->hasMcpRedoTransaction(cnv)) {
                     proc->getMcp()->redoMcpTransaction(cnv);

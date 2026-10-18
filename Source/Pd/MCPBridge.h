@@ -276,6 +276,18 @@ public:
     bool start();
     void stop();
     bool isConnected() const;
+    // P3.4 S8: new ports on the SAME object (it used to be destroyed and rebuilt while the audio thread could be
+    // inside audioTick/midiInputTick). Restarts only when it was running.
+    void rebind(int newListenPort, int newSendPort);
+    // P3.4 S8: before the processor frees its patches: stop receiving, finish or cancel the background jobs
+    // (offline render, voice analysis), and drop what is still to be posted. Idempotent; the destructor calls it.
+    void shutdown();
+    bool isShuttingDown() const { return shuttingDown.load(std::memory_order_acquire); }
+    // P3.4 S8: callAsync that runs `fn` only while this bridge still exists (checked on the message thread,
+    // where the bridge is destroyed, so the check cannot race the destruction).
+    void postMessage(std::function<void()> fn);
+    // Background work owned by the bridge (was std::thread(...).detach()); joined by shutdown().
+    void runJob(std::function<void()> job);
 
     // Tests only (Tests/mcp/bridge_handler_tests.cpp): replies go to `sink` instead of a socket, and the bridge
     // counts as active so sendReply sends. Call stop() first; nothing is bound.
@@ -625,6 +637,9 @@ private:
     std::function<void(const juce::String&, const juce::String&)> chatCallback;
     juce::CriticalSection chatLock;
 
+    std::atomic<bool> shuttingDown { false };
+    juce::ThreadPool jobPool { 2 }; // P3.4 S8: offline render, voice analysis
+
     // Plan 3 P3.4 S1: the network thread only posts; every command runs here, one at a time, in arrival
     // order (the order the network thread used to run them in). Declared last: destroyed first.
     mcp::SerialWorker<juce::OSCMessage> commandWorker;
@@ -636,6 +651,7 @@ private:
     bool runInPdContext(CommandHandler handler, const juce::String& action, const juce::OSCMessage& msg);
     void startCommandWorker();
 
+    JUCE_DECLARE_WEAK_REFERENCEABLE(MCPBridge)
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MCPBridge)
 };
 

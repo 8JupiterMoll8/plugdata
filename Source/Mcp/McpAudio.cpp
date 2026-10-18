@@ -124,13 +124,18 @@ void McpHost::pdBlock(float* audioVectorIn, float* audioVectorOut, int const pdB
 
 void McpHost::enqueuePd(std::function<void()> job)
 {
+    if (session.mcpShuttingDown.load(std::memory_order_acquire))
+        return; // P3.4 S8: after shutdown nothing may touch the patches
     session.mcpPdQueue.enqueue(std::move(job));
     // One posted drain at a time; a job queued after the drain has started schedules the next one.
     if (!session.mcpPdDrainPosted.exchange(true, std::memory_order_acq_rel)) {
         if (auto* mm = juce::MessageManager::getInstanceWithoutCreating()) {
-            mm->callAsync([this] {
-                session.mcpPdDrainPosted.store(false, std::memory_order_release);
-                drainPdQueue();
+            mm->callAsync([weak = juce::WeakReference<McpHost>(this)] { // P3.4 S8: the host may be gone
+                auto* self = weak.get();
+                if (self == nullptr)
+                    return;
+                self->session.mcpPdDrainPosted.store(false, std::memory_order_release);
+                self->drainPdQueue();
             });
         } else {
             session.mcpPdDrainPosted.store(false, std::memory_order_release);

@@ -437,6 +437,7 @@ struct McpSession {
     // editing context). Upstream's functionQueue stays upstream's.
     moodycamel::ConcurrentQueue<std::function<void()>> mcpPdQueue { 256 };
     std::atomic<bool> mcpPdDrainPosted { false }; // a drainPdQueue callAsync is pending
+    std::atomic<bool> mcpShuttingDown { false };  // P3.4 S8: McpHost::shutdown ran; no more Pd jobs
 
     // P3.4 S3: the focused editor's true root canvas, written only by the message thread
     // (McpHost::refreshFocusedRoot); readers validate it against pd_canvaslist.

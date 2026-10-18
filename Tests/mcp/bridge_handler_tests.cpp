@@ -252,6 +252,16 @@ void runMidiCaptureCases(PluginProcessor& processor, AudioControl& audio)
     CHECK(!bridge->isMidiCapturing());
 }
 
+// Teardown during work (P3.4 S8): start a long offline render and return; main() then destroys the processor
+// while the render job runs. McpHost::shutdown (first thing in ~PluginProcessor) must cancel it before the
+// patches go: the job used to be a detached std::thread holding raw processor and bridge pointers.
+void startRenderForTeardown(Harness& h)
+{
+    std::printf("teardown during a render\n");
+    auto r = h.call("/pd/render", { "teardown-render.wav", 20, 0, "td1" }, "/pd/render/started/td1", 3000);
+    CHECK(r.has_value());
+}
+
 void runCases(Harness& h)
 {
     // ── answers without a canvas ─────────────────────────────────────────────────────────────────
@@ -488,6 +498,7 @@ int main()
             runCases(harness);
             runPdContextCases(processor, audioControl);
             runMidiCaptureCases(processor, audioControl);
+            startRenderForTeardown(harness); // last: the processor is destroyed with the render running
             casesDone.store(true);
             stopMessageLoop();
         });

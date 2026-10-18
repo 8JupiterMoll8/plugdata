@@ -218,7 +218,7 @@ void MCPBridge::pdUiOpenReference(const juce::String& action, const juce::OSCMes
         auto objectName = getArgString(msg[0]);
         auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : juce::String("0");
 
-        juce::MessageManager::callAsync([proc = processor, objectName, correlationId, this] {
+        postMessage([proc = processor, objectName, correlationId, this] {
             if (proc->getMcp()->gui().showObjectReference(objectName)) {
                 sendReply("/pd/ui_open_reference/reply/" + correlationId, 1.0f);
             } else {
@@ -236,7 +236,7 @@ void MCPBridge::pdUiOpenHelp(const juce::String& action, const juce::OSCMessage&
         auto objectName = getArgString(msg[0]);
         auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : juce::String("0");
 
-        juce::MessageManager::callAsync([proc = processor, objectName, correlationId, this] {
+        postMessage([proc = processor, objectName, correlationId, this] {
             auto helpFile = pd::Library::findHelpfile(objectName);
             if (helpFile.existsAsFile()) {
                 if (proc->getMcp()->gui().openHelpPatch(helpFile)) {
@@ -256,7 +256,7 @@ void MCPBridge::pdViewport(const juce::String& action, const juce::OSCMessage& m
     auto canvasName = msg.size() > 0 ? getArgString(msg[0]) : juce::String("main");
     auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : juce::String("0");
 
-    juce::MessageManager::callAsync([proc = processor, canvasName, correlationId, this] {
+    postMessage([proc = processor, canvasName, correlationId, this] {
         if (auto info = proc->getMcp()->gui().focusedViewport()) {
             juce::OSCMessage reply(juce::OSCAddressPattern("/pd/viewport/reply/" + correlationId));
             reply.addArgument(info->zoom);

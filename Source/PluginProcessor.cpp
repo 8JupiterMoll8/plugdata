@@ -204,6 +204,7 @@ PluginProcessor::PluginProcessor()
 
 PluginProcessor::~PluginProcessor()
 {
+    mcp->shutdown(); // MCP-HOOK(teardown)
     // Deleting the pd instance in ~PdInstance() will also free all the Pd patches
     patches.clear();
 

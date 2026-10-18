@@ -26,7 +26,7 @@ void MCPBridge::pdSelect(const juce::String& action, const juce::OSCMessage& msg
     if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
     if (!cnv) { sendReply("/pd/select/reply/" + correlationId, 0.0f); return; }
 
-    juce::MessageManager::callAsync([proc = processor, cnv, canvasName, ids, correlationId, bridge = this]() {
+    postMessage([proc = processor, cnv, canvasName, ids, correlationId, bridge = this]() {
         if (mcpCanvasGone(cnv)) { bridge->sendReply("/pd/select/reply/" + correlationId, 0.0f); return; } // P3.4 S4: closed since the handler ran
         std::vector<t_gobj*> targets;
         for (const auto& id : ids) {
@@ -90,7 +90,7 @@ void MCPBridge::pdAiOverlay(const juce::String& action, const juce::OSCMessage& 
     if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
     if (!cnv) { sendReply("/pd/ai_overlay/reply/" + correlationId, 0.0f); return; }
 
-    juce::MessageManager::callAsync([proc = processor, cnv, canvasName, state, transient, ids, correlationId, bridge = this]() {
+    postMessage([proc = processor, cnv, canvasName, state, transient, ids, correlationId, bridge = this]() {
         if (mcpCanvasGone(cnv)) { bridge->sendReply("/pd/ai_overlay/reply/" + correlationId, 0.0f); return; } // P3.4 S4: closed since the handler ran
         juce::ScopedLock overlaySl(proc->getMcp()->session.mcpOverlayLock);
         if (state == 0 && ids.empty()) {
@@ -143,7 +143,7 @@ void MCPBridge::pdAiGhost(const juce::String& action, const juce::OSCMessage& ms
 
     auto parsed = juce::JSON::parse(jsonStr);
 
-    juce::MessageManager::callAsync([proc = processor, cnv, canvasName, correlationId, bridge = this, parsed]() {
+    postMessage([proc = processor, cnv, canvasName, correlationId, bridge = this, parsed]() {
         if (mcpCanvasGone(cnv)) { bridge->sendReply("/pd/ai_ghost/reply/" + correlationId, 0.0f); return; } // P3.4 S4: closed since the handler ran
         juce::ScopedLock overlaySl(proc->getMcp()->session.mcpOverlayLock);
         proc->getMcp()->session.mcpGhosts.clear();
@@ -199,7 +199,7 @@ void MCPBridge::pdAiAnnotate(const juce::String& action, const juce::OSCMessage&
 
     auto parsed = juce::JSON::parse(jsonStr);
 
-    juce::MessageManager::callAsync([proc = processor, cnv, canvasName, correlationId, bridge = this, parsed]() {
+    postMessage([proc = processor, cnv, canvasName, correlationId, bridge = this, parsed]() {
         if (mcpCanvasGone(cnv)) { bridge->sendReply("/pd/ai_annotate/reply/" + correlationId, 0.0f); return; } // P3.4 S4: closed since the handler ran
         juce::ScopedLock overlaySl(proc->getMcp()->session.mcpOverlayLock);
         proc->getMcp()->session.mcpAnnotations.clear();
@@ -305,7 +305,7 @@ void MCPBridge::pdAiRegion(const juce::String& action, const juce::OSCMessage& m
 
     auto parsed = juce::JSON::parse(jsonStr);
 
-    juce::MessageManager::callAsync([proc = processor, cnv, canvasName, correlationId, bridge = this, parsed]() {
+    postMessage([proc = processor, cnv, canvasName, correlationId, bridge = this, parsed]() {
         if (mcpCanvasGone(cnv)) { bridge->sendReply("/pd/ai_region/reply/" + correlationId, 0.0f); return; } // P3.4 S4: closed since the handler ran
         // DEADLOCK FIX: resolve bounds under the Pd lock WITHOUT holding
         // mcpOverlayLock. The GUI/render path takes sys_lock -> mcpOverlayLock;
@@ -382,7 +382,7 @@ void MCPBridge::pdAiHud(const juce::String& action, const juce::OSCMessage& msg)
 
     auto parsed = juce::JSON::parse(jsonStr);
 
-    juce::MessageManager::callAsync([proc = processor, cnv, correlationId, bridge = this, parsed]() {
+    postMessage([proc = processor, cnv, correlationId, bridge = this, parsed]() {
         if (mcpCanvasGone(cnv)) { bridge->sendReply("/pd/ai_hud/reply/" + correlationId, 0.0f); return; } // P3.4 S4: closed since the handler ran
         juce::ScopedLock overlaySl(proc->getMcp()->session.mcpOverlayLock);
         proc->getMcp()->session.mcpHud = McpSession::McpHud();
@@ -413,7 +413,7 @@ void MCPBridge::pdGetOverlays(const juce::String& action, const juce::OSCMessage
     t_canvas* cnv = processor ? processor->getMcp()->getCanvasBySymbol(canvasName) : nullptr;
     if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
 
-    juce::MessageManager::callAsync([proc = processor, cnv, correlationId, bridge = this]() {
+    postMessage([proc = processor, cnv, correlationId, bridge = this]() {
         if (mcpCanvasGone(cnv)) { bridge->sendReply("/pd/get_overlays/reply/" + correlationId, juce::String("{\"error\":\"canvas closed\"}")); return; } // P3.4 S4: closed since the handler ran
         int mask = proc ? proc->getMcp()->gui().overlayMask(cnv).value_or(0) : 0;
         juce::DynamicObject::Ptr obj = new juce::DynamicObject();
@@ -452,7 +452,7 @@ void MCPBridge::pdSetOverlays(const juce::String& action, const juce::OSCMessage
     t_canvas* cnv = processor ? processor->getMcp()->getCanvasBySymbol(canvasName) : nullptr;
     if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
 
-    juce::MessageManager::callAsync([proc = processor, cnv, canvasName, argStr, correlationId, bridge = this]() {
+    postMessage([proc = processor, cnv, canvasName, argStr, correlationId, bridge = this]() {
         if (mcpCanvasGone(cnv)) { bridge->sendReply("/pd/set_overlays/reply/" + correlationId, juce::String("{\"error\":\"canvas closed\"}")); return; } // P3.4 S4: closed since the handler ran
         auto const viewMask = proc ? proc->getMcp()->gui().overlayMask(cnv) : std::nullopt;
         if (!viewMask) {
@@ -540,7 +540,7 @@ void MCPBridge::pdMoodboard(const juce::String& action, const juce::OSCMessage& 
     // The multimodal brief rail: every visible moodboard artifact with paths,
     // coordinates, bindings and the structured voice takes.
     auto correlationId = msg.size() > 0 ? getArgString(msg[0]) : juce::String("0");
-    juce::MessageManager::callAsync([proc = processor, correlationId, this] {
+    postMessage([proc = processor, correlationId, this] {
         juce::Array<juce::var> imagesArr, notesArr, takesArr, midiTakesArr, selArr;
         juce::String strokesJson = "[]";
         juce::String bboxJson = "{}";
@@ -651,7 +651,7 @@ void MCPBridge::pdScreenshotCanvas(const juce::String& action, const juce::OSCMe
         // after the view is resolved, so it always walks the exact canvas that
         // was rendered — never a stale/null pre-resolved cnv. sys_lock from the
         // Message Thread is safe (same pattern as /pd/diagnose).
-        juce::MessageManager::callAsync([proc = processor, cnv, scale, correlationId, bridge = this,
+        postMessage([proc = processor, cnv, scale, correlationId, bridge = this,
                                          wantLabels, canvasName]() {
             if (mcpCanvasGone(cnv)) { bridge->sendReply("/pd/screenshot_canvas/reply/" + correlationId, juce::String("error: canvas closed")); return; } // P3.4 S4: closed since the handler ran
             McpGuiHost::LabelSource labelSource = [proc, canvasName](t_canvas* liveCnv) {
@@ -741,7 +741,7 @@ void MCPBridge::pdGemCapture(const juce::String& action, const juce::OSCMessage&
     float scale         = msg.size() >= 2 ? static_cast<float>(getArgFloat(msg[1])) : 0.75f;
     scale = juce::jlimit(0.1f, 2.0f, scale);
 
-    juce::MessageManager::callAsync([proc = processor, scale, correlationId, bridge = this]() {
+    postMessage([proc = processor, scale, correlationId, bridge = this]() {
 #if ENABLE_GEM
         auto img = proc->getMcp()->gui().captureGemWindow();
         if (!img.isValid()) {

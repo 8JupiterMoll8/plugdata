@@ -45,7 +45,7 @@ MCPBridge::MCPBridge(PluginProcessor* proc, int inPort, int outPort)
 
 MCPBridge::~MCPBridge()
 {
-    stop();
+    shutdown();
     // Phase 4: release any still-armed control receiver (the Pd instance is
     // still alive at this point — members destruct before ~PdInstance).
     if (controlWindow && controlWindow->receiver) {
@@ -53,6 +53,42 @@ MCPBridge::~MCPBridge()
         controlWindow->unbindReceiver();
         sys_unlock();
     }
+}
+
+void MCPBridge::rebind(int const newListenPort, int const newSendPort)
+{
+    bool const wasActive = active.load();
+    stop();
+    listenPort = newListenPort;
+    sendPort = newSendPort;
+    if (wasActive)
+        start();
+}
+
+void MCPBridge::shutdown()
+{
+    if (shuttingDown.exchange(true, std::memory_order_acq_rel))
+        return;
+    stop(); // receiver, command worker, timer
+    // The render loop checks isShuttingDown() every block; voice analysis is short. A job that does not end
+    // in 10 s is logged and waited for by the pool's own destructor.
+    if (!jobPool.removeAllJobs(true, 10000))
+        std::fprintf(stderr, "MCP bridge: a background job did not stop within 10 s at shutdown\n");
+}
+
+void MCPBridge::postMessage(std::function<void()> fn)
+{
+    juce::MessageManager::callAsync([weak = juce::WeakReference<MCPBridge>(this), fn = std::move(fn)] {
+        if (weak.get() != nullptr)
+            fn();
+    });
+}
+
+void MCPBridge::runJob(std::function<void()> job)
+{
+    if (isShuttingDown())
+        return;
+    jobPool.addJob(std::move(job));
 }
 
 bool MCPBridge::start()
@@ -1692,15 +1728,19 @@ void MCPBridge::enqueueSeqFire(bool isBang, t_symbol* sym, float value)
 }
 
 // Audio thread, after a Pd sub-block: send the collected step fires before the next performDSP (where the
-// old functionQueue route ran them). Under the Pd lock, tried only: if another thread holds it, the fires
-// stay and go out after the next sub-block.
+// old functionQueue route ran them), under the Pd lock. If another thread holds it, wait: it is the same lock
+// libpd_process_raw takes for the next sub-block a moment later, so this adds no new kind of stall, and the
+// steps stay block-accurate (S6 deferred them instead and lost up to two blocks under GUI load, S8 gate).
+// That one wait is deliberately not counted by the realtime guard.
 void MCPBridge::flushSeqFires()
 {
     if (seqPendingCount == 0 || processor == nullptr)
         return;
-    juce::ScopedTryLock const pdLock(processor->audioLock);
-    if (!pdLock.isLocked())
-        return;
+    auto const& pdLock = processor->audioLock;
+    if (!pdLock.tryEnter()) {
+        mcp::rt::Pause const sameWaitAsPerformDsp;
+        pdLock.enter();
+    }
     mcp::rt::Pause const patchWork; // what the patch does with the message is not the bridge's (realtime guard)
     for (int i = 0; i < seqPendingCount; ++i) {
         auto const& f = seqPendingFires[static_cast<size_t>(i)];
@@ -1712,6 +1752,7 @@ void MCPBridge::flushSeqFires()
         }
     }
     seqPendingCount = 0;
+    pdLock.exit();
 }
 
 void MCPBridge::audioTick()
@@ -1992,9 +2033,9 @@ void MCPBridge::analyzeCapturedVoice()
     int const declaredMode = voiceCaptureMode.exchange(0, std::memory_order_acq_rel);
     sendConsoleLog("MCP: Analyzing voice take (" + juce::String(totalSamples) + " samples)...", false);
 
-    std::thread([this, totalSamples, sampleRate, declaredMode] {
+    runJob([this, totalSamples, sampleRate, declaredMode] { // P3.4 S8: owned, joined at shutdown
         parseVoiceBufferToJson(voiceCaptureBuffer.data(), totalSamples, sampleRate, declaredMode);
-    }).detach();
+    });
 }
 
 // ── MIDI Melodic-Intent Capture ──────────────────────────────────────────────
@@ -2398,7 +2439,7 @@ void MCPBridge::stopMidiTake()
 
     if (processor) {
         // P3.4 S3: the caller may be a timer, the audio-side stop path or the command worker.
-        juce::MessageManager::callAsync([p = processor] { p->getMcp()->gui().repaintAll(); });
+        postMessage([p = processor] { p->getMcp()->gui().repaintAll(); });
     }
 }
 
@@ -3377,7 +3418,7 @@ void MCPBridge::setChatCallback(std::function<void(const juce::String& role, con
 
 void MCPBridge::postChatMessage(const juce::String& role, const juce::String& text)
 {
-    juce::MessageManager::callAsync([this, role, text]() {
+    postMessage([this, role, text]() {
         juce::ScopedLock sl(chatLock);
         if (chatCallback) {
             chatCallback(role, text);

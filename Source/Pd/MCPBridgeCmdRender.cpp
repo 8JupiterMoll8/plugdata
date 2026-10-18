@@ -91,6 +91,11 @@ static void runOfflineRender(PluginProcessor* processor, juce::String const& fil
     juce::String failReason;
 
     for (int64 b = 0; b < totalBlocks && renderOk; ++b) {
+        if (bridge && bridge->isShuttingDown()) { // P3.4 S8: the app is closing
+            renderOk = false;
+            failReason = "render cancelled: plugdata is shutting down";
+            break;
+        }
         int64 const sampleOff = b * pdBlockSize;
         int const samplesThisBlock = (int)std::min<int64>(pdBlockSize, totalSamples - sampleOff);
 
@@ -282,11 +287,11 @@ void MCPBridge::pdRender(const juce::String& action, const juce::OSCMessage& msg
 
         sendRawReply("/pd/render/started/" + correlationId);
 
-        // Detached one-shot render thread — owns the graph for its lifetime.
-        std::thread([proc = processor, filePath = filePath, durationSec, analyze,
+        // One-shot render job (P3.4 S8: on the bridge's pool, joined at shutdown) — owns the graph for its lifetime.
+        runJob([proc = processor, filePath = filePath, durationSec, analyze,
                      correlationId = correlationId, bridge = this]() {
             runOfflineRender(proc, filePath, durationSec, analyze, correlationId, bridge);
-        }).detach();
+        }); // P3.4 S8: owned, joined at shutdown
     } else if (processor) {
         auto correlationId = (msg.size() >= 4) ? getArgString(msg[3]) : "0";
         sendReply("/pd/render/error/" + correlationId, juce::String("usage: /pd/render <path> <durationSec> [analyze] [corrId]"));

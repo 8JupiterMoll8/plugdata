@@ -25,7 +25,7 @@ void MCPBridge::pdEncapsulate(const juce::String& action, const juce::OSCMessage
         if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
 
         if (cnv) {
-            juce::MessageManager::callAsync([proc = processor, cnv, canvasName, subpatchName, targetIds, correlationId, bridge = this]() {
+            postMessage([proc = processor, cnv, canvasName, subpatchName, targetIds, correlationId, bridge = this]() {
                 if (mcpCanvasGone(cnv)) { bridge->sendReply("/pd/encapsulate/reply/" + correlationId, 0.0f); return; } // P3.4 S4: closed since the handler ran
                 if (!proc->getMcp()->gui().ensureView(cnv)) {
                     bridge->sendReply("/pd/encapsulate/reply/" + correlationId, 0.0f);
@@ -168,7 +168,7 @@ void MCPBridge::pdEncapsulateToFile(const juce::String& action, const juce::OSCM
         if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
 
         if (cnv) {
-            juce::MessageManager::callAsync([proc = processor, cnv, canvasName, abstrName, filePath, targetIds, correlationId, bridge = this]() {
+            postMessage([proc = processor, cnv, canvasName, abstrName, filePath, targetIds, correlationId, bridge = this]() {
                 if (mcpCanvasGone(cnv)) { bridge->sendReply("/pd/encapsulate_to_file/reply/" + correlationId, 0.0f); return; } // P3.4 S4: closed since the handler ran
                 if (!proc->getMcp()->gui().ensureView(cnv)) {
                     bridge->sendReply("/pd/encapsulate_to_file/reply/" + correlationId, 0.0f);
@@ -429,7 +429,7 @@ void MCPBridge::pdEncapsulateGop(const juce::String& action, const juce::OSCMess
             if (!cnv) {
                 sendReply(replyAddr, juce::String("{\"ok\":false,\"error\":\"GOP_NO_CANVAS\",\"detail\":\"" + jsonEscape(canvasName) + "\"}"));
             } else {
-                juce::MessageManager::callAsync([proc = processor, cnv, canvasName, safeName, filePath, targetIds, inbound, outbound, posX, posY, correlationId, replyAddr, bridge = this]() {
+                postMessage([proc = processor, cnv, canvasName, safeName, filePath, targetIds, inbound, outbound, posX, posY, correlationId, replyAddr, bridge = this]() {
                     if (mcpCanvasGone(cnv)) { bridge->sendReply(replyAddr, juce::String("{\"ok\":false,\"error\":\"GOP_NO_CANVAS\",\"detail\":\"canvas closed\"}")); return; } // P3.4 S4: closed since the handler ran
                     // Phase 3: reconcile identity BEFORE resolving so a stale id
                     // can't resolve to a live-but-wrong object (same guarantee as
