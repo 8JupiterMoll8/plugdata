@@ -48,6 +48,8 @@ void MCPBridge::pdIdentitySnapshot(const juce::String& action, const juce::OSCMe
         auto* rootObj = new juce::DynamicObject();
         rootObj->setProperty("version", static_cast<juce::int64>(version));
         rootObj->setProperty("canvas", canvasName);
+        // P3.5 S6: the canvas's wire key and its own version ("version" stays the global counter).
+        rootObj->setProperty("canvasKey", juce::String(processor->getMcp()->identity.keyOf(cnv)));
         rootObj->setProperty("totalObjects", totalObjects);
 
         juce::Array<juce::var> entries;
@@ -99,12 +101,13 @@ void MCPBridge::pdIdentitySnapshot(const juce::String& action, const juce::OSCMe
                 canvasMap.erase(staleIt); // P3.5 S5: keep the serial: the address may belong to a new, bound object
         }
         if (!toEvict.empty()) {
-            processor->getMcp()->identity.bumpVersion();
+            processor->getMcp()->identity.bumpVersion(cnv);
             version = processor->getMcp()->identity.version();
             rootObj->setProperty("version", static_cast<juce::int64>(version));
             rootObj->setProperty("evicted", static_cast<int>(toEvict.size()));
         }
 
+        rootObj->setProperty("canvasVersion", static_cast<juce::int64>(processor->getMcp()->identity.canvasVersion(cnv)));
         rootObj->setProperty("entryCount", entries.size());
         rootObj->setProperty("entries", entries);
 
@@ -120,13 +123,27 @@ void MCPBridge::pdIdentitySnapshot(const juce::String& action, const juce::OSCMe
 
 void MCPBridge::pdIdentityVersion(const juce::String& action, const juce::OSCMessage& msg)
 {
-    // /pd/identity_version <correlationId>
-    // Returns the current identity version counter.
-    // Ultra-cheap: one atomic read, no locks, no canvas walk.
-    // Node.js uses this to decide if a full snapshot fetch is needed.
+    // Node.js uses this to decide if a full snapshot fetch is needed (cheap: one walk of the open canvases).
+    // P3.5 S6: /pd/identity_version <corrId> [canvas]. It first looks at every open canvas (registerOpenCanvases
+    // takes each structure stamp), so a GUI edit since the last look bumps the version now. With a canvas: that
+    // canvas's version; without: the global counter (bumped by every canvas change).
     if (msg.size() >= 1 && processor) {
         auto correlationId = getArgString(msg[0]);
-        uint64_t version = processor->getMcp()->identity.version();
+        uint64_t version = 0;
+        {
+            McpHost::PdLockScope lock(*processor);
+            processor->getMcp()->registerOpenCanvases();
+            if (msg.size() >= 2) {
+                auto* cnv = processor->getMcp()->getCanvasBySymbol(normalizeCanvas(getArgString(msg[1])));
+                if (!cnv) {
+                    sendReply("/pd/identity_version/error/" + correlationId, juce::String("Canvas not found: " + getArgString(msg[1])));
+                    return;
+                }
+                version = processor->getMcp()->identity.canvasVersion(cnv);
+            } else {
+                version = processor->getMcp()->identity.version();
+            }
+        }
 
         juce::OSCMessage reply { juce::OSCAddressPattern("/pd/identity_version/reply/" + correlationId) };
         reply.addArgument(static_cast<int32>(static_cast<int>(version & 0x7FFFFFFF)));
@@ -184,7 +201,7 @@ void MCPBridge::pdRenameId(const juce::String& action, const juce::OSCMessage& m
                 auto& map = processor->getMcp()->identity.canvasMap(cnv);
                 auto const renamed = mcp::identity::renameStableId(map, oldId, newId);
                 if (renamed == mcp::identity::RenameResult::Applied)
-                    processor->getMcp()->identity.bumpVersion();
+                    processor->getMcp()->identity.bumpVersion(cnv);
                 taken = renamed == mcp::identity::RenameResult::Taken;
                 success = renamed == mcp::identity::RenameResult::Applied || renamed == mcp::identity::RenameResult::NoOp;
             }
@@ -226,7 +243,7 @@ void MCPBridge::pdRenameIdBatch(const juce::String& action, const juce::OSCMessa
                 if (result == mcp::identity::RenameResult::Taken) takenIds.push_back(newId); // P3.5 S4 (C5)
             }
             if (changed)
-                processor->getMcp()->identity.bumpVersion();
+                processor->getMcp()->identity.bumpVersion(cnv);
         }
 
         auto correlationId = (cursor < msg.size()) ? getArgString(msg[cursor]) : "0";

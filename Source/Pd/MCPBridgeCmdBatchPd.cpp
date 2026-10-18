@@ -85,7 +85,7 @@ void mcp::BatchJob::reconcile(const std::string& canonStr)
         }
         for (auto& id : toEvict) {
             canvasMap.erase(id);
-            processor->getMcp()->identity.bumpVersion();
+            processor->getMcp()->identity.bumpVersion(cnv);
             reconcileEvicted++;
         }
 
@@ -123,7 +123,7 @@ void mcp::BatchJob::reconcile(const std::string& canonStr)
                     autoId = evictedEditIds[evictedEditIdx++];
                     canvasMap[autoId] = y;
                     processor->getMcp()->identity.assignSerial(y);
-                    processor->getMcp()->identity.bumpVersion();
+                    processor->getMcp()->identity.bumpVersion(cnv);
                 } else {
                     // P3.5 S4: the one minter (it binds and bumps).
                     processor->getMcp()->identity.mint(cnv, y, McpHost::mintPrefix(y).toStdString());
@@ -237,7 +237,7 @@ void mcp::BatchJob::deletePhase(const std::string& canonStr)
         if (obj) {
             processor->getMcp()->identity.canvasMap(cnv).erase(pd.objectId.toStdString());
             processor->getMcp()->identity.eraseSerial(obj);
-            processor->getMcp()->identity.bumpVersion();
+            processor->getMcp()->identity.bumpVersion(cnv);
             toDelete.add(obj);
             deleted++;
         }
@@ -276,7 +276,7 @@ void mcp::BatchJob::editPhase(const std::string& canonStr)
                 if (newObj) {
                     // The retyped object takes over its id (the old one is freed, so this is no theft).
                     if (processor->getMcp()->identity.bind(cnv, pe.objectId.toStdString(), newObj) == mcp::IdentityService::BindResult::Same)
-                        processor->getMcp()->identity.bumpVersion(); // the edit itself is an identity change
+                        processor->getMcp()->identity.bumpVersion(cnv); // the edit itself is an identity change
                     // C++ truth: when a class can't be instantiated Pd
                     // substitutes text_class (g_text.c canvas_objtext,
                     // "... couldn't create") and leaves an ERROR BOX — the

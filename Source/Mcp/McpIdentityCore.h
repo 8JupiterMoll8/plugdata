@@ -137,6 +137,7 @@ public:
                 continue;
             }
             auto& r = it->second;
+            bool droppedHere = false;
             for (auto e = r.ids.begin(); e != r.ids.end();) {
                 if (entryValid(r, e->first, e->second)) {
                     ++e;
@@ -144,8 +145,11 @@ public:
                 }
                 r.boundSerial.erase(e->first);
                 e = r.ids.erase(e);
-                dropped = true;
+                droppedHere = true;
             }
+            if (droppedHere)
+                ++r.version;
+            dropped = dropped || droppedHere;
             ++it;
         }
         // S5: serials are collected only here, by their own weak reference: dropping a record or an entry must
@@ -208,7 +212,7 @@ public:
         r.ids[id] = obj;
         assignSerial(obj);
         r.boundSerial[id] = serials[obj].serial;
-        bumpVersion();
+        bump(r);
         return BindResult::Bound;
     }
 
@@ -237,7 +241,7 @@ public:
         r.ids[id] = obj;
         ensureSerial(obj);
         r.boundSerial[id] = serials[obj].serial;
-        bumpVersion();
+        bump(r);
         return id;
     }
 
@@ -276,7 +280,7 @@ public:
                 bound = to;
                 assignSerial(to);
                 r.boundSerial[id] = serials[to].serial;
-                bumpVersion();
+                bump(r);
                 return id;
             }
         }
@@ -359,6 +363,37 @@ public:
     uint64_t version() const { return identityVersion.load(std::memory_order_relaxed); }
     void bumpVersion() { identityVersion.fetch_add(1, std::memory_order_relaxed); }
 
+    // S6: per-canvas versions. A change of canvas c bumps c's version and the global one.
+    void bumpVersion(Canvas c)
+    {
+        check("bumpVersion");
+        bump(ensure(c));
+    }
+    uint64_t canvasVersion(Canvas c)
+    {
+        check("canvasVersion");
+        auto* r = live(c);
+        return r ? r->version : 0;
+    }
+    // S6: GUI edits. The adapter computes a structure stamp of the canvas (object count + a hash of its objects)
+    // whenever it looks; a stamp different from the last one seen means the canvas changed behind the identity
+    // layer's back: bump. The first observation only sets the baseline. True when it bumped.
+    bool observeStamp(Canvas c, uint64_t stamp)
+    {
+        check("observeStamp");
+        auto& r = ensure(c);
+        if (!r.stamped) {
+            r.stamped = true;
+            r.stamp = stamp;
+            return false;
+        }
+        if (r.stamp == stamp)
+            return false;
+        r.stamp = stamp;
+        bump(r);
+        return true;
+    }
+
     // P3.5 S2: called on every access but version(); the audit build installs a check that reports an access
     // without the Pd lock. nullptr (the default) = no check.
     using AccessCheck = void (*)(char const* where);
@@ -372,6 +407,9 @@ private:
         uint64_t nextMint = 0; // 0 = not seeded yet (see mint)
         std::unordered_map<std::string, uint64_t> boundSerial; // S5: id -> its object's serial at bind time
         std::vector<Tombstone> tombstones;                     // S5 (L9)
+        uint64_t version = 0;                                  // S6: bumped by every change of this canvas
+        uint64_t stamp = 0;                                    // S6: last structure stamp seen (see observeStamp)
+        bool stamped = false;
         bool isAlive() const { return !alive || alive(); }
     };
 
@@ -409,6 +447,12 @@ private:
             n = n * 10 + static_cast<uint64_t>(id[i] - '0');
         }
         return n;
+    }
+
+    void bump(Record& r)
+    {
+        ++r.version;
+        bumpVersion();
     }
 
     void check(char const* where) const

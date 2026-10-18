@@ -90,17 +90,28 @@ void McpHost::registerOpenCanvases()
     if (!pd_this)
         return;
     identity.prune();
+    // S6: one walk also takes each canvas's structure stamp (object count + FNV-1a of the object pointers): a
+    // GUI create/delete/retype changes it, and IdentityCore::observeStamp bumps that canvas's version, so
+    // analyze_patch(sync) sees a manual edit on its next identity_version (S0: 0.04-0.13 us per 37 objects).
+    bool edited = false;
     std::function<void(t_canvas*)> walk = [&](t_canvas* c) {
         identity.canvasMap(c);
-        for (t_gobj* g = c->gl_list; g; g = g->g_next)
+        uint64_t stamp = 1469598103934665603ull;
+        uint64_t count = 0;
+        for (t_gobj* g = c->gl_list; g; g = g->g_next, ++count) {
+            stamp = (stamp ^ reinterpret_cast<uintptr_t>(g)) * 1099511628211ull;
             if (pd_class(&g->g_pd) == canvas_class)
                 walk(reinterpret_cast<t_canvas*>(g));
+        }
+        edited = identity.observeStamp(c, stamp ^ (count << 40)) || edited;
     };
     std::vector<t_canvas*> roots; // pd_canvaslist is newest first: walk it oldest first
     for (t_canvas* c = pd_this->pd_canvaslist; c; c = c->gl_next)
         roots.push_back(c);
     for (auto it = roots.rbegin(); it != roots.rend(); ++it)
         walk(*it);
+    if (edited)
+        identity.prune(); // drop the entries of objects deleted by hand
     rebindTombstones();
 }
 
@@ -553,7 +564,7 @@ void McpHost::reconcileIdentity(const String& canvasName)
     for (auto it = canvasMap.begin(); it != canvasMap.end();) {
         if (livePointers.find(it->second) == livePointers.end()) {
             it = canvasMap.erase(it); // P3.5 S5: serial kept (the address may be reused by a bound object)
-            identity.bumpVersion();
+            identity.bumpVersion(canvas);
         } else {
             ++it;
         }

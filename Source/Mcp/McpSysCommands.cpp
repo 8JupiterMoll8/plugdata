@@ -217,7 +217,7 @@ void McpHost::sysClearIds(SmallString const& selector, mcp::SysList const& list)
             t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
             // Drops the canvas's ids and their serials.
             if (canvas && identity.clearCanvas(canvas))
-                identity.bumpVersion();
+                identity.bumpVersion(canvas);
         }
 
         mcp::SysList atoms; // P3.4 S7: plain values, no Pd symbols
@@ -321,7 +321,7 @@ void McpHost::sysRenameId(SmallString const& selector, mcp::SysList const& list)
         if (canvas) { // P3.5 S3: an unknown canvas renames nothing
             auto const renamed = mcp::identity::renameStableId(identity.canvasMap(canvas), old_id.toStdString(), new_id.toStdString());
             if (renamed == mcp::identity::RenameResult::Applied)
-                identity.bumpVersion();
+                identity.bumpVersion(canvas);
             success = renamed == mcp::identity::RenameResult::Applied || renamed == mcp::identity::RenameResult::NoOp; // Taken refused (C5)
         }
         sys_unlock();
@@ -581,7 +581,7 @@ void McpHost::sysCensus(SmallString const& selector, mcp::SysList const& list)
             // One version bump per census that adopted anything — the
             // identity map changed, so identity_snapshot consumers resync.
             if (adoptedAny) {
-                identity.bumpVersion();
+                identity.bumpVersion(canvas);
             }
             rootObj->setProperty("objectCount", objectIndex);
             rootObj->setProperty("objects", objArray);

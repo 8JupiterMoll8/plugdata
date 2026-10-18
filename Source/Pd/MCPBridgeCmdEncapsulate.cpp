@@ -148,7 +148,7 @@ void MCPBridge::pdEncapsulate(const juce::String& action, const juce::OSCMessage
                             childMap[r.id.toStdString()] = y;
                             parentMap.erase(r.id.toStdString());
                             proc->getMcp()->identity.assignSerial(y);
-                            proc->getMcp()->identity.bumpVersion();
+                            proc->getMcp()->identity.bumpVersion(innerCnv);
                             break;
                         }
                     }
@@ -553,7 +553,7 @@ void MCPBridge::pdEncapsulateGop(const juce::String& action, const juce::OSCMess
                                 proc->getMcp()->identity.eraseSerial(g);
                             }
                             mcp::PdOps::removeObjectsAudioThread(cnv, toDelete);
-                            proc->getMcp()->identity.bumpVersion();
+                            proc->getMcp()->identity.bumpVersion(cnv);
 
                             // 3. Rewire parent boundary through the new box with createConnection.
                             for (auto& w : inWires) {

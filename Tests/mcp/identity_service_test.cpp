@@ -392,6 +392,34 @@ int main()
         CHECK(core.tombstones(&song).empty());
     }
 
+    // ── S6: per-canvas versions; every change bumps its canvas and the global counter; stamps catch GUI edits ──
+    {
+        Cnv x { "x.pd" }, y { "y.pd" };
+        Obj o1 { 1 }, o2 { 2 };
+        Core core;
+        hook(core);
+        CHECK(core.canvasVersion(&x) == 0);
+        core.bind(&x, "a", &o1);
+        CHECK(core.canvasVersion(&x) == 1);
+        CHECK(core.canvasVersion(&y) == 0);
+        core.mint(&y, &o2, "osc_sig");
+        CHECK(core.canvasVersion(&y) == 1);
+        CHECK(core.version() == 2);
+        core.bumpVersion(&x);
+        CHECK(core.canvasVersion(&x) == 2 && core.version() == 3);
+        // Stamps: the first observation sets the baseline; a different stamp is a change (GUI edit) and bumps.
+        CHECK(!core.observeStamp(&x, 111));
+        CHECK(core.canvasVersion(&x) == 2);
+        CHECK(!core.observeStamp(&x, 111));
+        CHECK(core.observeStamp(&x, 222));
+        CHECK(core.canvasVersion(&x) == 3 && core.version() == 4);
+        // prune bumps the canvas whose entry went
+        o1.generation++;
+        core.prune();
+        CHECK(core.canvasVersion(&x) == 4);
+        CHECK(core.canvasVersion(&y) == 1);
+    }
+
     if (failures == 0)
         std::printf("identity_service_test: all passed\n");
     return failures == 0 ? 0 : 1;

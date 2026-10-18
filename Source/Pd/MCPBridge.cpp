@@ -1672,7 +1672,7 @@ int MCPBridge::mcpApplyIdentitySidecar(PluginProcessor* processor, juce::Dynamic
         }
     }
 
-    processor->getMcp()->identity.bumpVersion();
+    processor->getMcp()->identity.bumpVersion(cnv);
     return restored;
 }
 
