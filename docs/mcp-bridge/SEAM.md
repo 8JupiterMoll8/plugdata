@@ -24,6 +24,16 @@ The fork's AI bridge (`Source/Pd/MCPBridge*`, the overlay layer, the moodboard) 
 | canvas input | mouse, key and modifier events, each returning `consumed` |
 | canvas lifecycle | created, destroyed, synchronised, settingsChanged, `undo/redo -> handled` |
 
+## Tests
+
+1. **JUCE-free unit tests** (`scripts/test-bridge-safety.sh`, g++ only, no Pd): the command tables and verb/selector rules (`Tests/mcp/registry_test.cpp`), the committed `.inc` rows, the audio-thread handoff, JSON escaping, identity renames, the seam check itself.
+2. **Handler tests** (`mcp_bridge_tests`, P3.3 S10). Real bridge handlers run through the command table on a **headless `PluginProcessor`** (no editor, no window): `Tests/mcp/bridge_handler_tests.cpp` feeds OSC messages to `MCPBridge::oscMessageReceived` from a worker thread (the OSC receiver's role) while the main thread runs the message loop and a third thread calls `processBlock` (the audio callback runs the queued Pd work). Replies are captured by `MCPBridge::setReplySinkForTests` (`LockedOscSender::setSink`), so no socket is opened. Covered: ping, unknown verb and domain (and that the report is never answered, and a retired `*_id` verb), capabilities, `batch_atomic` (two objects, one wire), connections, identity_snapshot, census, obj_get, params, obj_set, move_batch_id, undo, redo (positions read back with typeof), rename_id.
+   - Build: `cmake -S . -B build -DMCP_BRIDGE_TESTS=ON && cmake --build build --target mcp_bridge_tests` (Linux only; the option is declared in `Tests/mcp/mcp_bridge_tests.cmake`, so a default build has no such target). The one upstream-file hunk is the tagged `include(...)` line at the end of `CMakeLists.txt` (`MCP-HOOK(tests)`).
+   - Run: `scripts/run-mcp-bridge-tests.sh [binary]` (default `build/mcp_bridge_tests`). The program points `HOME` at a scratch directory (`MCP_TESTS_HOME`, kept between runs; the first run unpacks plugdata's resources) before it creates the processor: plugdata migrates and deletes settings under the real HOME. It needs a display for the look-and-feel (`DISPLAY`, `XAUTHORITY` as for the app). The processor starts its own bridge on the configured UDP port for an instant and the test stops it; if another plugdata holds UDP 9000 the processor only logs that it could not bind.
+   - Known noise: handlers that touch editors from the OSC or audio thread trip JUCE's "non-UI thread" assertion (`juce_AudioProcessor.cpp`, getActiveEditor) a few times per run; they are the off-thread GUI calls recorded as P3.4 inputs, not failures.
+   - Not covered (needs an editor or a GUI): overlays, screenshots, layout reads that need a viewport, anything that opens a tab. Those stay with the live sweep (`scripts/live/run-verb-sweep.sh` in the TS repo).
+3. **In-app tests** (upstream `ENABLE_TESTING` runner, `Tests/Tests.cpp`) are upstream's; the fork adds none: the headless spike worked, so the in-app fallback was not needed.
+
 ## Carried patches
 
 Upstream-file hunks that stay as they are, with the reason. Empty until P3.2 S9; the gate reads the first column.

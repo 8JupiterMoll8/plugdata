@@ -970,3 +970,5 @@ endif()
       install(PROGRAMS ${PLUGDATA_PLUGINS_LOCATION}/Standalone/plugdata DESTINATION bin)
     endif()
 endif()
+
+include(${CMAKE_CURRENT_SOURCE_DIR}/Tests/mcp/mcp_bridge_tests.cmake) # MCP-HOOK(tests): handler tests of the MCP bridge, off unless -DMCP_BRIDGE_TESTS=ON

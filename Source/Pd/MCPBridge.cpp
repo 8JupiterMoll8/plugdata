@@ -83,6 +83,12 @@ bool MCPBridge::start()
     return active.load();
 }
 
+void MCPBridge::setReplySinkForTests(std::function<void(juce::OSCMessage const&)> sink)
+{
+    sender.setSink(std::move(sink));
+    active.store(true);
+}
+
 void MCPBridge::stop()
 {
     stopTimer();

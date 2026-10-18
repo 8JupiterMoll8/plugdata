@@ -15,7 +15,9 @@
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <readerwriterqueue.h>
 #include <array>
+#include <functional>
 #include <memory>
+#include <type_traits>
 #include "Utility/Config.h"
 #include "Pd/Instance.h"
 #include "Pd/MCPIdentity.h" // renameStableId (also used by PluginProcessor.cpp; finding C6)
@@ -191,16 +193,31 @@ public:
         juce::ScopedLock const sl(lock);
         return inner.disconnect();
     }
+    // Tests (Tests/mcp/bridge_handler_tests.cpp): with a sink set, every OSCMessage goes to it instead of the socket.
+    void setSink(std::function<void(juce::OSCMessage const&)> newSink)
+    {
+        juce::ScopedLock const sl(lock);
+        sink = std::move(newSink);
+    }
     template<typename... Args>
     bool send(Args&&... args)
     {
         juce::ScopedLock const sl(lock);
+        if constexpr (sizeof...(Args) == 1) {
+            if constexpr ((std::is_convertible_v<Args, juce::OSCMessage const&> && ...)) {
+                if (sink) {
+                    sink(args...);
+                    return true;
+                }
+            }
+        }
         return inner.send(std::forward<Args>(args)...);
     }
 
 private:
     juce::CriticalSection lock;
     juce::OSCSender inner;
+    std::function<void(juce::OSCMessage const&)> sink;
 };
 
 class MCPBridge final : public juce::OSCReceiver::Listener<juce::OSCReceiver::RealtimeCallback>
@@ -228,6 +245,10 @@ public:
     bool start();
     void stop();
     bool isConnected() const;
+
+    // Tests only (Tests/mcp/bridge_handler_tests.cpp): replies go to `sink` instead of a socket, and the bridge
+    // counts as active so sendReply sends. Call stop() first; nothing is bound.
+    void setReplySinkForTests(std::function<void(juce::OSCMessage const&)> sink);
 
     // Status for the GUI / console. Returns a short human-readable state:
     // "connected" | "listening" | "stopped" | "error: <detail>".
