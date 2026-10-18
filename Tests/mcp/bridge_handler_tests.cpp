@@ -300,6 +300,76 @@ void runStampCostCases(PluginProcessor& processor)
     CHECK(us500 >= 0 && us500 < 100.0);
 }
 
+// P3.5 S5: identity entries are validated by a weak reference per bound object, so a freed object's id never
+// resolves to a new object Pd allocated at the same address (Report F3); an abstraction reload rebinds the ids of
+// its instances through tombstones (L9). Both run in the Pd context on the default patch.
+void runIdentityValidityCases(PluginProcessor& processor)
+{
+    std::printf("identity: address reuse, abstraction reload\n");
+    auto* host = processor.getMcp();
+    int reused = 0, staleResolves = 0, rounds = 0;
+    bool reloadRebound = false, reloadRan = false;
+    juce::String reloadNote;
+    CHECK(host->pdWait([&] {
+        t_canvas* cnv = host->getCanvasBySymbol("main");
+        if (!cnv) return;
+        auto newObj = [cnv](char const* cls) {
+            t_atom a[3];
+            SETFLOAT(a, 700);
+            SETFLOAT(a + 1, 40);
+            SETSYMBOL(a + 2, gensym(cls));
+            pd_typedmess(&cnv->gl_pd, gensym("obj"), 3, a);
+            return pd::Interface::getNewest(cnv);
+        };
+        for (int i = 0; i < 400 && reused < 20; ++i, ++rounds) {
+            t_gobj* old = newObj("osc~");
+            auto const id = "s5r" + std::to_string(i);
+            host->identity.bind(cnv, id, old);
+            glist_delete(cnv, old);
+            t_gobj* fresh = newObj("osc~"); // untracked: what a GUI create looks like to the identity layer
+            if (fresh == old)
+                ++reused;
+            if (host->resolveStableId("main", juce::String(id)) != nullptr)
+                ++staleResolves;
+            glist_delete(cnv, fresh);
+        }
+
+        // Abstraction reload: an instance bound to an id is recreated by reloadAbstractions; the id follows.
+        juce::File dir(juce::String::fromUTF8(canvas_getdir(cnv)->s_name));
+        auto absFile = dir.getChildFile("s5abs.pd");
+        if (!absFile.replaceWithText("#N canvas 0 50 450 300 12;\n#X obj 10 10 inlet;\n")) {
+            reloadNote = "could not write " + absFile.getFullPathName();
+            return;
+        }
+        t_gobj* inst = newObj("s5abs");
+        juce::String absName;
+        if (!inst || !pd::getAbstractionFileName(inst, absName)) {
+            reloadNote = "abstraction not instantiated";
+            return;
+        }
+        host->identity.bind(cnv, "s5abs1", inst);
+        host->tombstoneAbstractionInstances(absName);
+        absFile.replaceWithText("#N canvas 0 50 450 300 12;\n#X obj 10 10 inlet;\n#X obj 10 40 outlet;\n");
+        processor.reloadAbstractions(absFile, nullptr);
+        reloadRan = true;
+        host->rebindTombstones();
+        t_gobj* after = host->resolveStableId("main", "s5abs1");
+        juce::String afterName;
+        reloadRebound = after && pd::getAbstractionFileName(after, afterName) && afterName == absName
+            && pd::Interface::checkObject(after) && obj_noutlets(pd::Interface::checkObject(after)) == 1;
+        if (after)
+            glist_delete(cnv, after);
+        absFile.deleteFile();
+    }, 20000));
+    std::printf("  address reuse: %d of %d rounds reused the address, %d stale resolves\n", reused, rounds, staleResolves);
+    CHECK(staleResolves == 0);
+    if (reused == 0)
+        std::printf("  note: the allocator never reused an address here (the check above is then weaker)\n");
+    if (reloadNote.isNotEmpty())
+        std::printf("  abstraction reload not run: %s\n", reloadNote.toRawUTF8());
+    CHECK(reloadRan && reloadRebound);
+}
+
 // Bug #83 (P3.4 S10): with the audio callback stopped, Pd's signal vectors keep the last block. /meter/master
 // read them and reported that stale level as live, while every armed read (which needs processBlock) was
 // silent: the "master audible, armed silent" split of the bug report. The test's audio loop stands in for
@@ -627,6 +697,7 @@ int main()
             runAudioStallCases(harness, audioControl);
             runMidiCaptureCases(processor, audioControl);
             runStampCostCases(processor);
+            runIdentityValidityCases(processor);
             startRenderForTeardown(harness); // last: the processor is destroyed with the render running
             casesDone.store(true);
             stopMessageLoop();
