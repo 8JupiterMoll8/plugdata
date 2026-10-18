@@ -17,6 +17,7 @@ McpHost::McpHost(PluginProcessor& p)
     : processor(p)
     , guiHost(createMcpGuiHost(p))
 {
+    sysTable(); // a bad selector table fails here, at startup
 }
 
 McpHost::~McpHost() = default;

@@ -157,12 +157,13 @@ def cmd_move(a):
 
 
 def cmd_check(a):
-    """Line multisets (whitespace-normalized) of MCPBridge.cpp plus those --files that existed at --ref, against
+    """Line multisets (whitespace-normalized) of MCPBridge.cpp (or --base) plus those --files that existed at --ref, against
     the working copies of MCPBridge.cpp plus --files. Prints old-minus-new and new-minus-old: for a pure move the first holds only
     the cut `if (action == ...) {` lines and the second only function headers, braces and includes."""
     import subprocess
-    old = subprocess.check_output(["git", "show", f"{a.ref}:Source/Pd/MCPBridge.cpp"], cwd=ROOT).decode().split("\n")
-    new = SRC.read_text().split("\n")
+    base = a.base or "Source/Pd/MCPBridge.cpp"  # --base: another file to compare first (P3.3 S7: Source/Mcp/McpSysCommands.cpp)
+    old = subprocess.check_output(["git", "show", f"{a.ref}:{base}"], cwd=ROOT).decode().split("\n")
+    new = (ROOT / base).read_text().split("\n")
     for f in (a.files or "").split(","):
         if not f: continue
         new += (ROOT / f).read_text().split("\n")
@@ -180,7 +181,7 @@ def cmd_check(a):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("cmd", choices=["deps", "move", "check"])
-    p.add_argument("--func"); p.add_argument("--ref", default="HEAD"); p.add_argument("--files")
+    p.add_argument("--func"); p.add_argument("--ref", default="HEAD"); p.add_argument("--files"); p.add_argument("--base")
     p.add_argument("--verbs"); p.add_argument("--var"); p.add_argument("--preamble")
     p.add_argument("--domain"); p.add_argument("--out"); p.add_argument("--title"); p.add_argument("--alias")
     a = p.parse_args()

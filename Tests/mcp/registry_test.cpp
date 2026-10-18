@@ -125,6 +125,53 @@ int main()
         std::printf("  verb table: %zu verbs, %zu aliases, %zu domain handlers\n", verbRows.size(), aliasRows.size(), domainRows.size());
     }
 
+    // 4. The committed selector table of the mcp_* Pd system messages (McpSysVerbs.inc, Plan 3 P3.3 S7).
+    {
+        struct Row { std::string selector, handler; };
+        std::vector<Row> rows;
+#define MCP_SYS(selector, handler) rows.push_back({ selector, #handler });
+#include "../../Source/Mcp/McpSysVerbs.inc"
+
+        // The selectors the double list in handleSysMessage / dispatchSysMessage held.
+        std::set<std::string> const expected {
+            "mcp_selection_gate", "mcp_move", "mcp_clear_selection", "mcp_move_batch", "mcp_clear_ids",
+            "mcp_clear_undo", "mcp_suspend_dsp", "mcp_resume_dsp", "mcp_create_batch_id", "mcp_create_id",
+            "mcp_register_id", "mcp_connect_id", "mcp_disconnect_id", "mcp_delete_id", "mcp_rename_id",
+            "mcp_move_id", "mcp_edit_id", "mcp_get_mappings", "mcp_census", "mcp_move_batch_id",
+            "mcp_connect_batch_id", "mcp_disconnect_batch_id",
+        };
+        std::set<std::string> selectors;
+        for (auto const& r : rows) selectors.insert(r.selector);
+        CHECK(selectors == expected);
+        CHECK(rows.size() == expected.size()); // no selector twice
+
+        // The rows build into a table; a selector of another family is not handled here.
+        Table t;
+        bool built = true;
+        try {
+            t.setSource("sys", VerbSource::Path);
+            for (auto const& r : rows) t.add("sys", r.selector, r.handler);
+        } catch (std::logic_error const& e) {
+            std::printf("  sys table error: %s\n", e.what());
+            built = false;
+        }
+        CHECK(built);
+        CHECK(t.find("sys", "mcp_census") != nullptr && *t.find("sys", "mcp_census") == "sysCensus");
+        CHECK(t.find("sys", "dsp") == nullptr);          // plugdata's own selectors fall through
+        CHECK(t.find("sys", "") == nullptr);
+        CHECK(t.find("sys", "mcp_nope") == nullptr);
+        CHECK(t.find("sys", "MCP_CENSUS") == nullptr);   // exact match, as the hash switch was
+
+        // One handler per selector, and the name follows the selector.
+        std::set<std::string> handlers;
+        for (auto const& r : rows) {
+            CHECK(handlers.insert(r.handler).second);
+            CHECK(r.selector.compare(0, 4, "mcp_") == 0);
+            CHECK(r.handler.compare(0, 3, "sys") == 0);
+        }
+        std::printf("  sys table: %zu selectors\n", rows.size());
+    }
+
     std::printf(failures ? "registry_test: %d FAILED\n" : "registry_test: OK\n", failures);
     return failures ? 1 : 0;
 }

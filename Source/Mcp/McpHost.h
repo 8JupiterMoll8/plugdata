@@ -11,6 +11,7 @@
 #include <juce_dsp/juce_dsp.h>
 
 #include "Pd/Instance.h"
+#include "Pd/MCPBridgeRegistry.h"
 
 class PluginProcessor;
 class MCPBridge;
@@ -81,7 +82,18 @@ public:
     // The mcp_* Pd system messages (Source/Mcp/McpSysCommands.cpp). Returns false for
     // every other selector, which PluginProcessor::receiveSysMessage then handles.
     bool handleSysMessage(SmallString const& selector, SmallArray<pd::Atom> const& list);
-    void dispatchSysMessage(SmallString const& selector, SmallArray<pd::Atom> const& list);
+
+private:
+    // Selector table (McpSysVerbs.inc): one private member function per row, built at
+    // startup like the bridge's verb table.
+    using SysHandler = void (McpHost::*)(SmallString const& selector, SmallArray<pd::Atom> const& list);
+    using SysTable = mcp::CommandTable<SysHandler>;
+    static SysTable const& sysTable();
+
+#define MCP_SYS(name, handler) void handler(SmallString const& selector, SmallArray<pd::Atom> const& list);
+#include "Mcp/McpSysVerbs.inc"
+
+public:
 
     // The bridge's only way to the GUI (Source/Mcp/GuiHost.cpp, S6).
     McpGuiHost& gui() { return *guiHost; }
