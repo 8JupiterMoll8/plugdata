@@ -43,7 +43,6 @@ void MCPBridge::pdDiagnose(const juce::String& action, const juce::OSCMessage& m
 
     sys_lock();
     t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-    if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
 
     if (cnv) {
         hasCanvas = true;
@@ -74,7 +73,6 @@ void MCPBridge::pdClusters(const juce::String& action, const juce::OSCMessage& m
     juce::String json;
     sys_lock();
     t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-    if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
     json = cnv ? computeClusters(processor, cnv, canvasName)
                : juce::String("{\"error\":\"canvas not found\"}");
     sys_unlock();
@@ -96,7 +94,6 @@ void MCPBridge::pdPerf(const juce::String& action, const juce::OSCMessage& msg)
     juce::String json = "{\"error\":\"canvas not found\"}";
     sys_lock();
     t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-    if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
     if (cnv) json = computePerfFacts(processor, cnv, canvasName);
     sys_unlock();
 
@@ -116,12 +113,11 @@ void MCPBridge::pdBounds(const juce::String& action, const juce::OSCMessage& msg
     auto guiFacts = mcpFetchGuiFacts(processor, canvasName, true); // P3.4 S3: GUI facts before the lock
     sys_lock();
     t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-    if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
 
     if (cnv) {
         hasCanvas = true;
         std::unordered_map<t_gobj*, juce::String> ptrToId;
-        auto const* canvasIds = processor->getMcp()->identity.findCanvas(canonicalCanvasKey(cnv).toStdString());
+        auto const* canvasIds = processor->getMcp()->identity.findCanvas(cnv);
         if (canvasIds)
             for (auto& [tid, ptr] : *canvasIds)
                 if (ptr) ptrToId[ptr] = juce::String(tid);
@@ -231,14 +227,13 @@ void MCPBridge::pdCollisions(const juce::String& action, const juce::OSCMessage&
     auto guiFacts = mcpFetchGuiFacts(processor, canvasName); // P3.4 S3: GUI facts before the lock
     sys_lock();
     t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-    if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
 
     if (cnv) {
         hasCanvas = true;
         struct R { juce::String tid; int x, y, w, h; };
         std::vector<R> rects;
         std::unordered_map<t_gobj*, juce::String> ptrToId;
-        auto const* canvasIds = processor->getMcp()->identity.findCanvas(canonicalCanvasKey(cnv).toStdString());
+        auto const* canvasIds = processor->getMcp()->identity.findCanvas(cnv);
         if (canvasIds)
             for (auto& [tid, ptr] : *canvasIds)
                 if (ptr) ptrToId[ptr] = juce::String(tid);
@@ -309,7 +304,6 @@ void MCPBridge::pdWireOcclusions(const juce::String& action, const juce::OSCMess
     auto guiFacts = mcpFetchGuiFacts(processor, canvasName); // P3.4 S3: GUI facts before the lock
     sys_lock();
     t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-    if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
 
     if (cnv) {
         hasCanvas = true;
@@ -318,7 +312,7 @@ void MCPBridge::pdWireOcclusions(const juce::String& action, const juce::OSCMess
 std::vector<juce::String> classNames;
         std::unordered_map<t_gobj*, int> ptrToIdx;
         std::unordered_map<t_gobj*, juce::String> ptrToId;
-        auto const* canvasIds = processor->getMcp()->identity.findCanvas(canonicalCanvasKey(cnv).toStdString());
+        auto const* canvasIds = processor->getMcp()->identity.findCanvas(cnv);
         if (canvasIds)
             for (auto& [tid, ptr] : *canvasIds)
                 if (ptr) ptrToId[ptr] = juce::String(tid);

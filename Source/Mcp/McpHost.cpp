@@ -25,6 +25,52 @@ McpHost::McpHost(PluginProcessor& p)
     sysTable(); // a bad selector table fails here, at startup
     if (mcp::audit::enabled())
         identity.setAccessCheck(&mcp::audit::checkIdentityAccess); // P3.5 S2: report access without the Pd lock
+    // P3.5 S3: identity records are per live canvas. The liveness check is a pd::WeakReference: plugdata's Pd
+    // clears it when the canvas is freed, so a record never outlives its canvas (nor passes to a new canvas at
+    // the same address).
+    mcp::IdentityService::Hooks hooks;
+    hooks.baseKey = [](t_canvas* c) { return identityBaseKey(c).toStdString(); };
+    hooks.liveness = [this](t_canvas* c) {
+        pd::WeakReference ref(c, &processor);
+        return std::function<bool()>([ref] { return ref.isValid(); });
+    };
+    identity.setHooks(std::move(hooks));
+}
+
+// P3.5 S3: a canvas's wire key before any "#n": a root is its file name, a subcanvas "pd-<name>", an unnamed
+// canvas "pd-anon" (the old canonicalCanvasKey used the pointer there, which survived address reuse).
+juce::String McpHost::identityBaseKey(t_canvas* cnv)
+{
+    if (!cnv)
+        return {};
+    juce::String const name = cnv->gl_name && cnv->gl_name->s_name ? juce::String::fromUTF8(cnv->gl_name->s_name) : juce::String();
+    if (cnv->gl_owner != nullptr) {
+        if (name.startsWith("pd-")) return name;
+        if (name.isNotEmpty()) return "pd-" + name;
+        return "pd-anon";
+    }
+    if (name.isNotEmpty() && name != "main" && name != "pd-main")
+        return name;
+    return "pd-anon";
+}
+
+void McpHost::registerOpenCanvases()
+{
+    PdLockScope lock(processor);
+    if (!pd_this)
+        return;
+    identity.prune();
+    std::function<void(t_canvas*)> walk = [&](t_canvas* c) {
+        identity.canvasMap(c);
+        for (t_gobj* g = c->gl_list; g; g = g->g_next)
+            if (pd_class(&g->g_pd) == canvas_class)
+                walk(reinterpret_cast<t_canvas*>(g));
+    };
+    std::vector<t_canvas*> roots; // pd_canvaslist is newest first: walk it oldest first
+    for (t_canvas* c = pd_this->pd_canvaslist; c; c = c->gl_next)
+        roots.push_back(c);
+    for (auto it = roots.rbegin(); it != roots.rend(); ++it)
+        walk(*it);
 }
 
 McpHost::PdLockScope::PdLockScope(PluginProcessor& p)
@@ -280,50 +326,30 @@ void McpHost::refreshFocusedRoot()
 
 t_canvas* McpHost::getCanvasBySymbol(const String& canvas_symbol)
 {
+    // "main" is the true root of the focused editor's current canvas, published by the message thread
+    // (refreshFocusedRoot), used only while it is still an open root patch. P3.5 S3: with no patch open, "main"
+    // is nothing (it used to be the first canvas: Pd's float-array template).
     if (canvas_symbol == "pd-main" || canvas_symbol == "main" || canvas_symbol.isEmpty()) {
-        // "main" is the true root of the focused editor's current canvas, published by the message
-        // thread (refreshFocusedRoot). Used only while it is still an open root patch.
+        PdLockScope lock(processor);
+        registerOpenCanvases();
         if (auto* root = session.mcpFocusedRoot.load(std::memory_order_acquire)) {
             for (t_canvas* c = pd_this ? pd_this->pd_canvaslist : nullptr; c; c = c->gl_next)
                 if (c == root) return root;
         }
+        return nullptr;
     }
 
-    t_canvas* canvas = (t_canvas*)pd_findbyclass(gensym(canvas_symbol.toRawUTF8()), canvas_class);
-    if (!canvas && !canvas_symbol.startsWith("pd-")) {
-        canvas = (t_canvas*)pd_findbyclass(gensym(String("pd-" + canvas_symbol).toRawUTF8()), canvas_class);
-    }
-    if (!canvas) {
-        canvas = pd_this->pd_canvaslist;
-    }
-    return canvas;
+    // P3.5 S3 (#62): every other name is a wire key of the identity records ("song.pd", "pd-voice", "pd-voice#2",
+    // or the "pd-" spelling of either). Unknown names answer nullptr: no fallback to the first canvas, no
+    // per-request Pd symbol.
+    PdLockScope lock(processor);
+    registerOpenCanvases();
+    return identity.canvasByKey(canvas_symbol.toStdString());
 }
 
 t_canvas* McpHost::getCanvasBySymbolStrict(const String& canvas_symbol)
 {
-    // 'main' / 'pd-main' / empty resolve exactly like the legacy path (true
-    // top-level patch of the focused editor) — those aliases stay valid.
-    if (canvas_symbol == "pd-main" || canvas_symbol == "main" || canvas_symbol.isEmpty()) {
-        return getCanvasBySymbol(canvas_symbol);
-    }
-    t_canvas* canvas = (t_canvas*)pd_findbyclass(gensym(canvas_symbol.toRawUTF8()), canvas_class);
-    if (!canvas && !canvas_symbol.startsWith("pd-")) {
-        canvas = (t_canvas*)pd_findbyclass(gensym(String("pd-" + canvas_symbol).toRawUTF8()), canvas_class);
-    }
-    if (!canvas && pd_this) {
-        for (t_canvas* c = pd_this->pd_canvaslist; c; c = c->gl_next) {
-            if (c->gl_name) {
-                juce::String glName(c->gl_name->s_name);
-                if (glName == canvas_symbol || ("pd-" + glName) == canvas_symbol || glName == ("pd-" + canvas_symbol)) {
-                    canvas = c;
-                    break;
-                }
-            }
-        }
-    }
-    // NO fallback: unknown names return nullptr so the caller can name the
-    // failure instead of mutating the focused/root canvas by accident.
-    return canvas;
+    return getCanvasBySymbol(canvas_symbol); // P3.5 S3: every lookup is strict now
 }
 
 void McpHost::synchroniseCanvases()
@@ -394,7 +420,7 @@ juce::String McpHost::getOrAdoptStableId(t_canvas* canvas, t_gobj* g)
             juce::String minted = pd::sanitizeClassNameForTempId(classSrc)
                                       + "_" + canvasKey + "_" + juce::String(objectIndex);
 
-            auto& canvasIdMap = identity.canvasMap(canonStr);
+            auto& canvasIdMap = identity.canvasMap(canvas);
             canvasIdMap[minted.toStdString()] = y_obj;
             identity.ensureSerial(y_obj);
             identity.bumpVersion();
@@ -411,10 +437,10 @@ t_gobj* McpHost::resolveStableId(const String& canvasName, const String& objectI
     // focus-dependent ALIAS, never a stored key — resolve the canvas first and
     // derive its canonical key so both sides of the map agree.
     t_canvas* canvas = getCanvasBySymbol(canvasName);
-    auto canvasStr = (canvas ? MCPBridge::canonicalCanvasKey(canvas) : canvasName).toStdString();
+    if (!canvas) return nullptr; // P3.5 S3: no canvas, no id
     auto idStr = objectId.toStdString();
     
-    auto& canvasMap = identity.canvasMap(canvasStr);
+    auto& canvasMap = identity.canvasMap(canvas);
     auto it = canvasMap.find(idStr);
     if (it != canvasMap.end()) {
         if (canvas) {
@@ -441,7 +467,6 @@ t_gobj* McpHost::resolveStableId(const String& canvasName, const String& objectI
     // Index-based fallback: "0", "1", "obj_0", "obj_1", etc.
     if (objectId.startsWith("obj_") || objectId.containsOnly("0123456789")) {
         int idx = objectId.startsWith("obj_") ? objectId.substring(4).getIntValue() : objectId.getIntValue();
-        if (!canvas && canvasName == "pd-main") canvas = pd_this->pd_canvaslist;
         if (canvas) {
             int cur = 0;
             for (t_gobj* y_obj = canvas->gl_list; y_obj; y_obj = y_obj->g_next, cur++) {
@@ -457,13 +482,11 @@ void McpHost::reconcileIdentity(const String& canvasName)
 {
     PdLockScope lock(processor);
     t_canvas* canvas = getCanvasBySymbol(canvasName);
-    if (!canvas && (canvasName == "pd-main" || canvasName == "main" || canvasName.isEmpty()))
-        canvas = pd_this->pd_canvaslist;
     if (!canvas)
         return;
 
     auto canvasStr = MCPBridge::canonicalCanvasKey(canvas).toStdString();
-    auto& canvasMap = identity.canvasMap(canvasStr);
+    auto& canvasMap = identity.canvasMap(canvas);
 
     // Step A: live pointer set from gl_list (the ground truth).
     std::unordered_set<t_gobj*> livePointers;

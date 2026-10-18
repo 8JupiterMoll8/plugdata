@@ -56,7 +56,6 @@ t_garray* createArrayGraph(PluginProcessor* processor, juce::String const& canva
                            juce::String const& arrayName, t_symbol* nameSym, int size)
 {
     t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-    if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
     if (!cnv) return nullptr;
 
     int nobj = 0;

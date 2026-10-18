@@ -212,7 +212,7 @@ void mcp::BatchJob::scanConnections(const std::string& canonStr)
     // were erased — every live wire endpoint resolves.
     {
         auto canvasStr = canonStr;
-        auto& canvasMap = processor->getMcp()->identity.canvasMap(canvasStr);
+        auto& canvasMap = processor->getMcp()->identity.canvasMap(cnv);
         std::unordered_map<t_gobj*, std::string> ptrToTempId;
         for (auto& [tid, ptr] : canvasMap)
             if (ptr) ptrToTempId[ptr] = tid;

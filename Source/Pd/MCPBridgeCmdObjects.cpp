@@ -44,8 +44,6 @@ void MCPBridge::pdObjSet(const juce::String& action, const juce::OSCMessage& msg
         {
             sys_lock();
             t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-            if (!cnv && (canvasName == "pd-main" || canvasName == "main" || canvasName.isEmpty()))
-                cnv = pd_this->pd_canvaslist;
             t_gobj* g = processor->getMcp()->resolveStableId(canvasName, tempId);
             if (g && !mcpGobjIsLive(cnv, g)) g = nullptr; // stale → treat as unknown
             err = mcpObjSetCore(g, tempId, inlet, selector, atoms, &warning);
@@ -73,7 +71,6 @@ void MCPBridge::pdObjRelabel(const juce::String& action, const juce::OSCMessage&
     auto newText       = msg.size() > 3 ? getArgString(msg[3]) : juce::String();
 
     t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-    if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
     if (!cnv) { sendReply("/pd/obj_relabel/reply/" + correlationId, 0.0f); return; }
 
     int ok = 0;
@@ -191,8 +188,6 @@ void MCPBridge::pdParams(const juce::String& action, const juce::OSCMessage& msg
         {
             sys_lock();
             t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-            if (!cnv && (canvasName == "pd-main" || canvasName == "main" || canvasName.isEmpty()))
-                cnv = pd_this->pd_canvaslist;
             if (cnv) {
                 // Collect knob-bound params, DESCENDING into placed
                 // subpatches / abstractions (GOP/MERDA modules keep their
@@ -254,8 +249,6 @@ void MCPBridge::pdParamSetName(const juce::String& action, const juce::OSCMessag
         {
             sys_lock();
             t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-            if (!cnv && (canvasName == "pd-main" || canvasName == "main" || canvasName.isEmpty()))
-                cnv = pd_this->pd_canvaslist;
             if (cnv) {
                 // Descend into placed subpatches/abstractions so a param
                 // INSIDE a GOP/MERDA module can be set by name (#43).
@@ -314,8 +307,6 @@ void MCPBridge::pdObjGetBatch(const juce::String& action, const juce::OSCMessage
         {
             sys_lock();
             t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-            if (!cnv && (canvasName == "pd-main" || canvasName == "main" || canvasName.isEmpty()))
-                cnv = pd_this->pd_canvaslist;
             for (int i = 0; i < count && cursor < msg.size(); i++) {
                 auto tempId = getArgString(msg[cursor++]);
                 t_gobj* gobj = processor->getMcp()->resolveStableId(canvasName, tempId);
@@ -352,8 +343,6 @@ void MCPBridge::pdObjGet(const juce::String& action, const juce::OSCMessage& msg
         {
             sys_lock();
             t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-            if (!cnv && (canvasName == "pd-main" || canvasName == "main" || canvasName.isEmpty()))
-                cnv = pd_this->pd_canvaslist;
             t_gobj* gobj = processor->getMcp()->resolveStableId(canvasName, tempId);
             if (gobj && !mcpGobjIsLive(cnv, gobj)) gobj = nullptr; // stale → unknown
             if (gobj) json = mcpBuildObjJson(gobj);
@@ -394,7 +383,6 @@ void MCPBridge::pdTypeof(const juce::String& action, const juce::OSCMessage& msg
 
         sys_lock();
         t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-        if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
 
         if (!cnv) {
             sys_unlock();
@@ -483,7 +471,6 @@ void MCPBridge::pdPorts(const juce::String& action, const juce::OSCMessage& msg)
 
         sys_lock();
         t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-        if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
 
         if (!cnv) {
             sys_unlock();
@@ -560,7 +547,6 @@ void MCPBridge::pdConnections(const juce::String& action, const juce::OSCMessage
 
         sys_lock();
         t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-        if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
 
         if (!cnv) {
             sys_unlock();
@@ -578,7 +564,7 @@ void MCPBridge::pdConnections(const juce::String& action, const juce::OSCMessage
         // Build reverse identity map (ptr → tempId)
         auto canvasStr = canvasName.toStdString();
         std::unordered_map<t_gobj*, juce::String> ptrToId;
-        if (auto const* canvasIds = processor->getMcp()->identity.findCanvas(canvasStr)) {
+        if (auto const* canvasIds = processor->getMcp()->identity.findCanvas(cnv)) {
             for (auto const& [id, ptr] : *canvasIds) {
                 if (ptr) ptrToId[ptr] = juce::String(id);
             }
@@ -642,7 +628,6 @@ void MCPBridge::pdDump(const juce::String& action, const juce::OSCMessage& msg)
 
         sys_lock();
         t_canvas* cnv = processor ? processor->getMcp()->getCanvasBySymbol(canvasName) : nullptr;
-        if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
 
         if (cnv) {
             t_binbuf* b = binbuf_new();

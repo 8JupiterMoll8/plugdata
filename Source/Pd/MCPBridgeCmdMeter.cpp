@@ -493,7 +493,6 @@ void MCPBridge::meterMaster(const juce::String& meterAction, const juce::OSCMess
     }
 
     t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-    if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
     if (!cnv) {
         juce::OSCMessage rep { juce::OSCAddressPattern("/meter/master/reply/" + correlationId) };
         rep.addArgument(-100.0f);
@@ -558,7 +557,6 @@ void MCPBridge::meterTrace(const juce::String& meterAction, const juce::OSCMessa
     }
 
     t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-    if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
     if (!cnv) {
         sendReply("/meter/trace/reply/" + correlationId, "{\"error\":\"canvas not found: " + jsonEscape(canvasName) + "\"}");
         return;

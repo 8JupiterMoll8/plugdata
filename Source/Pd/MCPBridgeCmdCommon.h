@@ -253,7 +253,6 @@ inline McpGuiFacts mcpFetchGuiFacts(PluginProcessor* proc, juce::String const& c
     if (!proc) return facts;
     sys_lock();
     t_canvas* c = proc->getMcp()->getCanvasBySymbol(canvasName);
-    if (!c && canvasName == "pd-main") c = pd_this->pd_canvaslist;
     sys_unlock();
     facts.cnv = c;
     if (!c) return facts;

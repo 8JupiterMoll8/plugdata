@@ -215,9 +215,8 @@ void McpHost::sysClearIds(SmallString const& selector, mcp::SysList const& list)
         {
             PdLockScope lock(processor); // P3.5 S2: the worker path ran this without the lock
             t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
-            auto canvasStr = (canvas ? MCPBridge::canonicalCanvasKey(canvas) : canvas_symbol).toStdString();
             // Drops the canvas's ids and their serials.
-            if (identity.eraseCanvas(canvasStr))
+            if (canvas && identity.clearCanvas(canvas))
                 identity.bumpVersion();
         }
 
@@ -252,7 +251,6 @@ void McpHost::sysClearUndo(SmallString const& selector, mcp::SysList const& list
     if (list.size() >= 1) {
         auto canvas_symbol = list[0].toString();
         t_canvas* cnv = getCanvasBySymbol(canvas_symbol);
-        if (!cnv && (canvas_symbol == "pd-main")) cnv = pd_this->pd_canvaslist;
         if (cnv) {
             wipeCanvasUndo(cnv);
             if (!replaying)
@@ -298,7 +296,7 @@ void McpHost::sysRegisterId(SmallString const& selector, mcp::SysList const& lis
             }
 
             if (targetObj) {
-                identity.canvasMap(canonStr)[object_id.toStdString()] = targetObj;
+                identity.canvasMap(canvas)[object_id.toStdString()] = targetObj;
                 identity.assignSerial(targetObj);
                 identity.bumpVersion();
                 success = true;
@@ -323,12 +321,12 @@ void McpHost::sysRenameId(SmallString const& selector, mcp::SysList const& list)
         sys_lock();
         bool success = false;
         t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
-        auto canvasStr = (canvas ? MCPBridge::canonicalCanvasKey(canvas) : canvas_symbol).toStdString();
-        auto& map = identity.canvasMap(canvasStr);
-        auto const renamed = mcp::identity::renameStableId(map, old_id.toStdString(), new_id.toStdString());
-        if (renamed == mcp::identity::RenameResult::Applied)
-            identity.bumpVersion();
-        success = renamed != mcp::identity::RenameResult::Missing;
+        if (canvas) { // P3.5 S3: an unknown canvas renames nothing
+            auto const renamed = mcp::identity::renameStableId(identity.canvasMap(canvas), old_id.toStdString(), new_id.toStdString());
+            if (renamed == mcp::identity::RenameResult::Applied)
+                identity.bumpVersion();
+            success = renamed != mcp::identity::RenameResult::Missing;
+        }
         sys_unlock();
 
         mcp::SysList atoms; // P3.4 S7: plain values, no Pd symbols
@@ -348,7 +346,7 @@ void McpHost::sysGetMappings(SmallString const& selector, mcp::SysList const& li
         mcp::SysList atoms; // P3.4 S7: plain values, no Pd symbols
         if (canvas) {
             auto canonStr = MCPBridge::canonicalCanvasKey(canvas).toStdString();
-            auto& canvasMap = identity.canvasMap(canonStr);
+            auto& canvasMap = identity.canvasMap(canvas);
 
             // For each ID in the map, find its current index in gl_list
             for (auto it = canvasMap.begin(); it != canvasMap.end();) {
@@ -398,7 +396,7 @@ void McpHost::sysCensus(SmallString const& selector, mcp::SysList const& list)
 
             // Build reverse map of gobj* -> tempId
             std::unordered_map<t_gobj*, String> ptrToId;
-            if (auto const* canvasIds = identity.findCanvas(canonStr)) {
+            if (auto const* canvasIds = identity.findCanvas(canvas)) {
                 for (auto const& [id, ptr] : *canvasIds) {
                     if (ptr) ptrToId[ptr] = String(id);
                 }
@@ -592,7 +590,7 @@ void McpHost::sysCensus(SmallString const& selector, mcp::SysList const& list)
                     juce::String minted = pd::sanitizeClassNameForTempId(classSrc)
                                               + "_" + canvasKey + "_" + String(objectIndex);
 
-                    auto& canvasIdMap = identity.canvasMap(canonStr);
+                    auto& canvasIdMap = identity.canvasMap(canvas);
                     auto existing = canvasIdMap.find(minted.toStdString());
                     if (existing == canvasIdMap.end()) {
                         canvasIdMap[minted.toStdString()] = y_obj;

@@ -15,8 +15,6 @@ void mcp::BatchJob::runPdJob()
 {
     auto tLambdaStart = std::chrono::high_resolution_clock::now();
     cnv = processor->getMcp()->getCanvasBySymbolStrict(canvasName);
-    if (!cnv && (canvasName == "pd-main" || canvasName == "main" || canvasName.isEmpty()))
-        cnv = pd_this->pd_canvaslist;
     if (!cnv) {
         canvasNotFound = true;
         post("batch_atomic: canvas '%s' not found — mutation refused", canvasName.toRawUTF8());
@@ -71,7 +69,7 @@ void mcp::BatchJob::reconcile(const std::string& canonStr)
     // zero audio dropout (runs inside the same audio-thread lambda).
     {
         auto canvasStr = canonStr;
-        auto& canvasMap = processor->getMcp()->identity.canvasMap(canvasStr);
+        auto& canvasMap = processor->getMcp()->identity.canvasMap(cnv);
 
         // Step A: Build set of all live pointers from gl_list (O(n))
         std::unordered_set<t_gobj*> livePointers;
@@ -184,7 +182,7 @@ void mcp::BatchJob::deletePhase(const std::string& canonStr)
     // Capture each doomed object's creation text + bounds + wires
     // FIRST so the inverse can recreate it (message-delta, no pointers).
     {
-        auto& delMap = processor->getMcp()->identity.canvasMap(canonStr);
+        auto& delMap = processor->getMcp()->identity.canvasMap(cnv);
         std::unordered_map<t_gobj*, std::string> ptrToTempId;
         for (auto& [tid, ptr] : delMap)
             if (ptr) ptrToTempId[ptr] = tid;
@@ -245,7 +243,7 @@ void mcp::BatchJob::deletePhase(const std::string& canonStr)
     for (auto& pd : preDeletes) {
         t_gobj* obj = processor->getMcp()->resolveStableId(canvasName, pd.objectId);
         if (obj) {
-            processor->getMcp()->identity.canvasMap(canonStr).erase(pd.objectId.toStdString());
+            processor->getMcp()->identity.canvasMap(cnv).erase(pd.objectId.toStdString());
             processor->getMcp()->identity.eraseSerial(obj);
             processor->getMcp()->identity.bumpVersion();
             toDelete.add(obj);
@@ -284,7 +282,7 @@ void mcp::BatchJob::editPhase(const std::string& canonStr)
                     if (y == obj) { still = true; break; }
                 newObj = still ? obj : pd::Interface::getNewest(cnv);
                 if (newObj) {
-                    processor->getMcp()->identity.canvasMap(canonStr)[pe.objectId.toStdString()] = newObj;
+                    processor->getMcp()->identity.canvasMap(cnv)[pe.objectId.toStdString()] = newObj;
                     if (newObj != obj) processor->getMcp()->identity.eraseSerial(obj);
                     processor->getMcp()->identity.assignSerial(newObj);
                     processor->getMcp()->identity.bumpVersion();
@@ -451,7 +449,7 @@ void mcp::BatchJob::createPhase(const std::string& canonStr)
                 redBoxes.add(no.ptr);
             } else {
                 // Map the stable tempId to the live gobj pointer
-                processor->getMcp()->identity.canvasMap(canonStr)[pc.tempId.toStdString()] = no.ptr;
+                processor->getMcp()->identity.canvasMap(cnv)[pc.tempId.toStdString()] = no.ptr;
                 processor->getMcp()->identity.assignSerial(no.ptr);
                 processor->getMcp()->identity.bumpVersion();
 

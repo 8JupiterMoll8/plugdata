@@ -5,92 +5,150 @@
 */
 #pragma once
 
-// Identity service core (Plan 3 P3.5). Owns everything the bridge knows about tempIds: per canvas key the map
-// id -> object, a serial per bound object, and the identity version TS polls. JUCE-free and templated on the
-// object handle, so Tests/mcp/identity_service_test.cpp runs with plain g++ on fake handles; the plugdata side
-// is mcp::IdentityService (McpIdentity.h).
+// Identity service core (Plan 3 P3.5). Owns everything the bridge knows about tempIds: per live canvas a record
+// with its wire key and its map id -> object, a serial per bound object, and the identity version TS polls.
+// JUCE-free and templated on the object and canvas handles, so Tests/mcp/identity_service_test.cpp runs with
+// plain g++ on fake handles; the plugdata side is mcp::IdentityService (McpIdentity.h), which installs the hooks.
 //
-// S1: the three McpSession fields moved here unchanged; still keyed by canvas name, callers keep their eviction
-// and minting rules. Later steps add canvas records, validation and the lock rule (see docs/plans/p3.5-steps.md).
+// S1: the three McpSession fields moved here unchanged. S2: every access but version() calls the access check
+// (the audit build reports an access without the Pd lock). S3 (#62): records are keyed by the live canvas, not
+// by a name. A record's wire key is the adapter's base key ("song.pd", "pd-voice"); a second live canvas with
+// the same base key gets "#2" (the lowest free number), kept for the canvas's life. A record whose liveness
+// check fails (the canvas was freed, even if a new canvas now sits at the same address) is dropped on sight
+// with its serials, so it never lends its ids.
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace mcp::identity {
 
-template <typename Obj>
+template <typename Obj, typename Canvas>
 class IdentityCore {
 public:
     using IdMap = std::unordered_map<std::string, Obj>;
 
-    // The id map of one canvas key, created empty when missing.
-    IdMap& canvasMap(std::string const& key)
+    struct Hooks {
+        // The canvas's key before any "#n" ("song.pd", "pd-voice", "pd-anon").
+        std::function<std::string(Canvas)> baseKey;
+        // Called once when a record is made: the returned check answers whether THAT canvas still lives.
+        std::function<std::function<bool()>(Canvas)> liveness;
+    };
+    void setHooks(Hooks h) { hooks = std::move(h); }
+
+    // The id map of a live canvas; makes its record (and wire key) when missing.
+    IdMap& canvasMap(Canvas c)
     {
         check("canvasMap");
-        return canvases[key];
+        return ensure(c).ids;
     }
 
-    // The id map of one canvas key, or nullptr; never creates one.
-    IdMap* findCanvas(std::string const& key)
+    // The id map of a live canvas, or nullptr; never makes a record.
+    IdMap* findCanvas(Canvas c)
     {
         check("findCanvas");
-        auto it = canvases.find(key);
-        return it == canvases.end() ? nullptr : &it->second;
+        auto* r = live(c);
+        return r ? &r->ids : nullptr;
     }
-    IdMap const* findCanvas(std::string const& key) const
+    IdMap const* findCanvas(Canvas c) const
     {
         check("findCanvas");
-        auto it = canvases.find(key);
-        return it == canvases.end() ? nullptr : &it->second;
+        auto it = records.find(c);
+        return it != records.end() && it->second.isAlive() ? &it->second.ids : nullptr;
     }
 
-    // Drops a canvas key with its ids and their serials. True when the key existed. No version bump.
-    bool eraseCanvas(std::string const& key)
+    // The wire key of a live canvas (makes its record when missing).
+    std::string keyOf(Canvas c)
     {
-        check("eraseCanvas");
-        auto it = canvases.find(key);
-        if (it == canvases.end())
+        check("keyOf");
+        return ensure(c).key;
+    }
+
+    // The live canvas whose wire key is `name`, or its "pd-" spelling ("pd-song.pd" for a root "song.pd",
+    // "voice" for "pd-voice"); a null handle when none. Only canvases that already have a record are found:
+    // the adapter makes records for every open canvas before it resolves a name.
+    Canvas canvasByKey(std::string const& name) const
+    {
+        check("canvasByKey");
+        if (name.empty())
+            return Canvas {};
+        Canvas found {};
+        for (auto const& [c, r] : records) {
+            if (!r.isAlive())
+                continue;
+            if (r.key == name)
+                return c;
+            if (!found && ("pd-" + r.key == name || r.key == "pd-" + name))
+                found = c;
+        }
+        return found;
+    }
+
+    // Drops a canvas's ids and their serials; the record and its key stay. True when the canvas had a record.
+    // No version bump.
+    bool clearCanvas(Canvas c)
+    {
+        check("clearCanvas");
+        auto* r = live(c);
+        if (!r)
             return false;
-        for (auto const& entry : it->second)
+        for (auto const& entry : r->ids)
             serials.erase(entry.second);
-        canvases.erase(it);
+        r->ids.clear();
         return true;
     }
 
-    // Save-as: the ids follow the file to its new key (replacing whatever that key held).
-    void moveCanvas(std::string const& from, std::string const& to)
+    // Save-as renamed the canvas: recompute its key (a new "#n" if another live canvas holds the new name).
+    void rekey(Canvas c)
     {
-        check("moveCanvas");
-        if (from == to)
+        check("rekey");
+        auto* r = live(c);
+        if (!r)
             return;
-        auto it = canvases.find(from);
-        if (it == canvases.end())
-            return;
-        auto moved = std::move(it->second);
-        canvases.erase(it);
-        canvases[to] = std::move(moved);
+        r->key.clear();
+        r->key = freeKey(baseOf(c));
     }
 
-    // The id bound to `obj` on any canvas, or "" (the first match in map order, as the old scans did).
+    // Drops every record whose canvas is gone, with its serials.
+    void prune()
+    {
+        check("prune");
+        for (auto it = records.begin(); it != records.end();) {
+            if (it->second.isAlive()) {
+                ++it;
+                continue;
+            }
+            dropSerials(it->second);
+            it = records.erase(it);
+        }
+    }
+
+    size_t recordCount() const { return records.size(); }
+
+    // The id bound to `obj` on any live canvas, or "".
     std::string idOf(Obj obj) const
     {
         check("idOf");
         if (!obj)
             return {};
-        for (auto const& [key, ids] : canvases)
-            for (auto const& [id, bound] : ids)
+        for (auto const& [c, r] : records) {
+            if (!r.isAlive())
+                continue;
+            for (auto const& [id, bound] : r.ids)
                 if (bound == obj)
                     return id;
+        }
         return {};
     }
 
-    // Binds `id` to `obj` on `key` (overwriting), gives the object a new serial, bumps the version.
-    void bind(std::string const& key, std::string const& id, Obj obj)
+    // Binds `id` to `obj` on canvas `c` (overwriting), gives the object a new serial, bumps the version.
+    void bind(Canvas c, std::string const& id, Obj obj)
     {
         check("bind");
-        canvases[key][id] = obj;
+        ensure(c).ids[id] = obj;
         assignSerial(obj);
         bumpVersion();
     }
@@ -134,14 +192,69 @@ public:
     void setAccessCheck(AccessCheck c) { accessCheck = c; }
 
 private:
+    struct Record {
+        std::string key;
+        IdMap ids;
+        std::function<bool()> alive;
+        bool isAlive() const { return !alive || alive(); }
+    };
+
     void check(char const* where) const
     {
         if (accessCheck)
             accessCheck(where);
     }
 
+    std::string baseOf(Canvas c) const { return hooks.baseKey ? hooks.baseKey(c) : std::string(); }
+
+    // The base key, or base + "#n" with the lowest n no other live record holds.
+    std::string freeKey(std::string const& base) const
+    {
+        std::unordered_set<std::string> taken;
+        for (auto const& [c, r] : records)
+            if (r.isAlive())
+                taken.insert(r.key);
+        if (!taken.count(base))
+            return base;
+        for (int n = 2;; ++n) {
+            auto candidate = base + "#" + std::to_string(n);
+            if (!taken.count(candidate))
+                return candidate;
+        }
+    }
+
+    void dropSerials(Record const& r)
+    {
+        for (auto const& entry : r.ids)
+            serials.erase(entry.second);
+    }
+
+    Record* live(Canvas c)
+    {
+        auto it = records.find(c);
+        if (it == records.end())
+            return nullptr;
+        if (it->second.isAlive())
+            return &it->second;
+        dropSerials(it->second); // dead (maybe a new canvas at the same address): never lend its ids
+        records.erase(it);
+        return nullptr;
+    }
+
+    Record& ensure(Canvas c)
+    {
+        if (auto* r = live(c))
+            return *r;
+        Record r;
+        r.key = freeKey(baseOf(c));
+        if (hooks.liveness)
+            r.alive = hooks.liveness(c);
+        return records.emplace(c, std::move(r)).first->second;
+    }
+
     AccessCheck accessCheck = nullptr;
-    std::unordered_map<std::string, IdMap> canvases;
+    Hooks hooks;
+    std::unordered_map<Canvas, Record> records;
     std::unordered_map<Obj, uint64_t> serials;
     uint64_t nextSerial = 1;
     std::atomic<uint64_t> identityVersion { 0 };

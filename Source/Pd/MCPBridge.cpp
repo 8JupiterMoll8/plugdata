@@ -236,8 +236,7 @@ juce::String MCPBridge::computeDiagnoseFacts(PluginProcessor* processor, t_canva
     std::vector<juce::String> names;
     std::vector<juce::String> classNames;
     std::unordered_map<t_gobj*, juce::String> ptrToId;
-    auto canonKey = canonicalCanvasKey(cnv);
-    auto const* canvasIds = processor->getMcp()->identity.findCanvas(canonKey.toStdString());
+    auto const* canvasIds = processor->getMcp()->identity.findCanvas(cnv);
     if (canvasIds)
         for (auto& [tid, ptr] : *canvasIds)
             if (ptr) ptrToId[ptr] = juce::String(tid);
@@ -585,8 +584,7 @@ juce::String MCPBridge::computeSignalTrace(PluginProcessor* processor, t_canvas*
     std::vector<juce::String> names;
     std::vector<juce::String> classNames;
     std::unordered_map<t_gobj*, juce::String> ptrToId;
-    auto canonKey = canonicalCanvasKey(cnv);
-    auto const* canvasIds = processor->getMcp()->identity.findCanvas(canonKey.toStdString());
+    auto const* canvasIds = processor->getMcp()->identity.findCanvas(cnv);
     if (canvasIds)
         for (auto& [tid, ptr] : *canvasIds)
             if (ptr) ptrToId[ptr] = juce::String(tid);
@@ -898,8 +896,7 @@ juce::String MCPBridge::computeClusters(PluginProcessor* processor, t_canvas* cn
     std::unordered_map<t_gobj*, int> ptrToIdx;
 
     std::unordered_map<t_gobj*, juce::String> ptrToId;
-    auto canonKey = canonicalCanvasKey(cnv);
-    auto const* canvasIds = processor->getMcp()->identity.findCanvas(canonKey.toStdString());
+    auto const* canvasIds = processor->getMcp()->identity.findCanvas(cnv);
     if (canvasIds)
         for (auto& [tid, ptr] : *canvasIds)
             if (ptr) ptrToId[ptr] = juce::String(tid);
@@ -1556,7 +1553,7 @@ juce::var MCPBridge::buildIdentitySidecar(PluginProcessor* processor, t_canvas* 
     auto buildIdArray = [&](const juce::String& mapKey, t_canvas* c) -> juce::var {
         juce::Array<juce::var> arr;
         std::unordered_map<t_gobj*, juce::String> ptrToId;
-        auto const* canvasIds = processor->getMcp()->identity.findCanvas(mapKey.toStdString());
+        auto const* canvasIds = processor->getMcp()->identity.findCanvas(c);
         if (canvasIds) {
             for (auto const& [id, ptr] : *canvasIds)
                 if (ptr) ptrToId[ptr] = juce::String(id);
@@ -1636,7 +1633,7 @@ int MCPBridge::mcpApplyIdentitySidecar(PluginProcessor* processor, juce::Dynamic
         for (t_gobj* g = target->gl_list; g; g = g->g_next, ++idx) {
             auto it = idxToId.find(idx);
             if (it == idxToId.end()) continue;
-            processor->getMcp()->identity.canvasMap(mapKey.toStdString())[it->second.toStdString()] = g;
+            processor->getMcp()->identity.canvasMap(target)[it->second.toStdString()] = g;
             processor->getMcp()->identity.ensureSerial(g);
             restored++;
         }
@@ -1657,7 +1654,7 @@ int MCPBridge::mcpApplyIdentitySidecar(PluginProcessor* processor, juce::Dynamic
             auto childIds = subObj->getProperty(juce::Identifier(childName));
             if (childIds.getArray() != nullptr && childIds.getArray()->size() > 0) {
                 juce::String childKey = canonicalCanvasKey(child);
-                processor->getMcp()->identity.canvasMap(childKey.toStdString()).clear();
+                processor->getMcp()->identity.clearCanvas(child);
                 restored += registerArray(childIds, childKey, child);
             }
         }
@@ -3236,7 +3233,6 @@ t_outconnect* MCPBridge::resolveProbeTarget(const juce::String& canvasName, cons
     }
 
     t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-    if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
     if (!cnv) {
         errorOut = "Canvas not found: " + canvasName;
         return nullptr;

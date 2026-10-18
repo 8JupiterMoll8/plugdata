@@ -107,6 +107,12 @@ public:
     // (fault gauntlet 2026-09-09 bug #11 — wrong-canvas injection).
     t_canvas* getCanvasBySymbolStrict(const String& canvas_symbol);
     void synchroniseCanvases();
+    // P3.5 S3: makes an identity record for every open canvas (roots oldest first, subcanvases depth-first, so
+    // an earlier canvas keeps the plain wire key and a later duplicate gets "#2") and drops dead ones. Takes the
+    // Pd lock.
+    void registerOpenCanvases();
+    // P3.5 S3: a canvas's wire key before any "#n" (root: file name; subcanvas: pd-<name>; unnamed: pd-anon).
+    static juce::String identityBaseKey(t_canvas* cnv);
 
     t_gobj* resolveStableId(const String& canvasName, const String& objectId);
     // Full identity reconcile against the live canvas (gl_list): evict entries whose

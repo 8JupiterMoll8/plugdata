@@ -149,7 +149,6 @@ void MCPBridge::pdUndo(const juce::String& action, const juce::OSCMessage& msg)
         auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : "0";
 
         t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-        if (!cnv && (canvasName == "pd-main" || canvasName == "main" || canvasName.isEmpty())) cnv = pd_this->pd_canvaslist;
 
         if (cnv) {
             postMessage([proc = processor, cnv, correlationId, bridge = this]() {
@@ -188,7 +187,6 @@ void MCPBridge::pdRedo(const juce::String& action, const juce::OSCMessage& msg)
         auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : "0";
 
         t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-        if (!cnv && (canvasName == "pd-main" || canvasName == "main" || canvasName.isEmpty())) cnv = pd_this->pd_canvaslist;
 
         if (cnv) {
             postMessage([proc = processor, cnv, correlationId, bridge = this]() {

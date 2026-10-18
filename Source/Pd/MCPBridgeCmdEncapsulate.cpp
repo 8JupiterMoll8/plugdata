@@ -22,7 +22,6 @@ void MCPBridge::pdEncapsulate(const juce::String& action, const juce::OSCMessage
         auto correlationId = (cursor < msg.size()) ? getArgString(msg[cursor]) : "0";
 
         t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-        if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
 
         if (cnv) {
             postMessage([proc = processor, cnv, canvasName, subpatchName, targetIds, correlationId, bridge = this]() {
@@ -111,15 +110,15 @@ void MCPBridge::pdEncapsulate(const juce::String& action, const juce::OSCMessage
                 }
 
                 if (newestObj) {
-                    proc->getMcp()->identity.canvasMap(canonicalCanvasKey(cnv).toStdString())[subpatchName.toStdString()] = newestObj;
+                    proc->getMcp()->identity.canvasMap(cnv)[subpatchName.toStdString()] = newestObj;
                     proc->getMcp()->identity.assignSerial(newestObj);
                     proc->getMcp()->identity.bumpVersion();
 
                     // Re-attach the original tempIds to the recreated inner
                     // objects (match by class + object text; greedy, best-effort).
                     auto* innerCnv = reinterpret_cast<t_canvas*>(newestObj);
-                    auto& parentMap = proc->getMcp()->identity.canvasMap(canonicalCanvasKey(cnv).toStdString());
-                    auto& childMap = proc->getMcp()->identity.canvasMap(canonicalCanvasKey(innerCnv).toStdString());
+                    auto& parentMap = proc->getMcp()->identity.canvasMap(cnv);
+                    auto& childMap = proc->getMcp()->identity.canvasMap(innerCnv);
                     for (t_gobj* y = innerCnv->gl_list; y; y = y->g_next) {
                         juce::String cls = juce::String::fromUTF8(class_getname(pd_class(&y->g_pd)));
                         juce::String txt;
@@ -169,7 +168,6 @@ void MCPBridge::pdEncapsulateToFile(const juce::String& action, const juce::OSCM
         auto correlationId = (cursor < msg.size()) ? getArgString(msg[cursor]) : "0";
 
         t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-        if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
 
         if (cnv) {
             postMessage([proc = processor, cnv, canvasName, abstrName, filePath, targetIds, correlationId, bridge = this]() {
@@ -343,7 +341,7 @@ void MCPBridge::pdEncapsulateToFile(const juce::String& action, const juce::OSCM
                     McpHost::PdLockScope lock(*proc); // P3.5 S2
                     t_gobj* newObj = pd::Interface::getNewest(cnv);
                     if (newObj) {
-                        proc->getMcp()->identity.canvasMap(canonicalCanvasKey(cnv).toStdString())[abstrName.toStdString()] = newObj;
+                        proc->getMcp()->identity.canvasMap(cnv)[abstrName.toStdString()] = newObj;
                         proc->getMcp()->identity.assignSerial(newObj);
                         proc->getMcp()->identity.bumpVersion();
                     }
@@ -435,7 +433,6 @@ void MCPBridge::pdEncapsulateGop(const juce::String& action, const juce::OSCMess
             sendReply(replyAddr, juce::String("{\"ok\":false,\"error\":\"GOP_BAD_SPEC\",\"detail\":\"no targetIds\"}"));
         } else {
             t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-            if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
             if (!cnv) {
                 sendReply(replyAddr, juce::String("{\"ok\":false,\"error\":\"GOP_NO_CANVAS\",\"detail\":\"" + jsonEscape(canvasName) + "\"}"));
             } else {
@@ -518,9 +515,9 @@ void MCPBridge::pdEncapsulateGop(const juce::String& action, const juce::OSCMess
                             // remover. removeObjects() clears selection first (noselect),
                             // opens UNDO_SEQUENCE_START, records UNDO_CUT, and suspends DSP around free.
                             for (auto* g : toDelete) {
-                                proc->getMcp()->identity.canvasMap(gopKey).erase(
+                                proc->getMcp()->identity.canvasMap(cnv).erase(
                                     [&]() -> std::string {
-                                        for (auto& [tid, ptr] : proc->getMcp()->identity.canvasMap(gopKey))
+                                        for (auto& [tid, ptr] : proc->getMcp()->identity.canvasMap(cnv))
                                             if (ptr == g) return tid;
                                         return "";
                                     }());
@@ -553,7 +550,7 @@ void MCPBridge::pdEncapsulateGop(const juce::String& action, const juce::OSCMess
                             undoAtoms.add(juce::String(canvasName));
                             proc->getMcp()->callSys("mcp_clear_undo", undoAtoms);
                             for (auto& e : staleErrs) connErrs.add(e);
-                            proc->getMcp()->identity.canvasMap(gopKey)[safeName.toStdString()] = newObj;
+                            proc->getMcp()->identity.canvasMap(cnv)[safeName.toStdString()] = newObj;
                             proc->getMcp()->identity.assignSerial(newObj);
                             proc->getMcp()->identity.bumpVersion();
                             newTempId = safeName;

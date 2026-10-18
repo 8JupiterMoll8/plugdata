@@ -21,7 +21,6 @@ void MCPBridge::pdTidy(const juce::String& action, const juce::OSCMessage& msg)
         auto correlationId = (cursor < msg.size()) ? getArgString(msg[cursor]) : "0";
 
         t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-        if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
 
         if (cnv) {
             SmallArray<t_gobj*> targetObjs;
@@ -62,7 +61,6 @@ void MCPBridge::pdAlign(const juce::String& action, const juce::OSCMessage& msg)
         auto correlationId = (cursor < msg.size()) ? getArgString(msg[cursor]) : "0";
 
         t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-        if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
 
         if (cnv) {
             postMessage([proc = processor, cnv, canvasName, alignStr, targetIds, correlationId, bridge = this]() {
@@ -95,7 +93,6 @@ void MCPBridge::pdZoomToFit(const juce::String& action, const juce::OSCMessage& 
         auto correlationId = (msg.size() >= 2) ? getArgString(msg[1]) : "0";
 
         t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-        if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
 
         postMessage([proc = processor, cnv, correlationId, bridge = this]() {
             if (mcpCanvasGone(cnv)) { bridge->sendReply("/pd/zoom_to_fit/reply/" + correlationId, 0.0f); return; } // P3.4 S4: closed since the handler ran
@@ -127,7 +124,6 @@ void MCPBridge::pdDeoverlap(const juce::String& action, const juce::OSCMessage& 
         auto correlationId = (cursor < (int)msg.size()) ? getArgString(msg[cursor]) : "0";
 
         t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-        if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
         if (!cnv) {
             sendReply("/pd/deoverlap/reply/" + correlationId, 0.0f);
             return;
@@ -247,7 +243,6 @@ void MCPBridge::pdLayoutGuard(const juce::String& action, const juce::OSCMessage
     juce::String replyAddr = "/pd/layout_guard/reply/" + correlationId;
 
     t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-    if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
     if (!cnv) {
         juce::Array<juce::var> none;
         none.add(0.0f);
@@ -281,7 +276,6 @@ void MCPBridge::pdCompose(const juce::String& action, const juce::OSCMessage& ms
     juce::String replyAddr = "/pd/compose/reply/" + correlationId;
 
     t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-    if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
     if (!cnv) { sendReply(replyAddr, 0.0f); return; }
 
     sys_lock();
@@ -312,7 +306,6 @@ void MCPBridge::pdPillars(const juce::String& action, const juce::OSCMessage& ms
                            : (msg.size() > 1 ? getArgString(msg[1]) : "0");
 
         t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-        if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
         if (!cnv) {
             sendReply("/pd/pillars/reply/" + correlationId, 0.0f);
             return;
@@ -406,7 +399,6 @@ void MCPBridge::pdFlow(const juce::String& action, const juce::OSCMessage& msg)
                            : (msg.size() > 1 ? getArgString(msg[1]) : "0");
 
         t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-        if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
         if (!cnv) {
             sendReply("/pd/flow/reply/" + correlationId, 0.0f);
             return;

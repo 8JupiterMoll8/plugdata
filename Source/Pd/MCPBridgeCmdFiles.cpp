@@ -40,7 +40,6 @@ void MCPBridge::pdSaveContent(const juce::String& action, const juce::OSCMessage
         juce::String content;
         sys_lock();
         t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-        if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
         if (cnv) {
             char* buf = nullptr;
             int   bufsize = 0;
@@ -109,7 +108,6 @@ void MCPBridge::pdLoadContent(const juce::String& action, const juce::OSCMessage
 
         sys_lock();
         t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-        if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
         if (cnv) {
             // 1. Clear existing objects
             mcp::PdOps::clearCanvasAudioThread(cnv);
@@ -217,7 +215,6 @@ void MCPBridge::pdSavePatch(const juce::String& action, const juce::OSCMessage& 
 
         sys_lock();
         t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-        if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
         if (cnv) {
             char* buf = nullptr;
             int   bufsize = 0;
@@ -282,7 +279,7 @@ void MCPBridge::pdSavePatch(const juce::String& action, const juce::OSCMessage& 
         const std::string newKey = juce::File(destFilePath).getFileName().toStdString();
         processor->getMcp()->enqueuePd([p = processor, cnv, destFilePath, oldKey, newKey]() {
             juce::File f(destFilePath);
-            p->getMcp()->identity.moveCanvas(oldKey, newKey);
+            p->getMcp()->identity.rekey(cnv); // P3.5 S3: the record follows the canvas; only its key changes
             // P3.4 S3: the tab title is GUI state: set it on the message thread, if the canvas still exists.
             p->getMcp()->postMessage([p, cnv, f] {
                 sys_lock();
@@ -376,11 +373,10 @@ void MCPBridge::pdLoadPatch(const juce::String& action, const juce::OSCMessage& 
                 int objectCount = 0;
                 sys_lock();
                 t_canvas* cnv = proc->getMcp()->getCanvasBySymbol(canvasName);
-                if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
                 if (cnv) {
                     auto canonKey = MCPBridge::canonicalCanvasKey(cnv);
                     // 0. Reset identity for this canvas tree BEFORE re-registering
-                    proc->getMcp()->identity.canvasMap(canonKey.toStdString()).clear();
+                    proc->getMcp()->identity.clearCanvas(cnv);
 
                     // 1. Clear existing objects (message-thread-safe)
                     mcp::PdOps::clearCanvas(cnv);

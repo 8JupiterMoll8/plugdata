@@ -24,7 +24,6 @@ void MCPBridge::pdIdentitySnapshot(const juce::String& action, const juce::OSCMe
 
         sys_lock();
         t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-        if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
 
         if (!cnv) {
             sys_unlock();
@@ -43,7 +42,7 @@ void MCPBridge::pdIdentitySnapshot(const juce::String& action, const juce::OSCMe
         // Step 2: Walk the identity map and validate each entry (O(m))
         auto canonKey = canonicalCanvasKey(cnv);
         auto canvasStr = canonKey.toStdString();
-        auto& canvasMap = processor->getMcp()->identity.canvasMap(canvasStr);
+        auto& canvasMap = processor->getMcp()->identity.canvasMap(cnv);
         uint64_t version = processor->getMcp()->identity.version();
 
         auto* rootObj = new juce::DynamicObject();
@@ -182,12 +181,13 @@ void MCPBridge::pdRenameId(const juce::String& action, const juce::OSCMessage& m
         {
             McpHost::PdLockScope lock(*processor); // P3.5 S2: was unlocked on the command worker
             t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-            auto mapKey = (cnv ? canonicalCanvasKey(cnv) : canvasName).toStdString();
-            auto& map = processor->getMcp()->identity.canvasMap(mapKey);
-            auto const renamed = mcp::identity::renameStableId(map, oldId, newId);
-            if (renamed == mcp::identity::RenameResult::Applied)
-                processor->getMcp()->identity.bumpVersion();
-            success = renamed != mcp::identity::RenameResult::Missing;
+            if (cnv) { // P3.5 S3: an unknown canvas renames nothing (it used to rename in a map named after the request)
+                auto& map = processor->getMcp()->identity.canvasMap(cnv);
+                auto const renamed = mcp::identity::renameStableId(map, oldId, newId);
+                if (renamed == mcp::identity::RenameResult::Applied)
+                    processor->getMcp()->identity.bumpVersion();
+                success = renamed != mcp::identity::RenameResult::Missing;
+            }
         }
 
         sendReply("/pd/rename_id/reply/" + correlationId, success ? 1.0f : 0.0f);
@@ -211,12 +211,11 @@ void MCPBridge::pdRenameIdBatch(const juce::String& action, const juce::OSCMessa
         {
             McpHost::PdLockScope lock(*processor);
             t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-            auto mapKey = (cnv ? canonicalCanvasKey(cnv) : canvasName).toStdString();
-            auto& map = processor->getMcp()->identity.canvasMap(mapKey);
             for (int i = 0; i < count && (cursor + 1) < msg.size(); i++) {
                 auto oldId = getArgString(msg[cursor++]).toStdString();
                 auto newId = getArgString(msg[cursor++]).toStdString();
-                auto const result = mcp::identity::renameStableId(map, oldId, newId);
+                if (!cnv) continue; // P3.5 S3: an unknown canvas renames nothing
+                auto const result = mcp::identity::renameStableId(processor->getMcp()->identity.canvasMap(cnv), oldId, newId);
                 if (result != mcp::identity::RenameResult::Missing) renamed++;
                 if (result == mcp::identity::RenameResult::Applied) changed = true;
             }

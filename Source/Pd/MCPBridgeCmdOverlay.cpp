@@ -23,7 +23,6 @@ void MCPBridge::pdSelect(const juce::String& action, const juce::OSCMessage& msg
     auto correlationId = (cursor < msg.size()) ? getArgString(msg[cursor]) : "0";
 
     t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-    if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
     if (!cnv) { sendReply("/pd/select/reply/" + correlationId, 0.0f); return; }
 
     postMessage([proc = processor, cnv, canvasName, ids, correlationId, bridge = this]() {
@@ -87,7 +86,6 @@ void MCPBridge::pdAiOverlay(const juce::String& action, const juce::OSCMessage& 
     for (int i = 0; i < count && cursor < msg.size(); i++) ids.push_back(getArgString(msg[cursor++]));
 
     t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-    if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
     if (!cnv) { sendReply("/pd/ai_overlay/reply/" + correlationId, 0.0f); return; }
 
     postMessage([proc = processor, cnv, canvasName, state, transient, ids, correlationId, bridge = this]() {
@@ -138,7 +136,6 @@ void MCPBridge::pdAiGhost(const juce::String& action, const juce::OSCMessage& ms
     auto jsonStr       = msg.size() > 2 ? getArgString(msg[2]) : juce::String("[]");
 
     t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-    if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
     if (!cnv) { sendReply("/pd/ai_ghost/reply/" + correlationId, 0.0f); return; }
 
     auto parsed = juce::JSON::parse(jsonStr);
@@ -195,7 +192,6 @@ void MCPBridge::pdAiAnnotate(const juce::String& action, const juce::OSCMessage&
     auto jsonStr       = msg.size() > 2 ? getArgString(msg[2]) : juce::String("[]");
 
     t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-    if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
     if (!cnv) { sendReply("/pd/ai_annotate/reply/" + correlationId, 0.0f); return; }
 
     auto parsed = juce::JSON::parse(jsonStr);
@@ -302,7 +298,6 @@ void MCPBridge::pdAiRegion(const juce::String& action, const juce::OSCMessage& m
     auto jsonStr       = msg.size() > 2 ? getArgString(msg[2]) : juce::String("[]");
 
     t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-    if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
     if (!cnv) { sendReply("/pd/ai_region/reply/" + correlationId, 0.0f); return; }
 
     auto parsed = juce::JSON::parse(jsonStr);
@@ -380,7 +375,6 @@ void MCPBridge::pdAiHud(const juce::String& action, const juce::OSCMessage& msg)
     auto jsonStr = getArgString(msg[2]);
 
     t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-    if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
 
     auto parsed = juce::JSON::parse(jsonStr);
 
@@ -413,7 +407,6 @@ void MCPBridge::pdGetOverlays(const juce::String& action, const juce::OSCMessage
     auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : "0";
 
     t_canvas* cnv = processor ? processor->getMcp()->getCanvasBySymbol(canvasName) : nullptr;
-    if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
 
     postMessage([proc = processor, cnv, correlationId, bridge = this]() {
         if (mcpCanvasGone(cnv)) { bridge->sendReply("/pd/get_overlays/reply/" + correlationId, juce::String("{\"error\":\"canvas closed\"}")); return; } // P3.4 S4: closed since the handler ran
@@ -452,7 +445,6 @@ void MCPBridge::pdSetOverlays(const juce::String& action, const juce::OSCMessage
     auto argStr        = msg.size() > 2 ? getArgString(msg[2]) : "{}";
 
     t_canvas* cnv = processor ? processor->getMcp()->getCanvasBySymbol(canvasName) : nullptr;
-    if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
 
     postMessage([proc = processor, cnv, canvasName, argStr, correlationId, bridge = this]() {
         if (mcpCanvasGone(cnv)) { bridge->sendReply("/pd/set_overlays/reply/" + correlationId, juce::String("{\"error\":\"canvas closed\"}")); return; } // P3.4 S4: closed since the handler ran
@@ -674,7 +666,7 @@ void MCPBridge::pdScreenshotCanvas(const juce::String& action, const juce::OSCMe
                 std::unordered_map<t_gobj*, juce::String> ptrToId;
                 if (proc) {
                     McpHost::PdLockScope lock(*proc);
-                    auto const* canvasIds = proc->getMcp()->identity.findCanvas((liveCnv ? canonicalCanvasKey(liveCnv) : canvasName).toStdString());
+                    auto const* canvasIds = proc->getMcp()->(liveCnv ? proc->getMcp()->identity.findCanvas(liveCnv) : nullptr);
                     if (canvasIds)
                         for (auto& [tid, ptr] : *canvasIds)
                             if (ptr) ptrToId[ptr] = juce::String(tid);
