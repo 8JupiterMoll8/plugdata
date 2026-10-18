@@ -39,5 +39,9 @@ void markAudioThread();
 bool holdsPdLock();
 // Logs "MCP_AUDIT wait-under-lock <where>" on every such call (audit on only).
 void reportWaitUnderLock(char const* where);
+// P3.5 S2: identity state is touched only under the Pd lock. Installed as the identity service's access check
+// when the audit is on: logs "MCP_AUDIT identity-unlocked <where> role=<thread> at <caller frames>" for an access
+// without the lock (once per distinct caller, at most 200 lines).
+void checkIdentityAccess(char const* where);
 
 } // namespace mcp::audit

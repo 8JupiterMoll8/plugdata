@@ -13,6 +13,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
+#include <unordered_set>
+
+#include <execinfo.h>
 #include <string>
 
 #include "Mcp/McpAudit.h"
@@ -172,6 +176,33 @@ void reportWaitUnderLock(char const* where)
         return;
     std::fprintf(stderr, "MCP_AUDIT wait-under-lock %s (during %s)\n", where ? where : "?", currentAddress.c_str());
     std::fflush(stderr);
+}
+
+void checkIdentityAccess(char const* where)
+{
+    if (!enabled() || tls.depth > 0)
+        return;
+    void* frames[8];
+    int const n = backtrace(frames, 8);
+    // Frames 0-1 are this function and the core's check; the caller chain starts at 2.
+    uintptr_t key = reinterpret_cast<uintptr_t>(where);
+    for (int i = 2; i < n; ++i)
+        key = key * 1099511628211ull ^ reinterpret_cast<uintptr_t>(frames[i]);
+    static std::mutex seenLock;
+    static std::unordered_set<uintptr_t> seen;
+    {
+        std::lock_guard<std::mutex> g(seenLock);
+        if (seen.size() >= 200 || !seen.insert(key).second)
+            return;
+    }
+    static char const* const roleNames[] = { "other", "net", "audio", "msg" };
+    std::fprintf(stderr, "MCP_AUDIT identity-unlocked %s role=%s at", where ? where : "?", roleNames[roleOfThisThread()]);
+    char** syms = backtrace_symbols(frames, n);
+    for (int i = 2; i < n && i < 7; ++i)
+        std::fprintf(stderr, " | %s", syms ? syms[i] : "?");
+    std::fprintf(stderr, "\n");
+    std::fflush(stderr);
+    std::free(syms);
 }
 
 } // namespace mcp::audit

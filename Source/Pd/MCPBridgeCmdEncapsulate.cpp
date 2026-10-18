@@ -32,6 +32,10 @@ void MCPBridge::pdEncapsulate(const juce::String& action, const juce::OSCMessage
                     return;
                 }
 
+                // P3.5 S2: identity and gl_list work under the Pd lock (message thread; it used to run unlocked
+                // while the worker renamed ids: a data race on the identity map).
+                McpHost::PdLockScope lock(*proc);
+
                 // Phase 3: reconcile identity BEFORE resolving tempIds so a stale id
                 // can't resolve to the wrong object. Shared routine.
                 proc->getMcp()->reconcileIdentity(canvasName);
@@ -179,6 +183,8 @@ void MCPBridge::pdEncapsulateToFile(const juce::String& action, const juce::OSCM
                 // Selection-free (same as /pd/encapsulate): reconcile, resolve the
                 // ids straight to Object*, fail closed on the first miss, and hand
                 // the explicit list to the native encapsulate. No GUI selection.
+                // P3.5 S2: identity and gl_list work under the Pd lock, released before the file write (Step 3).
+                auto identityLock = std::make_unique<McpHost::PdLockScope>(*proc);
                 proc->getMcp()->reconcileIdentity(canvasName);
 
                 std::vector<t_gobj*> toEncapsulate;
@@ -237,6 +243,7 @@ void MCPBridge::pdEncapsulateToFile(const juce::String& action, const juce::OSCM
                 // ── Step 3: Save subpatch content to file ────────────────
                 // getCanvasContent runs under sys_lock; disk write is outside.
                 juce::String content;
+                identityLock.reset();
                 sys_lock();
                 {
                     char* buf = nullptr; int bufsize = 0;
@@ -332,11 +339,14 @@ void MCPBridge::pdEncapsulateToFile(const juce::String& action, const juce::OSCM
                 sys_unlock();
 
                 // ── Step 5: Register new abstraction object in identity map
-                t_gobj* newObj = pd::Interface::getNewest(cnv);
-                if (newObj) {
-                    proc->getMcp()->identity.canvasMap(canonicalCanvasKey(cnv).toStdString())[abstrName.toStdString()] = newObj;
-                    proc->getMcp()->identity.assignSerial(newObj);
-                    proc->getMcp()->identity.bumpVersion();
+                {
+                    McpHost::PdLockScope lock(*proc); // P3.5 S2
+                    t_gobj* newObj = pd::Interface::getNewest(cnv);
+                    if (newObj) {
+                        proc->getMcp()->identity.canvasMap(canonicalCanvasKey(cnv).toStdString())[abstrName.toStdString()] = newObj;
+                        proc->getMcp()->identity.assignSerial(newObj);
+                        proc->getMcp()->identity.bumpVersion();
+                    }
                 }
 
                 // ── Step 6: Reload abstractions so Pd registers the file ─

@@ -34,6 +34,17 @@ public:
     MCPBridge* getMCPBridge() const { return mcpBridge.get(); }
     int xrunCount() const;
     juce::String getMcpBridgeStatus() const;
+    // P3.5 S2: identity state is touched only under the Pd lock (sys_lock, recursive). Scoped lock for any thread.
+    // Never hold it while waiting for another context (THREADING.md rule 2); take it before mcpOverlayLock (rule 10).
+    class PdLockScope {
+    public:
+        explicit PdLockScope(PluginProcessor& p);
+        ~PdLockScope();
+        PdLockScope(PdLockScope const&) = delete;
+        PdLockScope& operator=(PdLockScope const&) = delete;
+    };
+
+    // The identity methods below take the Pd lock themselves (any thread; they hand out values, not references).
     // Reverse identity lookup (C++ truth): the stable tempId for a live pd object,
     // read straight from the bridge's own stable map — never from the TS mirror.
     juce::String getStableId(t_gobj* g) const;
@@ -100,8 +111,7 @@ public:
     t_gobj* resolveStableId(const String& canvasName, const String& objectId);
     // Full identity reconcile against the live canvas (gl_list): evict entries whose
     // gobj is gone, adopt untracked objects (gui_<class>_<n>), bump the identity version.
-    // Caller must be on the message thread / hold the Pd lock (same context as
-    // resolveStableId). Makes the tempId cache equal gl_list truth before any op that
+    // Takes the Pd lock itself (P3.5 S2). Makes the tempId cache equal gl_list truth before any op that
     // resolves ids — so a stale id can never silently map to the wrong object.
     void reconcileIdentity(const String& canvasName);
     // Open/close the WAV take. Never call these on the audio thread.

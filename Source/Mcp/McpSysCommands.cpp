@@ -212,11 +212,14 @@ void McpHost::sysClearIds(SmallString const& selector, mcp::SysList const& list)
         auto canvas_symbol = list[0].toString();
         auto correlation_id = list[1].toString();
 
-        t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
-        auto canvasStr = (canvas ? MCPBridge::canonicalCanvasKey(canvas) : canvas_symbol).toStdString();
-        // Drops the canvas's ids and their serials.
-        if (identity.eraseCanvas(canvasStr))
-            identity.bumpVersion();
+        {
+            PdLockScope lock(processor); // P3.5 S2: the worker path ran this without the lock
+            t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
+            auto canvasStr = (canvas ? MCPBridge::canonicalCanvasKey(canvas) : canvas_symbol).toStdString();
+            // Drops the canvas's ids and their serials.
+            if (identity.eraseCanvas(canvasStr))
+                identity.bumpVersion();
+        }
 
         mcp::SysList atoms; // P3.4 S7: plain values, no Pd symbols
         atoms.add(1.0f);

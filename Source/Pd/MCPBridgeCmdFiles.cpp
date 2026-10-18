@@ -503,11 +503,12 @@ void MCPBridge::pdOpenPatch(const juce::String& action, const juce::OSCMessage& 
             juce::File f(fileStr);
             p->getMcp()->gui().closeDuplicateTabs(f);
 
-            // PRD Phase 3 §2.5: sidecar registration via the proven async
-            // mcp_register_id path — NO sys_lock in this lambda (lock
-            // inversion with the audio thread crashes the message thread).
+            // PRD Phase 3 §2.5: sidecar registration via the async mcp_register_id path. P3.5 S2: the gl_list walk
+            // runs under the Pd lock (the old "no sys_lock here" note predates P3.4's execution model: the
+            // audio thread never waits for the message thread now).
             int queued = 0;
             if (auto* sidecarObj = sidecar.getDynamicObject()) {
+                McpHost::PdLockScope lock(*p);
                 auto queueRegisters = [&p, &queued](juce::var const& idArray, juce::String const& canvasKey, t_canvas* target) {
                     const auto* arr = idArray.getArray();
                     if (arr == nullptr) return;

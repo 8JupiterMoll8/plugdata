@@ -23,6 +23,19 @@ McpHost::McpHost(PluginProcessor& p)
     , guiHost(createMcpGuiHost(p))
 {
     sysTable(); // a bad selector table fails here, at startup
+    if (mcp::audit::enabled())
+        identity.setAccessCheck(&mcp::audit::checkIdentityAccess); // P3.5 S2: report access without the Pd lock
+}
+
+McpHost::PdLockScope::PdLockScope(PluginProcessor& p)
+{
+    p.setThis();
+    sys_lock();
+}
+
+McpHost::PdLockScope::~PdLockScope()
+{
+    sys_unlock();
 }
 
 McpHost::~McpHost()
@@ -340,12 +353,14 @@ void McpHost::synchroniseCanvases()
 
 juce::String McpHost::getStableId(t_gobj* g) const
 {
+    PdLockScope lock(processor);
     return juce::String(identity.idOf(g));
 }
 
 juce::String McpHost::getOrAdoptStableId(t_canvas* canvas, t_gobj* g)
 {
     if (!g) return {};
+    PdLockScope lock(processor);
     auto const existing = getStableId(g);
     if (existing.isNotEmpty()) return existing;
     if (!canvas) return {};
@@ -391,6 +406,7 @@ juce::String McpHost::getOrAdoptStableId(t_canvas* canvas, t_gobj* g)
 
 t_gobj* McpHost::resolveStableId(const String& canvasName, const String& objectId)
 {
+    PdLockScope lock(processor);
     // Identity is keyed by the canvas's CANONICAL key. "main" is a
     // focus-dependent ALIAS, never a stored key — resolve the canvas first and
     // derive its canonical key so both sides of the map agree.
@@ -439,6 +455,7 @@ t_gobj* McpHost::resolveStableId(const String& canvasName, const String& objectI
 
 void McpHost::reconcileIdentity(const String& canvasName)
 {
+    PdLockScope lock(processor);
     t_canvas* canvas = getCanvasBySymbol(canvasName);
     if (!canvas && (canvasName == "pd-main" || canvasName == "main" || canvasName.isEmpty()))
         canvas = pd_this->pd_canvaslist;

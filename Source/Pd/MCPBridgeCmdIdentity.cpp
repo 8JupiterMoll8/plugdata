@@ -179,13 +179,16 @@ void MCPBridge::pdRenameId(const juce::String& action, const juce::OSCMessage& m
         auto newId = getArgString(msg[3]).toStdString();
 
         bool success = false;
-        t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-        auto mapKey = (cnv ? canonicalCanvasKey(cnv) : canvasName).toStdString();
-        auto& map = processor->getMcp()->identity.canvasMap(mapKey);
-        auto const renamed = mcp::identity::renameStableId(map, oldId, newId);
-        if (renamed == mcp::identity::RenameResult::Applied)
-            processor->getMcp()->identity.bumpVersion();
-        success = renamed != mcp::identity::RenameResult::Missing;
+        {
+            McpHost::PdLockScope lock(*processor); // P3.5 S2: was unlocked on the command worker
+            t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
+            auto mapKey = (cnv ? canonicalCanvasKey(cnv) : canvasName).toStdString();
+            auto& map = processor->getMcp()->identity.canvasMap(mapKey);
+            auto const renamed = mcp::identity::renameStableId(map, oldId, newId);
+            if (renamed == mcp::identity::RenameResult::Applied)
+                processor->getMcp()->identity.bumpVersion();
+            success = renamed != mcp::identity::RenameResult::Missing;
+        }
 
         sendReply("/pd/rename_id/reply/" + correlationId, success ? 1.0f : 0.0f);
     }
@@ -204,19 +207,22 @@ void MCPBridge::pdRenameIdBatch(const juce::String& action, const juce::OSCMessa
         int renamed = 0;
         bool changed = false;
 
-        // Inline rename — directly mutates the identity map, no queue.
-        t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-        auto mapKey = (cnv ? canonicalCanvasKey(cnv) : canvasName).toStdString();
-        auto& map = processor->getMcp()->identity.canvasMap(mapKey);
-        for (int i = 0; i < count && (cursor + 1) < msg.size(); i++) {
-            auto oldId = getArgString(msg[cursor++]).toStdString();
-            auto newId = getArgString(msg[cursor++]).toStdString();
-            auto const result = mcp::identity::renameStableId(map, oldId, newId);
-            if (result != mcp::identity::RenameResult::Missing) renamed++;
-            if (result == mcp::identity::RenameResult::Applied) changed = true;
+        // Inline rename — directly mutates the identity map, no queue. P3.5 S2: under the Pd lock.
+        {
+            McpHost::PdLockScope lock(*processor);
+            t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
+            auto mapKey = (cnv ? canonicalCanvasKey(cnv) : canvasName).toStdString();
+            auto& map = processor->getMcp()->identity.canvasMap(mapKey);
+            for (int i = 0; i < count && (cursor + 1) < msg.size(); i++) {
+                auto oldId = getArgString(msg[cursor++]).toStdString();
+                auto newId = getArgString(msg[cursor++]).toStdString();
+                auto const result = mcp::identity::renameStableId(map, oldId, newId);
+                if (result != mcp::identity::RenameResult::Missing) renamed++;
+                if (result == mcp::identity::RenameResult::Applied) changed = true;
+            }
+            if (changed)
+                processor->getMcp()->identity.bumpVersion();
         }
-        if (changed)
-            processor->getMcp()->identity.bumpVersion();
 
         auto correlationId = (cursor < msg.size()) ? getArgString(msg[cursor]) : "0";
         sendReply("/pd/rename_id_batch/reply/" + correlationId, static_cast<float>(renamed));

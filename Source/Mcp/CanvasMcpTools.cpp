@@ -110,6 +110,7 @@ juce::StringArray CanvasMcpLayer::getSelectionStableIds()
     if (!canvas.pd) return ids;
     auto patchPtr = canvas.patch.getPointer();
     t_canvas* cnv = patchPtr ? patchPtr.get() : nullptr;
+    McpHost::PdLockScope lock(*canvas.pd); // P3.5 S2: one lock for the loop
     for (auto* obj : canvas.getSelectionOfType<Object>()) {
         if (auto* ptr = obj->getPointer()) {
             auto tid = canvas.pd->getMcp()->getStableId(ptr);

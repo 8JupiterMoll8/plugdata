@@ -26,6 +26,7 @@
 Object* CanvasMcpLayer::findObjectByStableId(juce::String const& targetId) const
 {
     if (targetId.isEmpty() || !canvas.pd) return nullptr;
+    McpHost::PdLockScope lock(*canvas.pd); // P3.5 S2: one lock for the loop (getStableId re-enters it)
     for (auto* obj : canvas.objects) {
         if (!obj) continue;
         if (auto* ptr = obj->getPointer()) {

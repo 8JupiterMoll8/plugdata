@@ -126,6 +126,33 @@ int main()
         CHECK(core.version() == 2);
     }
 
+    // ── the access check (S2: the audit build reports an access without the Pd lock) sees every access but the
+    //    atomic version read ──
+    {
+        static int calls = 0;
+        static std::string last;
+        static bool sawBind = false;
+        Core core;
+        core.setAccessCheck([](char const* where) { ++calls; last = where; sawBind = sawBind || last == "bind"; });
+        core.bind("a.pd", "x", &a);
+        CHECK(calls >= 1 && sawBind);
+        int const before = calls;
+        (void)core.version();
+        CHECK(calls == before);
+        (void)core.idOf(&a);
+        CHECK(last == "idOf");
+        (void)core.findCanvas("a.pd");
+        CHECK(last == "findCanvas");
+        core.canvasMap("a.pd");
+        CHECK(last == "canvasMap");
+        core.eraseCanvas("a.pd");
+        CHECK(last == "eraseCanvas");
+        core.setAccessCheck(nullptr);
+        int const after = calls;
+        core.bind("a.pd", "y", &b);
+        CHECK(calls == after);
+    }
+
     if (failures == 0)
         std::printf("identity_service_test: all passed\n");
     return failures == 0 ? 0 : 1;
