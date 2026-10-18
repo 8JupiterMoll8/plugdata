@@ -92,6 +92,16 @@ bool arrayFloats(t_garray* garray, int& size, t_word*& vec)
     return garray_getfloatwords(garray, &size, &vec) && vec;
 }
 
+// L21 (P3.4 S9): a missing array, or one without float data, answers
+// /array/<verb>/error/<corrId> "<reason>" instead of silence.
+juce::OSCMessage arrayError(char const* verb, juce::String const& correlationId,
+                            juce::String const& arrayName, t_garray* garray)
+{
+    juce::OSCMessage err { juce::OSCAddressPattern("/array/" + juce::String(verb) + "/error/" + correlationId) };
+    err.addArgument("array '" + arrayName + (garray ? "' has no float data" : "' not found"));
+    return err;
+}
+
 } // namespace
 
 // /array/load <name> <subpatch> <filePath> <corrId>
@@ -171,6 +181,8 @@ void MCPBridge::arrayWrite(const juce::String& action, const juce::OSCMessage& m
     t_word* vec = nullptr;
     if (!garray || !arrayFloats(garray, size, vec) || msg.size() < 5) {
         sys_unlock();
+        if (msg.size() > 2 && (!garray || !vec))
+            sender.send(arrayError("write", getArgString(msg[2]), arrayName, garray));
         return;
     }
 
@@ -214,6 +226,8 @@ void MCPBridge::arrayWriteBulk(const juce::String& action, const juce::OSCMessag
     t_word* vec = nullptr;
     if (!garray || !arrayFloats(garray, size, vec) || msg.size() < 4) {
         sys_unlock();
+        if (msg.size() > 2 && (!garray || !vec))
+            sender.send(arrayError("write_bulk", getArgString(msg[2]), arrayName, garray));
         return;
     }
 
@@ -262,6 +276,7 @@ void MCPBridge::arrayRead(const juce::String&, const juce::OSCMessage& msg)
     t_word* vec = nullptr;
     if (!garray || !arrayFloats(garray, size, vec)) {
         sys_unlock();
+        sender.send(arrayError("read", msg.size() > 2 ? getArgString(msg[2]) : "0", arrayName, garray));
         return;
     }
 
@@ -308,6 +323,7 @@ void MCPBridge::arrayReadBulk(const juce::String&, const juce::OSCMessage& msg)
     t_word* vec = nullptr;
     if (!garray || !arrayFloats(garray, size, vec)) {
         sys_unlock();
+        sender.send(arrayError("read_bulk", msg.size() > 2 ? getArgString(msg[2]) : "0", arrayName, garray));
         return;
     }
 
@@ -346,6 +362,7 @@ void MCPBridge::arrayStats(const juce::String&, const juce::OSCMessage& msg)
     t_word* vec = nullptr;
     if (!garray || !arrayFloats(garray, size, vec)) {
         sys_unlock();
+        sender.send(arrayError("stats", msg.size() > 3 ? getArgString(msg[3]) : "0", arrayName, garray));
         return;
     }
 
@@ -406,6 +423,7 @@ void MCPBridge::arrayMutate(const juce::String& action, const juce::OSCMessage& 
     t_word* vec = nullptr;
     if (!garray || !arrayFloats(garray, size, vec)) {
         sys_unlock();
+        sender.send(arrayError("mutate", msg.size() > 2 ? getArgString(msg[2]) : "0", arrayName, garray));
         return;
     }
 

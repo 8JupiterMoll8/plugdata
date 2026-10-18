@@ -416,6 +416,21 @@ void runCases(Harness& h)
         }
         CHECK(renamed && oldGone);
     }
+
+    // ── arrays (P3.4 S9): a write creates the array; a missing array answers its error (L21) ───
+    {
+        std::printf("array write_bulk, stats, missing array\n");
+        auto w = h.call("/array/write_bulk", { "s9arr", "main", "a1", 0, 0.5, -0.5, 0.25, -0.25 }, "/array/write_bulk/reply/a1");
+        CHECK(w.has_value() && w->num(0) == 4 && w->num(1) == 4);
+        auto s = h.call("/array", { "stats", "s9arr", 44100, "a2" }, "/array/stats/reply/a2");
+        CHECK(s.has_value() && s->str(0) == "s9arr" && s->num(1) == 4 && s->num(3) == 0.5);
+        auto ms = h.call("/array", { "stats", "s9_no_such", 44100, "a3" }, "/array/stats/error/a3", 2000);
+        CHECK(ms.has_value() && ms->str(0) == "array 's9_no_such' not found");
+        auto mr = h.call("/array/read_bulk", { "s9_no_such", "main", "a4", 0, 8 }, "/array/read_bulk/error/a4", 2000);
+        CHECK(mr.has_value());
+        auto mm = h.call("/array/mutate", { "s9_no_such", "main", "a5", "reverse" }, "/array/mutate/error/a5", 2000);
+        CHECK(mm.has_value());
+    }
 }
 
 // Where plugdata keeps its files follows HOME: never the real one.
