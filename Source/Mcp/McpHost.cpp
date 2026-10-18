@@ -346,6 +346,16 @@ void McpHost::refreshFocusedRoot()
             }
         }
     }
+    // P3.5 S3: no editor (the plugin's window is closed, or a headless host): "main" is the most recently opened
+    // patch the processor holds, never the first canvas (which with no patch open is Pd's float-array template).
+    if (!root) {
+        for (int i = static_cast<int>(processor.patches.size()) - 1; i >= 0 && !root; --i) {
+            if (auto* glist = reinterpret_cast<t_glist*>(processor.patches[i]->getRawPointer())) {
+                while (glist->gl_owner) glist = glist->gl_owner;
+                root = reinterpret_cast<t_canvas*>(glist);
+            }
+        }
+    }
     session.mcpFocusedRoot.store(root, std::memory_order_release);
 }
 
