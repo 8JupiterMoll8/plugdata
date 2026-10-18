@@ -518,10 +518,18 @@ void MCPBridge::meterMaster(const juce::String& meterAction, const juce::OSCMess
 
     // Bug #83 (P3.4 S10): this reads the dac~'s Pd signal vectors, which keep the last block when the audio
     // callback stops (device lost, a second instance on the device). That stale level was reported as live
-    // while every armed read, which needs processBlock, was silent. No block for 250 ms: say so instead.
+    // while every armed read, which needs processBlock, was silent. No block for 250 ms (or four blocks of a
+    // larger host buffer): say so instead. Also true during an offline render (it suspends live processing).
+    double const blockMs = processor->getSampleRate() > 0.0 ? 1000.0 * processor->juce::AudioProcessor::getBlockSize() / processor->getSampleRate() : 0.0;
+    auto const limitMs = static_cast<juce::uint32>(std::max(250.0, 4.0 * blockMs));
     auto const lastBlockMs = processor->getMcp()->session.mcpLastBlockMs.load(std::memory_order_relaxed);
-    if (lastBlockMs == 0 || juce::Time::getMillisecondCounter() - lastBlockMs > 250) {
-        post("MCP meter: the audio callback has not run for 250 ms, the master level is not live");
+    bool const stalled = lastBlockMs == 0 || juce::Time::getMillisecondCounter() - lastBlockMs > limitMs;
+    static std::atomic<bool> reportedStall { false }; // log the transition only (the meter is polled)
+    if (stalled && !reportedStall.exchange(true))
+        processor->logWarning("MCP meter: the audio callback is not running, the master level is not live");
+    if (!stalled)
+        reportedStall = false;
+    if (stalled && res.masterFound) {
         res.peakDb = -100.0f;
         res.rmsDb = -100.0f;
         res.masterType = "audio_not_running";

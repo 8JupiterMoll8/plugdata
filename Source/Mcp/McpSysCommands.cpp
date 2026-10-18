@@ -14,6 +14,8 @@
 // to it; canvas_undo_free drops it too, so it is put back here. Without it the first GUI action after an
 // MCP flush became the head, undoing it walked off the queue and left u_last NULL, and the next GUI edit
 // crashed in canvas_undo_init (finding L6, P3.4 S9).
+// Side effect (accepted, conservative): the re-init marks the canvas's clean state unknown, so undoing
+// back to the head after an MCP flush leaves the patch flagged unsaved even right after a save.
 static void resetNativeUndo(t_canvas* c)
 {
     if (!c) return;

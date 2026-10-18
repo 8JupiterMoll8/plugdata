@@ -138,8 +138,15 @@ void mcp::BatchJob::parse(const juce::OSCMessage& msg)
         // silently overwrite mcpStableObjectMap (below), orphaning the
         // original as gui_* and misrouting every later op on that id.
         // Refuse it here; skip the paste + registration entirely.
-        if (ot.isNotEmpty() && !oid.isEmpty()
-            && processor->getMcp()->resolveStableId(canvasName, oid) != nullptr) {
+        bool taken = false;
+        if (ot.isNotEmpty() && !oid.isEmpty()) {
+            // P3.4 S11 (review): resolveStableId walks gl_list and edits the identity maps; under the Pd lock
+            // like every other identity access (an MCP undo replays a batch on the message thread meanwhile).
+            sys_lock();
+            taken = processor->getMcp()->resolveStableId(canvasName, oid) != nullptr;
+            sys_unlock();
+        }
+        if (taken) {
             CreateFailure cf;
             cf.tempId = oid.toStdString();
             cf.type = ot.toStdString();
