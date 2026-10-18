@@ -19,6 +19,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
@@ -246,6 +247,57 @@ void runNativeUndoCases(PluginProcessor& processor)
         headIsInit = udo && udo->u_queue && udo->u_queue->type == UNDO_INIT;
     }, 2000));
     CHECK(headIsInit);
+}
+
+// P3.5 S0: the identity service will detect GUI edits by recomputing a per-canvas stamp (object count plus a hash
+// of the gl_list pointers) under the Pd lock on every version read. Measure one walk on a canvas the size of the
+// DEV.md standard patch (37 objects) and on a large one (500): the plan stops and re-plans above 100 us.
+void runStampCostCases(PluginProcessor& processor)
+{
+    std::printf("identity stamp walk cost\n");
+    auto* host = processor.getMcp();
+    double us37 = -1, us500 = -1;
+    CHECK(host->pdWait([&] {
+        t_canvas* cnv = host->getCanvasBySymbolStrict("main");
+        if (!cnv) return;
+        int before = 0;
+        for (t_gobj* g = cnv->gl_list; g; g = g->g_next) ++before;
+        for (int i = 0; i < 500; ++i) {
+            t_atom a[3];
+            SETFLOAT(a, 600 + (i % 20) * 30);
+            SETFLOAT(a + 1, 40 + (i / 20) * 30);
+            SETSYMBOL(a + 2, gensym("f"));
+            pd_typedmess(&cnv->gl_pd, gensym("obj"), 3, a);
+        }
+        auto walk = [cnv](int limit) {
+            uint64_t h = 1469598103934665603ull;
+            int n = 0;
+            for (t_gobj* g = cnv->gl_list; g && n < limit; g = g->g_next, ++n)
+                h = (h ^ reinterpret_cast<uintptr_t>(g)) * 1099511628211ull;
+            return h ^ static_cast<uint64_t>(n);
+        };
+        auto time = [&](int limit) {
+            constexpr int rounds = 2000;
+            volatile uint64_t sink = 0;
+            auto const t0 = std::chrono::steady_clock::now();
+            for (int r = 0; r < rounds; ++r)
+                sink = sink + walk(limit);
+            auto const dt = std::chrono::steady_clock::now() - t0;
+            return std::chrono::duration<double, std::micro>(dt).count() / rounds;
+        };
+        us37 = time(37);
+        us500 = time(before + 500);
+        // Remove the timing objects again (the newest 500, at the end of gl_list).
+        std::vector<t_gobj*> extra;
+        int idx = 0;
+        for (t_gobj* g = cnv->gl_list; g; g = g->g_next, ++idx)
+            if (idx >= before) extra.push_back(g);
+        for (auto* g : extra)
+            glist_delete(cnv, g);
+    }, 10000));
+    std::printf("  stamp walk: %.3f us at 37 objects, %.3f us at 500\n", us37, us500);
+    CHECK(us37 >= 0 && us37 < 100.0);
+    CHECK(us500 >= 0 && us500 < 100.0);
 }
 
 // Bug #83 (P3.4 S10): with the audio callback stopped, Pd's signal vectors keep the last block. /meter/master
@@ -574,6 +626,7 @@ int main()
             runNativeUndoCases(processor);
             runAudioStallCases(harness, audioControl);
             runMidiCaptureCases(processor, audioControl);
+            runStampCostCases(processor);
             startRenderForTeardown(harness); // last: the processor is destroyed with the render running
             casesDone.store(true);
             stopMessageLoop();
