@@ -12,6 +12,10 @@
 
 #include "Pd/Instance.h"
 #include "Pd/MCPBridgeRegistry.h"
+#include "Pd/MCPBridgeHandoff.h"
+#include "Mcp/McpAudit.h"
+#include <optional>
+#include <type_traits>
 
 class PluginProcessor;
 class MCPBridge;
@@ -43,6 +47,38 @@ public:
     bool settingsChanged(String const& name, var const& value);
     void mcpSettingsChanged(String const& name, var const& value);
     t_canvas* getCanvasBySymbol(const String& canvas_symbol);
+    // P3.4 S3: the true root of the focused editor's current canvas, published by the message thread
+    // (refreshFocusedRoot: a 50 ms timer and every MCP tab change). getCanvasBySymbol("main") reads it, so
+    // no command thread touches an editor. Message thread only.
+    void refreshFocusedRoot();
+
+    // P3.4 S3: run `fn` on the JUCE message thread and return its result (inline when already there).
+    // Empty when the message thread did not start it within timeoutMs; it then never runs, so `fn` may
+    // capture the caller's frame by reference. NEVER call it while holding sys_lock: the message thread may
+    // be waiting for that lock, and the audio thread needs it every block (the audit reports such a call).
+    template<typename F>
+    auto onMessageThread(F&& fn, int timeoutMs, char const* where) -> std::optional<std::invoke_result_t<F&>>
+    {
+        using R = std::invoke_result_t<F&>;
+        auto* mm = juce::MessageManager::getInstanceWithoutCreating();
+        if (mm == nullptr)
+            return std::nullopt;
+        if (mm->isThisTheMessageThread())
+            return std::optional<R>(fn());
+        if (mcp::audit::holdsPdLock())
+            mcp::audit::reportWaitUnderLock(where);
+        auto handoff = std::make_shared<mcp::OneShotHandoff>();
+        std::optional<R> result;
+        mm->callAsync([handoff, &fn, &result] {
+            if (!handoff->begin())
+                return; // the caller gave up: its frame may be gone
+            mcp::OneShotHandoff::FinishGuard finishGuard(*handoff);
+            result.emplace(fn());
+        });
+        if (handoff->waitOrAbandon(std::chrono::milliseconds(timeoutMs)) != mcp::OneShotHandoff::Result::Finished)
+            return std::nullopt;
+        return result;
+    }
     // Strict variant for mutations: resolves ONLY 'main'/'pd-main'/'' (focused
     // root) and genuinely registered canvas symbols. Returns nullptr for
     // unknown names instead of silently falling back to the first canvas
@@ -68,11 +104,14 @@ public:
     // No-op when no tap is active. Non-destructive: the patch is untouched.
     void applyMonitorTap(float* out, int numSamples, int numChannels);
 
-    // The Pd context (Plan 3 P3.4 S2). enqueuePd: any thread, never waits; the job runs under sys_lock at
-    // the start of the next audio block. pdWait: the same, then waits up to timeoutMs; false = abandoned
-    // (the job never ran and never will, so it may capture the caller's frame by reference).
-    // drainPdQueue: the audio thread (audioBlockStarted), the backup loop and the offline render only.
+    // The Pd context (Plan 3 P3.4 S2/S3): the message thread under sys_lock (see McpAudio.cpp).
+    // enqueuePd: any thread, never waits; posts a drain. pdWait: the same, then waits up to timeoutMs; false =
+    // abandoned (the job never ran and never will, so it may capture the caller's frame by reference); on the
+    // message thread it runs the job inline under sys_lock. drainPdQueue: posted by enqueuePd only.
     void enqueuePd(std::function<void()> job);
+    // In the Pd context now: inline under sys_lock when called on the message thread (an MCP undo/redo
+    // replays batch_atomic there; queuing would wait for a drain that thread itself must run), else queued.
+    void runPd(std::function<void()> job);
     bool pdWait(std::function<void()> const& job, int timeoutMs);
     void drainPdQueue();
 
@@ -115,5 +154,15 @@ public:
     // before the state they touch goes away.
     std::unique_ptr<MCPBridge> mcpBridge;
 
+private:
+    // Calls refreshFocusedRoot every 50 ms on the message thread (started in createBridge).
+    struct FocusTimer final : juce::Timer {
+        explicit FocusTimer(McpHost& h) : host(h) {}
+        void timerCallback() override { host.refreshFocusedRoot(); }
+        McpHost& host;
+    };
+    FocusTimer focusTimer { *this };
+
+public:
     JUCE_DECLARE_NON_COPYABLE(McpHost)
 };

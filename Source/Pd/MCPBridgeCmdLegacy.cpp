@@ -41,6 +41,7 @@ static juce::String buildObjectText(const juce::String& kind, const juce::String
 
 void MCPBridge::pdCreate(const juce::String& action, const juce::OSCMessage& msg)
 {
+    if (runInPdContext(&MCPBridge::pdCreate, action, msg)) return; // P3.4 S3: structural edit
     if (msg.size() >= 5 && processor) {
         auto canvasName = normalizeCanvas(getArgString(msg[0]));
         auto kind = getArgString(msg[1]);
@@ -67,6 +68,7 @@ void MCPBridge::pdCreate(const juce::String& action, const juce::OSCMessage& msg
 
 void MCPBridge::pdCreateBatch(const juce::String& action, const juce::OSCMessage& msg)
 {
+    if (runInPdContext(&MCPBridge::pdCreateBatch, action, msg)) return; // P3.4 S3: structural edit
     if (msg.size() >= 3 && processor) {
         auto canvasName = normalizeCanvas(getArgString(msg[0]));
         auto correlationId = getArgString(msg[1]);
@@ -105,6 +107,7 @@ void MCPBridge::pdCreateBatch(const juce::String& action, const juce::OSCMessage
 
 void MCPBridge::pdConnectBatch(const juce::String& action, const juce::OSCMessage& msg)
 {
+    if (runInPdContext(&MCPBridge::pdConnectBatch, action, msg)) return; // P3.4 S3: structural edit
     if (msg.size() >= 3 && processor) {
         auto canvasName = normalizeCanvas(getArgString(msg[0]));
         auto correlationId = action == "connect_batch" ? getArgString(msg[1]) : "0";
@@ -143,6 +146,7 @@ void MCPBridge::pdConnectBatch(const juce::String& action, const juce::OSCMessag
 
 void MCPBridge::pdDisconnect(const juce::String& action, const juce::OSCMessage& msg)
 {
+    if (runInPdContext(&MCPBridge::pdDisconnect, action, msg)) return; // P3.4 S3: structural edit
     if (msg.size() >= 5 && processor) {
         auto canvasName = normalizeCanvas(getArgString(msg[0]));
         int srcIdx = static_cast<int>(getArgFloat(msg[1]));
@@ -169,6 +173,7 @@ void MCPBridge::pdDisconnect(const juce::String& action, const juce::OSCMessage&
 
 void MCPBridge::pdDisconnectBatch(const juce::String& action, const juce::OSCMessage& msg)
 {
+    if (runInPdContext(&MCPBridge::pdDisconnectBatch, action, msg)) return; // P3.4 S3: structural edit
     if (msg.size() >= 3 && processor) {
         auto canvasName = normalizeCanvas(getArgString(msg[0]));
         auto correlationId = getArgString(msg[1]);
@@ -205,6 +210,7 @@ void MCPBridge::pdDisconnectBatch(const juce::String& action, const juce::OSCMes
 
 void MCPBridge::pdDelete(const juce::String& action, const juce::OSCMessage& msg)
 {
+    if (runInPdContext(&MCPBridge::pdDelete, action, msg)) return; // P3.4 S3: structural edit
     if (msg.size() >= 2 && processor) {
         auto canvasName = normalizeCanvas(getArgString(msg[0]));
         int index = static_cast<int>(getArgFloat(msg[1]));
@@ -229,6 +235,7 @@ void MCPBridge::pdDelete(const juce::String& action, const juce::OSCMessage& msg
 
 void MCPBridge::pdDeleteBatch(const juce::String& action, const juce::OSCMessage& msg)
 {
+    if (runInPdContext(&MCPBridge::pdDeleteBatch, action, msg)) return; // P3.4 S3: structural edit
     if (msg.size() >= 3 && processor) {
         auto canvasName = normalizeCanvas(getArgString(msg[0]));
         auto correlationId = getArgString(msg[1]);

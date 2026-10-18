@@ -113,6 +113,7 @@ void MCPBridge::pdBounds(const juce::String& action, const juce::OSCMessage& msg
     juce::String json;
     bool hasCanvas = false;
 
+    auto guiFacts = mcpFetchGuiFacts(processor, canvasName, true); // P3.4 S3: GUI facts before the lock
     sys_lock();
     t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
     if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
@@ -125,8 +126,8 @@ void MCPBridge::pdBounds(const juce::String& action, const juce::OSCMessage& msg
             for (auto& [tid, ptr] : mapIt->second)
                 if (ptr) ptrToId[ptr] = juce::String(tid);
 
-        auto guiCanvas = mcpLiveBounds(processor, cnv);
-        auto guiView = processor->getMcp()->gui().viewState(cnv);
+        auto guiCanvas = guiFacts.boundsFor(cnv);
+        auto guiView = guiFacts.viewFor(cnv);
 
         float zoom = 1.0f;
         int vx = 0, vy = 0, vw = 1000, vh = 800;
@@ -227,6 +228,7 @@ void MCPBridge::pdCollisions(const juce::String& action, const juce::OSCMessage&
     juce::String json;
     bool hasCanvas = false;
 
+    auto guiFacts = mcpFetchGuiFacts(processor, canvasName); // P3.4 S3: GUI facts before the lock
     sys_lock();
     t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
     if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
@@ -241,7 +243,7 @@ void MCPBridge::pdCollisions(const juce::String& action, const juce::OSCMessage&
             for (auto& [tid, ptr] : mapIt->second)
                 if (ptr) ptrToId[ptr] = juce::String(tid);
 
-        auto guiCanvas = mcpLiveBounds(processor, cnv);
+        auto guiCanvas = guiFacts.boundsFor(cnv);
         int idx = 0;
         for (t_gobj* y = cnv->gl_list; y; y = y->g_next, ++idx) {
             int x = 0, yy = 0, w = 0, h = 0;
@@ -304,6 +306,7 @@ void MCPBridge::pdWireOcclusions(const juce::String& action, const juce::OSCMess
     juce::String json;
     bool hasCanvas = false;
 
+    auto guiFacts = mcpFetchGuiFacts(processor, canvasName); // P3.4 S3: GUI facts before the lock
     sys_lock();
     t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
     if (!cnv && canvasName == "pd-main") cnv = pd_this->pd_canvaslist;
@@ -329,7 +332,7 @@ std::vector<juce::String> classNames;
                 : (juce::String(class_getname(pd_class(&y->g_pd))) + "#" + juce::String(idx)));
         }
 
-        auto guiCanvas = mcpLiveBounds(processor, cnv);
+        auto guiCanvas = guiFacts.boundsFor(cnv);
         struct R { int x, y, w, h; };
         std::vector<R> rects(objs.size());
         for (size_t i = 0; i < objs.size(); ++i) {
@@ -415,21 +418,23 @@ void MCPBridge::pdMeasureText(const juce::String& action, const juce::OSCMessage
         auto replyAddr     = "/pd/measure_text/reply/" + correlationId;
 
         juce::var parsed = juce::JSON::parse(jsonArrayStr);
-        juce::Font font = processor->getMcp()->gui().defaultFont().withHeight(fontSize);
-        auto* resultObj = new juce::DynamicObject();
-
-        if (auto* arr = parsed.getArray()) {
-            for (const auto& item : *arr) {
-                auto str = item.toString();
+        // P3.4 S3: the plugdata font and glyph layout are GUI objects: measure on the message thread.
+        auto measured = processor->getMcp()->onMessageThread([&] {
+            juce::Font font = processor->getMcp()->gui().defaultFont().withHeight(fontSize);
+            auto* resultObj = new juce::DynamicObject();
+            if (auto* arr = parsed.getArray()) {
+                for (const auto& item : *arr) {
+                    auto str = item.toString();
+                    resultObj->setProperty(str, juce::roundToInt(juce::GlyphArrangement().getStringWidth(font, str)));
+                }
+            } else if (parsed.isString()) {
+                auto str = parsed.toString();
                 resultObj->setProperty(str, juce::roundToInt(juce::GlyphArrangement().getStringWidth(font, str)));
             }
-        } else if (parsed.isString()) {
-            auto str = parsed.toString();
-            resultObj->setProperty(str, juce::roundToInt(juce::GlyphArrangement().getStringWidth(font, str)));
-        }
+            return juce::JSON::toString(juce::var(resultObj));
+        }, 2000, "measure_text");
 
-        juce::String jsonResult = juce::JSON::toString(juce::var(resultObj));
-        sendReply(replyAddr, jsonResult);
+        sendReply(replyAddr, measured ? *measured : juce::String("{}"));
     }
     return;
 }

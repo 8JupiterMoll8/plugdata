@@ -97,7 +97,6 @@ static void runOfflineRender(PluginProcessor* processor, juce::String const& fil
         // Mirror processConstant per block: message phase then DSP phase.
         processor->setThis();
         processor->sendParameters();
-        processor->getMcp()->drainPdQueue(); // the bridge's Pd jobs (P3.4 S2), as audioBlockStarted does live
         processor->sendMessagesFromQueue(); // drains OSC fires + loadbangs
 
         std::fill(outVec.begin(), outVec.end(), 0.0f);

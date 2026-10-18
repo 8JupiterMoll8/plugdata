@@ -430,8 +430,12 @@ struct McpSession {
 
     // --- The MCP Pd queue (Plan 3 P3.4 S2) ------------------------------------
     // Every Pd job of the bridge (batch_atomic's mutation, the legacy verbs, layout moves, ...) is queued
-    // here and run by McpHost::drainPdQueue() at the start of an audio block (or in the backup loop when no
-    // device runs, or by the offline render loop), UNDER sys_lock. Upstream's functionQueue stays upstream's.
+    // here and run by McpHost::drainPdQueue() on the message thread UNDER sys_lock (S3: plugdata's own Pd
+    // editing context). Upstream's functionQueue stays upstream's.
     moodycamel::ConcurrentQueue<std::function<void()>> mcpPdQueue { 256 };
-    std::atomic<int> mcpPdQueueBusyBlocks { 0 }; // blocks in a row the drain found the Pd lock taken
+    std::atomic<bool> mcpPdDrainPosted { false }; // a drainPdQueue callAsync is pending
+
+    // P3.4 S3: the focused editor's true root canvas, written only by the message thread
+    // (McpHost::refreshFocusedRoot); readers validate it against pd_canvaslist.
+    std::atomic<t_canvas*> mcpFocusedRoot { nullptr };
 };

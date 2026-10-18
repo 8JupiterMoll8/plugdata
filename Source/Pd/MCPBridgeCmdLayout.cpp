@@ -131,6 +131,7 @@ void MCPBridge::pdDeoverlap(const juce::String& action, const juce::OSCMessage& 
             return;
         }
 
+        auto guiFacts = mcpFetchGuiFacts(processor, canvasName); // P3.4 S3: GUI facts before the lock
         sys_lock();
         std::vector<t_gobj*> objs;
         if (!targetIds.empty()) {
@@ -147,7 +148,7 @@ void MCPBridge::pdDeoverlap(const juce::String& action, const juce::OSCMessage& 
             return;
         }
 
-        auto guiCanvas = mcpLiveBounds(processor, cnv);
+        auto guiCanvas = guiFacts.boundsFor(cnv);
         struct DR { t_gobj* g; int x, y, w, h; };
         std::vector<DR> rects;
         rects.reserve(objs.size());
@@ -315,6 +316,7 @@ void MCPBridge::pdPillars(const juce::String& action, const juce::OSCMessage& ms
             return;
         }
 
+        auto guiFacts = mcpFetchGuiFacts(processor, canvasName); // P3.4 S3: GUI facts before the lock
         sys_lock();
         std::vector<t_gobj*> objs;
         if (!targetIds.empty()) {
@@ -331,7 +333,7 @@ void MCPBridge::pdPillars(const juce::String& action, const juce::OSCMessage& ms
             return;
         }
 
-        auto guiCanvas = mcpLiveBounds(processor, cnv);
+        auto guiCanvas = guiFacts.boundsFor(cnv);
         struct PR { t_gobj* g; int x, y, w, h; int pillar; };
         std::vector<PR> rects;
         rects.reserve(objs.size());
@@ -408,6 +410,7 @@ void MCPBridge::pdFlow(const juce::String& action, const juce::OSCMessage& msg)
             return;
         }
 
+        auto guiFacts = mcpFetchGuiFacts(processor, canvasName); // P3.4 S3: GUI facts before the lock
         sys_lock();
         std::vector<t_gobj*> objs;
         if (!targetIds.empty()) {
@@ -459,7 +462,7 @@ void MCPBridge::pdFlow(const juce::String& action, const juce::OSCMessage& msg)
         std::vector<FR> rects;
         rects.reserve(objs.size());
 
-        auto guiCanvas = mcpLiveBounds(processor, cnv);
+        auto guiCanvas = guiFacts.boundsFor(cnv);
         for (auto* g : objs) {
             int x = 0, yy = 0, w = 0, h = 0;
             getTrueObjectBounds(cnv, g, guiCanvas.get(), &x, &yy, &w, &h);

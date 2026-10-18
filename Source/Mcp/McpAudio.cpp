@@ -34,7 +34,6 @@ void McpHost::audioBlockStarted()
 {
     session.mcpAudioBlocks.fetch_add(1, std::memory_order_relaxed); // #83 audio-thread liveness
     mcp::audit::markAudioThread(); // P3.4 S0: no-op unless PLUGDATA_MCP_AUDIT=1
-    drainPdQueue();                // P3.4 S2: the bridge's Pd jobs, under sys_lock, before any performDSP
 }
 
 // processBlock, after the MIDI input history is filled and before the toolbar sees it.
@@ -110,15 +109,55 @@ void McpHost::pdBlock(float* audioVectorIn, float* audioVectorOut, int const pdB
     applyMonitorTap(audioVectorOut, pdBlockSize, numChannels);
 }
 
-// ── The Pd context (Plan 3 P3.4 S2) ─────────────────────────────────────────
+// ── The Pd context (Plan 3 P3.4 S2/S3) ──────────────────────────────────────
+// The bridge's Pd jobs run on the JUCE MESSAGE THREAD under sys_lock: that is where plugdata itself edits
+// Pd (Canvas::removeSelection -> Patch::removeObjects; WeakReference::get() holds sys_lock), and the GUI's
+// own reads assume nothing else changes the object list behind them (Canvas::performSynchronise checks
+// isValid() unlocked, then builds the view object). S2 drained this queue on the audio thread; a batch
+// delete there landed inside a performSynchronise and segfaulted in Object::setType (S3 gates). For audio
+// it makes no difference: a job under the Pd lock stalls the audio callback for the same time either way.
 
 void McpHost::enqueuePd(std::function<void()> job)
 {
     session.mcpPdQueue.enqueue(std::move(job));
+    // One posted drain at a time; a job queued after the drain has started schedules the next one.
+    if (!session.mcpPdDrainPosted.exchange(true, std::memory_order_acq_rel)) {
+        if (auto* mm = juce::MessageManager::getInstanceWithoutCreating()) {
+            mm->callAsync([this] {
+                session.mcpPdDrainPosted.store(false, std::memory_order_release);
+                drainPdQueue();
+            });
+        } else {
+            session.mcpPdDrainPosted.store(false, std::memory_order_release);
+        }
+    }
+}
+
+void McpHost::runPd(std::function<void()> job)
+{
+    auto* mm = juce::MessageManager::getInstanceWithoutCreating();
+    if (mm && mm->isThisTheMessageThread()) {
+        processor.setThis();
+        sys_lock();
+        job();
+        sys_unlock();
+        return;
+    }
+    enqueuePd(std::move(job));
 }
 
 bool McpHost::pdWait(std::function<void()> const& job, int const timeoutMs)
 {
+    auto* mm = juce::MessageManager::getInstanceWithoutCreating();
+    if (mm && mm->isThisTheMessageThread()) { // already the Pd context: run inline (waiting would deadlock)
+        processor.setThis();
+        sys_lock();
+        job();
+        sys_unlock();
+        return true;
+    }
+    if (mcp::audit::holdsPdLock())
+        mcp::audit::reportWaitUnderLock("pdWait");
     auto handoff = std::make_shared<mcp::OneShotHandoff>();
     enqueuePd([handoff, &job] {
         if (!handoff->begin())
@@ -129,31 +168,22 @@ bool McpHost::pdWait(std::function<void()> const& job, int const timeoutMs)
     return handoff->waitOrAbandon(std::chrono::milliseconds(timeoutMs)) == mcp::OneShotHandoff::Result::Finished;
 }
 
-// Busy blocks in a row after which the drain waits for the Pd lock instead of trying (a job must not starve
-// behind a long read on the command worker). The audio thread already waits for the lock every block in
-// sendPlayhead and libpd_process_raw, so the wait adds no new kind of stall.
-static constexpr int kMaxPdQueueBusyBlocks = 8;
-// Jobs run per drain at most; a job that queues another one runs it in the next block.
-static constexpr int kMaxPdJobsPerDrain = 1024;
+// Jobs run per drain at most; the rest go to the next posted drain, so a flood never starves the GUI.
+static constexpr int kMaxPdJobsPerDrain = 256;
 
 void McpHost::drainPdQueue()
 {
     if (session.mcpPdQueue.size_approx() == 0)
         return;
-    auto const& lock = processor.audioLock;
-    if (!lock.tryEnter()) {
-        if (session.mcpPdQueueBusyBlocks.fetch_add(1, std::memory_order_relaxed) + 1 < kMaxPdQueueBusyBlocks)
-            return;
-        lock.enter();
-    }
-    session.mcpPdQueueBusyBlocks.store(0, std::memory_order_relaxed);
     processor.setThis();
-    sys_lock(); // re-enters audioLock (recursive) and takes the instance's read side, as every Pd caller does
+    sys_lock();
     std::function<void()> job;
-    for (int n = 0; n < kMaxPdJobsPerDrain && session.mcpPdQueue.try_dequeue(job); ++n) {
+    int n = 0;
+    for (; n < kMaxPdJobsPerDrain && session.mcpPdQueue.try_dequeue(job); ++n) {
         job();
         job = nullptr; // release the captures under the lock, before the next job
     }
     sys_unlock();
-    lock.exit();
+    if (n == kMaxPdJobsPerDrain && session.mcpPdQueue.size_approx() > 0)
+        enqueuePd([] {}); // posts the next drain
 }

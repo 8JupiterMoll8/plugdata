@@ -595,6 +595,11 @@ private:
     // order (the order the network thread used to run them in). Declared last: destroyed first.
     mcp::SerialWorker<juce::OSCMessage> commandWorker;
     void handleMessage(const juce::OSCMessage& message);
+    // P3.4 S3: handlers that create, delete or rewire Pd objects run in the Pd context (the message thread
+    // under sys_lock), where plugdata's GUI expects every structural edit. Called first in such a handler:
+    // true = it has been run there now (or could not be: logged), the caller returns; false = already there.
+    using CommandHandler = void (MCPBridge::*)(const juce::String&, const juce::OSCMessage&);
+    bool runInPdContext(CommandHandler handler, const juce::String& action, const juce::OSCMessage& msg);
     void startCommandWorker();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MCPBridge)

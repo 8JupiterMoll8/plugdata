@@ -159,11 +159,83 @@ inline void pasteDirect(t_canvas* cnv, char const* buf)
 }
 
 // Shared: the live object bounds of the JUCE Canvas showing a Pd canvas
-// (message thread; nullptr when no view shows it). Was mcpFindGuiCanvasFor.
+// (nullptr when no view shows it). Was mcpFindGuiCanvasFor. Runs on the message
+// thread (P3.4 S3: hops there when called elsewhere; never call it holding
+// sys_lock, use mcpFetchGuiFacts before taking the lock instead).
 inline std::unique_ptr<McpGuiHost::LiveBounds> mcpLiveBounds(PluginProcessor* proc, t_canvas* c)
 {
     if (!proc || !c) return nullptr;
-    return proc->getMcp()->gui().liveObjectBounds(c);
+    auto got = proc->getMcp()->onMessageThread([proc, c] { return proc->getMcp()->gui().liveObjectBounds(c); }, 1000, "mcpLiveBounds");
+    return got ? std::move(*got) : nullptr;
+}
+
+// P3.4 S3: true while `target` is an open canvas: a root patch or a canvas
+// (subpatch, abstraction, GOP) anywhere inside one. CALLER HOLDS sys_lock. For
+// async work that kept a t_canvas* across a thread hop: compare, never trust.
+inline bool mcpCanvasIsLive(t_canvas* target)
+{
+    if (!target || !pd_this) return false;
+    std::vector<t_canvas*> todo;
+    for (t_canvas* r = pd_this->pd_canvaslist; r; r = r->gl_next) todo.push_back(r);
+    while (!todo.empty()) {
+        t_canvas* c = todo.back();
+        todo.pop_back();
+        if (c == target) return true;
+        for (t_gobj* y = c->gl_list; y; y = y->g_next)
+            if (pd_class(&y->g_pd) == canvas_class) todo.push_back(reinterpret_cast<t_canvas*>(y));
+    }
+    return false;
+}
+
+// Message thread: repaint the view of `cnv` if the canvas still exists (it may
+// open a tab for it: ensureView). Posts itself when called from another thread.
+inline void mcpRepaintViewLater(PluginProcessor* proc, t_canvas* cnv)
+{
+    if (!proc || !cnv) return;
+    juce::MessageManager::callAsync([proc, cnv] {
+        sys_lock();
+        bool const live = mcpCanvasIsLive(cnv);
+        sys_unlock();
+        if (live) proc->getMcp()->gui().repaintView(cnv);
+    });
+}
+
+// P3.4 S3: the GUI facts a geometry handler needs, fetched on the message
+// thread BEFORE it takes sys_lock (waiting for the message thread under the Pd
+// lock could stall the audio thread, which needs that lock every block). Keyed
+// by the canvas the name resolved to: boundsFor/viewFor hand them out only for
+// that same canvas (resolved again under the lock), else nothing, and the
+// handler uses Pd geometry, as when no view shows the canvas.
+struct McpGuiFacts {
+    t_canvas* cnv = nullptr;
+    std::unique_ptr<McpGuiHost::LiveBounds> bounds;
+    std::optional<McpGuiHost::ViewState> view;
+
+    std::unique_ptr<McpGuiHost::LiveBounds> boundsFor(t_canvas* c) { return c != nullptr && c == cnv ? std::move(bounds) : nullptr; }
+    std::optional<McpGuiHost::ViewState> viewFor(t_canvas* c) const { return c != nullptr && c == cnv ? view : std::nullopt; }
+};
+
+inline McpGuiFacts mcpFetchGuiFacts(PluginProcessor* proc, juce::String const& canvasName, bool withView = false)
+{
+    McpGuiFacts facts;
+    if (!proc) return facts;
+    sys_lock();
+    t_canvas* c = proc->getMcp()->getCanvasBySymbol(canvasName);
+    if (!c && canvasName == "pd-main") c = pd_this->pd_canvaslist;
+    sys_unlock();
+    facts.cnv = c;
+    if (!c) return facts;
+    auto got = proc->getMcp()->onMessageThread([proc, c, withView] {
+        auto& gui = proc->getMcp()->gui();
+        std::optional<McpGuiHost::ViewState> view;
+        if (withView) view = gui.viewState(c);
+        return std::make_pair(gui.liveObjectBounds(c), view);
+    }, 1000, "mcpFetchGuiFacts");
+    if (got) {
+        facts.bounds = std::move(got->first);
+        facts.view = got->second;
+    }
+    return facts;
 }
 
 // Shared true-rect bounds (GUI-aware). MUST run on the JUCE message thread

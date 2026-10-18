@@ -100,14 +100,17 @@ static bool mcpHasCollisions(PluginProcessor* processor, t_canvas* cnv, int pad)
     if (!processor || !cnv) return false;
     auto gui = mcpLiveBounds(processor, cnv);
     std::vector<t_gobj*> objs;
-    for (t_gobj* y = cnv->gl_list; y; y = y->g_next) { if (mcpIsDecorativeBackground(y)) continue; objs.push_back(y); }
     struct R { int x, y, w, h; };
-    std::vector<R> rects(objs.size());
+    std::vector<R> rects;
+    sys_lock(); // P3.4 S3: reads gl_list and Pd geometry (this ran unlocked on the message thread)
+    for (t_gobj* y = cnv->gl_list; y; y = y->g_next) { if (mcpIsDecorativeBackground(y)) continue; objs.push_back(y); }
+    rects.resize(objs.size());
     for (size_t i = 0; i < objs.size(); ++i) {
         int x = 0, y = 0, w = 0, h = 0;
         mcpGetTrueObjectBounds(cnv, objs[i], gui.get(), &x, &y, &w, &h);
         rects[i] = { x, y, w, h };
     }
+    sys_unlock();
     for (size_t i = 0; i < rects.size(); ++i)
         for (size_t j = i + 1; j < rects.size(); ++j) {
             auto& a = rects[i]; auto& b = rects[j];
@@ -377,7 +380,7 @@ void MCPBridge::pdBatchAtomic(const juce::String& action, const juce::OSCMessage
 
 
         // =========================================================================
-        // EXECUTE ON AUDIO THREAD — zero lock contention, zero dropout
+        // EXECUTE IN THE PD CONTEXT (message thread, sys_lock; P3.4 S3)
         // =========================================================================
 
         // Storage for PHASE 0 reconcile results (filled inside lambda, read outside)
@@ -397,9 +400,9 @@ void MCPBridge::pdBatchAtomic(const juce::String& action, const juce::OSCMessage
         std::vector<UndoWire> deletedWires;
         struct EditUndo { juce::String objectId, type; juce::StringArray args; };
         std::vector<EditUndo> editUndoEntries;
-        // Manual GUI patching has zero dropout because it enqueues mutations into
-        // functionQueue, which runs on the audio thread during sendMessagesFromQueue()
-        // BEFORE performDSP(). We do exactly the same thing here.
+        // Plan 3 P3.4 S3: the mutation runs in the Pd context = the message thread under
+        // sys_lock, where plugdata's own GUI edits Pd (the old note here said GUI edits
+        // went through the audio-thread queue; they do not). See McpAudio.cpp.
 
         extern int dsp_update_deferred;  // defined in m_obj.c
         // Report F3: the lambda below captures this frame by reference. The
@@ -411,7 +414,7 @@ void MCPBridge::pdBatchAtomic(const juce::String& action, const juce::OSCMessage
         // canvas — name the failure instead of mutating the wrong patch.
         bool canvasNotFound = false;
 
-        processor->getMcp()->enqueuePd([&, handoff]() {
+        processor->getMcp()->runPd([&, handoff]() {
             if (!handoff->begin())
                 return; // the caller gave up: this frame may be gone, touch nothing
             mcp::OneShotHandoff::FinishGuard finishGuard(*handoff);
@@ -1103,14 +1106,14 @@ void MCPBridge::pdBatchAtomic(const juce::String& action, const juce::OSCMessage
             post("batch_atomic: TOTAL lambda took %lld us", (long long)totalUs);
         }); // end enqueueFunctionAsync lambda (finishGuard signals the caller)
 
-        // Wait for audio thread to complete (max 2000ms)
+        // Wait for the Pd context to run it (max 2000ms)
         auto tWaitStart = std::chrono::high_resolution_clock::now();
         // Returns early only if the lambda never started; once it runs, we
         // wait for it to finish however long that takes.
         bool const waitOk = handoff->waitOrAbandon(std::chrono::milliseconds(2000))
             == mcp::OneShotHandoff::Result::Finished;
         if (waitOk && handoff->wasLate())
-            post("batch_atomic: finished after the 2000ms budget (audio thread was slow)");
+            post("batch_atomic: finished after the 2000ms budget (the Pd context was busy)");
         auto tWaitEnd = std::chrono::high_resolution_clock::now();
         auto waitUs = std::chrono::duration_cast<std::chrono::microseconds>(tWaitEnd - tWaitStart).count();
         post("batch_atomic: done.wait() took %lld us (%.1f ms)", (long long)waitUs, waitUs / 1000.0f);
@@ -1119,7 +1122,7 @@ void MCPBridge::pdBatchAtomic(const juce::String& action, const juce::OSCMessage
         // for). Say so plainly; the TS side classifies this as "rejected".
         if (!waitOk) {
             juce::OSCMessage errReply { juce::OSCAddressPattern("/pd/batch_atomic/error/" + correlationId) };
-            errReply.addArgument(juce::String("rejected: the audio thread did not start the batch within 2000ms; nothing was applied"));
+            errReply.addArgument(juce::String("rejected: the Pd context did not start the batch within 2000ms; nothing was applied"));
             sender.send(errReply);
             return;
         }

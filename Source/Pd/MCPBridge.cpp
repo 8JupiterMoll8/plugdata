@@ -1444,6 +1444,16 @@ void MCPBridge::startCommandWorker()
     commandWorker.start([this](juce::OSCMessage message) { handleMessage(message); });
 }
 
+bool MCPBridge::runInPdContext(CommandHandler handler, const juce::String& action, const juce::OSCMessage& msg)
+{
+    auto* mm = juce::MessageManager::getInstanceWithoutCreating();
+    if (processor == nullptr || mm == nullptr || mm->isThisTheMessageThread())
+        return false;
+    if (!processor->getMcp()->pdWait([&] { (this->*handler)(action, msg); }, 5000))
+        processor->logError("MCP bridge: " + msg.getAddressPattern().toString() + " was not run: the message thread was busy for 5 s");
+    return true;
+}
+
 // Command worker: parse the address and dispatch through the command table.
 void MCPBridge::handleMessage(const juce::OSCMessage& message)
 {
@@ -2321,7 +2331,8 @@ void MCPBridge::stopMidiTake()
     }
 
     if (processor) {
-        processor->getMcp()->gui().repaintAll();
+        // P3.4 S3: the caller may be a timer, the audio-side stop path or the command worker.
+        juce::MessageManager::callAsync([p = processor] { p->getMcp()->gui().repaintAll(); });
     }
 }
 

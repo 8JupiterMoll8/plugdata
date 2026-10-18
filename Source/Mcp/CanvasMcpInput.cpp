@@ -503,35 +503,35 @@ void CanvasMcpLayer::canvasSynchronised()
     }
 }
 
+// The GUI's Ctrl+Z / Ctrl+Y over two stacks, newest first (Plan 3 P3.4 S3). Every MCP mutation empties
+// Pd's native undo queue (resetCanvasUndo, move_batch_id), so a native entry is always NEWER than every MCP
+// transaction: undo the native stack first, then the AI's transactions. Before, the MCP stack went first;
+// that was harmless only while finding L12 kept it empty after a batch_atomic. With L12 fixed, a GUI drag
+// after an AI build undid the whole build instead of the drag (s8-input-check). /pd/undo (the AI's own undo)
+// still takes the MCP transaction first. The two-layer design itself is Plan 4 P4.4's to replace.
 bool CanvasMcpLayer::undo()
 {
-    // 1. If an AI transaction exists, undo that first (safe transactional rollback with semantic IDs)
-    if (canvas.pd && canvas.pd->getMcp()->hasMcpTransaction(canvas.patch.getUncheckedPointer())) {
-        canvas.pd->getMcp()->undoMcpTransaction(canvas.patch.getUncheckedPointer());
-        return true;
-    }
-
-    // 2. Otherwise, if user has manual GUI edits on Pure Data's native stack, undo that
     if (canvas.patch.canUndo()) {
         canvas.patch.undo();
         return true;
     }
-
-    // Nothing to undo
+    if (canvas.pd && canvas.pd->getMcp()->hasMcpTransaction(canvas.patch.getUncheckedPointer())) {
+        canvas.pd->getMcp()->undoMcpTransaction(canvas.patch.getUncheckedPointer());
+        return true;
+    }
     return false;
 }
 
 bool CanvasMcpLayer::redo()
 {
-    // 1. If an AI transaction was undone, redo that first to recreate objects before redoing manual edits on them
-    if (canvas.pd && canvas.pd->getMcp()->hasMcpRedoTransaction(canvas.patch.getUncheckedPointer())) {
-        canvas.pd->getMcp()->redoMcpTransaction(canvas.patch.getUncheckedPointer());
-        return true;
-    }
-
-    // 2. Otherwise, if user has manual GUI edits to redo, tell pd to redo
+    // Native redo entries exist only after native undos, which only undo entries newer than every MCP
+    // transaction (an MCP undo empties the native queue), so they go first here too.
     if (canvas.patch.canRedo()) {
         canvas.patch.redo();
+        return true;
+    }
+    if (canvas.pd && canvas.pd->getMcp()->hasMcpRedoTransaction(canvas.patch.getUncheckedPointer())) {
+        canvas.pd->getMcp()->redoMcpTransaction(canvas.patch.getUncheckedPointer());
         return true;
     }
     return false;

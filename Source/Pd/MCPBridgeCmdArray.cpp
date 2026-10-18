@@ -30,6 +30,9 @@ static t_garray* findGArrayInCanvas(t_canvas* cnv, t_symbol* nameSym)
 void MCPBridge::handleArrayDomain(const juce::String& arrayAction, const juce::OSCMessage& msg)
 {
     if (!processor || msg.size() < 2) return;
+    // P3.4 S3: load/write/write_bulk/mutate may paste a new graph (create on write): structural edit.
+    bool const reads = arrayAction == "read" || arrayAction == "read_bulk" || arrayAction == "stats";
+    if (!reads && runInPdContext(&MCPBridge::handleArrayDomain, arrayAction, msg)) return;
 
     // Two conventions:
     //   write/read: /array/<action> <name> <subpatch> <corrId> ...  (name = msg[0])

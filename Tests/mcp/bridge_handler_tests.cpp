@@ -161,12 +161,13 @@ void sleepMs(int ms)
     std::this_thread::sleep_for(std::chrono::milliseconds(ms));
 }
 
-// The Pd context (Plan 3 P3.4 S2): McpHost::enqueuePd / pdWait run jobs on the audio thread, under the Pd
-// lock, at the start of a block; a job the caller gave up on never runs; a held lock delays a job but the
-// drain does not let it starve.
+// The Pd context (Plan 3 P3.4 S2/S3): McpHost::enqueuePd / pdWait run jobs on the message thread, under the
+// Pd lock (plugdata's own Pd editing context); a job the caller gave up on never runs; a held lock delays a
+// job until it is released.
 struct AudioControl {
     std::atomic<bool> paused { false };
     std::atomic<std::thread::id> threadId {};
+    std::atomic<std::thread::id> messageThreadId {};
 };
 
 void runPdContextCases(PluginProcessor& processor, AudioControl& audio)
@@ -174,13 +175,13 @@ void runPdContextCases(PluginProcessor& processor, AudioControl& audio)
     std::printf("pd context\n");
     auto* host = processor.getMcp();
 
-    // 1. pdWait runs the job on the audio thread and returns once it ran.
+    // 1. pdWait runs the job on the message thread and returns once it ran.
     {
         std::atomic<bool> ran { false };
         std::atomic<std::thread::id> where {};
         CHECK(host->pdWait([&] { ran = true; where = std::this_thread::get_id(); }, 2000));
         CHECK(ran.load());
-        CHECK(where.load() == audio.threadId.load());
+        CHECK(where.load() == audio.messageThreadId.load());
     }
 
     // 2. The job holds the Pd lock while it runs: another thread cannot take it.
@@ -203,23 +204,22 @@ void runPdContextCases(PluginProcessor& processor, AudioControl& audio)
         sleepMs(30);
     }
 
-    // 3. With the audio thread stalled, pdWait gives up and the job never runs afterwards.
+    // 3. With the message thread stalled, pdWait gives up and the job never runs afterwards.
     {
-        audio.paused = true;
-        sleepMs(30);
+        juce::MessageManager::callAsync([] { sleepMs(300); });
+        sleepMs(20);
         std::atomic<bool> ran { false };
         CHECK(!host->pdWait([&] { ran = true; }, 100));
-        audio.paused = false;
-        sleepMs(100);
+        sleepMs(400);
         CHECK(!ran.load());
     }
 
-    // 4. A held Pd lock delays a job; the drain then waits for the lock instead of starving the job.
+    // 4. A held Pd lock delays a job; it runs once the lock is released.
     {
         std::atomic<bool> ran { false };
         processor.audioLock.enter();
         host->enqueuePd([&] { ran = true; });
-        sleepMs(200); // ~25 blocks: past the busy limit, the drain now waits for us
+        sleepMs(200);
         CHECK(!ran.load());
         processor.audioLock.exit();
         for (int i = 0; i < 200 && !ran.load(); ++i)
@@ -476,6 +476,7 @@ int main()
         });
 
         // The message thread: handlers hand work to it (callAsync) while the worker waits.
+        audioControl.messageThreadId = std::this_thread::get_id();
         juce::MessageManager::getInstance()->runDispatchLoop();
 
         worker.join();

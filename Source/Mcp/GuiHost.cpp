@@ -7,6 +7,7 @@
 
 #include "Mcp/McpGuiHost.h"
 #include "PluginProcessor.h"
+#include "Mcp/McpHost.h"
 #include "PluginEditor.h"
 #include "Toolbar.h"
 #include "Sidebar/Sidebar.h"
@@ -390,6 +391,7 @@ public:
         for (auto* editor : proc->getEditors()) {
             if (!editor) continue;
             editor->getTabComponent().openPatch(juce::URL(file));
+            proc->getMcp()->refreshFocusedRoot(); // P3.4 S3: "main" follows at once, not on the next 50 ms tick
             return true;
         }
         return false;
@@ -432,6 +434,7 @@ public:
                 if (tabMatches(canvas, f, target)) {
                     editor->getTabComponent().showTab(canvas, canvas->patch.splitViewIndex);
                     editor->getTabComponent().setActiveSplit(canvas);
+                    proc->getMcp()->refreshFocusedRoot(); // P3.4 S3
                     return canvas->patch.getTitle();
                 }
             }
@@ -451,6 +454,7 @@ public:
                         return { CloseResult::Dirty, canvas->patch.getTitle() };
                     juce::String title = canvas->patch.getTitle();
                     editor->getTabComponent().closeTab(canvas);
+                    proc->getMcp()->refreshFocusedRoot(); // P3.4 S3
                     return { CloseResult::Closed, title };
                 }
             }

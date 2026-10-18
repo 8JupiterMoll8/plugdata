@@ -4,9 +4,9 @@
  // headers are included by Source/Mcp/GuiHost.cpp alone. No plugdata GUI type
  // appears in a signature: canvases are named by their t_canvas*, objects by t_gobj*.
  //
- // Threads. Every method is meant for the JUCE message thread. Callers that are
- // NOT on it today are marked "OFF-THREAD" below; they are listed in PROGRESS.md
- // for P3.4 and are left as they were (S6 is a move).
+ // Threads. Every method is for the JUCE message thread (cpuUsage excepted). The
+ // bridge reaches it from other threads only through McpHost::onMessageThread,
+ // mcpLiveBounds / mcpFetchGuiFacts or a posted callAsync (Plan 3 P3.4 S3).
  */
 #pragma once
 
@@ -31,12 +31,11 @@ public:
     // ── Canvas views ────────────────────────────────────────────────────
     // Selectable bounds of the first object component per gobj, in the view that
     // shows `cnv`; nullptr when no view shows it. Never opens a tab.
-    // OFF-THREAD: the layout handlers call it from the OSC thread under sys_lock.
+    // Callers on other threads go through mcpLiveBounds / mcpFetchGuiFacts (P3.4 S3).
     using LiveBounds = std::unordered_map<t_gobj*, juce::Rectangle<int>>;
     virtual std::unique_ptr<LiveBounds> liveObjectBounds(t_canvas* cnv) = 0;
 
     // Zoom and viewport of the view that shows `cnv`; empty when none does.
-    // OFF-THREAD: /pd/bounds (OSC thread).
     struct ViewState {
         float zoom = 1.0f;
         bool hasViewport = false;
@@ -46,10 +45,9 @@ public:
 
     // Finds the view of `cnv`, opening a tab for it when no editor shows it.
     virtual bool ensureView(t_canvas* cnv) = 0;
-    // ensureView, then repaint it. OFF-THREAD: /pd/ai_state (OSC thread).
+    // ensureView, then repaint it.
     virtual void repaintView(t_canvas* cnv) = 0;
     // Repaints every canvas of every editor and invalidates the NVG surface.
-    // OFF-THREAD: the MIDI take stop path (caller's thread).
     virtual void repaintAll() = 0;
     // Pans (never zooms) the view of `cnv` so freshly created objects are in sight,
     // when one of them landed outside it. Was batch_atomic's frameIfCreateOffscreen.
@@ -124,7 +122,6 @@ public:
         juce::File file;
         bool focused = false;
     };
-    // OFF-THREAD: /pd/open_patch's duplicate check (OSC thread, under sys_lock).
     virtual std::vector<TabInfo> listTabs() = 0;
     virtual bool openPatch(juce::File const& file) = 0;
     // Keeps the first tab showing `file`, closes the others; logs each close.
@@ -138,16 +135,14 @@ public:
         juce::String title;
     };
     virtual CloseResult closeTab(juce::String const& target, bool force) = 0;
-    // OFF-THREAD: /pd/save_as runs it on the Pd thread (enqueueFunctionAsync).
     virtual void setPatchFile(t_canvas* cnv, juce::File const& file) = 0;
 
     // ── Misc ────────────────────────────────────────────────────────────
     virtual bool showObjectReference(juce::String const& objectName) = 0;
     virtual bool openHelpPatch(juce::File const& helpFile) = 0;
     virtual void clearConsole() = 0;
-    // OFF-THREAD: /pd/measure_text (OSC thread).
     virtual juce::Font defaultFont() = 0;
-    // OFF-THREAD: /pd/perf (OSC thread).
+    // Any thread: an atomic the audio side writes (Toolbar::getCPUUsage), no component is read.
     virtual float cpuUsage() = 0;
 };
 

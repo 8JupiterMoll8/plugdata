@@ -10,6 +10,7 @@
 
 void MCPBridge::pdLoad(const juce::String& action, const juce::OSCMessage& msg)
 {
+    if (runInPdContext(&MCPBridge::pdLoad, action, msg)) return; // P3.4 S3: structural edit
     if (msg.size() >= 2 && processor) {
         auto file = getArgString(msg[0]);
         auto folder = getArgString(msg[1]);
@@ -80,6 +81,7 @@ void MCPBridge::pdSaveContent(const juce::String& action, const juce::OSCMessage
     // Reply: /pd/load_content/reply/<corrId>  arg0=objectCount (float)
 void MCPBridge::pdLoadContent(const juce::String& action, const juce::OSCMessage& msg)
 {
+    if (runInPdContext(&MCPBridge::pdLoadContent, action, msg)) return; // P3.4 S3: structural edit
     if (msg.size() >= 2 && processor) {
         auto canvasName    = normalizeCanvas(getArgString(msg[0]));
         auto srcFilePath   = getArgString(msg[1]);
@@ -284,7 +286,13 @@ void MCPBridge::pdSavePatch(const juce::String& action, const juce::OSCMessage& 
                 p->getMcp()->session.mcpStableObjectMap[newKey] = std::move(p->getMcp()->session.mcpStableObjectMap[oldKey]);
                 p->getMcp()->session.mcpStableObjectMap.erase(oldKey);
             }
-            p->getMcp()->gui().setPatchFile(cnv, f);
+            // P3.4 S3: the tab title is GUI state: set it on the message thread, if the canvas still exists.
+            juce::MessageManager::callAsync([p, cnv, f] {
+                sys_lock();
+                bool const live = mcpCanvasIsLive(cnv);
+                sys_unlock();
+                if (live) p->getMcp()->gui().setPatchFile(cnv, f);
+            });
         });
 
         sendReply(replyAddr, destFilePath);
@@ -455,16 +463,15 @@ void MCPBridge::pdOpenPatch(const juce::String& action, const juce::OSCMessage& 
         // PRD Phase 3 §2.5: duplicate-tab guard — PlugData focuses the
         // existing tab instead of duplicating a patch (by design). Reply
         // honestly instead of falling into the async no-reply path.
+        // P3.4 S3: the tabs are GUI state: read them on the message thread (no Pd lock needed).
         bool alreadyOpen = false;
-        {
-            sys_lock();
-            for (auto const& tab : processor->getMcp()->gui().listTabs()) {
+        if (auto tabs = processor->getMcp()->onMessageThread([p = processor] { return p->getMcp()->gui().listTabs(); }, 2000, "open_patch")) {
+            for (auto const& tab : *tabs) {
                 if (tab.file == srcFile) {
                     alreadyOpen = true;
                     break;
                 }
             }
-            sys_unlock();
         }
         if (alreadyOpen) {
             sendReply(replyAddr, juce::String("already open: " + srcFile.getFullPathName() + " (focused existing tab)"));

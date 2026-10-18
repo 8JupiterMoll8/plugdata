@@ -44,6 +44,7 @@ void McpHost::createBridge()
     processor.setThis();
     mcp::audit::installLock(&processor.audioLock);
     mcpBridge = std::make_unique<MCPBridge>(&processor, mcpListen, mcpSend);
+    focusTimer.startTimer(50); // P3.4 S3: publishes the focused root for getCanvasBySymbol("main")
     if (!mcpEnabled) {
         mcpBridge->stop();
     }
@@ -203,25 +204,39 @@ void McpHost::writeRecorderTap(dsp::AudioBlock<float> const& buffer)
     session.mcpThreadedWriter->write(channels, static_cast<int>(buffer.getNumSamples()));
 }
 
+// "main" must ALWAYS resolve to the true top-level patch. The editor's current
+// canvas can be a subpatch OR an abstraction tab the artist has navigated into —
+// automating against that would silently target the voice's internals instead of
+// the patch (phantom "receive->canvas connection failed", census listing internals
+// as top-level, silent recalls). Walk gl_owner all the way up (past abstractions
+// too, unlike canvas_getrootfor which stops at them) so MCP operations always land
+// on the actual root patch. Message thread only (it reads the editors).
+void McpHost::refreshFocusedRoot()
+{
+    t_canvas* root = nullptr;
+    for (auto* editor : processor.getEditors()) {
+        if (editor) {
+            if (auto* cnv = editor->getCurrentCanvas()) {
+                auto* glist = reinterpret_cast<t_glist*>(cnv->patch.getRawPointer());
+                while (glist && glist->gl_owner) glist = glist->gl_owner;
+                if (glist) {
+                    root = reinterpret_cast<t_canvas*>(glist);
+                    break;
+                }
+            }
+        }
+    }
+    session.mcpFocusedRoot.store(root, std::memory_order_release);
+}
+
 t_canvas* McpHost::getCanvasBySymbol(const String& canvas_symbol)
 {
     if (canvas_symbol == "pd-main" || canvas_symbol == "main" || canvas_symbol.isEmpty()) {
-        // "main" must ALWAYS resolve to the true top-level patch. The editor's
-        // current canvas can be a subpatch OR an abstraction tab the artist has
-        // navigated into — automating against that would silently target the
-        // voice's internals instead of the patch (phantom "receive->canvas
-        // connection failed", census listing internals as top-level, silent
-        // recalls). Walk gl_owner all the way up (past abstractions too, unlike
-        // canvas_getrootfor which stops at them) so MCP operations always land
-        // on the actual root patch.
-        for (auto* editor : processor.getEditors()) {
-            if (editor) {
-                if (auto* cnv = editor->getCurrentCanvas()) {
-                    auto* glist = reinterpret_cast<t_glist*>(cnv->patch.getRawPointer());
-                    while (glist && glist->gl_owner) glist = glist->gl_owner;
-                    if (glist) return reinterpret_cast<t_canvas*>(glist);
-                }
-            }
+        // "main" is the true root of the focused editor's current canvas, published by the message
+        // thread (refreshFocusedRoot). Used only while it is still an open root patch.
+        if (auto* root = session.mcpFocusedRoot.load(std::memory_order_acquire)) {
+            for (t_canvas* c = pd_this ? pd_this->pd_canvaslist : nullptr; c; c = c->gl_next)
+                if (c == root) return root;
         }
     }
 

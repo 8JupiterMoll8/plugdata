@@ -11,7 +11,7 @@ list what the handler does that matters for the execution model:
   wait     waitOrAbandon / Thread::sleep / cv.wait (blocks the calling thread)
   drain    sendMessagesFromQueue (runs queued jobs on the calling thread)
   editors  getEditors() (JUCE UI objects; message thread only)
-  gui      McpGuiHost methods called (OFF = marked OFF-THREAD in McpGuiHost.h)
+  gui      McpGuiHost methods called (OFF = a message-thread-only method called off the message thread)
   sym      gensym / generateSymbol (permanent Pd symbols)
   capture  lambdas passed to enqueueFunctionAsync/callAsync that capture by
            reference ([&...]) or capture a raw Pd pointer local
@@ -160,7 +160,7 @@ def mask(body, spans):
 
 
 def facts_of(body_code, body_raw, ptr_locals, off_methods):
-    msg_spans = lambda_spans(body_code, "callAsync")
+    msg_spans = lambda_spans(body_code, "callAsync") + lambda_spans(body_code, "onMessageThread")
     on_msg = "".join(body_code[a:b] for a, b in msg_spans)
     full_code = body_code
     body_code = mask(body_code, msg_spans)   # message-thread lambda bodies do not count as off-thread
@@ -210,15 +210,18 @@ def main():
     root = args.root
 
     guihost = open(os.path.join(root, "Source/Mcp/McpGuiHost.h")).read()
+    # Every McpGuiHost method is message-thread-only, except those whose comment starts "Any thread"
+    # (P3.4 S3; before S3 the header marked the off-thread callers "OFF-THREAD" instead).
     off_methods = set()
-    pending_off = False
+    any_thread = False
     for line in guihost.splitlines():
-        if "OFF-THREAD" in line:
-            pending_off = True
+        if "Any thread" in line:
+            any_thread = True
         m = re.search(r"virtual\s+.*?\b(\w+)\s*\(", line)
-        if m and pending_off:
-            off_methods.add(m.group(1))
-            pending_off = False
+        if m:
+            if not any_thread and m.group(1) != "McpGuiHost":
+                off_methods.add(m.group(1))
+            any_thread = False
 
     funcs = {}  # short name -> list of (qualified, direct facts, callees, file)
     all_short = set()
@@ -236,9 +239,15 @@ def main():
 
     for path, q, s, bc, br in parsed:
         ptr_locals = set(re.findall(PTR_TYPES + r"\s*\*\s*(\w+)", bc))
+        # A function that starts by posting itself to the message thread when called elsewhere
+        # ("if (!...isThisTheMessageThread()) { ...callAsync...; return; }") runs its body there.
+        head = bc[:600]
+        hops_first = "isThisTheMessageThread()" in head and "callAsync" in head and "return" in head
         f = facts_of(bc, br, ptr_locals, off_methods)
-        off_part = mask(bc, lambda_spans(bc, "callAsync"))
-        callees = set(re.findall(r"\b([A-Za-z_]\w*)\s*\(", off_part)) & all_short
+        if hops_first:
+            f = empty()
+        off_part = mask(bc, lambda_spans(bc, "callAsync") + lambda_spans(bc, "onMessageThread"))
+        callees = set() if hops_first else set(re.findall(r"\b([A-Za-z_]\w*)\s*\(", off_part)) & all_short
         callees.discard(s)
         funcs.setdefault(s, []).append({"q": q, "file": path, "direct": f, "callees": callees})
 

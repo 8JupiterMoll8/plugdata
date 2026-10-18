@@ -34,4 +34,10 @@ void commandEnd();
 // Called at the top of every audio block: tags the calling thread as audio.
 void markAudioThread();
 
+// P3.4 S3: true when this thread holds the Pd lock (only known with the audit on;
+// false otherwise). A cross-thread wait while holding it can stall the audio thread.
+bool holdsPdLock();
+// Logs "MCP_AUDIT wait-under-lock <where>" on every such call (audit on only).
+void reportWaitUnderLock(char const* where);
+
 } // namespace mcp::audit

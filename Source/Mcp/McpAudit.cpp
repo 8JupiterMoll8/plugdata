@@ -161,4 +161,17 @@ void markAudioThread()
         tls.role = Audio;
 }
 
+bool holdsPdLock()
+{
+    return enabled() && tls.depth > 0;
+}
+
+void reportWaitUnderLock(char const* where)
+{
+    if (!enabled())
+        return;
+    std::fprintf(stderr, "MCP_AUDIT wait-under-lock %s (during %s)\n", where ? where : "?", currentAddress.c_str());
+    std::fflush(stderr);
+}
+
 } // namespace mcp::audit
