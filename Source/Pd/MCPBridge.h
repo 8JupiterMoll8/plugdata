@@ -14,6 +14,8 @@
 #include <juce_audio_devices/juce_audio_devices.h>
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <readerwriterqueue.h>
+#include <mutex>
+#include <optional>
 #include <array>
 #include <functional>
 #include <memory>
@@ -22,6 +24,7 @@
 #include "Pd/Instance.h"
 #include "Pd/MCPIdentity.h" // renameStableId (also used by PluginProcessor.cpp; finding C6)
 #include "Pd/MCPBridgeRegistry.h" // verb table (Plan 3 P3.3)
+#include "Pd/MCPBridgeWorker.h"   // command worker and reply queue (Plan 3 P3.4)
 
 class PluginProcessor;
 class MCPBridge;
@@ -179,45 +182,68 @@ private:
     bool debugWasEnabledByUs = false;
 };
 
-// juce::OSCSender is not thread-safe, and the bridge sends from the OSC
-// thread, the render thread and timers (Report F3). Same interface, one lock.
-class LockedOscSender {
+// The reply queue (Plan 3 P3.4 S1; Report F3). juce::OSCSender is not
+// thread-safe and the bridge replies from the command worker, the message
+// thread, timers and the render thread. Every thread posts here; one thread
+// owns the OSCSender and sends in post order. connect/disconnect are queued
+// too, so a reconnect stays ordered with the replies around it. Nothing on the
+// audio thread may post (posting copies the message).
+class ReplyQueue {
 public:
-    bool connect(juce::String const& host, int port)
+    ReplyQueue()
     {
-        juce::ScopedLock const sl(lock);
-        return inner.connect(host, port);
+        worker.start([this](Op op) { run(std::move(op)); });
     }
-    bool disconnect()
-    {
-        juce::ScopedLock const sl(lock);
-        return inner.disconnect();
-    }
-    // Tests (Tests/mcp/bridge_handler_tests.cpp): with a sink set, every OSCMessage goes to it instead of the socket.
+    ~ReplyQueue() { worker.stop(); } // replies still queued at teardown are dropped
+
+    bool connect(juce::String const& host, int port) { return worker.post(Op { Op::Connect, {}, host, port }); }
+    bool disconnect() { return worker.post(Op { Op::Disconnect, {}, {}, 0 }); }
+    bool send(juce::OSCMessage const& message) { return worker.post(Op { Op::Send, message, {}, 0 }); }
+
+    // Tests (Tests/mcp/bridge_handler_tests.cpp): with a sink set, every message goes to it instead of the
+    // socket, on the reply thread.
     void setSink(std::function<void(juce::OSCMessage const&)> newSink)
     {
-        juce::ScopedLock const sl(lock);
+        std::lock_guard<std::mutex> const l(sinkLock);
         sink = std::move(newSink);
-    }
-    template<typename... Args>
-    bool send(Args&&... args)
-    {
-        juce::ScopedLock const sl(lock);
-        if constexpr (sizeof...(Args) == 1) {
-            if constexpr ((std::is_convertible_v<Args, juce::OSCMessage const&> && ...)) {
-                if (sink) {
-                    sink(args...);
-                    return true;
-                }
-            }
-        }
-        return inner.send(std::forward<Args>(args)...);
     }
 
 private:
-    juce::CriticalSection lock;
-    juce::OSCSender inner;
+    struct Op {
+        enum Kind { Send, Connect, Disconnect } kind = Send;
+        std::optional<juce::OSCMessage> message;
+        juce::String host;
+        int port = 0;
+    };
+
+    void run(Op op)
+    {
+        switch (op.kind) {
+        case Op::Connect:
+            inner.connect(op.host, op.port);
+            return;
+        case Op::Disconnect:
+            inner.disconnect();
+            return;
+        case Op::Send: {
+            std::function<void(juce::OSCMessage const&)> s;
+            {
+                std::lock_guard<std::mutex> const l(sinkLock);
+                s = sink;
+            }
+            if (s)
+                s(*op.message);
+            else
+                inner.send(*op.message);
+            return;
+        }
+        }
+    }
+
+    juce::OSCSender inner; // touched only on the reply thread
+    std::mutex sinkLock;
     std::function<void(juce::OSCMessage const&)> sink;
+    mcp::SerialWorker<Op> worker; // last: stopped (joined) first, before `inner` goes
 };
 
 class MCPBridge final : public juce::OSCReceiver::Listener<juce::OSCReceiver::RealtimeCallback>
@@ -469,7 +495,7 @@ private:
     // listen on every interface. Must outlive the receiver's connection.
     std::unique_ptr<juce::DatagramSocket> listenSocket;
     juce::OSCReceiver receiver;
-    LockedOscSender sender;
+    ReplyQueue sender;
     // Current reply target, so /bridge/connect only reconnects on a change.
     juce::String senderHost { "127.0.0.1" };
     int senderPort = 0;
@@ -564,6 +590,12 @@ private:
 
     std::function<void(const juce::String&, const juce::String&)> chatCallback;
     juce::CriticalSection chatLock;
+
+    // Plan 3 P3.4 S1: the network thread only posts; every command runs here, one at a time, in arrival
+    // order (the order the network thread used to run them in). Declared last: destroyed first.
+    mcp::SerialWorker<juce::OSCMessage> commandWorker;
+    void handleMessage(const juce::OSCMessage& message);
+    void startCommandWorker();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MCPBridge)
 };

@@ -61,6 +61,7 @@ bool MCPBridge::start()
     if (!recvOk)
         listenSocket.reset();
     if (recvOk) {
+        startCommandWorker(); // before the listener: nothing may arrive with no worker
         receiver.addListener(this);
         active.store(true);
         reportedConnected = false;
@@ -86,6 +87,7 @@ bool MCPBridge::start()
 void MCPBridge::setReplySinkForTests(std::function<void(juce::OSCMessage const&)> sink)
 {
     sender.setSink(std::move(sink));
+    startCommandWorker();
     active.store(true);
 }
 
@@ -97,6 +99,7 @@ void MCPBridge::stop()
     receiver.removeListener(this);
     receiver.disconnect();
     listenSocket.reset();
+    commandWorker.stop(); // the running command finishes; queued ones are dropped
     sender.disconnect();
     active.store(false);
     reportedConnected = false;
@@ -1430,7 +1433,19 @@ int MCPBridge::composeLayout(PluginProcessor* processor, t_canvas* cnv, const ju
     return moved;
 }
 
+// Network thread: decode (done by JUCE) and enqueue, nothing else (Plan 3 P3.4 S1).
 void MCPBridge::oscMessageReceived(const juce::OSCMessage& message)
+{
+    commandWorker.post(message);
+}
+
+void MCPBridge::startCommandWorker()
+{
+    commandWorker.start([this](juce::OSCMessage message) { handleMessage(message); });
+}
+
+// Command worker: parse the address and dispatch through the command table.
+void MCPBridge::handleMessage(const juce::OSCMessage& message)
 {
     auto addr = message.getAddressPattern().toString();
     while (addr.startsWith("/")) addr = addr.substring(1);
