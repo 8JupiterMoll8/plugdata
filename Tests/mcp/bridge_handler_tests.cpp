@@ -133,6 +133,7 @@ struct A {
     A(int v) : value(static_cast<juce::int32>(v)) { }
     A(double v) : value(static_cast<float>(v)) { }
     A(char const* v) : value(juce::String(v)) { }
+    A(juce::String const& v) : value(v) { }
 };
 
 juce::OSCMessage message(char const* address, std::initializer_list<A> args)
@@ -405,6 +406,118 @@ void runNativeUndoCases(PluginProcessor& processor)
         headIsInit = udo && udo->u_queue && udo->u_queue->type == UNDO_INIT;
     }, 2000));
     CHECK(headIsInit);
+}
+
+// Plan 4 P4.4: ONE undo history per canvas (Pd's own queue) for AI and manual edits, in time order; one AI call is
+// one undo step (decision 9); undo/redo keep the tempIds. A "manual" edit here is a move registered exactly as the
+// GUI's drag registers it (UNDO_MOTION before the displacement).
+void runSharedUndoCases(Harness& h, PluginProcessor& processor)
+{
+    std::printf("shared undo: AI and manual edits in one history\n");
+    auto* host = processor.getMcp();
+    int corr = 0;
+    auto next = [&corr](char const* p) { return juce::String(p) + juce::String(++corr); };
+    auto batch = [&](std::initializer_list<A> args, juce::String const& c) {
+        auto r = h.call("/pd/batch_atomic", args, ("/pd/batch_atomic/reply/" + c).toStdString());
+        return r.has_value();
+    };
+    // undo/redo on main; true when the bridge answered 1 (a step was taken).
+    auto step = [&](char const* verb) {
+        auto const c = next(verb);
+        auto r = h.call((juce::String("/pd/") + verb).toRawUTF8(), { "main", c }, ("/pd/" + juce::String(verb) + "/reply/" + c).toStdString());
+        sleepMs(300);
+        return r.has_value() && r->num(0) == 1;
+    };
+    auto text = [&](char const* id) -> std::string {
+        auto const c = next("sut");
+        auto r = h.call("/pd/obj_get", { "main", c, id }, ("/pd/obj_get/reply/" + c).toStdString(), 2000);
+        if (!r) return "";
+        auto const json = parseJson(*r);
+        return json["text"].toString().toStdString();
+    };
+    auto pos = [&](char const* id) -> std::pair<int, int> {
+        auto const c = next("sup");
+        auto r = h.call("/pd/typeof", { "main", id, c }, ("/pd/typeof/reply/" + c).toStdString(), 2000);
+        if (!r || r->args.size() < 4) return { -1, -1 };
+        return { static_cast<int>(r->num(2)), static_cast<int>(r->num(3)) };
+    };
+    auto wired = [&](char const* src, char const* dst) {
+        auto const c = next("suw");
+        auto r = h.call("/pd/connections", { "main", c }, ("/pd/connections/reply/" + c).toStdString(), 2000);
+        if (!r) return false;
+        auto const json = parseJson(*r);
+        if (auto const* list = json["connections"].getArray())
+            for (auto const& w : *list)
+                if (w["srcId"].toString() == src && w["destId"].toString() == dst) return true;
+        return false;
+    };
+    auto manualMove = [&](char const* id, int dx, int dy) {
+        return host->pdWait([&] {
+            t_canvas* cnv = host->getCanvasBySymbolStrict("main");
+            t_gobj* obj = cnv ? host->resolveStableId("main", id) : nullptr;
+            if (!obj) return;
+            if (!cnv->gl_editor) canvas_create_editor(cnv);
+            glist_noselect(cnv);
+            glist_select(cnv, obj);
+            canvas_undo_add(cnv, UNDO_MOTION, "motion", canvas_undo_set_move(cnv, 1));
+            gobj_displace(obj, cnv, dx, dy);
+            glist_noselect(cnv);
+        }, 2000);
+    };
+
+    // 1. Two AI calls are two undo steps (L30), and redo brings both back with their tempIds.
+    auto const ca = next("sua");
+    CHECK(batch({ "main", ca, 0, 0, 0, 1, 0, "su_a", 700, 300, "obj", "f", 1, "1", 0, 5, 10, 0 }, ca));
+    auto const cb = next("sub");
+    CHECK(batch({ "main", cb, 0, 0, 0, 1, 0, "su_b", 760, 300, "obj", "f", 1, "2", 0, 5, 10, 0 }, cb));
+    CHECK(text("su_a") == "f 1" && text("su_b") == "f 2");
+    CHECK(step("undo"));
+    CHECK(text("su_b").empty() && text("su_a") == "f 1");
+    CHECK(step("undo"));
+    CHECK(text("su_a").empty());
+    CHECK(step("redo"));
+    CHECK(text("su_a") == "f 1");
+    CHECK(step("redo"));
+    CHECK(text("su_b") == "f 2");
+
+    // 2. A manual edit, then an AI call: undo takes back the AI call first, then the manual edit.
+    auto const before = pos("su_a");
+    CHECK(manualMove("su_a", 20, 30));
+    CHECK(pos("su_a") == std::make_pair(before.first + 20, before.second + 30));
+    auto const cc = next("suc");
+    CHECK(batch({ "main", cc, 0, 0, 0, 1, 0, "su_c", 820, 300, "obj", "f", 1, "3", 0, 5, 10, 0 }, cc));
+    CHECK(step("undo"));
+    CHECK(text("su_c").empty() && pos("su_a") == std::make_pair(before.first + 20, before.second + 30));
+    CHECK(step("undo"));
+    CHECK(pos("su_a") == before);
+
+    // 3. Deleting a wired object: undo restores the object, its wire and its tempId.
+    auto const cw = next("suw");
+    CHECK(batch({ "main", cw, 0, 0, 0, 2, 1,
+        "su_o", 700, 400, "obj", "osc~", 1, "220",
+        "su_g", 700, 450, "obj", "*~", 1, "0.1",
+        "su_o", 0, "su_g", 0,
+        0, 5, 10, 0 }, cw));
+    CHECK(wired("su_o", "su_g"));
+    auto const cd = next("sud");
+    CHECK(batch({ "main", cd, 1, 0, 0, 0, 0, "su_o", 0, 5, 10, 0 }, cd));
+    CHECK(text("su_o").empty());
+    CHECK(step("undo"));
+    CHECK(text("su_o") == "osc~ 220");
+    CHECK(wired("su_o", "su_g"));
+
+    // 4. Retype: undo restores the old class and keeps the id and the wire.
+    auto const ce = next("sue");
+    CHECK(batch({ "main", ce, 0, 0, 1, 0, 0, "su_g", "*~", 1, "0.5", 0, 5, 10, 0 }, ce));
+    CHECK(text("su_g") == "*~ 0.5");
+    CHECK(step("undo"));
+    CHECK(text("su_g") == "*~ 0.1");
+    CHECK(wired("su_o", "su_g"));
+
+    // 5. Redo of the retype, then nothing left to redo: that answers 0 (an honest no-op), never 1.
+    CHECK(step("redo"));
+    CHECK(text("su_g") == "*~ 0.5");
+    CHECK(!step("redo"));
 }
 
 // P3.5 S0: the identity service will detect GUI edits by recomputing a per-canvas stamp (object count plus a hash
@@ -1467,6 +1580,7 @@ int main()
             });
             runPdContextCases(processor, audioControl);
             runNativeUndoCases(processor);
+            runSharedUndoCases(harness, processor);
             runAudioStallCases(harness, audioControl);
             runMidiCaptureCases(processor, audioControl);
             runStampCostCases(processor);
