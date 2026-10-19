@@ -551,10 +551,10 @@ void PluginProcessor::updateSearchPaths()
 
     auto librariesTree = settingsFile->getProperty<VarArray>("libraries");
 
-    for (auto& library : librariesTree) {
-        if (library.toString().isEmpty()) {
-            librariesTree.remove(&library);
-        }
+    // Remove empty entries from the back: removing while the range-for walks the array is a use-after-free (L24).
+    for (int i = librariesTree.size() - 1; i >= 0; --i) {
+        if (librariesTree[i].toString().isEmpty())
+            librariesTree.remove(i);
     }
 
     // Load startup libraries that the user defined in settings
