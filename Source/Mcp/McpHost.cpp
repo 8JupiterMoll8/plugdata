@@ -199,7 +199,8 @@ McpHost::~McpHost()
 
 void McpHost::postMessage(std::function<void()> fn)
 {
-    juce::MessageManager::callAsync([weak = juce::WeakReference<McpHost>(this), fn = std::move(fn)] {
+    juce::MessageManager::callAsync([weak = juce::WeakReference<McpHost>(this), fn = std::move(fn), work = mcp::v2::captureWork()] {
+        mcp::v2::WorkScope const scope(work); // P4.1 S3: replies stay with the request that posted this; it is done after
         if (weak.get() != nullptr)
             fn();
     });

@@ -423,6 +423,68 @@ int main()
         CHECK(allValid);
     }
 
+    // 15. S3 callbacks: a request goes to onRequest (its refusal is sent back), the session is reported opened with
+    // its telemetry flag and closed when it ends, send() reaches a session by number, onTick runs.
+    {
+        Server s;
+        std::string why;
+        auto c = config(dir, logs);
+        std::mutex m;
+        std::vector<std::string> seen;
+        std::vector<std::pair<int, bool>> opened;
+        std::vector<int> closed;
+        std::atomic<int> ticks { 0 };
+        c.onRequest = [&](int session, Request r) -> std::optional<RequestAnswer> {
+            std::lock_guard<std::mutex> l(m);
+            seen.push_back(std::to_string(session) + " " + r.id + " " + r.verb);
+            if (r.verb == "/pd/refuse")
+                return RequestAnswer { encodeRejected(r.id, ErrorCode::UnknownVerb, "no"), false };
+            if (r.verb == "/pd/close_me")
+                return RequestAnswer { encodeBye(ErrorCode::BadFrame, "reused id"), true };
+            return std::nullopt;
+        };
+        c.onSessionOpened = [&](int session, bool telemetry) { std::lock_guard<std::mutex> l(m); opened.emplace_back(session, telemetry); };
+        c.onSessionClosed = [&](int session) { std::lock_guard<std::mutex> l(m); closed.push_back(session); };
+        c.onTick = [&] { ++ticks; };
+        CHECK(s.start(c, why));
+        auto const token = tokenFrom(c.discoveryPath);
+        int sessionNo = 0;
+        {
+            Client cl(s.port());
+            cl.sendFrame(R"({"t":"hello","protocol":2,"schemaHash":")" + std::string(mcp::v2schema::kSchemaHash) + R"(","token":")" + token
+                + R"(","telemetry":true})");
+            auto const w = cl.next();
+            CHECK(Client::kindOf(w) == "welcome");
+            sessionNo = w ? std::atoi(w->find("sessionId")->string.c_str() + 1) : 0;
+            cl.sendFrame(R"({"t":"req","id":"V1N1","verb":"/pd/census","args":[{"t":"s","v":"main"}]})");
+            cl.sendFrame(R"({"t":"req","id":"V1N2","verb":"/pd/refuse"})");
+            auto const r = cl.next();
+            CHECK(Client::kindOf(r) == "rep" && r->find("id")->string == "V1N2" && errorCode(r) == "unknown_verb");
+            s.send(sessionNo, R"({"t":"evt","class":"telemetry","address":"/pd/log","args":[]})");
+            CHECK(Client::kindOf(cl.next()) == "evt");
+            s.send(sessionNo + 1000, R"({"t":"pong"})"); // no such session: dropped
+            cl.sendFrame(R"({"t":"req","id":"V1N3","verb":"/pd/close_me"})");
+            auto const bye = cl.next();
+            CHECK(Client::kindOf(bye) == "bye" && errorCode(bye) == "bad_frame");
+            CHECK(cl.closedByServer());
+        }
+        auto const t0 = Clock::now();
+        while (std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - t0).count() < 2000) {
+            {
+                std::lock_guard<std::mutex> l(m);
+                if (!closed.empty())
+                    break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        s.stop();
+        std::lock_guard<std::mutex> l(m);
+        CHECK(seen.size() == 3 && seen[0] == std::to_string(sessionNo) + " V1N1 /pd/census");
+        CHECK(opened.size() == 1 && opened[0].first == sessionNo && opened[0].second);
+        CHECK(closed.size() == 1 && closed[0] == sessionNo);
+        CHECK(ticks.load() > 0);
+    }
+
     std::string const cleanup = "rm -rf '" + dir + "'";
     if (std::system(cleanup.c_str()) != 0)
         std::printf("  (could not remove %s)\n", dir.c_str());

@@ -15,6 +15,7 @@
 #include "Pd/Instance.h"
 #include "Pd/MCPBridgeRegistry.h"
 #include "Pd/MCPBridgeHandoff.h"
+#include "Pd/MCPBridgeV2Router.h" // P4.1 S3: the request's work token travels with each hop
 #include "Mcp/McpAudit.h"
 #include <optional>
 #include <type_traits>
@@ -91,10 +92,11 @@ public:
             mcp::audit::reportWaitUnderLock(where);
         auto handoff = std::make_shared<mcp::OneShotHandoff>();
         std::optional<R> result;
-        mm->callAsync([handoff, &fn, &result] {
+        mm->callAsync([handoff, &fn, &result, work = mcp::v2::captureWork()] {
             if (!handoff->begin())
                 return; // the caller gave up: its frame may be gone
             mcp::OneShotHandoff::FinishGuard finishGuard(*handoff);
+            mcp::v2::WorkScope const scope(work);
             result.emplace(fn());
         });
         if (handoff->waitOrAbandon(std::chrono::milliseconds(timeoutMs)) != mcp::OneShotHandoff::Result::Finished)

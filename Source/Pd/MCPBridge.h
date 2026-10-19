@@ -26,6 +26,7 @@
 #include "Pd/MCPBridgeRegistry.h" // verb table (Plan 3 P3.3)
 #include "Pd/MCPBridgeWorker.h"   // command worker and reply queue (Plan 3 P3.4)
 #include "Pd/MCPBridgeV2Server.h" // v2 TCP listener (Plan 4 P4.1)
+#include "Pd/MCPBridgeV2Router.h" // v2 reply routing (P4.1 S3)
 
 class PluginProcessor;
 class MCPBridge;
@@ -204,9 +205,20 @@ public:
     }
     ~ReplyQueue() { worker.stop(); } // replies still queued at teardown are dropped
 
-    bool connect(juce::String const& host, int port) { return worker.post(Op { Op::Connect, {}, host, port }); }
-    bool disconnect() { return worker.post(Op { Op::Disconnect, {}, {}, 0 }); }
-    bool send(juce::OSCMessage const& message) { return worker.post(Op { Op::Send, message, {}, 0 }); }
+    bool connect(juce::String const& host, int port) { return worker.post(Op { Op::Connect, {}, host, port, {} }); }
+    bool disconnect() { return worker.post(Op { Op::Disconnect, {}, {}, 0, {} }); }
+    // P4.1 S3: the reply carries the origin of the code that sent it (mcp::v2::currentOrigin() on this thread).
+    bool send(juce::OSCMessage const& message) { return worker.post(Op { Op::Send, message, {}, 0, mcp::v2::currentOrigin() }); }
+    // P4.1 S3: posted when a request's work token goes (the handler and every hop it posted finished), so it is
+    // queued behind every reply they sent and the router sees them first.
+    bool handlerDone(mcp::v2::OriginPtr origin) { return worker.post(Op { Op::HandlerDone, {}, {}, 0, std::move(origin) }); }
+    bool tick() { return worker.post(Op { Op::Tick, {}, {}, 0, {} }); }
+
+    // P4.1 S3: every message passes the v2 router first (nullptr = none). The router outlives this queue.
+    void setRouter(mcp::v2::Router* r) { router.store(r); }
+    // Off while the bridge does not own its UDP port: what is left after routing is dropped, so another app's
+    // MCP server on the reply port never gets this bridge's messages.
+    void setUdpEnabled(bool enabled) { udpEnabled.store(enabled); }
 
     // Tests (Tests/mcp/bridge_handler_tests.cpp): with a sink set, every message goes to it instead of the
     // socket, on the reply thread.
@@ -218,11 +230,42 @@ public:
 
 private:
     struct Op {
-        enum Kind { Send, Connect, Disconnect } kind = Send;
+        enum Kind { Send, Connect, Disconnect, HandlerDone, Tick } kind = Send;
         std::optional<juce::OSCMessage> message;
         juce::String host;
         int port = 0;
+        mcp::v2::OriginPtr origin;
     };
+
+    static std::int64_t nowMs()
+    {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+
+    static mcp::v2::OutMessage toOut(juce::OSCMessage const& message)
+    {
+        mcp::v2::OutMessage out;
+        out.address = message.getAddressPattern().toString().toStdString();
+        out.args.reserve(static_cast<size_t>(message.size()));
+        for (auto const& a : message) {
+            mcp::v2::Arg arg;
+            if (a.isInt32()) {
+                arg.type = 'i';
+                arg.i = a.getInt32();
+            } else if (a.isFloat32()) {
+                arg.type = 'f';
+                arg.f = a.getFloat32();
+            } else if (a.isString()) {
+                arg.s = a.getString().toStdString();
+            } else if (a.isBlob()) {
+                arg.s = a.getBlob().toBase64Encoding().toStdString(); // no reply sends one today
+            } else {
+                continue; // colours, T/F/nil: not used by the bridge
+            }
+            out.args.push_back(std::move(arg));
+        }
+        return out;
+    }
 
     void run(Op op)
     {
@@ -233,7 +276,20 @@ private:
         case Op::Disconnect:
             inner.disconnect();
             return;
+        case Op::HandlerDone:
+            if (auto* r = router.load())
+                r->handlerDone(op.origin, nowMs());
+            return;
+        case Op::Tick:
+            if (auto* r = router.load())
+                r->tick(nowMs());
+            return;
         case Op::Send: {
+            if (auto* r = router.load(); r && (r->active() || op.origin))
+                if (!r->route(toOut(*op.message), op.origin.get(), nowMs()))
+                    return; // a v2 session's reply or an artist event for v2: not for UDP
+            if (!udpEnabled.load())
+                return;
             std::function<void(juce::OSCMessage const&)> s;
             {
                 std::lock_guard<std::mutex> const l(sinkLock);
@@ -249,6 +305,8 @@ private:
     }
 
     juce::OSCSender inner; // touched only on the reply thread
+    std::atomic<mcp::v2::Router*> router { nullptr };
+    std::atomic<bool> udpEnabled { false };
     std::mutex sinkLock;
     std::function<void(juce::OSCMessage const&)> sink;
     mcp::SerialWorker<Op> worker; // last: stopped (joined) first, before `inner` goes
@@ -543,6 +601,12 @@ private:
     // listen on every interface. Must outlive the receiver's connection.
     std::unique_ptr<juce::DatagramSocket> listenSocket;
     juce::OSCReceiver receiver;
+    // P4.1 S2: the v2 listener (loopback TCP, frames, token handshake). Started by start() even when the UDP port is
+    // taken (v2 has its own port and token); stopped first in stop(), before the command worker. S3: the router
+    // decides, for every message `sender` sends, whether a v2 session gets it. Both are declared before `sender`
+    // so they outlive its thread.
+    mcp::v2::Server v2Server;
+    mcp::v2::Router v2Router { v2Server };
     ReplyQueue sender;
     // Current reply target, so /bridge/connect only reconnects on a change.
     juce::String senderHost { "127.0.0.1" };
@@ -557,14 +621,15 @@ private:
     // capability handshakes to detect a PlugData restart and clear its stale
     // identity cache (tempId -> index mappings from the previous session).
     juce::String bootToken;
-    // P4.1 S2: the v2 listener (loopback TCP, frames, token handshake). Started by start() even when the UDP port is
-    // taken (v2 has its own port and token); stopped first in stop(), before the command worker.
-    mcp::v2::Server v2Server;
     bool startV2();
     void stopV2();
     // The v1 capability names (the capabilities reply without its version and boot entries); the v2 welcome sends
     // the same list. `protocol_v2` is in it only while this bridge's v2 listener runs.
     std::vector<std::string> capabilityList() const;
+    // P4.1 S3: a v2 request from a V2Read thread: admitted (posted to the worker with its origin) or refused.
+    std::optional<mcp::v2::RequestAnswer> admitV2(int session, mcp::v2::Request request);
+    // Replies may be sent: the UDP socket is ours, or a v2 listener runs (UDP output is then dropped by `sender`).
+    bool canReply() const { return active.load() || v2Server.running(); }
 
     std::vector<MorphJob> morphJobs;
     juce::CriticalSection morphLock;
@@ -667,7 +732,26 @@ private:
 
     // Plan 3 P3.4 S1: the network thread only posts; every command runs here, one at a time, in arrival
     // order (the order the network thread used to run them in). Declared last: destroyed first.
-    mcp::SerialWorker<juce::OSCMessage> commandWorker;
+    // P4.1 S3: a v1 datagram (no origin) or a v2 request (its origin), in one queue: arrival order across both.
+    struct Command {
+        juce::OSCMessage message;
+        mcp::v2::WorkPtr work; // null for a v1 datagram
+    };
+    // A request's work token reports "done" through this; the bridge's destructor turns it off, so a token released
+    // later (a posted lambda dropped after the bridge went) does nothing.
+    struct V2DoneGate {
+        std::mutex lock;
+        ReplyQueue* queue = nullptr;
+        void done(mcp::v2::OriginPtr const& origin)
+        {
+            std::lock_guard<std::mutex> const l(lock);
+            if (queue)
+                queue->handlerDone(origin);
+        }
+    };
+    std::shared_ptr<V2DoneGate> v2Done = std::make_shared<V2DoneGate>();
+    mcp::SerialWorker<Command> commandWorker;
+    void runCommand(Command command);
     void handleMessage(const juce::OSCMessage& message);
     // P3.4 S3: handlers that create, delete or rewire Pd objects run in the Pd context (the message thread
     // under sys_lock), where plugdata's GUI expects every structural edit. Called first in such a handler:

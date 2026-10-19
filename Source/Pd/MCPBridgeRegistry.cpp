@@ -63,7 +63,7 @@ void MCPBridge::replyUnknownVerb(const juce::String& domain, const juce::String&
     if (!unknown)
         return;
 
-    if (!active.load())
+    if (!canReply())
         return;
     juce::OSCMessage reply { juce::OSCAddressPattern("/bridge/unknown_verb") };
     reply.addArgument(msg.getAddressPattern().toString());

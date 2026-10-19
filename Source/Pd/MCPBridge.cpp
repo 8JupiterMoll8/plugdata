@@ -28,6 +28,8 @@ MCPBridge::MCPBridge(PluginProcessor* proc, int inPort, int outPort)
     , probeManager(this)
 {
     commandTable(); // a bad verb table must fail here, at startup, not on the first message
+    sender.setRouter(&v2Router); // P4.1 S3
+    v2Done->queue = &sender;
     controlWindow = std::make_unique<McpControlWindow>();
     voiceCaptureBuffer.resize(MAX_VOICE_CAPTURE_SAMPLES, 0.0f);
     bootToken = juce::String(juce::Time::getMillisecondCounter()) + "-"
@@ -71,6 +73,10 @@ MCPBridge::MCPBridge(PluginProcessor* proc, int inPort, int outPort)
 MCPBridge::~MCPBridge()
 {
     shutdown();
+    {
+        std::lock_guard<std::mutex> const l(v2Done->lock); // P4.1 S3: a work token released from now on reports nothing
+        v2Done->queue = nullptr;
+    }
     // Phase 4: release any still-armed control receiver (the Pd instance is
     // still alive at this point — members destruct before ~PdInstance).
     if (controlWindow && controlWindow->receiver) {
@@ -103,7 +109,9 @@ void MCPBridge::shutdown()
 
 void MCPBridge::postMessage(std::function<void()> fn)
 {
-    juce::MessageManager::callAsync([weak = juce::WeakReference<MCPBridge>(this), fn = std::move(fn)] {
+    // P4.1 S3: the posted work replies for the request that posted it (e.g. /pd/clear's /pd/cleared, rule 2b).
+    juce::MessageManager::callAsync([weak = juce::WeakReference<MCPBridge>(this), fn = std::move(fn), work = mcp::v2::captureWork()] {
+        mcp::v2::WorkScope const scope(work); // the request is done only when this hop is
         if (weak.get() != nullptr)
             fn();
     });
@@ -113,7 +121,10 @@ void MCPBridge::runJob(std::function<void()> job)
 {
     if (isShuttingDown())
         return;
-    jobPool.addJob(std::move(job));
+    jobPool.addJob([job = std::move(job), work = mcp::v2::captureWork()] {
+        mcp::v2::WorkScope const scope(work);
+        job();
+    });
 }
 
 bool MCPBridge::start()
@@ -129,8 +140,9 @@ bool MCPBridge::start()
         && receiver.connectToSocket(*listenSocket);
     if (!recvOk)
         listenSocket.reset();
+    sender.setUdpEnabled(recvOk);
+    startCommandWorker(); // before any listener: nothing may arrive with no worker (P4.1 S3: v2 needs it without UDP)
     if (recvOk) {
-        startCommandWorker(); // before the listener: nothing may arrive with no worker
         receiver.addListener(this);
         active.store(true);
         reportedConnected = false;
@@ -170,6 +182,15 @@ bool MCPBridge::startV2()
         if (proc)
             proc->logMessage(juce::String::fromUTF8(line.c_str())); // a lock-free console queue: any thread
     };
+    // P4.1 S3: requests in, sessions in and out, the async deadline clock. All on V2 threads: they only post.
+    config.onRequest = [this](int session, mcp::v2::Request request) { return admitV2(session, std::move(request)); };
+    config.onSessionOpened = [this](int session, bool telemetry) { v2Router.sessionOpened(session, telemetry); };
+    config.onSessionClosed = [this](int session) { v2Router.sessionClosed(session); };
+    config.onTick = [this] {
+        if (v2Router.hasPending())
+            sender.tick();
+    };
+    v2Router.reopen();
     std::string reason;
     if (v2Server.start(std::move(config), reason))
         return true;
@@ -180,7 +201,73 @@ bool MCPBridge::startV2()
 
 void MCPBridge::stopV2()
 {
-    v2Server.stop();
+    v2Server.stop(); // sessions get bye{shutting_down}; their pending requests are dropped as they close
+    v2Router.close();
+}
+
+namespace {
+std::int64_t v2NowMs() // the router's clock (ReplyQueue::nowMs is the same steady clock)
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+}
+
+// V2Read thread: the same verb resolution as dispatchRegistered, the schema row, admission, then the identical
+// juce::OSCMessage a datagram would give, posted to the one command worker.
+std::optional<mcp::v2::RequestAnswer> MCPBridge::admitV2(int session, mcp::v2::Request request)
+{
+    auto const address = juce::String::fromUTF8(request.verb.c_str());
+    auto path = address;
+    while (path.startsWith("/"))
+        path = path.substring(1);
+    auto parts = juce::StringArray::fromTokens(path, "/", "");
+    parts.removeEmptyStrings();
+    mcp::v2schema::VerbMeta const* meta = nullptr;
+    if (!parts.isEmpty()) {
+        auto const& table = commandTable();
+        auto const domain = parts[0].toStdString();
+        auto const pathVerb = parts.size() > 1 ? parts[1].toStdString() : std::string();
+        auto const source = table.sourceOf(domain);
+        std::string arg0;
+        if (source != mcp::VerbSource::Path && !request.args.empty()) {
+            auto const& a = request.args.front();
+            arg0 = a.type == 's' ? a.s : a.type == 'i' ? std::to_string(a.i) : std::string();
+        }
+        auto const verb = mcp::resolveVerb(source, pathVerb, arg0);
+        if (table.find(domain, verb) != nullptr) {
+            meta = mcp::v2schema::findVerb(domain, verb);
+            if (!meta && table.hasDomain(domain))
+                meta = mcp::v2schema::findVerb(domain, "");
+        }
+    }
+    // The identical message a datagram would give. Built first: an address JUCE refuses is a bad frame, not a crash.
+    std::optional<juce::OSCMessage> message;
+    try {
+        message.emplace(juce::OSCAddressPattern(address));
+        for (auto const& a : request.args) {
+            if (a.type == 'i')
+                message->addArgument(static_cast<juce::int32>(a.i));
+            else if (a.type == 'f')
+                message->addArgument(a.f);
+            else
+                message->addArgument(juce::String::fromUTF8(a.s.c_str())); // NUL-free and valid UTF-8 (codec)
+        }
+    } catch (...) { // juce::OSCFormatError: its what() is generic
+        return mcp::v2::RequestAnswer { mcp::v2::encodeSynth(request.id, mcp::v2schema::Outcome::Rejected, mcp::v2::ErrorCode::BadFrame,
+            "not a valid OSC message: " + mcp::v2::json::truncateUtf8(request.verb, 128)), false };
+    }
+
+    auto admission = v2Router.admit(session, request, meta, v2NowMs());
+    if (admission.reply)
+        return mcp::v2::RequestAnswer { std::move(*admission.reply), admission.closeSession };
+    auto work = std::make_shared<mcp::v2::Work>(admission.origin, [gate = v2Done](mcp::v2::OriginPtr const& o) { gate->done(o); });
+    if (!commandWorker.post(Command { std::move(*message), work })) {
+        work->disarm(); // answered here instead
+        v2Router.drop(admission.origin);
+        return mcp::v2::RequestAnswer { mcp::v2::encodeSynth(request.id, mcp::v2schema::Outcome::Rejected, mcp::v2::ErrorCode::ShuttingDown,
+            "the bridge is not running commands"), false };
+    }
+    return std::nullopt;
 }
 
 bool MCPBridge::startV2ForTests()
@@ -191,6 +278,7 @@ bool MCPBridge::startV2ForTests()
 void MCPBridge::setReplySinkForTests(std::function<void(juce::OSCMessage const&)> sink)
 {
     sender.setSink(std::move(sink));
+    sender.setUdpEnabled(true); // the sink stands for the UDP target
     startCommandWorker();
     active.store(true);
 }
@@ -198,14 +286,21 @@ void MCPBridge::setReplySinkForTests(std::function<void(juce::OSCMessage const&)
 void MCPBridge::stop()
 {
     stopTimer();
+    bool const v2WasRunning = v2Server.running();
     stopV2(); // P3.4 S8 order: listeners before the worker
-    if (!active.load()) return;
+    if (!active.load()) {
+        commandWorker.stop(); // P4.1 S3: started for v2 even when the UDP bind failed
+        if (v2WasRunning && processor)
+            processor->logMessage("MCP bridge stopped");
+        return;
+    }
 
     receiver.removeListener(this);
     receiver.disconnect();
     listenSocket.reset();
     commandWorker.stop(); // the running command finishes; queued ones are dropped
     sender.disconnect();
+    sender.setUdpEnabled(false);
     active.store(false);
     reportedConnected = false;
     reportedLost = false;
@@ -1550,12 +1645,24 @@ int MCPBridge::composeLayout(PluginProcessor* processor, t_canvas* cnv, const ju
 // Network thread: decode (done by JUCE) and enqueue, nothing else (Plan 3 P3.4 S1).
 void MCPBridge::oscMessageReceived(const juce::OSCMessage& message)
 {
-    commandWorker.post(message);
+    commandWorker.post(Command { message, nullptr });
 }
 
 void MCPBridge::startCommandWorker()
 {
-    commandWorker.start([this](juce::OSCMessage message) { handleMessage(message); });
+    commandWorker.start([this](Command command) { runCommand(std::move(command)); });
+}
+
+void MCPBridge::runCommand(Command command)
+{
+    if (!command.work) {
+        handleMessage(command.message);
+        return;
+    }
+    if (!v2Router.begin(command.work->origin, v2NowMs()))
+        return; // too late: answered rejected{deadline}, nothing run (the token still reports done)
+    mcp::v2::WorkScope const scope(std::move(command.work)); // its end may be the request's "done"
+    handleMessage(command.message);
 }
 
 bool MCPBridge::runInPdContext(CommandHandler handler, const juce::String& action, const juce::OSCMessage& msg)
@@ -1563,7 +1670,11 @@ bool MCPBridge::runInPdContext(CommandHandler handler, const juce::String& actio
     auto* mm = juce::MessageManager::getInstanceWithoutCreating();
     if (processor == nullptr || mm == nullptr || mm->isThisTheMessageThread())
         return false;
-    if (!processor->getMcp()->pdWait([&] { (this->*handler)(action, msg); }, 5000))
+    auto const work = mcp::v2::captureWork(); // P4.1 S3: the handler replies for the same v2 request there
+    if (!processor->getMcp()->pdWait([&] {
+            mcp::v2::WorkScope const scope(work);
+            (this->*handler)(action, msg);
+        }, 5000))
         processor->logError("MCP bridge: " + msg.getAddressPattern().toString() + " was not run: the message thread was busy for 5 s");
     return true;
 }
@@ -3513,7 +3624,7 @@ void MCPBridge::timerCallback()
 
 void MCPBridge::sendArtistNote(const juce::String& targetId, const juce::String& text)
 {
-    if (!active.load()) return;
+    if (!canReply()) return;
     juce::OSCMessage msg { juce::OSCAddressPattern("/pd/ui/note") };
     msg.addArgument(targetId);
     msg.addArgument(text);
@@ -3522,7 +3633,7 @@ void MCPBridge::sendArtistNote(const juce::String& targetId, const juce::String&
 
 void MCPBridge::sendSelectionTelemetry(const juce::String& selector, const SmallArray<pd::Atom>& list)
 {
-    if (!active.load()) return;
+    if (!canReply()) return;
 
     juce::String addr;
     if (selector.startsWith("/")) addr = selector;
@@ -3544,7 +3655,7 @@ void MCPBridge::sendSelectionTelemetry(const juce::String& selector, const Small
 
 void MCPBridge::sendConsoleLog(const juce::String& message, bool isError)
 {
-    if (!active.load()) return;
+    if (!canReply()) return;
 
     juce::OSCMessage msg { juce::OSCAddressPattern(isError ? "/pd/error" : "/pd/log") };
     msg.addArgument(message);
@@ -3569,7 +3680,7 @@ void MCPBridge::postChatMessage(const juce::String& role, const juce::String& te
 
 void MCPBridge::sendPrompt(const juce::String& promptText)
 {
-    if (!active.load()) return;
+    if (!canReply()) return;
 
     postChatMessage("user", promptText);
 
@@ -3580,7 +3691,7 @@ void MCPBridge::sendPrompt(const juce::String& promptText)
 
 void MCPBridge::sendLens(const juce::String& lens)
 {
-    if (!active.load()) return;
+    if (!canReply()) return;
     juce::OSCMessage msg { juce::OSCAddressPattern("/pd/lens") };
     msg.addArgument(lens);
     sender.send(msg);
@@ -3588,7 +3699,7 @@ void MCPBridge::sendLens(const juce::String& lens)
 
 void MCPBridge::sendSelectionPrompt(const juce::String& promptText, const juce::StringArray& targetTempIds, bool queue)
 {
-    if (!active.load()) return;
+    if (!canReply()) return;
 
     postChatMessage("user", promptText);
 
@@ -3607,7 +3718,7 @@ void MCPBridge::sendSelectionPrompt(const juce::String& promptText, const juce::
 
 void MCPBridge::sendSketchStroke(const juce::String& subpatch, const juce::String& jsonPoints, bool isFastPath)
 {
-    if (!active.load()) return;
+    if (!canReply()) return;
     juce::OSCMessage msg { juce::OSCAddressPattern("/pd/sketch/stroke") };
     msg.addArgument(subpatch);
     msg.addArgument(isFastPath ? 1 : 0);
@@ -3617,7 +3728,7 @@ void MCPBridge::sendSketchStroke(const juce::String& subpatch, const juce::Strin
 
 void MCPBridge::sendSketchBuild(const juce::String& subpatch, const juce::String& jsonStrokes, const juce::String& jsonBBox, const juce::String& prompt)
 {
-    if (!active.load()) return;
+    if (!canReply()) return;
     juce::OSCMessage msg { juce::OSCAddressPattern("/pd/sketch/build") };
     msg.addArgument(subpatch);
     msg.addArgument(jsonStrokes);
@@ -3628,7 +3739,7 @@ void MCPBridge::sendSketchBuild(const juce::String& subpatch, const juce::String
 
 void MCPBridge::sendReferenceImage(const juce::String& path, float x, float y, float w, float h)
 {
-    if (!active.load()) return;
+    if (!canReply()) return;
     juce::OSCMessage msg { juce::OSCAddressPattern("/pd/reference/image") };
     msg.addArgument(path);
     msg.addArgument(x);
@@ -3640,7 +3751,7 @@ void MCPBridge::sendReferenceImage(const juce::String& path, float x, float y, f
 
 void MCPBridge::sendReply(const juce::String& addressPattern, const juce::Array<juce::var>& args)
 {
-    if (!active.load()) return;
+    if (!canReply()) return;
 
     juce::OSCMessage msg { juce::OSCAddressPattern(addressPattern) };
     for (auto const& v : args) {
@@ -3655,7 +3766,7 @@ void MCPBridge::sendReply(const juce::String& addressPattern, const juce::Array<
 
 void MCPBridge::sendReply(const juce::String& addressPattern, float val)
 {
-    if (!active.load()) return;
+    if (!canReply()) return;
 
     juce::OSCMessage msg { juce::OSCAddressPattern(addressPattern) };
     msg.addArgument(val);
@@ -3664,7 +3775,7 @@ void MCPBridge::sendReply(const juce::String& addressPattern, float val)
 
 void MCPBridge::sendReply(const juce::String& addressPattern, const juce::String& str)
 {
-    if (!active.load()) return;
+    if (!canReply()) return;
 
     juce::OSCMessage msg { juce::OSCAddressPattern(addressPattern) };
     msg.addArgument(str);
@@ -3673,7 +3784,7 @@ void MCPBridge::sendReply(const juce::String& addressPattern, const juce::String
 
 void MCPBridge::sendRawReply(const juce::String& addressPattern)
 {
-    if (!active.load()) return;
+    if (!canReply()) return;
 
     juce::OSCMessage msg { juce::OSCAddressPattern(addressPattern) };
     sender.send(msg);

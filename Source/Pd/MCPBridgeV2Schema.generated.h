@@ -8,7 +8,7 @@
 
 namespace mcp::v2schema {
 
-inline constexpr char kSchemaHash[] = "27a99fab58ba68f7";
+inline constexpr char kSchemaHash[] = "ef24231851c22aca";
 inline constexpr int kProtocol = 2;
 
 enum class VerbClass : std::uint8_t { Read, Mutate, Heavy, Long, Realtime };
@@ -233,7 +233,7 @@ inline constexpr VerbMeta kVerbs[] = {
     { "pd", "clear_ids", VerbClass::Mutate, true, Effect::Patch, true, true, ReplyMode::Sync, 1, 10000, 54, 1 },
     { "pd", "clear_selection", VerbClass::Mutate, true, Effect::Ui, false, true, ReplyMode::None, kCorrNone, 10000, 55, 0 },
     { "pd", "clear_undo", VerbClass::Mutate, true, Effect::Patch, true, true, ReplyMode::Sync, kCorrNone, 10000, 55, 1 },
-    { "pd", "close_tab", VerbClass::Mutate, true, Effect::Patch, true, true, ReplyMode::Sync, 2, 10000, 56, 1 },
+    { "pd", "close_tab", VerbClass::Mutate, true, Effect::Patch, true, true, ReplyMode::Async, 2, 10000, 56, 1 },
     { "pd", "clusters", VerbClass::Read, false, Effect::None, false, false, ReplyMode::Sync, kCorrLast, 3000, 57, 1 },
     { "pd", "collisions", VerbClass::Read, false, Effect::None, false, false, ReplyMode::Sync, 1, 3000, 58, 1 },
     { "pd", "compose", VerbClass::Mutate, true, Effect::Patch, true, true, ReplyMode::Sync, 3, 10000, 59, 1 },
@@ -255,10 +255,10 @@ inline constexpr VerbMeta kVerbs[] = {
     { "pd", "dsp", VerbClass::Realtime, true, Effect::Live, true, false, ReplyMode::None, kCorrNone, 0, 72, 0 },
     { "pd", "dump", VerbClass::Mutate, true, Effect::File, true, true, ReplyMode::Sync, 3, 10000, 72, 2 },
     { "pd", "encapsulate", VerbClass::Mutate, true, Effect::Patch, true, true, ReplyMode::Async, kCorrLast, 10000, 74, 1 },
-    { "pd", "encapsulate_gop", VerbClass::Heavy, true, Effect::Patch, true, true, ReplyMode::Sync, 4, 30000, 75, 1 },
+    { "pd", "encapsulate_gop", VerbClass::Heavy, true, Effect::Patch, true, true, ReplyMode::Async, 4, 30000, 75, 1 },
     { "pd", "encapsulate_to_file", VerbClass::Heavy, true, Effect::Patch, true, true, ReplyMode::Async, kCorrLast, 30000, 76, 1 },
     { "pd", "flow", VerbClass::Mutate, true, Effect::Patch, true, true, ReplyMode::Sync, kCorrLast, 10000, 77, 1 },
-    { "pd", "focus_tab", VerbClass::Mutate, true, Effect::Ui, false, true, ReplyMode::Sync, 1, 10000, 78, 1 },
+    { "pd", "focus_tab", VerbClass::Mutate, true, Effect::Ui, false, true, ReplyMode::Async, 1, 10000, 78, 1 },
     { "pd", "gem_capture", VerbClass::Heavy, true, Effect::File, true, true, ReplyMode::Async, 0, 30000, 79, 1 },
     { "pd", "get_mappings", VerbClass::Read, false, Effect::None, false, false, ReplyMode::Sync, 1, 3000, 80, 1 },
     { "pd", "get_overlays", VerbClass::Read, false, Effect::None, false, false, ReplyMode::Async, 1, 3000, 81, 1 },
@@ -266,10 +266,10 @@ inline constexpr VerbMeta kVerbs[] = {
     { "pd", "identity_version", VerbClass::Read, false, Effect::None, false, false, ReplyMode::Sync, 0, 3000, 84, 2 },
     { "pd", "layout_guard", VerbClass::Mutate, true, Effect::Patch, true, true, ReplyMode::Sync, 4, 10000, 86, 1 },
     { "pd", "library_info", VerbClass::Read, false, Effect::None, false, false, ReplyMode::Sync, 0, 3000, 87, 1 },
-    { "pd", "list_tabs", VerbClass::Read, false, Effect::None, false, false, ReplyMode::Sync, 0, 3000, 88, 1 },
+    { "pd", "list_tabs", VerbClass::Read, false, Effect::None, false, false, ReplyMode::Async, 0, 3000, 88, 1 },
     { "pd", "load", VerbClass::Heavy, true, Effect::Patch, true, true, ReplyMode::Sync, kCorrNone, 30000, 89, 1 },
     { "pd", "load_content", VerbClass::Heavy, true, Effect::Patch, true, true, ReplyMode::Sync, 2, 30000, 90, 3 },
-    { "pd", "load_patch", VerbClass::Heavy, true, Effect::Patch, true, true, ReplyMode::Sync, 2, 30000, 93, 2 },
+    { "pd", "load_patch", VerbClass::Heavy, true, Effect::Patch, true, true, ReplyMode::Async, 2, 30000, 93, 2 },
     { "pd", "mcp_reload_lua", VerbClass::Read, false, Effect::None, false, false, ReplyMode::Sync, kCorrLast, 3000, 95, 1 },
     { "pd", "measure_text", VerbClass::Read, false, Effect::None, false, false, ReplyMode::Sync, 2, 3000, 96, 1 },
     { "pd", "moodboard", VerbClass::Read, false, Effect::None, false, false, ReplyMode::Async, 0, 3000, 97, 1 },

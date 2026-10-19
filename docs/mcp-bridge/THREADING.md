@@ -14,8 +14,9 @@ or posted job. The reasons and the measurements behind each rule are in the TS r
 | Gui | the message thread | `McpHost::onMessageThread(fn, timeoutMs, where)`, `postMessage` | editors, components, viewport, repaint. |
 | Audio | the audio callback | the `MCP-HOOK` lines in `PluginProcessor.cpp` -> `McpAudio.cpp` | no blocking lock, no allocation, no `callAsync`; Pd state only under a `ScopedTryLock` on the Pd lock. |
 | Jobs | `MCPBridge::jobPool` | offline render, voice analysis | joined by `MCPBridge::shutdown`; stop on `isShuttingDown()`. |
-| V2Accept | `mcp::v2::Server` accept thread (`MCPBridgeV2Server.cpp`, P4.1 S2) | `Server::acceptLoop` | accept on 127.0.0.1, start a session, reap finished ones. Never touches Pd or the bridge; logs only through `ServerConfig::log` (the lock-free console queue). |
-| V2Read | one per v2 session | `Session::readLoop` | as Net: decode frames and post; answers the envelope frames (hello, ping, bye) itself. Never waits on the worker, the Pd context or a lock the bridge holds. |
+| V2Accept | `mcp::v2::Server` accept thread (`MCPBridgeV2Server.cpp`, P4.1 S2) | `Server::acceptLoop` | accept on 127.0.0.1, start a session, reap finished ones; every ~50 ms `onTick` posts the router's deadline check to the reply queue. Never touches Pd; logs only through `ServerConfig::log` (the lock-free console queue). |
+| V2Read | one per v2 session | `Session::readLoop` | as Net: decode frames; answers the envelope frames (hello, ping, bye) itself; a `req` goes to `MCPBridge::admitV2` (router admission, then a post to the command worker). Never waits on the worker, the Pd context or a lock the bridge holds. |
+| Reply | the `ReplyQueue` thread | `ReplyQueue::run` | sends every bridge message; first `mcp::v2::Router::route` (P4.1 S3) decides whether a v2 session gets it; also the router's done and deadline checks. |
 | V2Write | one per v2 session (`mcp::SerialWorker`) | `Session::write` | the only writer of that socket; any thread posts a frame. A queue over `sessionQueueFrames` closes the session. |
 
 ## Rules
@@ -50,6 +51,13 @@ or posted job. The reasons and the measurements behind each rule are in the TS r
    `reconcileIdentity` take it themselves. Never hold a reference into an id map past the lock. Only
    `IdentityCore::version()` is lock-free (atomic). With `PLUGDATA_MCP_AUDIT=1` every unlocked access logs
    `MCP_AUDIT identity-unlocked <where> role=... at <frames>`.
+
+13. **v2: a hop carries the request's work token** (P4.1 S3). Code that moves work to another thread goes through
+   `postMessage`, `runJob`, `runInPdContext` or `McpHost::onMessageThread` / `postMessage` / `enqueuePd`, which copy
+   `mcp::v2::captureWork()` and run the work under a `WorkScope`. The token's last release is the request's "done";
+   every reply sent under it is routed to that request (`mcp::v2::Router`, `MCPBridgeV2Router.h`). A bare
+   `MessageManager::callAsync` in a handler would lose both (`test-bridge-safety.sh` fails on one). Replies go only
+   through `sender` (rule 5), which tags them with the work's origin.
 
 ## Test tools
 

@@ -8,7 +8,8 @@
 // by Tests/mcp/v2_codec_test.cpp.
 //
 //   frame    = 4-byte big-endian length, then that many bytes of UTF-8 JSON (one object)
-//   arg      = {"t":"i","v":3} | {"t":"f","v":0.5} | {"t":"s","v":"osc~"}   (f is float32 on arrival, as in OSC)
+//   arg      = {"t":"i","v":3} | {"t":"f","v":0.5} | {"t":"s","v":"osc~"}   (f is float32 on arrival, as in OSC;
+//              NaN is {"t":"f","v":null}, infinity {"t":"f","v":"inf"} or "-inf")
 //
 // FrameDecoder splits a byte stream into frame payloads, at any read boundary; a zero length or a length over the
 // maximum is a sticky error (the connection is closed). An HTTP request line or a TLS hello fails on its first 4
@@ -21,6 +22,7 @@
 
 #include <algorithm>
 #include <cfloat>
+#include <limits>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -125,6 +127,7 @@ struct Hello {
     std::string schemaHash;
     std::string token;
     std::string clientName;
+    bool telemetry = false; // S3: logs and telemetry events wanted (artist events need no subscription)
 };
 
 struct Request {
@@ -218,6 +221,14 @@ inline std::optional<std::string> readArg(Value const& a, Arg& out)
         out.i = static_cast<std::int32_t>(v->number);
         return std::nullopt;
     case 'f':
+        if (v->is(Value::Kind::Null)) {
+            out.f = std::numeric_limits<float>::quiet_NaN(); // as encodeArgs writes them
+            return std::nullopt;
+        }
+        if (v->is(Value::Kind::String) && (v->string == "inf" || v->string == "-inf")) {
+            out.f = v->string == "inf" ? std::numeric_limits<float>::infinity() : -std::numeric_limits<float>::infinity();
+            return std::nullopt;
+        }
         if (!v->is(Value::Kind::Number) || std::fabs(v->number) >= kFloatLimit)
             return "is not a float32";
         out.f = static_cast<float>(v->number);
@@ -305,6 +316,11 @@ inline DecodeResult readHello(Value const& v)
     h.token = token->string;
     if (auto const* client = v.find("client"); client && client->is(Value::Kind::Object))
         optionalString(*client, "name", kMaxTextChars, h.clientName);
+    if (auto const* t = v.find("telemetry")) {
+        if (!t->is(Value::Kind::Bool))
+            return refuse("hello.telemetry must be a boolean");
+        h.telemetry = t->boolean;
+    }
     r.ok = true;
     return r;
 }

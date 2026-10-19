@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <cstdint>
 #include <cstdio>
 #include <random>
@@ -132,6 +133,10 @@ int main()
         CHECK(h.ok && h.frame.kind == Kind::Hello);
         CHECK(h.frame.hello.protocol == 2 && h.frame.hello.token == "tok" && h.frame.hello.schemaHash == "feedfacecafebeef");
         CHECK(h.frame.hello.clientName == "test");
+        CHECK(!h.frame.hello.telemetry);
+        auto const ht = inbound(R"({"t":"hello","protocol":2,"schemaHash":"x","token":"t","telemetry":true})");
+        CHECK(ht.ok && ht.frame.hello.telemetry);
+        CHECK(refused(R"({"t":"hello","protocol":2,"schemaHash":"x","token":"t","telemetry":"yes"})", ErrorCode::BadFrame));
 
         auto const r = inbound(R"({"t":"req","id":"V7N42","verb":"/pd/batch_atomic","key":"3f9a0c1d2b4e5f60:42","deadlineMs":10000,)"
                                R"("args":[{"t":"i","v":3},{"t":"f","v":0.5},{"t":"s","v":"osc~ 440"},{"t":"i","v":-2147483648}]})");
@@ -340,6 +345,13 @@ int main()
         nan.type = 'f';
         nan.f = std::nanf("");
         CHECK(encodeArgs({ nan }) == R"([{"t":"f","v":null}])");
+        Arg ninf;
+        ninf.type = 'f';
+        ninf.f = -std::numeric_limits<float>::infinity();
+        CHECK(encodeArgs({ ninf }) == R"([{"t":"f","v":"-inf"}])");
+        auto const back = decodeInbound(R"({"t":"req","id":"V1N1","verb":"/pd/x","args":)" + encodeArgs({ nan, ninf }) + "}");
+        CHECK(back.ok && back.frame.req.args.size() == 2 && std::isnan(back.frame.req.args[0].f) && back.frame.req.args[1].f == ninf.f);
+        CHECK(refused(R"({"t":"req","id":"V1N1","verb":"/pd/x","args":[{"t":"f","v":"nan"}]})", ErrorCode::BadFrame));
     }
 
     // 12. S2 review H1/H2: a node budget bounds memory and time; the duplicate-key check is O(n log n).

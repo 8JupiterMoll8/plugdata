@@ -17,11 +17,14 @@
 //             schemaHash, startedAt}; removed at stop only while it still holds this server's pid and token
 //
 // One listener per process (a DAW may host several plugdata bridges): a second start() is refused.
-// S2 answers hello, ping and bye; `req` and `status` get rep{rejected, protocol_unsupported} until S3/S4 serve them.
+// The server answers hello, ping and bye itself. A `req` goes to ServerConfig::onRequest (S3: the bridge admits it
+// and posts it to its command worker); without that callback, and for `status` until S4, the answer is
+// rep{rejected, protocol_unsupported}.
 // Not on Windows yet (start() returns false; v1 UDP is unaffected).
 #pragma once
 
 #include "MCPBridgeV2Codec.h"
+#include "MCPBridgeV2Router.h" // Sink
 
 #include <atomic>
 #include <cstddef>
@@ -39,6 +42,12 @@ inline constexpr std::size_t kMaxPendingSessions = 8; // waiting for hello; then
 inline constexpr int kEvictAfterMs = 250;              // kEvictAfterMs) gets bye{busy}, else the newcomer does
 inline constexpr std::size_t kSessionQueueBytes = 64u << 20; // per session write queue, with sessionQueueFrames
 
+// What the bridge answers a `req` with at once (a refusal). closeSession: `frame` is a bye and the session ends.
+struct RequestAnswer {
+    std::string frame;
+    bool closeSession = false;
+};
+
 struct ServerConfig {
     int preferredPort = 0;     // tried first; taken or 0 = an ephemeral port
     std::string discoveryPath; // required (a listener whose token nobody can read is refused); see defaultDiscoveryPath()
@@ -50,15 +59,21 @@ struct ServerConfig {
     std::size_t sessionQueueFrames = v2schema::kSessionQueueFrames;
     std::size_t sessionQueueBytes = kSessionQueueBytes;
     std::function<void(std::string const&)> log; // any thread; never sees the token
+    // V2Read thread. Returns a frame to send at once (a refusal), or nullopt when the request was taken. Must not
+    // wait for the bridge (it only posts).
+    std::function<std::optional<RequestAnswer>(int session, Request request)> onRequest;
+    std::function<void(int session, bool telemetry)> onSessionOpened; // after welcome
+    std::function<void(int session)> onSessionClosed;                 // a welcomed session ended
+    std::function<void()> onTick;                                     // V2Accept, about every 50 ms
 };
 
 class Session;
 struct ServerShared; // config + token, shared with the sessions
 
-class Server {
+class Server : public Sink {
 public:
     Server();
-    ~Server();
+    ~Server() override;
     Server(Server const&) = delete;
     Server& operator=(Server const&) = delete;
 
@@ -72,6 +87,9 @@ public:
     bool running() const { return isRunning.load(); }
     int port() const { return boundPort.load(); }
     std::size_t sessionCount() const;
+
+    // Queues a frame on session `session` (the number in its id "V<n>"); dropped when it is gone. Any thread.
+    void send(int session, std::string const& payload) override;
 
 private:
     void acceptLoop();

@@ -31,6 +31,7 @@ std::size_t Server::sessionCount() const { return 0; }
 void Server::acceptLoop() { }
 void Server::reapFinished() { }
 void Server::log(std::string const&) const { }
+void Server::send(int, std::string const&) { }
 bool randomToken(std::string&) { return false; }
 std::string defaultDiscoveryPath() { return {}; }
 
@@ -275,7 +276,8 @@ public:
     Session(int socketFd, std::shared_ptr<ServerShared const> s, std::optional<Refusal> refusal = std::nullopt)
         : fd(socketFd)
         , shared(std::move(s))
-        , sessionId("V" + std::to_string(nextSessionNo.fetch_add(1)))
+        , sessionNo(nextSessionNo.fetch_add(1))
+        , sessionId("V" + std::to_string(sessionNo))
         , decoder(std::min(kPreAuthFrameBytes, shared->config.maxFrameBytes))
         , refuseWith(std::move(refusal))
     {
@@ -295,6 +297,21 @@ public:
     bool authenticated() const { return authed.load(); }
     bool refusing() const { return refuseWith.has_value(); }
     bool isClosing() const { return closing.load(); }
+    int number() const { return sessionNo; }
+
+    // Any thread. Nothing is queued once the session is closing (the bye and the FIN are the last frames).
+    void post(std::string const& payload)
+    {
+        if (closing.load())
+            return;
+        enqueue(encodeFrame(payload));
+    }
+    void postFrame(std::string frame) // already encoded
+    {
+        if (closing.load())
+            return;
+        enqueue(std::move(frame));
+    }
     Clock::time_point acceptedAt() const { return accepted; }
     void join()
     {
@@ -319,17 +336,8 @@ private:
             aborted.store(true); // the peer is gone; the reader ends the session
     }
 
-    // Any thread. Nothing is queued once the session is closing (the bye and the FIN are the last frames).
-    void post(std::string const& payload)
+    void enqueue(std::string frame)
     {
-        if (closing.load())
-            return;
-        enqueue(payload);
-    }
-
-    void enqueue(std::string const& payload)
-    {
-        auto frame = encodeFrame(payload);
         auto const size = frame.size();
         auto const bytes = queuedBytes.fetch_add(size) + size;
         if (writer.pending() >= shared->config.sessionQueueFrames || bytes > shared->config.sessionQueueBytes) {
@@ -360,7 +368,7 @@ private:
             welcomed ? shared->log(line) : shared->logPreAuth(line);
         }
         if (!closing.load())
-            enqueue(encodeBye(code, message));
+            enqueue(encodeFrame(encodeBye(code, message)));
         beginDrain(drainMs);
     }
 
@@ -380,6 +388,8 @@ private:
         w.helloTimeoutMs = shared->config.helloTimeoutMs;
         w.sessionQueueFrames = shared->config.sessionQueueFrames;
         post(encodeWelcome(w));
+        if (shared->config.onSessionOpened)
+            shared->config.onSessionOpened(sessionNo, hello.telemetry);
         shared->log("MCP bridge v2: session " + sessionId + " connected (" + (clientName.empty() ? "unnamed" : clientName) + ")");
     }
 
@@ -410,6 +420,17 @@ private:
             shared->log("MCP bridge v2: session " + sessionId + " said bye (" + printable(f.reason) + ")");
             return beginDrain(kDrainAfterByeMs);
         case Kind::Req:
+            if (shared->config.onRequest) {
+                if (auto const answer = shared->config.onRequest(sessionNo, f.req)) {
+                    if (!answer->closeSession)
+                        return post(answer->frame);
+                    shared->log("MCP bridge v2: session " + sessionId + " closed: bad_frame (a request id reused while in flight)");
+                    post(answer->frame); // the bye
+                    beginDrain(kDrainAfterByeMs);
+                }
+                return;
+            }
+            [[fallthrough]];
         case Kind::Status:
             return post(encodeRejected(f.req.id, ErrorCode::ProtocolUnsupported, "this bridge does not serve v2 requests yet"));
         case Kind::Claim:
@@ -474,6 +495,9 @@ private:
         } catch (...) {
             shared->log("MCP bridge v2: session " + sessionId + " ended by an internal error");
         }
+        closing.store(true); // late replies from the bridge are dropped from here on
+        if (authed.load() && shared->config.onSessionClosed)
+            shared->config.onSessionClosed(sessionNo);
         ::shutdown(fd, SHUT_RDWR); // wakes a writer blocked on a full socket
         writer.stop();
         ::close(fd);
@@ -482,6 +506,7 @@ private:
 
     int const fd;
     std::shared_ptr<ServerShared const> shared;
+    int const sessionNo;
     std::string const sessionId;
     Clock::time_point const accepted = Clock::now();
     FrameDecoder decoder;
@@ -618,6 +643,17 @@ std::size_t Server::sessionCount() const
     return n;
 }
 
+void Server::send(int session, std::string const& payload)
+{
+    auto frame = encodeFrame(payload); // the copy is made outside the lock
+    std::lock_guard<std::mutex> const l(sessionsLock);
+    for (auto const& s : sessions)
+        if (s->number() == session && !s->finished()) {
+            s->postFrame(std::move(frame)); // only queues: never waits on the socket
+            return;
+        }
+}
+
 void Server::reapFinished()
 {
     std::vector<std::unique_ptr<Session>> finished;
@@ -642,6 +678,8 @@ void Server::acceptLoop()
             pollfd p { listenFd, POLLIN, 0 };
             int const ready = ::poll(&p, 1, kPollMs);
             reapFinished();
+            if (shared->config.onTick)
+                shared->config.onTick();
             if (ready <= 0)
                 continue;
             int const fd = acceptOne(listenFd);

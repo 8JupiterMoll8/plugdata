@@ -30,6 +30,9 @@
 #include <thread>
 #include <vector>
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -139,14 +142,108 @@ juce::OSCMessage message(char const* address, std::initializer_list<A> args)
     return msg;
 }
 
+// P4.1 S3: one v2 session of the bridge's own listener, used by a Harness in v2 mode. Every request id sent and
+// every final received is recorded, so a run can check that no request was left without a final.
+struct V2Link {
+    explicit V2Link(int port)
+        : client(port)
+    {
+    }
+
+    mcp::v2::test::Client client;
+    std::vector<mcp::v2::json::Value> stash; // frames read while waiting for another one
+    std::vector<std::string> sentIds;
+    std::vector<std::string> finalIds;
+    int next = 0;
+
+    void sendReq(std::string const& id, char const* address, std::string const& args, bool noReply = false)
+    {
+        sentIds.push_back(id);
+        client.sendFrame(R"({"t":"req","id":)" + mcp::v2::json::quote(id) + ",\"verb\":" + mcp::v2::json::quote(address)
+            + ",\"args\":" + args + (noReply ? ",\"noReply\":true}" : "}"));
+    }
+
+    // The next frame (stashed ones first) matching `want`, waiting up to timeoutMs; others are stashed.
+    template<typename P>
+    std::optional<mcp::v2::json::Value> take(P want, int timeoutMs)
+    {
+        for (size_t i = 0; i < stash.size(); ++i)
+            if (want(stash[i])) {
+                auto v = stash[i];
+                stash.erase(stash.begin() + static_cast<long>(i));
+                return v;
+            }
+        auto const until = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+        while (std::chrono::steady_clock::now() < until) {
+            auto const left = std::chrono::duration_cast<std::chrono::milliseconds>(until - std::chrono::steady_clock::now()).count();
+            auto f = client.next(static_cast<int>(std::max<long long>(1, left)));
+            if (!f)
+                continue;
+            note(*f);
+            if (want(*f))
+                return f;
+            stash.push_back(std::move(*f));
+        }
+        return std::nullopt;
+    }
+
+    void note(mcp::v2::json::Value const& f)
+    {
+        auto const* t = f.find("t");
+        auto const* fin = f.find("final");
+        auto const* id = f.find("id");
+        if (t && t->string == "rep" && fin && fin->boolean && id)
+            finalIds.push_back(id->string);
+    }
+
+    // Reads for up to `ms`, then the ids sent without a final.
+    std::vector<std::string> withoutFinal(int ms)
+    {
+        take([](auto const&) { return false; }, ms);
+        std::vector<std::string> missing;
+        for (auto const& id : sentIds)
+            if (std::find(finalIds.begin(), finalIds.end(), id) == finalIds.end())
+                missing.push_back(id);
+        return missing;
+    }
+};
+
+std::string field(mcp::v2::json::Value const& v, char const* key)
+{
+    auto const* m = v.find(key);
+    return m && m->is(mcp::v2::json::Value::Kind::String) ? m->string : std::string();
+}
+
+Reply replyOf(mcp::v2::json::Value const& rep)
+{
+    Reply r;
+    r.address = field(rep, "address");
+    if (auto const* args = rep.find("args"))
+        for (auto const& a : args->items) {
+            Arg arg;
+            auto const* v = a.find("v");
+            if (field(a, "t") == "s") {
+                arg.text = v ? v->string : std::string();
+            } else {
+                arg.isNumber = true;
+                arg.number = v ? v->number : 0;
+            }
+            r.args.push_back(std::move(arg));
+        }
+    return r;
+}
+
 struct Harness {
     MCPBridge& bridge;
     Replies& replies;
+    V2Link* v2 = nullptr; // P4.1 S3: set = every call goes through this v2 session instead of a datagram
 
     // Sends one request through the bridge and waits for the reply on `replyAddress`.
     std::optional<Reply> call(char const* address, std::initializer_list<A> args, std::string const& replyAddress, int timeoutMs = 5000)
     {
         replies.clear();
+        if (v2)
+            return callV2(address, args, replyAddress, timeoutMs);
         bridge.oscMessageReceived(message(address, args));
         return replies.waitFor(replyAddress, timeoutMs);
     }
@@ -156,6 +253,56 @@ struct Harness {
     {
         replies.clear();
         bridge.oscMessageReceived(message(address, args));
+    }
+
+    // v2: the corr id of the case gets a "v2" suffix (the v1 pass used it: the batch de-dup would replay it), the
+    // request id is that corr id (the TS v2 contract), the reply must come back on this session, by id, and never
+    // reach the UDP side (the sink).
+    std::optional<Reply> callV2(char const* address, std::initializer_list<A> args, std::string const& replyAddress, int timeoutMs)
+    {
+        auto const slash = replyAddress.find_last_of('/');
+        auto const token = replyAddress.substr(slash + 1);
+        bool rewrite = false;
+        for (auto const& a : args)
+            rewrite = rewrite || (a.value.isString() && a.value.getString().toStdString() == token);
+        std::string expect = replyAddress;
+        std::string id = "H" + std::to_string(v2->next++);
+        if (rewrite) {
+            id = token + "v2";
+            expect = replyAddress.substr(0, slash + 1) + id;
+        }
+        std::vector<mcp::v2::Arg> typed;
+        for (auto const& a : args) {
+            mcp::v2::Arg arg;
+            if (a.value.isInt32()) {
+                arg.type = 'i';
+                arg.i = a.value.getInt32();
+            } else if (a.value.isFloat32()) {
+                arg.type = 'f';
+                arg.f = a.value.getFloat32();
+            } else {
+                arg.s = a.value.getString().toStdString();
+                if (rewrite && arg.s == token)
+                    arg.s = id;
+            }
+            typed.push_back(std::move(arg));
+        }
+        v2->sendReq(id, address, mcp::v2::encodeArgs(typed));
+        auto const got = v2->take([&](auto const& f) {
+            if (field(f, "t") != "rep" || field(f, "id") != id)
+                return false;
+            auto const* fin = f.find("final");
+            return field(f, "address") == expect || (fin && fin->boolean);
+        }, timeoutMs);
+        if (!got || field(*got, "address") != expect) {
+            std::printf("  v2 %s (id %s): %s\n", address, id.c_str(),
+                got ? ("final " + field(*got, "outcome") + " on " + field(*got, "address")).c_str() : "no reply");
+            return std::nullopt;
+        }
+        CHECK(!replies.waitFor(expect, 0).has_value()); // a v2 reply never reaches the v1 side
+        auto r = replyOf(*got);
+        r.address = replyAddress; // as the v1 case knows it
+        return r;
     }
 };
 
@@ -538,7 +685,18 @@ void runCases(Harness& h)
         std::printf("ping\n");
         CHECK(r.has_value());
     }
-    {
+    if (h.v2) {
+        // v2 answers an unknown verb by id (rejected{unknown_verb}); /bridge/unknown_verb is v1's report
+        std::printf("unknown verb (v2)\n");
+        for (char const* address : { "/pd/no_such_verb", "/nodomain/anything", "/pd/create_id" }) {
+            auto const id = "U" + std::to_string(h.v2->next++);
+            h.v2->sendReq(id, address, R"([{"t":"s","v":"main"}])");
+            auto const f = h.v2->take([&](auto const& v) { return field(v, "id") == id; }, 3000);
+            auto const* e = f ? f->find("error") : nullptr;
+            CHECK(f && field(*f, "outcome") == "rejected" && e && field(*e, "code") == "unknown_verb");
+        }
+        CHECK(!h.replies.waitFor("/bridge/unknown_verb", 200).has_value());
+    } else {
         std::printf("unknown verb, unknown domain\n");
         auto r = h.call("/pd/no_such_verb", { "main", "c1" }, "/bridge/unknown_verb");
         CHECK(r.has_value() && r->args.size() == 3);
@@ -699,6 +857,176 @@ void runCases(Harness& h)
         auto mm = h.call("/array/mutate", { "s9_no_such", "main", "a5", "reverse" }, "/array/mutate/error/a5", 2000);
         CHECK(mm.has_value());
     }
+}
+
+// P4.1 S3: port and token from the bridge's discovery file (under the scratch HOME).
+std::pair<int, std::string> v2Discovery()
+{
+    std::ifstream in(mcp::v2::defaultDiscoveryPath());
+    std::stringstream text;
+    text << in.rdbuf();
+    std::string err;
+    auto const file = mcp::v2::json::parse(text.str(), err);
+    if (!file || !file->find("port") || !file->find("token"))
+        return { 0, {} };
+    return { static_cast<int>(file->find("port")->number), file->find("token")->string };
+}
+
+void clearMain(Harness& v1, char const* corr)
+{
+    auto const r = v1.call("/pd/clear", { "main", corr }, std::string("/pd/clear/reply/") + corr, 5000);
+    CHECK(r.has_value());
+    sleepMs(200);
+}
+
+// A batch_atomic of `count` plain [f] boxes, over v2; true when it created them all.
+bool v2Boxes(V2Link& link, std::string const& id, int count, int first)
+{
+    std::vector<mcp::v2::Arg> args;
+    auto const s = [&](std::string v) { mcp::v2::Arg a; a.s = std::move(v); args.push_back(std::move(a)); };
+    auto const i = [&](int v) { mcp::v2::Arg a; a.type = 'i'; a.i = v; args.push_back(a); };
+    s("main"); s(id); i(0); i(0); i(0); i(count); i(0);
+    for (int k = first; k < first + count; ++k) {
+        s("n" + std::to_string(k)); i((k % 100) * 70); i((k / 100) * 30); s("obj"); s("f"); i(0);
+    }
+    i(0); i(5); i(10); i(0);
+    link.sendReq(id, "/pd/batch_atomic", mcp::v2::encodeArgs(args));
+    auto const f = link.take([&](auto const& v) { auto const* fin = v.find("final"); return field(v, "id") == id && fin && fin->boolean; }, 60000);
+    if (!f || field(*f, "outcome") != "applied")
+        return false;
+    auto const r = replyOf(*f);
+    return r.num(0) == count;
+}
+
+void runV2DispatchCases(Harness& h, MCPBridge& bridge)
+{
+    auto& link = *h.v2;
+    {
+        std::printf("v2: a fire-and-forget verb ends unknown{no_reply_verb}; the noReply lane gets nothing\n");
+        link.sendReq("F1", "/pd/clear_selection", R"([{"t":"s","v":"main"}])");
+        auto const f = link.take([](auto const& v) { return field(v, "id") == "F1"; }, 3000);
+        auto const* e = f ? f->find("error") : nullptr;
+        CHECK(f && field(*f, "outcome") == "unknown" && e && field(*e, "code") == "no_reply_verb");
+        link.sendReq("R1", "/param/s3_nothing", R"([{"t":"f","v":0.5}])", true);
+        CHECK(!link.take([](auto const& v) { return field(v, "id") == "R1"; }, 500).has_value());
+        link.sentIds.pop_back(); // nothing is owed for a noReply request
+    }
+    {
+        std::printf("v2: events (artist to the newest session only, telemetry to subscribers and UDP)\n");
+        h.replies.clear();
+        bridge.sendArtistNote("x1", "warmer");
+        auto const a = link.take([](auto const& v) { return field(v, "t") == "evt" && field(v, "address") == "/pd/ui/note"; }, 2000);
+        CHECK(a && field(*a, "class") == "artist");
+        CHECK(!h.replies.waitFor("/pd/ui/note", 200).has_value());
+        bridge.sendConsoleLog("v2 telemetry check", false);
+        auto const t = link.take([](auto const& v) { return field(v, "t") == "evt" && field(v, "address") == "/pd/log"; }, 2000);
+        CHECK(t && field(*t, "class") == "telemetry");
+        CHECK(h.replies.waitFor("/pd/log", 1000).has_value());
+    }
+    {
+        std::printf("v2: a census over 1 MB arrives whole\n");
+        {
+            Harness v1 { h.bridge, h.replies, nullptr };
+            clearMain(v1, "c4"); // the case list leaves carrier, mul1 and an array behind
+        }
+        // [f] boxes take ~150 bytes each in the census: 7,200 of them pass 1 MB
+        bool built = v2Boxes(link, "big1", 2000, 0) && v2Boxes(link, "big2", 2000, 2000) && v2Boxes(link, "big3", 2000, 4000)
+            && v2Boxes(link, "big4", 1200, 6000);
+        CHECK(built);
+        link.sendReq("bigc", "/pd/census", R"([{"t":"s","v":"main"},{"t":"s","v":"bigc"}])");
+        auto const f = link.take([](auto const& v) { return field(v, "id") == "bigc"; }, 30000);
+        CHECK(f && field(*f, "address") == "/pd/census/reply/bigc");
+        if (f) {
+            auto const r = replyOf(*f);
+            std::printf("  census reply: %zu bytes\n", r.str(0).size());
+            CHECK(r.str(0).size() > 1000000);
+            auto const json = juce::JSON::parse(juce::String::fromUTF8(r.str(0).c_str()));
+            CHECK(static_cast<int>(json["objectCount"]) == 7200);
+        }
+        Harness v1 { h.bridge, h.replies, nullptr };
+        clearMain(v1, "c5");
+    }
+    {
+        // S3 review HIGH 2: list_tabs replies from a posted hop after its handler returned; its work token keeps the
+        // request open until that hop ran, so the real reply is the final (not unknown{no_reply_verb}, not UDP)
+        std::printf("v2: a reply from a posted hop is the final (list_tabs)\n");
+        auto const r = h.call("/pd/list_tabs", { "lt1" }, "/pd/list_tabs/reply/lt1", 5000);
+        CHECK(r.has_value());
+    }
+    {
+        std::printf("v2: one worker for both transports (v1 and v2 see each other's changes)\n");
+        CHECK(v2Boxes(link, "iv", 1, 0));
+        Harness v1 { h.bridge, h.replies, nullptr };
+        auto const census = v1.call("/pd/census", { "main", "ic1" }, "/pd/census/reply/ic1");
+        CHECK(census && static_cast<int>(parseJson(*census)["objectCount"]) == 1);
+        auto const rn = v1.call("/pd/rename_id", { "main", "ir1", "n0", "renamed_by_v1" }, "/pd/rename_id/reply/ir1");
+        CHECK(rn && rn->num(0) == 1);
+        auto const seen = h.call("/pd/census", { "main", "ic2" }, "/pd/census/reply/ic2");
+        CHECK(seen && parseJson(*seen)["objects"][0]["id"].toString() == "renamed_by_v1");
+        clearMain(v1, "c6");
+    }
+}
+
+// P4.1 S3: the handler cases a second time, through a v2 session of the bridge's own listener, with the same
+// expectations on the decoded replies (the evidence that the handlers did not change), then the v2-only cases.
+void runV2Pass(Harness& v1, MCPBridge& bridge)
+{
+    std::printf("v2 pass\n");
+    CHECK(bridge.startV2ForTests());
+    auto const [port, token] = v2Discovery();
+    CHECK(port > 0 && !token.empty());
+    V2Link link(port);
+    link.client.sendFrame(R"({"t":"hello","protocol":2,"schemaHash":")" + std::string(mcp::v2schema::kSchemaHash) + R"(","token":")"
+        + token + R"(","client":{"name":"mcp_bridge_tests"},"telemetry":true})");
+    auto const w = link.take([](auto const& v) { return field(v, "t") == "welcome"; }, 3000);
+    CHECK(w.has_value());
+    if (!w)
+        return;
+    clearMain(v1, "c0");
+    Harness h { v1.bridge, v1.replies, &link };
+    runCases(h);
+    runV2DispatchCases(h, bridge);
+    auto const missing = link.withoutFinal(1500);
+    for (auto const& id : missing)
+        std::printf("  no final for %s\n", id.c_str());
+    CHECK(missing.empty());
+    std::printf("  v2 requests: %zu, finals: %zu\n", link.sentIds.size(), link.finalIds.size());
+    clearMain(v1, "c9");
+}
+
+// S3 review HIGH 3: another program holds the bridge's UDP port (L22). v2 still starts, with its command worker, and
+// serves requests; the UDP side stays silent. Restores the port, the sink and the v2 listener afterwards.
+void runV2WithoutUdpCases(MCPBridge& bridge, std::function<void()> const& restoreSink)
+{
+    std::printf("v2: serves while another program holds the UDP port\n");
+    int const holder = ::socket(AF_INET, SOCK_DGRAM, 0);
+    sockaddr_in a {};
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    CHECK(::bind(holder, reinterpret_cast<sockaddr*>(&a), sizeof a) == 0);
+    socklen_t len = sizeof a;
+    ::getsockname(holder, reinterpret_cast<sockaddr*>(&a), &len);
+    int const takenPort = ntohs(a.sin_port);
+    int const listenPort = bridge.getListenPort();
+    int const sendPort = bridge.getSendPort();
+    bridge.stop();
+    bridge.rebind(takenPort, sendPort); // not running: only the ports change
+    CHECK(!bridge.start());            // UDP refused...
+    auto const [port, token] = v2Discovery();
+    CHECK(port > 0);                    // ...v2 listening
+    {
+        V2Link link(port);
+        link.client.sendFrame(mcp::v2::test::helloJson(token));
+        CHECK(link.take([](auto const& v) { return field(v, "t") == "welcome"; }, 3000).has_value());
+        link.sendReq("nu1", "/pd/census", R"([{"t":"s","v":"main"},{"t":"s","v":"nu1"}])");
+        auto const f = link.take([](auto const& v) { return field(v, "id") == "nu1"; }, 5000);
+        CHECK(f && field(*f, "outcome") == "applied" && field(*f, "address") == "/pd/census/reply/nu1");
+    }
+    bridge.stop();
+    ::close(holder);
+    bridge.rebind(listenPort, sendPort);
+    restoreSink();
+    CHECK(bridge.startV2ForTests());
 }
 
 // P4.1 S2: the bridge's own v2 listener over real loopback sockets. The discovery file lands under the scratch
@@ -873,6 +1201,10 @@ int main()
         std::thread worker([&] {
             Harness harness { *bridge, replies };
             runCases(harness);
+            runV2Pass(harness, *bridge);
+            runV2WithoutUdpCases(*bridge, [&] {
+                bridge->setReplySinkForTests([&replies](juce::OSCMessage const& msg) { replies.push(msg); });
+            });
             runPdContextCases(processor, audioControl);
             runNativeUndoCases(processor);
             runAudioStallCases(harness, audioControl);

@@ -137,6 +137,10 @@ void McpHost::enqueuePd(std::function<void()> job)
 {
     if (session.mcpShuttingDown.load(std::memory_order_acquire))
         return; // P3.4 S8: after shutdown nothing may touch the patches
+    job = [work = mcp::v2::captureWork(), inner = std::move(job)] { // P4.1 S3: the job replies for the request that
+        mcp::v2::WorkScope const scope(work);                         // queued it (none: for none), done after it
+        inner();
+    };
     session.mcpPdQueue.enqueue(std::move(job));
     // One posted drain at a time; a job queued after the drain has started schedules the next one.
     if (!session.mcpPdDrainPosted.exchange(true, std::memory_order_acq_rel)) {

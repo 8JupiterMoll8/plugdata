@@ -459,11 +459,14 @@ inline std::string quote(std::string_view text)
     return out;
 }
 
-// Shortest text that reads back as the same float32; null for NaN and infinity (JSON has no such numbers).
+// Shortest text that reads back as the same float32. JSON has no NaN or infinity: NaN is null, infinity the string
+// "inf" or "-inf" (a meter's silence is -inf dB; its sign matters).
 inline std::string floatText(float f)
 {
-    if (!std::isfinite(f))
+    if (std::isnan(f))
         return "null";
+    if (std::isinf(f))
+        return f > 0 ? "\"inf\"" : "\"-inf\"";
 #if MCP_V2_STREAM_FLOAT
     std::ostringstream out;
     out.imbue(std::locale::classic());
