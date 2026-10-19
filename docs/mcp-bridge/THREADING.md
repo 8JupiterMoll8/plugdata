@@ -14,6 +14,9 @@ or posted job. The reasons and the measurements behind each rule are in the TS r
 | Gui | the message thread | `McpHost::onMessageThread(fn, timeoutMs, where)`, `postMessage` | editors, components, viewport, repaint. |
 | Audio | the audio callback | the `MCP-HOOK` lines in `PluginProcessor.cpp` -> `McpAudio.cpp` | no blocking lock, no allocation, no `callAsync`; Pd state only under a `ScopedTryLock` on the Pd lock. |
 | Jobs | `MCPBridge::jobPool` | offline render, voice analysis | joined by `MCPBridge::shutdown`; stop on `isShuttingDown()`. |
+| V2Accept | `mcp::v2::Server` accept thread (`MCPBridgeV2Server.cpp`, P4.1 S2) | `Server::acceptLoop` | accept on 127.0.0.1, start a session, reap finished ones. Never touches Pd or the bridge; logs only through `ServerConfig::log` (the lock-free console queue). |
+| V2Read | one per v2 session | `Session::readLoop` | as Net: decode frames and post; answers the envelope frames (hello, ping, bye) itself. Never waits on the worker, the Pd context or a lock the bridge holds. |
+| V2Write | one per v2 session (`mcp::SerialWorker`) | `Session::write` | the only writer of that socket; any thread posts a frame. A queue over `sessionQueueFrames` closes the session. |
 
 ## Rules
 

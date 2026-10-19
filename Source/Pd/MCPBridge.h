@@ -25,6 +25,7 @@
 #include "Pd/MCPIdentity.h" // renameStableId (also used by PluginProcessor.cpp; finding C6)
 #include "Pd/MCPBridgeRegistry.h" // verb table (Plan 3 P3.3)
 #include "Pd/MCPBridgeWorker.h"   // command worker and reply queue (Plan 3 P3.4)
+#include "Pd/MCPBridgeV2Server.h" // v2 TCP listener (Plan 4 P4.1)
 
 class PluginProcessor;
 class MCPBridge;
@@ -302,6 +303,9 @@ public:
     // Tests only (Tests/mcp/bridge_handler_tests.cpp): replies go to `sink` instead of a socket, and the bridge
     // counts as active so sendReply sends. Call stop() first; nothing is bound.
     void setReplySinkForTests(std::function<void(juce::OSCMessage const&)> sink);
+    // Tests only: starts the v2 listener alone (no UDP), discovery file under the current HOME. False if it could
+    // not start. stop() stops it.
+    bool startV2ForTests();
 
     // Status for the GUI / console. Returns a short human-readable state:
     // "connected" | "listening" | "stopped" | "error: <detail>".
@@ -553,6 +557,14 @@ private:
     // capability handshakes to detect a PlugData restart and clear its stale
     // identity cache (tempId -> index mappings from the previous session).
     juce::String bootToken;
+    // P4.1 S2: the v2 listener (loopback TCP, frames, token handshake). Started by start() even when the UDP port is
+    // taken (v2 has its own port and token); stopped first in stop(), before the command worker.
+    mcp::v2::Server v2Server;
+    bool startV2();
+    void stopV2();
+    // The v1 capability names (the capabilities reply without its version and boot entries); the v2 welcome sends
+    // the same list. `protocol_v2` is in it only while this bridge's v2 listener runs.
+    std::vector<std::string> capabilityList() const;
 
     std::vector<MorphJob> morphJobs;
     juce::CriticalSection morphLock;

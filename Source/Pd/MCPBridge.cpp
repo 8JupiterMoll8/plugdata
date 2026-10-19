@@ -82,7 +82,7 @@ MCPBridge::~MCPBridge()
 
 void MCPBridge::rebind(int const newListenPort, int const newSendPort)
 {
-    bool const wasActive = active.load();
+    bool const wasActive = active.load() || v2Server.running();
     stop();
     listenPort = newListenPort;
     sendPort = newSendPort;
@@ -118,7 +118,10 @@ void MCPBridge::runJob(std::function<void()> job)
 
 bool MCPBridge::start()
 {
-    if (active.load()) return true;
+    if (active.load()) {
+        startV2(); // the v2 slot may have been taken by another bridge of this process at the first start
+        return true;
+    }
 
     // Loopback only: other hosts on the LAN must not be able to drive the patch.
     listenSocket = std::make_unique<juce::DatagramSocket>(false);
@@ -147,7 +150,42 @@ bool MCPBridge::start()
     senderHost = "127.0.0.1";
     senderPort = sendPort;
 
+    // P4.1 S2: v2 has its own TCP port and token, so it starts even when the UDP port is taken (L22).
+    startV2();
     return active.load();
+}
+
+bool MCPBridge::startV2()
+{
+    if (v2Server.running())
+        return true;
+    mcp::v2::ServerConfig config;
+    config.preferredPort = listenPort; // TCP and UDP port numbers are separate
+    config.discoveryPath = mcp::v2::defaultDiscoveryPath();
+    config.bridgeVersion = "11.18";
+    config.bootToken = bootToken.toStdString();
+    config.caps = capabilityList();
+    config.caps.push_back("protocol_v2");
+    config.log = [proc = processor](std::string const& line) {
+        if (proc)
+            proc->logMessage(juce::String::fromUTF8(line.c_str())); // a lock-free console queue: any thread
+    };
+    std::string reason;
+    if (v2Server.start(std::move(config), reason))
+        return true;
+    if (processor)
+        processor->logMessage("MCP bridge: no v2 listener (" + juce::String::fromUTF8(reason.c_str()) + "); v1 UDP only");
+    return false;
+}
+
+void MCPBridge::stopV2()
+{
+    v2Server.stop();
+}
+
+bool MCPBridge::startV2ForTests()
+{
+    return startV2();
 }
 
 void MCPBridge::setReplySinkForTests(std::function<void(juce::OSCMessage const&)> sink)
@@ -160,6 +198,7 @@ void MCPBridge::setReplySinkForTests(std::function<void(juce::OSCMessage const&)
 void MCPBridge::stop()
 {
     stopTimer();
+    stopV2(); // P3.4 S8 order: listeners before the worker
     if (!active.load()) return;
 
     receiver.removeListener(this);

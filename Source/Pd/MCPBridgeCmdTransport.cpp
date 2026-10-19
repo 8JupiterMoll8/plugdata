@@ -233,131 +233,142 @@ void MCPBridge::handleBridgeDomain(const juce::String& bridgeAction, const juce:
         }
         sendReply("/bridge/connect/ack", "127.0.0.1");
     } else if (bridgeAction == "capabilities") {
-        auto correlationId = msg.size() > 0 ? getArgString(msg[0]) : "0";
         juce::OSCMessage reply { juce::OSCAddressPattern("/bridge/capabilities/reply") };
         reply.addArgument(juce::String("11.18"));
-        reply.addArgument(juce::String("create_batch"));
-        reply.addArgument(juce::String("delete_batch"));
-        reply.addArgument(juce::String("connect_batch"));
-        reply.addArgument(juce::String("disconnect_batch"));
-        reply.addArgument(juce::String("ping"));
-        reply.addArgument(juce::String("clear"));
-        reply.addArgument(juce::String("dump"));
-        reply.addArgument(juce::String("load"));
-        reply.addArgument(juce::String("param"));
-        reply.addArgument(juce::String("param_symbol"));
-        reply.addArgument(juce::String("param_list"));
-        reply.addArgument(juce::String("obj_set"));
-        reply.addArgument(juce::String("obj_set_batch"));
-        reply.addArgument(juce::String("obj_get"));
-        reply.addArgument(juce::String("obj_get_batch"));
-        reply.addArgument(juce::String("param_get"));
-        reply.addArgument(juce::String("params"));
-        reply.addArgument(juce::String("param_set_name"));
-        // Rewrite a text object's label without recreating it (live set + truthful number)
-        reply.addArgument(juce::String("obj_relabel"));
-        reply.addArgument(juce::String("trigger"));
-        reply.addArgument(juce::String("telemetry"));
-        reply.addArgument(juce::String("array_io"));
-        reply.addArgument(juce::String("morph"));
-        reply.addArgument(juce::String("array_stats"));
-        reply.addArgument(juce::String("get_mappings"));
-        reply.addArgument(juce::String("move_batch_id"));
-        reply.addArgument(juce::String("meter"));
-        reply.addArgument(juce::String("meter_query"));
-        reply.addArgument(juce::String("meter_master"));
-        reply.addArgument(juce::String("meter_arm"));
-        reply.addArgument(juce::String("meter_control"));
-        reply.addArgument(juce::String("meter_spectral_arm"));
-        reply.addArgument(juce::String("meter_trace"));
-        reply.addArgument(juce::String("array_bulk"));
-        reply.addArgument(juce::String("census"));
-        reply.addArgument(juce::String("typeof"));
-        reply.addArgument(juce::String("ports"));
-        reply.addArgument(juce::String("identity_snapshot"));
-        reply.addArgument(juce::String("identity_version"));
-        // PRD Phase 2 §2.6: the bridge mints readable tempIds natively
-        // (census auto-adopt). TS is a read-only mirror on bridges that
-        // advertise this; legacy bridges keep the TS adoption path.
-        reply.addArgument(juce::String("auto_adopt"));
-        // PRD Phase 3 §2.6: C++-native save/load with identity sidecar —
-        // tempIds travel with the file and are re-registered by the engine.
-        reply.addArgument(juce::String("save_patch"));
-        reply.addArgument(juce::String("load_patch"));
-        // PRD Phase 3 §2.5: multi-tab — open in new tab + enumerate tabs
-        reply.addArgument(juce::String("open_patch"));
-        reply.addArgument(juce::String("list_tabs"));
-        reply.addArgument(juce::String("focus_tab"));
-        reply.addArgument(juce::String("close_tab"));
-        // PRD diagnostic layer: the graph X-ray
-        reply.addArgument(juce::String("diagnose"));
-        // PRD 1.2: CPU/DSP cost introspection (live load + weighted census)
-        reply.addArgument(juce::String("perf"));
-        // PRD GOP Module v2 Phase A: atomic parent-canvas swap for TS-generated
-        // MERDA abstractions (single delete+create+rewire under one DSP update)
-        reply.addArgument(juce::String("encapsulate_gop"));
-        // PRD GOP Module v2 Phase B: font measurement for pixel-perfect GOP layout
-        reply.addArgument(juce::String("measure_text"));
-        // PRD layout-v2 Phase A: read-only layout facts (C++ truth of layout)
-        reply.addArgument(juce::String("bounds"));
-        reply.addArgument(juce::String("collisions"));
-        reply.addArgument(juce::String("clusters"));
-        reply.addArgument(juce::String("wire_occlusions"));
-        // PRD layout-v2 Phase B1/B2: native writers on the zero-drop move path
-        reply.addArgument(juce::String("deoverlap"));
-        reply.addArgument(juce::String("layout_guard"));
-        reply.addArgument(juce::String("compose"));
-        reply.addArgument(juce::String("flow"));
-        // PRD Multimodal Studio: the moodboard rail — one query returns the whole
-        // multimodal brief (images + ink + notes + voice takes + selection).
-        reply.addArgument(juce::String("moodboard"));
-        reply.addArgument(juce::String("pillars"));
-        reply.addArgument(juce::String("connections"));
-        reply.addArgument(juce::String("zoom_to_fit"));
-        reply.addArgument(juce::String("spectral"));
-        reply.addArgument(juce::String("batch_atomic"));
-        reply.addArgument(juce::String("batch-facts"));
-        reply.addArgument(juce::String("batch-dedup"));
-        reply.addArgument(juce::String("preflight-guards"));
-        reply.addArgument(juce::String("transport"));
-        reply.addArgument(juce::String("seq"));
-        // Canvas screenshot 2192 LLM vision: render Canvas to PNG temp file, MCP returns ImageContent
-        reply.addArgument(juce::String("screenshot_canvas"));
-        // PRD 1.4: native GEM render-window capture (no patch objects)
-        reply.addArgument(juce::String("gem_capture"));
-        // PRD 1.5: programmatic GUI selection by tempId (highlight)
-        reply.addArgument(juce::String("select"));
-        // PRD overlay: per-object AI state markers drawn on the canvas
-        // C++ Ground Truth Documentation & Native Dialogs
-        reply.addArgument(juce::String("doc_get"));
-        reply.addArgument(juce::String("doc_search"));
-        reply.addArgument(juce::String("doc_dump"));
-        reply.addArgument(juce::String("library_info"));
-        reply.addArgument(juce::String("ui_open_reference"));
-        reply.addArgument(juce::String("ui_open_help"));
-        reply.addArgument(juce::String("viewport"));
-        reply.addArgument(juce::String("ai_overlay"));
-        // PRD overlay: ghost/preview of proposed (uncommitted) changes
-        reply.addArgument(juce::String("ai_ghost"));
-        // PRD overlay: short in-place AI annotations (explain on the patch)
-        reply.addArgument(juce::String("ai_annotate"));
-        // PRD overlay: titled regions grouping objects (structure at a glance)
-        reply.addArgument(juce::String("ai_region"));
-        // Cinematic Viewport HUD & Subtitle overlay for video/tutorial capture
-        reply.addArgument(juce::String("ai_hud"));
-        // Native & AI overlay control: query and set overlay flags from MCP
-        reply.addArgument(juce::String("overlays_control"));
-        // Labeled screenshots: GUI-widget name chips painted on the bitmap only
-        reply.addArgument(juce::String("screenshot_labels"));
-        // Offline faster-than-realtime render to WAV (background DSP bake)
-        reply.addArgument(juce::String("render"));
-        // An address the bridge has no verb for is answered with /bridge/unknown_verb [address, domain, verb]
-        reply.addArgument(juce::String("unknown_verb_reply"));
-        // P3.5: per-canvas identity_version, snapshot canvasKey/canvasVersion, rename_id error, sidecar v2.
-        reply.addArgument(juce::String("identity_v2"));
+        for (auto const& cap : capabilityList())
+            reply.addArgument(juce::String(cap));
         reply.addArgument(juce::String("boot:" + bootToken));
         sender.send(reply);
     }
+}
+
+std::vector<std::string> MCPBridge::capabilityList() const
+{
+    std::vector<std::string> caps {
+        "create_batch",
+        "delete_batch",
+        "connect_batch",
+        "disconnect_batch",
+        "ping",
+        "clear",
+        "dump",
+        "load",
+        "param",
+        "param_symbol",
+        "param_list",
+        "obj_set",
+        "obj_set_batch",
+        "obj_get",
+        "obj_get_batch",
+        "param_get",
+        "params",
+        "param_set_name",
+        // Rewrite a text object's label without recreating it (live set + truthful number)
+        "obj_relabel",
+        "trigger",
+        "telemetry",
+        "array_io",
+        "morph",
+        "array_stats",
+        "get_mappings",
+        "move_batch_id",
+        "meter",
+        "meter_query",
+        "meter_master",
+        "meter_arm",
+        "meter_control",
+        "meter_spectral_arm",
+        "meter_trace",
+        "array_bulk",
+        "census",
+        "typeof",
+        "ports",
+        "identity_snapshot",
+        "identity_version",
+        // PRD Phase 2 §2.6: the bridge mints readable tempIds natively
+        // (census auto-adopt). TS is a read-only mirror on bridges that
+        // advertise this; legacy bridges keep the TS adoption path.
+        "auto_adopt",
+        // PRD Phase 3 §2.6: C++-native save/load with identity sidecar —
+        // tempIds travel with the file and are re-registered by the engine.
+        "save_patch",
+        "load_patch",
+        // PRD Phase 3 §2.5: multi-tab — open in new tab + enumerate tabs
+        "open_patch",
+        "list_tabs",
+        "focus_tab",
+        "close_tab",
+        // PRD diagnostic layer: the graph X-ray
+        "diagnose",
+        // PRD 1.2: CPU/DSP cost introspection (live load + weighted census)
+        "perf",
+        // PRD GOP Module v2 Phase A: atomic parent-canvas swap for TS-generated
+        // MERDA abstractions (single delete+create+rewire under one DSP update)
+        "encapsulate_gop",
+        // PRD GOP Module v2 Phase B: font measurement for pixel-perfect GOP layout
+        "measure_text",
+        // PRD layout-v2 Phase A: read-only layout facts (C++ truth of layout)
+        "bounds",
+        "collisions",
+        "clusters",
+        "wire_occlusions",
+        // PRD layout-v2 Phase B1/B2: native writers on the zero-drop move path
+        "deoverlap",
+        "layout_guard",
+        "compose",
+        "flow",
+        // PRD Multimodal Studio: the moodboard rail — one query returns the whole
+        // multimodal brief (images + ink + notes + voice takes + selection).
+        "moodboard",
+        "pillars",
+        "connections",
+        "zoom_to_fit",
+        "spectral",
+        "batch_atomic",
+        "batch-facts",
+        "batch-dedup",
+        "preflight-guards",
+        "transport",
+        "seq",
+        // Canvas screenshot 2192 LLM vision: render Canvas to PNG temp file, MCP returns ImageContent
+        "screenshot_canvas",
+        // PRD 1.4: native GEM render-window capture (no patch objects)
+        "gem_capture",
+        // PRD 1.5: programmatic GUI selection by tempId (highlight)
+        "select",
+        // PRD overlay: per-object AI state markers drawn on the canvas
+        // C++ Ground Truth Documentation & Native Dialogs
+        "doc_get",
+        "doc_search",
+        "doc_dump",
+        "library_info",
+        "ui_open_reference",
+        "ui_open_help",
+        "viewport",
+        "ai_overlay",
+        // PRD overlay: ghost/preview of proposed (uncommitted) changes
+        "ai_ghost",
+        // PRD overlay: short in-place AI annotations (explain on the patch)
+        "ai_annotate",
+        // PRD overlay: titled regions grouping objects (structure at a glance)
+        "ai_region",
+        // Cinematic Viewport HUD & Subtitle overlay for video/tutorial capture
+        "ai_hud",
+        // Native & AI overlay control: query and set overlay flags from MCP
+        "overlays_control",
+        // Labeled screenshots: GUI-widget name chips painted on the bitmap only
+        "screenshot_labels",
+        // Offline faster-than-realtime render to WAV (background DSP bake)
+        "render",
+        // An address the bridge has no verb for is answered with /bridge/unknown_verb [address, domain, verb]
+        "unknown_verb_reply",
+        // P3.5: per-canvas identity_version, snapshot canvasKey/canvasVersion, rename_id error, sidecar v2.
+        "identity_v2",
+    };
+    // P4.1 S2: the v2 listener is up (TCP 127.0.0.1, port and token in the discovery file).
+    if (v2Server.running())
+        caps.push_back("protocol_v2");
+    return caps;
 }
 
 void MCPBridge::handleMorphDomain(const juce::String& morphAction, const juce::OSCMessage& msg)

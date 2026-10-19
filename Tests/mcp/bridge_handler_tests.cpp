@@ -16,6 +16,7 @@
 // HOME decides where plugdata keeps its settings and patches. This program therefore points HOME at a fresh
 // temporary directory before anything else (MCP_TESTS_HOME reuses a directory: the first start unpacks the
 // resources and is slow).
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -29,12 +30,17 @@
 #include <thread>
 #include <vector>
 
+#include <sys/stat.h>
 #include <unistd.h>
+
+#include <fstream>
+#include <sstream>
 
 #include "PluginProcessor.h"
 #include "Mcp/McpHost.h"
 #include "Pd/MCPBridge.h"
 #include "Pd/Interface.h" // g_undo.h: the native undo queue (L6 check)
+#include "v2_test_client.h" // P4.1 S2: loopback v2 client
 
 namespace {
 
@@ -695,6 +701,98 @@ void runCases(Harness& h)
     }
 }
 
+// P4.1 S2: the bridge's own v2 listener over real loopback sockets. The discovery file lands under the scratch
+// HOME (main() moved HOME and unset XDG_CONFIG_HOME before the processor started). Ends with the listener stopped
+// and the reply sink restored, so later cases run as before.
+void runV2HandshakeCases(Harness& h, MCPBridge& bridge, std::function<void()> const& restoreSink)
+{
+    using namespace mcp::v2::test;
+    using mcp::v2::json::Value;
+    std::printf("v2 handshake\n");
+    CHECK(bridge.startV2ForTests());
+    auto const path = mcp::v2::defaultDiscoveryPath();
+    char const* home = std::getenv("HOME");
+    CHECK(home && path.rfind(home, 0) == 0);
+    struct stat st {};
+    CHECK(::stat(path.c_str(), &st) == 0 && (st.st_mode & 0777) == 0600);
+    std::ifstream in(path);
+    std::stringstream text;
+    text << in.rdbuf();
+    std::string err;
+    auto const file = mcp::v2::json::parse(text.str(), err);
+    CHECK(file.has_value());
+    if (!file)
+        return;
+    auto const str = [&](char const* k) { auto const* v = file->find(k); return v && v->is(Value::Kind::String) ? v->string : std::string(); };
+    auto const num = [&](char const* k) { auto const* v = file->find(k); return v ? v->number : -1.0; };
+    int const port = static_cast<int>(num("port"));
+    auto const token = str("token");
+    CHECK(num("pid") == ::getpid() && port > 0 && token.size() == 64 && num("protocol") == 2);
+    CHECK(str("schemaHash") == mcp::v2schema::kSchemaHash && str("bridgeVersion") == "11.18");
+
+    // v1 capabilities list protocol_v2 while the listener runs; boot:<token> stays last and matches the file.
+    auto const caps = h.call("/bridge/capabilities", { "v2caps" }, "/bridge/capabilities/reply");
+    CHECK(caps.has_value());
+    std::vector<std::string> v1;
+    if (caps)
+        for (size_t i = 1; i + 1 < caps->args.size(); ++i)
+            v1.push_back(caps->str(i));
+    CHECK(caps && caps->str(0) == "11.18" && caps->str(caps->args.size() - 1) == "boot:" + str("bootToken"));
+    CHECK(std::find(v1.begin(), v1.end(), "protocol_v2") != v1.end());
+
+    // welcome: the same capability list (no version, no boot entry), the boot token, the schema hash.
+    {
+        Client cl(port);
+        CHECK(cl.connected && cl.sendFrame(helloJson(token)));
+        auto const w = cl.next();
+        CHECK(Client::kindOf(w) == "welcome");
+        if (w) {
+            std::vector<std::string> wc;
+            if (auto const* c = w->find("caps"))
+                for (auto const& item : c->items)
+                    wc.push_back(item.string);
+            CHECK(wc == v1);
+            CHECK(w->find("bootToken") && w->find("bootToken")->string == str("bootToken"));
+            CHECK(w->find("bridgeVersion") && w->find("bridgeVersion")->string == "11.18");
+            CHECK(w->find("schemaHash") && w->find("schemaHash")->string == mcp::v2schema::kSchemaHash);
+            CHECK(!w->find("token"));
+        }
+        CHECK(cl.sendFrame(R"({"t":"ping"})") && Client::kindOf(cl.next()) == "pong");
+    }
+
+    // Refusals: typed bye, then the bridge closes.
+    CHECK(refusalOf(port, mcp::v2::encodeFrame(helloJson(std::string(64, '0')))) == "unauthorized");
+    CHECK(refusalOf(port, mcp::v2::encodeFrame(helloJson(token, "0000000000000000"))) == "schema_mismatch");
+    CHECK(refusalOf(port, std::string("\xff\xff\xff\xff", 4)) == "too_large");
+    CHECK(refusalOf(port, "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n") == "too_large");
+    {
+        Client silent(port); // no hello: refused after the schema's 2 s
+        auto const t0 = Clock::now();
+        auto const f = silent.next(5000);
+        auto const ms = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - t0).count();
+        CHECK(Client::kindOf(f) == "bye" && errorCode(f) == "bad_frame" && ms >= 1900 && ms < 3500);
+    }
+
+    // stop(): a connected session gets bye{shutting_down}, the file goes, v1 caps drop protocol_v2.
+    {
+        Client cl(port);
+        cl.sendFrame(helloJson(token));
+        CHECK(Client::kindOf(cl.next()) == "welcome");
+        bridge.stop();
+        auto const f = cl.next(2000);
+        CHECK(Client::kindOf(f) == "bye" && errorCode(f) == "shutting_down");
+        CHECK(::stat(path.c_str(), &st) != 0);
+    }
+    restoreSink();
+    auto const after = h.call("/bridge/capabilities", { "v2caps2" }, "/bridge/capabilities/reply");
+    CHECK(after.has_value());
+    bool listed = false;
+    if (after)
+        for (auto const& a : after->args)
+            listed = listed || a.text == "protocol_v2";
+    CHECK(!listed);
+}
+
 // Where plugdata keeps its files follows HOME: never the real one.
 std::string chooseScratchHome()
 {
@@ -782,6 +880,9 @@ int main()
             runStampCostCases(processor);
             runIdentityValidityCases(processor);
             runSidecarCases(processor);
+            runV2HandshakeCases(harness, *bridge, [&] {
+                bridge->setReplySinkForTests([&replies](juce::OSCMessage const& msg) { replies.push(msg); });
+            });
             startRenderForTeardown(harness); // last: the processor is destroyed with the render running
             casesDone.store(true);
             stopMessageLoop();
