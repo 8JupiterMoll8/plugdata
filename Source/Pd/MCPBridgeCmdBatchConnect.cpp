@@ -8,6 +8,7 @@
 // post-mutation wire scan for the receipt. Pd context (message thread, sys_lock).
 
 #include "MCPBridgeCmdBatch.h"
+#include "Mcp/McpNativeUndo.h"
 
 void mcp::BatchJob::connectPhase()
 {
@@ -189,8 +190,10 @@ void mcp::BatchJob::connectPhase()
                 }
                 tentativeSigAdj[sg].push_back(dg);
             }
-            if (obj_connect(so, cc.srcOut, d_o, cc.destIn))
+            if (obj_connect(so, cc.srcOut, d_o, cc.destIn)) {
+                mcp::undo::connect(cnv, so, cc.srcOut, d_o, cc.destIn); // P4.4
                 connected++;
+            }
             else
                 connectFailures.push_back({
                     cc.srcId.toStdString(), cc.destId.toStdString(),

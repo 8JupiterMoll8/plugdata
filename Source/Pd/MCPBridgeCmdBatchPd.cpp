@@ -8,6 +8,7 @@
 // Phases 0-4 here; connect and the wire scan in MCPBridgeCmdBatchConnect.cpp.
 
 #include "MCPBridgeCmdBatch.h"
+#include "Mcp/McpNativeUndo.h"
 
 extern int dsp_update_deferred;  // defined in m_obj.c
 
@@ -26,11 +27,18 @@ void mcp::BatchJob::runPdJob()
         auto canonStr = canonKey.toStdString();
 
         reconcile(canonStr);
+        // Plan 4 P4.4: the whole batch is ONE step of the canvas's own undo queue (decision 9). Each phase registers
+        // Pd's own undo action as it changes the canvas, in order, so older entries (manual or AI) stay valid and
+        // nothing is flushed. Pd drops the sequence again when nothing was registered.
+        mcp::undo::beginStep(cnv);
         disconnectPhase();
         deletePhase(canonStr);
         editPhase(canonStr);
         createPhase(canonStr);
         connectPhase();
+        // The layout guard moves objects after this job (message thread): their positions now are what undo restores.
+        if (autoLayout) mcp::undo::motion(cnv);
+        mcp::undo::endStep(cnv);
         scanConnections(canonStr);
 
         canvas_dirty(cnv, 1);
@@ -158,6 +166,7 @@ void mcp::BatchJob::disconnectPhase()
             // is a silent no-op for a missing wire, but we counted
             // the attempt ("1 disconnect(s)" while removing nothing).
             if (so && d_o && pd::Interface::hasConnection(cnv, so, pdc.srcOut, d_o, pdc.destIn)) {
+                mcp::undo::disconnect(cnv, so, pdc.srcOut, d_o, pdc.destIn);
                 obj_disconnect(so, pdc.srcOut, d_o, pdc.destIn);
                 disconnected++;
             }
@@ -167,72 +176,13 @@ void mcp::BatchJob::disconnectPhase()
 
 void mcp::BatchJob::deletePhase(const std::string& canonStr)
 {
-    // PHASE 2: DELETE — audio-thread-safe object removal (zero undo/GUI
-    // overhead; editor reconciles via trailing synchroniseCanvases).
-    // Capture each doomed object's creation text + bounds + wires
-    // FIRST so the inverse can recreate it (message-delta, no pointers).
-    {
-        auto& delMap = processor->getMcp()->identity.canvasMap(cnv);
-        std::unordered_map<t_gobj*, std::string> ptrToTempId;
-        for (auto& [tid, ptr] : delMap)
-            if (ptr) ptrToTempId[ptr] = tid;
-
-        std::unordered_set<t_gobj*> deleteSet;
-        for (auto& pd : preDeletes) {
-            t_gobj* obj = processor->getMcp()->resolveStableId(canvasName, pd.objectId);
-            if (!obj) continue;
-            deleteSet.insert(obj);
-
-            DeletedSnapshot ds;
-            ds.tempId = pd.objectId;
-            juce::String cls = juce::String::fromUTF8(class_getname(pd_class(&obj->g_pd)));
-            ds.kind = "obj";
-            if (cls == "text" || cls == "comment") ds.kind = "text";
-            else if (cls == "msg" || cls == "message") ds.kind = "msg";
-            if (auto* tobj = pd::Interface::checkObject(obj)) {
-                char* tb = nullptr; int tsz = 0;
-                mcpGetObjectText(tobj, &tb, &tsz);
-                juce::String full = (tb && tsz) ? juce::String::fromUTF8(tb, tsz) : juce::String();
-                if (tb) freebytes(tb, static_cast<size_t>(tsz) * sizeof(char));
-                juce::StringArray toks; toks.addTokens(full, " ", "");
-                if (ds.kind == "obj") {
-                    ds.type = toks.size() > 0 ? toks[0] : full;
-                    for (int i = 1; i < toks.size(); ++i) ds.args.add(toks[i]);
-                } else {
-                    ds.type = cls;   // "text"/"msg" — formatAsPdLine strips it
-                    ds.args = toks;
-                }
-            }
-            int bx = 0, by = 0, bw = 0, bh = 0;
-            pd::Interface::getObjectBounds(cnv, obj, &bx, &by, &bw, &bh);
-            ds.x = bx; ds.y = by;
-            deletedSnapshots.push_back(ds);
-        }
-
-        // Wires touching any doomed object (captured while tempIds live).
-        if (!deleteSet.empty()) {
-            t_linetraverser lt;
-            linetraverser_start(&lt, cnv);
-            t_outconnect* ltoc = nullptr;
-            while ((ltoc = linetraverser_next_nosize(&lt))) {
-                t_gobj* sg = &lt.tr_ob->ob_g;
-                t_gobj* dg = &lt.tr_ob2->ob_g;
-                if (!deleteSet.count(sg) && !deleteSet.count(dg)) continue;
-                auto sIt = ptrToTempId.find(sg);
-                auto dIt = ptrToTempId.find(dg);
-                if (sIt == ptrToTempId.end() || dIt == ptrToTempId.end()) continue;
-                deletedWires.push_back({ juce::String(sIt->second),
-                    static_cast<int>(lt.tr_outno),
-                    juce::String(dIt->second),
-                    static_cast<int>(lt.tr_inno) });
-            }
-        }
-    }
-
+    // PHASE 2: DELETE — audio-thread-safe object removal (editor reconciles via trailing synchroniseCanvases).
+    // P4.4: registered first as Pd's own "clear" (its undo pastes the objects back at their old indices, wired).
     SmallArray<t_gobj*> toDelete;
     for (auto& pd : preDeletes) {
         t_gobj* obj = processor->getMcp()->resolveStableId(canvasName, pd.objectId);
         if (obj) {
+            processor->getMcp()->journalId(cnv, pd.objectId.toStdString(), obj); // P4.4: back with an undo
             processor->getMcp()->identity.eraseId(cnv, pd.objectId.toStdString());
             processor->getMcp()->identity.eraseSerial(obj); // the object is deleted next: its other ids die with it
             processor->getMcp()->identity.bumpVersion(cnv);
@@ -241,6 +191,7 @@ void mcp::BatchJob::deletePhase(const std::string& canonStr)
         }
     }
     if (toDelete.size() > 0) {
+        mcp::undo::cut(cnv, toDelete);
         mcp::PdOps::removeObjectsAudioThread(cnv, toDelete);
     }
 }
@@ -253,19 +204,7 @@ void mcp::BatchJob::editPhase(const std::string& canonStr)
         if (obj) {
             t_object* o = pd::Interface::checkObject(obj);
             if (o) {
-                // Capture old creation text so undo can edit it back.
-                {
-                    char* tb = nullptr; int tsz = 0;
-                    mcpGetObjectText(o, &tb, &tsz);
-                    juce::String oldT = (tb && tsz) ? juce::String::fromUTF8(tb, tsz) : juce::String();
-                    if (tb) freebytes(tb, static_cast<size_t>(tsz) * sizeof(char));
-                    juce::StringArray toks; toks.addTokens(oldT, " ", "");
-                    EditUndo eu;
-                    eu.objectId = pe.objectId;
-                    eu.type = toks.size() > 0 ? toks[0] : oldT;
-                    for (int i = 1; i < toks.size(); ++i) eu.args.add(toks[i]);
-                    editUndoEntries.push_back(eu);
-                }
+                // P4.4: Pd's text_setto registers this retype as UNDO_RECREATE itself.
                 mcp::PdOps::renameObject(cnv, obj, pe.newText.toRawUTF8(), pe.newText.length());
                 t_gobj* newObj = nullptr; bool still = false;
                 for (t_gobj* y = cnv->gl_list; y; y = y->g_next)
@@ -487,5 +426,7 @@ void mcp::BatchJob::createPhase(const std::string& canonStr)
                 if (found >= 0) mappingIndices[mi] = found;
             }
         }
+        // P4.4: the survivors sit at the end of the canvas: one paste entry over them.
+        mcp::undo::pasteAppended(cnv, created);
     }
 }

@@ -95,9 +95,6 @@ void MCPBridge::pdClear(const juce::String& action, const juce::OSCMessage& msg)
                 // Clearing freed every object while Pd's index-based undo
                 // entries still point at them — drop the stale queue.
                 resetCanvasUndo(proc, canvasName);
-                // Drop MCP transactions too — their inverses reference the
-                // objects we just freed.
-                if (cnv) proc->getMcp()->clearMcpTransactions(cnv);
 
                 mcp::SysList atoms; // P3.4 S7: plain values, no Pd symbols
                 atoms.add(juce::String(canvasName));
@@ -142,72 +139,35 @@ void MCPBridge::pdClearSelection(const juce::String& action, const juce::OSCMess
     return;
 }
 
+// /pd/undo and /pd/redo (Plan 4 P4.4): one step of the canvas's own undo queue, the same one Ctrl+Z walks (AI and
+// manual edits in time order). Reply 1 = a step was taken, 0 = nothing to take (or the canvas is gone): never a
+// claimed success on a no-op.
+static void pdUndoStep(MCPBridge& bridge, PluginProcessor* processor, juce::OSCMessage const& msg, bool redo)
+{
+    auto const canvasName = MCPBridge::normalizeCanvas(getArgString(msg[0]));
+    auto const correlationId = msg.size() > 1 ? getArgString(msg[1]) : juce::String("0");
+    auto const replyAddr = juce::String(redo ? "/pd/redo/reply/" : "/pd/undo/reply/") + correlationId;
+    t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
+    if (!cnv) {
+        bridge.sendReply(replyAddr, 0.0f);
+        return;
+    }
+    bridge.postMessage([proc = processor, cnv, replyAddr, redo, b = &bridge]() {
+        if (mcpCanvasGone(cnv)) { b->sendReply(replyAddr, 0.0f); return; } // P3.4 S4: closed since the handler ran
+        bool const stepped = proc->getMcp()->undoStep(cnv, redo);
+        if (stepped) proc->getMcp()->synchroniseCanvases();
+        b->sendReply(replyAddr, stepped ? 1.0f : 0.0f);
+    });
+}
+
 void MCPBridge::pdUndo(const juce::String& action, const juce::OSCMessage& msg)
 {
-    if (msg.size() >= 1 && processor) {
-        auto canvasName = normalizeCanvas(getArgString(msg[0]));
-        auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : "0";
-
-        t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-
-        if (cnv) {
-            postMessage([proc = processor, cnv, correlationId, bridge = this]() {
-                if (mcpCanvasGone(cnv)) { bridge->sendReply("/pd/undo/reply/" + correlationId, 0.0f); return; } // P3.4 S4: closed since the handler ran
-                if (proc->getMcp()->hasMcpTransaction(cnv)) {
-                    proc->getMcp()->undoMcpTransaction(cnv);
-                    proc->getMcp()->synchroniseCanvases();
-                    bridge->sendReply("/pd/undo/reply/" + correlationId, 1.0f);
-                    return;
-                }
-                auto const viewUndo = proc->getMcp()->gui().undo(cnv);
-                if (viewUndo == McpGuiHost::UndoResult::Done) {
-                    bridge->sendReply("/pd/undo/reply/" + correlationId, 1.0f);
-                } else if (viewUndo == McpGuiHost::UndoResult::NoView) {
-                    pd::Interface::undo(cnv);
-                    proc->getMcp()->synchroniseCanvases();
-                    bridge->sendReply("/pd/undo/reply/" + correlationId, 1.0f);
-                } else {
-                    // Canvas present but the undo stack is EMPTY (e.g. after a
-                    // GOP/refactor/encapsulate flush) — report the truth so the
-                    // server stops claiming "undo succeeded" on a no-op.
-                    bridge->sendReply("/pd/undo/reply/" + correlationId, 0.0f);
-                }
-            });
-        } else {
-            sendReply("/pd/undo/reply/" + correlationId, 0.0f);
-        }
-    }
-    return;
+    if (msg.size() >= 1 && processor) pdUndoStep(*this, processor, msg, false);
 }
 
 void MCPBridge::pdRedo(const juce::String& action, const juce::OSCMessage& msg)
 {
-    if (msg.size() >= 1 && processor) {
-        auto canvasName = normalizeCanvas(getArgString(msg[0]));
-        auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : "0";
-
-        t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
-
-        if (cnv) {
-            postMessage([proc = processor, cnv, correlationId, bridge = this]() {
-                if (mcpCanvasGone(cnv)) { bridge->sendReply("/pd/redo/reply/" + correlationId, 0.0f); return; } // P3.4 S4: closed since the handler ran
-                if (proc->getMcp()->hasMcpRedoTransaction(cnv)) {
-                    proc->getMcp()->redoMcpTransaction(cnv);
-                    proc->getMcp()->synchroniseCanvases();
-                    bridge->sendReply("/pd/redo/reply/" + correlationId, 1.0f);
-                } else if (proc->getMcp()->gui().redo(cnv)) {
-                    bridge->sendReply("/pd/redo/reply/" + correlationId, 1.0f);
-                } else {
-                    pd::Interface::redo(cnv);
-                    proc->getMcp()->synchroniseCanvases();
-                    bridge->sendReply("/pd/redo/reply/" + correlationId, 1.0f);
-                }
-            });
-        } else {
-            sendReply("/pd/redo/reply/" + correlationId, 0.0f);
-        }
-    }
-    return;
+    if (msg.size() >= 1 && processor) pdUndoStep(*this, processor, msg, true);
 }
 
 // P3.4 S11 (test-only, registered only with PLUGDATA_MCP_AUDIT=1): the next audio block holds the Pd lock and

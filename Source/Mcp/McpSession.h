@@ -11,31 +11,30 @@
 #include <map>
 #include <unordered_map>
 #include <unordered_set>
+#include <string>
 #include <vector>
 
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_osc/juce_osc.h>
 
 #include "Utility/Config.h"
-#include "Mcp/McpUndoCommand.h" // P4.2 S6: the undo log holds typed commands
 
 extern "C" {
 #include <m_pd.h>
 #include <g_canvas.h>
 }
 
-struct McpTransaction {
-    juce::String canvasName;
-    mcp::UndoCommand forward; // typed (P4.2 S6); replayed as an OSC message by undo and redo
-    mcp::UndoCommand inverse;
-    // Which /pd action the forward/inverse messages are replayed through.
-    // Defaults to batch_atomic (create/connect/edit/delete); moves use move_batch_id.
-    juce::String replayAction = "batch_atomic";
+// P4.4: an id whose object an undo or redo took away, kept so the object that comes back (same text, same place)
+// gets the id again. Pd context only.
+struct McpUndoGhost {
+    std::string id;
+    std::string text;
+    int x = 0, y = 0, index = -1;
 };
 
 struct McpSession {
-    // Atomic: written on the message thread (undo/redo), read on the OSC thread
-    // (batch_atomic dedup / push guards). Plain bool was a cross-thread race.
+    // True while an undo/redo step runs (P4.4: Pd's own queue); the batch de-dup skips its cache then.
+    // Atomic: written in the Pd context, read on the command worker.
     std::atomic<bool> isExecutingMcpUndoRedo { false };
 
     struct AiMark { int state = 0; bool transient = false; };
@@ -355,12 +354,8 @@ struct McpSession {
     // auto-clear can never erase a later *persistent* mark. Message-thread only.
     std::unordered_map<t_gobj*, AiMark> mcpAiOverlay;
     int mcpSuspendedDspState = 0;
-    std::map<t_canvas*, std::vector<McpTransaction>> mcpUndoStack;
-    std::map<t_canvas*, std::vector<McpTransaction>> mcpRedoStack;
-    // Undo/redo stacks are pushed on the OSC thread and read/popped on the
-    // message thread — mcpUndoLock guards all access. Held only for map ops,
-    // never across the nested batch_atomic execution (avoids re-entry deadlock).
-    mutable CriticalSection mcpUndoLock;
+    // P4.4: per canvas, the ids undo/redo took away (newest last, bounded). Pd context only.
+    std::map<t_canvas*, std::vector<McpUndoGhost>> undoJournal;
 
     // MCP zero-dropout WAV recorder — taps outputFifo directly in processBlock.
     // No canvas objects created, no DSP recompile, zero audio dropout.

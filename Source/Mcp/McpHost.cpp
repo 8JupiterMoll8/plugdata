@@ -15,6 +15,7 @@
 #include "Utility/Config.h"
 #include "Mcp/McpAudit.h"
 #include "Mcp/McpRtGuard.h"
+#include "Mcp/McpNativeUndo.h"
 
 extern "C" int ugen_getsortno(void); // d_ugen.c (P3.4 S5)
 
@@ -605,101 +606,128 @@ void McpHost::sendMCPReply(const String& replyAddr, mcp::SysList const& values)
     mcpBridge->sendReply(replyAddr, args);
 }
 
-bool McpHost::hasMcpTransaction(t_canvas* cnv) const
+namespace {
+std::string objectText(t_gobj* g)
 {
-    juce::ScopedLock sl(session.mcpUndoLock);
-    auto it = session.mcpUndoStack.find(cnv);
-    return it != session.mcpUndoStack.end() && !it->second.empty();
+    t_object* ob = pd_checkobject(&g->g_pd);
+    if (!ob || !ob->te_binbuf) return {};
+    char* buf = nullptr;
+    int len = 0;
+    binbuf_gettext(ob->te_binbuf, &buf, &len);
+    std::string text = (buf && len > 0) ? std::string(buf, static_cast<size_t>(len)) : std::string();
+    if (buf) freebytes(buf, static_cast<size_t>(len));
+    return text;
+}
+constexpr size_t kUndoJournalMax = 512;
+} // namespace
+
+bool McpHost::canUndoStep(t_canvas* cnv, bool redo)
+{
+    PdLockScope lock(processor);
+    return redo ? mcp::undo::canRedo(cnv) : mcp::undo::canUndo(cnv);
 }
 
-bool McpHost::hasMcpRedoTransaction(t_canvas* cnv) const
+// P4.4: one step of the canvas's own undo queue (AI and manual edits alike). Pd recreates the objects an undo or
+// redo brings back, so their ids would be lost: the ids of objects the step takes away go to the canvas's journal,
+// and an object that comes back without an id gets the journal id with the same text and position (newest first).
+bool McpHost::undoStep(t_canvas* cnv, bool redo)
 {
-    juce::ScopedLock sl(session.mcpUndoLock);
-    auto it = session.mcpRedoStack.find(cnv);
-    return it != session.mcpRedoStack.end() && !it->second.empty();
-}
+    PdLockScope lock(processor);
+    if (!cnv || !(redo ? mcp::undo::canRedo(cnv) : mcp::undo::canUndo(cnv)))
+        return false;
 
-void McpHost::pushMcpTransaction(t_canvas* cnv, const juce::String& canvasName, const juce::OSCMessage& forward, const juce::OSCMessage& inverse, const juce::String& replayAction)
-{
+    struct Before { std::string id; t_gobj* obj; std::string text; int x, y, index; };
+    std::vector<Before> before;
+    if (auto* ids = identity.findCanvas(cnv)) {
+        std::unordered_map<t_gobj*, int> indexOf; // only objects in the list are read: a map entry may be stale
+        int i = 0;
+        for (t_gobj* g = cnv->gl_list; g; g = g->g_next) indexOf[g] = i++;
+        for (auto const& [id, obj] : *ids) {
+            auto const at = indexOf.find(obj);
+            if (at == indexOf.end()) continue;
+            t_object* ob = pd_checkobject(&obj->g_pd);
+            before.push_back({ id, obj, objectText(obj), ob ? ob->te_xpix : 0, ob ? ob->te_ypix : 0, at->second });
+        }
+    }
+
+    session.isExecutingMcpUndoRedo = true;
     {
-        juce::ScopedLock sl(session.mcpUndoLock);
-        session.mcpUndoStack[cnv].push_back({ canvasName, mcp::undoCommandFrom(forward), mcp::undoCommandFrom(inverse), replayAction });
-        if (session.mcpUndoStack[cnv].size() > 50) {
-            session.mcpUndoStack[cnv].erase(session.mcpUndoStack[cnv].begin());
-        }
-        session.mcpRedoStack[cnv].clear();
+        mcp::undo::EditorScope editor(cnv);
+        if (redo)
+            pd::Interface::redo(cnv);
+        else
+            pd::Interface::undo(cnv);
     }
-    postMessage([this] {
-        for (auto* editor : processor.getEditors()) {
-            editor->triggerAsyncUpdate();
+    session.isExecutingMcpUndoRedo = false;
+
+    std::unordered_set<t_gobj*> live;
+    for (t_gobj* g = cnv->gl_list; g; g = g->g_next) live.insert(g);
+    auto& journal = session.undoJournal[cnv];
+    bool changed = false;
+    for (auto const& b : before) {
+        // Still bound to a live object (the same one, or the one the retype hook moved it to): kept. Gone, or
+        // another object now sits at the old address: the id leaves with its object.
+        t_gobj* now = identity.resolve(cnv, b.id);
+        bool const reused = now == b.obj && objectText(now) != b.text;
+        if (now && live.count(now) && !reused) continue;
+        identity.eraseId(cnv, b.id);
+        journal.push_back({ b.id, b.text, b.x, b.y, b.index });
+        changed = true;
+    }
+    if (journal.size() > kUndoJournalMax)
+        journal.erase(journal.begin(), journal.begin() + static_cast<long>(journal.size() - kUndoJournalMax));
+
+    std::vector<std::string> ids; // resolve() may drop stale entries, so not while walking the map
+    if (auto* map = identity.findCanvas(cnv))
+        for (auto const& entry : *map) ids.push_back(entry.first);
+    std::unordered_set<t_gobj*> tracked;
+    for (auto const& id : ids)
+        if (t_gobj* obj = identity.resolve(cnv, id)) tracked.insert(obj);
+    // Two passes: the same text at the same place (an object brought back), then the same place and index with
+    // another text (a retype undone or redone: Pd recreates the box where it was).
+    for (int pass = 0; pass < 2; ++pass) {
+        int index = 0;
+        for (t_gobj* g = cnv->gl_list; g; g = g->g_next, ++index) {
+            if (tracked.count(g)) continue;
+            t_object* ob = pd_checkobject(&g->g_pd);
+            if (!ob) continue;
+            auto const text = objectText(g);
+            for (auto it = journal.rbegin(); it != journal.rend(); ++it) {
+                bool const samePlace = it->x == ob->te_xpix && it->y == ob->te_ypix;
+                if (!samePlace || (pass == 0 ? it->text != text : it->index != index)) continue;
+                if (identity.resolve(cnv, it->id)) continue; // the id is in use again: leave it there
+                if (identity.bind(cnv, it->id, g) != mcp::IdentityService::BindResult::Refused) {
+                    journal.erase(std::next(it).base());
+                    tracked.insert(g);
+                    changed = true;
+                }
+                break;
+            }
         }
+    }
+    if (changed) identity.bumpVersion(cnv);
+
+    postMessage([this] {
+        for (auto* editor : processor.getEditors())
+            editor->triggerAsyncUpdate();
     });
+    return true;
 }
 
-void McpHost::undoMcpTransaction(t_canvas* cnv)
+void McpHost::journalId(t_canvas* cnv, std::string const& id, t_gobj* obj)
 {
-    // McpTransaction has no default ctor (OSCMessage needs an address), so hold
-    // the popped transaction by pointer.
-    std::unique_ptr<McpTransaction> tx;
-    {
-        juce::ScopedLock sl(session.mcpUndoLock);
-        auto it = session.mcpUndoStack.find(cnv);
-        if (it == session.mcpUndoStack.end() || it->second.empty()) return;
-
-        tx = std::make_unique<McpTransaction>(it->second.back());
-        it->second.pop_back();
-        session.mcpRedoStack[cnv].push_back(*tx);
-    }
-
-    // Execute OUTSIDE the lock — the nested batch_atomic must not re-enter the
-    // stack map while we hold mcpUndoLock.
-    if (mcpBridge && tx) {
-        session.isExecutingMcpUndoRedo = true;
-        mcpBridge->replayPd(tx->replayAction, mcp::oscMessageFrom(tx->inverse));
-        session.isExecutingMcpUndoRedo = false;
-    }
-    postMessage([this] {
-        for (auto* editor : processor.getEditors()) {
-            editor->triggerAsyncUpdate();
-        }
-    });
+    if (!cnv || !obj) return;
+    int index = 0;
+    for (t_gobj* g = cnv->gl_list; g && g != obj; g = g->g_next) ++index;
+    t_object* ob = pd_checkobject(&obj->g_pd);
+    auto& journal = session.undoJournal[cnv];
+    journal.push_back({ id, objectText(obj), ob ? ob->te_xpix : 0, ob ? ob->te_ypix : 0, index });
+    if (journal.size() > kUndoJournalMax)
+        journal.erase(journal.begin());
 }
 
-void McpHost::redoMcpTransaction(t_canvas* cnv)
+void McpHost::forgetCanvasUndo(t_canvas* cnv)
 {
-    std::unique_ptr<McpTransaction> tx;
-    {
-        juce::ScopedLock sl(session.mcpUndoLock);
-        auto it = session.mcpRedoStack.find(cnv);
-        if (it == session.mcpRedoStack.end() || it->second.empty()) return;
-
-        tx = std::make_unique<McpTransaction>(it->second.back());
-        it->second.pop_back();
-        session.mcpUndoStack[cnv].push_back(*tx);
-    }
-
-    if (mcpBridge && tx) {
-        session.isExecutingMcpUndoRedo = true;
-        mcpBridge->replayPd(tx->replayAction, mcp::oscMessageFrom(tx->forward));
-        session.isExecutingMcpUndoRedo = false;
-    }
-    postMessage([this] {
-        for (auto* editor : processor.getEditors()) {
-            editor->triggerAsyncUpdate();
-        }
-    });
-}
-
-void McpHost::clearMcpTransactions(t_canvas* cnv)
-{
-    {
-        juce::ScopedLock sl(session.mcpUndoLock);
-        session.mcpUndoStack.erase(cnv);
-        session.mcpRedoStack.erase(cnv);
-    }
-    postMessage([this] {
-        for (auto* editor : processor.getEditors()) {
-            editor->triggerAsyncUpdate();
-        }
-    });
+    PdLockScope lock(processor);
+    session.undoJournal.erase(cnv);
 }

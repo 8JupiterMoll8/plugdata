@@ -133,24 +133,6 @@ void mcp::BatchJob::frameCreated(MCPBridge& bridge)
     }
 }
 
-void mcp::BatchJob::resetUndo()
-{
-    // MCP mutations never register correct Pd undo actions, yet they
-    // still reorder/free objects that pre-existing index-based undo
-    // entries point at (delete shifts indices; encapsulate/GOP/refactor
-    // and clear/load replace objects outright). Any such entry left on
-    // the queue makes the NEXT undo/redo dereference freed memory — the
-    // recurring "unsupported undo command <garbage int>" segfault.
-    // Flushing only on deletes was NOT enough: a create/edit/move after
-    // a delete re-populates the queue with entries that a later
-    // object-freeing op invalidates. The only provably-safe state for
-    // the queue after ANY MCP mutation is EMPTY.
-    if (created > 0 || connected > 0 || edited > 0 || deleted > 0 || disconnected > 0 || layoutSanitizedMoved > 0 || occlusionsFixed > 0) {
-        resetCanvasUndo(processor, canvasName);
-        undoReset = true;
-    }
-}
-
 void MCPBridge::pdBatchAtomic(const juce::String& action, const juce::OSCMessage& msg)
 {
     // /pd/batch_atomic <canvas> <corrId> <deleteCount> <disconnectCount> <editCount> <createCount> <connectCount> [data...]
@@ -245,8 +227,6 @@ void MCPBridge::pdBatchAtomic(const juce::String& action, const juce::OSCMessage
 
         job.runLayoutGuard(*this);
         job.frameCreated(*this);
-        job.resetUndo();
-        job.recordUndo(msg);
         auto reply = job.buildReply();
 
         sender.send(reply);

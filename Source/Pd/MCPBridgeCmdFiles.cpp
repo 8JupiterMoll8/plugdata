@@ -412,9 +412,6 @@ void MCPBridge::pdLoadPatch(const juce::String& action, const juce::OSCMessage& 
                 // Clear/free replaced every prior object — its index-based
                 // undo entries now dangle. Reset the queue to stay crash-safe.
                 resetCanvasUndo(proc, canvasName);
-                // Also drop MCP transactions: their inverse deltas reference
-                // the objects we just replaced and would fire on dead tempIds.
-                if (cnv) proc->getMcp()->clearMcpTransactions(cnv);
 
                 // arg0 = objectCount, arg1 = undoReset.
                 juce::Array<juce::var> loadReplyArgs;

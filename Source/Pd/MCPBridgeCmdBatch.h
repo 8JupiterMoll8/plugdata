@@ -8,8 +8,9 @@
 // request and the outcome through the stages, each in its own context:
 //   parse (command worker)            MCPBridgeCmdBatchParse.cpp
 //   runPdJob (Pd context, sys_lock)   MCPBridgeCmdBatchPd.cpp + MCPBridgeCmdBatchConnect.cpp
-//   runLayoutGuard, frameCreated (message thread), resetUndo   MCPBridgeCmdBatch.cpp
-//   recordUndo, buildReply (command worker)                    MCPBridgeCmdBatchReply.cpp
+//   runLayoutGuard, frameCreated (message thread)               MCPBridgeCmdBatch.cpp
+//   buildReply (command worker)                                 MCPBridgeCmdBatchReply.cpp
+// Undo (Plan 4 P4.4): runPdJob registers Pd's own undo actions, one sequence per batch (Mcp/McpNativeUndo.h).
 // The fields are the old pdBatchAtomic locals, unchanged.
 
 #pragma once
@@ -85,26 +86,12 @@ struct BatchJob {
     struct DetectedConn { std::string srcId; int srcOut; std::string destId; int destIn; };
     std::vector<DetectedConn> detectedConnections;
 
-    // ── Undo capture (Stage 2 coverage: edits + deletes) ──────────────
-    // Filled inside the audio lambda BEFORE the mutation, consumed by the
-    // inverse-message builder below. Message-delta only — never pointers.
-    struct DeletedSnapshot {
-        juce::String tempId, kind, type;
-        juce::StringArray args;
-        int x = 0, y = 0;
-    };
-    std::vector<DeletedSnapshot> deletedSnapshots;
-    struct UndoWire { juce::String srcId; int srcOut; juce::String destId; int destIn; };
-    std::vector<UndoWire> deletedWires;
-    struct EditUndo { juce::String objectId, type; juce::StringArray args; };
-    std::vector<EditUndo> editUndoEntries;
-
     t_canvas* cnv = nullptr;
     // Bug #11 (fault gauntlet 2026-09-09): strict canvas resolution.
     // Unknown names must NOT silently fall back to the focused/root
     // canvas — name the failure instead of mutating the wrong patch.
     bool canvasNotFound = false;
-    bool undoReset = false;
+    bool undoReset = false; // the reply's undoReset fact: always false since P4.4 (no flush)
     bool pdLockBusy = false; // P3.4 S11: parse could not take the Pd lock within 2 s (nothing applied)
 
     void parse(const juce::OSCMessage& msg);
@@ -118,8 +105,6 @@ struct BatchJob {
     void scanConnections(const std::string& canonStr);
     void runLayoutGuard(MCPBridge& bridge);
     void frameCreated(MCPBridge& bridge);
-    void resetUndo();
-    void recordUndo(const juce::OSCMessage& msg);
     juce::OSCMessage buildReply();
 };
 

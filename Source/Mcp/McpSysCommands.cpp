@@ -8,6 +8,7 @@
  // McpHost undo/redo replays a move transaction through it.
  */
 #include "Mcp/McpSysCommon.h"
+#include "Mcp/McpNativeUndo.h"
 
 // Empties a canvas's native undo queue. Caller holds the Pd lock. Pd keeps an UNDO_INIT action at the
 // head of every queue (canvas_undo_init at canvas creation, g_canvas.c) and canvas_undo_undo walks back
@@ -232,39 +233,22 @@ void McpHost::sysClearUndo(SmallString const& selector, mcp::SysList const& list
     // receiveSysMessage, synchronously on the caller's thread (command worker,
     // message thread or a Pd job). canvas_undo_free calls canvas_suspend_dsp,
     // which needs the Pd lock: taken here (recursive when the caller holds it).
-    // While an MCP undo/redo replays its batch, that batch's own clear must leave the MCP stacks alone:
-    // the undo has just moved the transaction to the redo stack (and back), and wiping it here made every
-    // redo after an undo of a batch a no-op (P3.4 S2, found once L12 was fixed).
-    bool const replaying = session.isExecutingMcpUndoRedo.load();
+    // Plan 4 P4.4: only the ops that replace a canvas's content (load, clear of a whole file, encapsulate/GOP,
+    // /pd/clear_undo) still come here; batches and moves register Pd's own undo actions instead.
     processor.setThis();
     sys_lock();
     auto wipeCanvasUndo = [](t_canvas* c) { resetNativeUndo(c); };
 
-    // #28b: the MCP transaction stacks are a SEPARATE undo layer from the
-    // native canvas undo. Wiping only the native queue (canvas_undo_free)
-    // left stale MCP transactions armed — the next undo then replayed a
-    // pre-restructure inverse against a canvas it no longer matched (silent
-    // no-op) yet still reported success ("undo succeeded" while the
-    // encapsulate stood). Clear BOTH layers together, so after any op that
-    // flushes the native stack (encapsulate / GOP / refactor / clear / load)
-    // undo is honest — empty → reply 0.0 — instead of a false success.
     if (list.size() >= 1) {
         auto canvas_symbol = list[0].toString();
-        t_canvas* cnv = getCanvasBySymbol(canvas_symbol);
-        if (cnv) {
+        if (t_canvas* cnv = getCanvasBySymbol(canvas_symbol))
             wipeCanvasUndo(cnv);
-            if (!replaying)
-                clearMcpTransactions(cnv);
-        }
     }
 
     // Always also wipe undo on top-level root patch and all open canvas roots
     // so subpatch mutations never leave armed undo actions on the parent canvas.
-    for (t_canvas* root = pd_this->pd_canvaslist; root; root = root->gl_next) {
+    for (t_canvas* root = pd_this->pd_canvaslist; root; root = root->gl_next)
         wipeCanvasUndo(root);
-        if (!replaying)
-            clearMcpTransactions(root);
-    }
     sys_unlock();
 }
 
@@ -634,11 +618,12 @@ void McpHost::sysMoveBatchId(SmallString const& selector, mcp::SysList const& li
         auto correlation_id = list[1].toString();
 
         int movedCount = 0;
-        struct MoveUndo { juce::String id; int oldX, oldY, newX, newY; };
-        std::vector<MoveUndo> moveUndo;
         sys_lock();
         t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
         if (canvas) {
+            // P4.4: one undo step (Pd's own motion entry), in the canvas's one history.
+            mcp::undo::beginStep(canvas);
+            mcp::undo::motion(canvas);
             for (int i = 2; i + 2 < list.size(); i += 3) {
                 auto object_id = list[i].toString();
                 int x = (int)list[i+1].getFloat();
@@ -646,36 +631,15 @@ void McpHost::sysMoveBatchId(SmallString const& selector, mcp::SysList const& li
 
                 t_gobj* targetObj = resolveStableId(canvas_symbol, object_id);
                 if (targetObj) {
-                    int ox = 0, oy = 0, ow = 0, oh = 0;
-                    pd::Interface::getObjectBounds(canvas, targetObj, &ox, &oy, &ow, &oh);
                     pd::Interface::moveObject(canvas, targetObj, x, y);
                     movedCount++;
-                    if (ox != x || oy != y)
-                        moveUndo.push_back({ object_id, ox, oy, x, y });
                 }
             }
-            if (movedCount > 0) {
+            mcp::undo::endStep(canvas);
+            if (movedCount > 0)
                 canvas_dirty(canvas, 1);
-                resetNativeUndo(canvas);
-            }
         }
         sys_unlock();
-
-        // Register an undoable move (message-delta, replayed via move_batch_id).
-        // Skipped while an undo/redo is replaying so we never push recursively.
-        if (canvas && !moveUndo.empty() && !session.isExecutingMcpUndoRedo) {
-            juce::OSCMessage fwd { juce::OSCAddressPattern("/pd/move_batch_id") };
-            juce::OSCMessage inv { juce::OSCAddressPattern("/pd/move_batch_id") };
-            fwd.addArgument(canvas_symbol);
-            inv.addArgument(canvas_symbol);
-            fwd.addArgument(correlation_id);
-            inv.addArgument(correlation_id);
-            for (auto const& m : moveUndo) {
-                fwd.addArgument(m.id); fwd.addArgument(static_cast<float>(m.newX)); fwd.addArgument(static_cast<float>(m.newY));
-                inv.addArgument(m.id); inv.addArgument(static_cast<float>(m.oldX)); inv.addArgument(static_cast<float>(m.oldY));
-            }
-            pushMcpTransaction(canvas, canvas_symbol, fwd, inv, "move_batch_id");
-        }
 
         mcp::SysList atoms; // P3.4 S7: plain values, no Pd symbols
         atoms.add((float)movedCount);

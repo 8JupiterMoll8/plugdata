@@ -54,12 +54,16 @@ public:
     // "mcp_telemetry_reply" message it also sent had no receiver anywhere (the Lua bridge was retired).
     void sendMCPReply(const String& replyAddr, mcp::SysList const& values);
 
-    bool hasMcpTransaction(t_canvas* cnv) const;
-    bool hasMcpRedoTransaction(t_canvas* cnv) const;
-    void pushMcpTransaction(t_canvas* cnv, const juce::String& canvasName, const juce::OSCMessage& forward, const juce::OSCMessage& inverse, const juce::String& replayAction = "batch_atomic");
-    void undoMcpTransaction(t_canvas* cnv);
-    void redoMcpTransaction(t_canvas* cnv);
-    void clearMcpTransactions(t_canvas* cnv);
+    // P4.4: one undo history per canvas, Pd's own queue, for AI and manual edits. One step back (or forward); false
+    // when there was nothing to take. Ids of objects the step takes away come back with the objects (undo journal).
+    // Takes the Pd lock; any thread that may lock Pd.
+    bool undoStep(t_canvas* cnv, bool redo);
+    bool canUndoStep(t_canvas* cnv, bool redo);
+    // The canvas is going away: drop its undo journal.
+    void forgetCanvasUndo(t_canvas* cnv);
+    // An MCP edit is about to take `obj` (named `id`) away in an undoable step: its id goes to the journal, so an
+    // undo that brings the object back gives it the id again. Pd context (lock held).
+    void journalId(t_canvas* cnv, std::string const& id, t_gobj* obj);
     bool settingsChanged(String const& name, var const& value);
     void mcpSettingsChanged(String const& name, var const& value);
     t_canvas* getCanvasBySymbol(const String& canvas_symbol);

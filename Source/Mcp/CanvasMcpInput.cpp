@@ -489,11 +489,9 @@ bool CanvasMcpLayer::keyPressedForCanvas(KeyPress const& key)
 
 void CanvasMcpLayer::canvasDestroyed()
 {
-    // Drop this canvas's MCP undo/redo transactions. Without this the stacks
-    // leak (<=50 full forward+inverse messages each) and, worse, a later canvas
-    // could reuse the freed t_canvas* address and inherit a stale stack.
+    // Drop this canvas's undo journal (P4.4), so a later canvas at the same address never inherits it.
     if (!canvas.isGraph)
-        canvas.pd->getMcp()->clearMcpTransactions(canvas.patch.getUncheckedPointer());
+        canvas.pd->getMcp()->forgetCanvasUndo(canvas.patch.getUncheckedPointer());
 }
 
 void CanvasMcpLayer::canvasSynchronised()
@@ -503,43 +501,21 @@ void CanvasMcpLayer::canvasSynchronised()
     }
 }
 
-// The GUI's Ctrl+Z / Ctrl+Y over two stacks, newest first (Plan 3 P3.4 S3). Every MCP mutation empties
-// Pd's native undo queue (resetCanvasUndo, move_batch_id), so a native entry is always NEWER than every MCP
-// transaction: undo the native stack first, then the AI's transactions. Before, the MCP stack went first;
-// that was harmless only while finding L12 kept it empty after a batch_atomic. With L12 fixed, a GUI drag
-// after an AI build undid the whole build instead of the drag (s8-input-check). /pd/undo (the AI's own undo)
-// still takes the MCP transaction first. The two-layer design itself is Plan 4 P4.4's to replace.
+// The GUI's Ctrl+Z / Ctrl+Y (Plan 4 P4.4): ONE history, the canvas's own Pd undo queue, which holds AI and manual
+// edits in time order (every MCP mutation registers Pd's own undo actions, one sequence per AI call). The host's
+// step keeps the AI's ids on the objects an undo or redo brings back. false = nothing to undo/redo.
 bool CanvasMcpLayer::undo()
 {
-    if (canvas.patch.canUndo()) {
-        canvas.patch.undo();
-        return true;
-    }
-    if (canvas.pd && canvas.pd->getMcp()->hasMcpTransaction(canvas.patch.getUncheckedPointer())) {
-        canvas.pd->getMcp()->undoMcpTransaction(canvas.patch.getUncheckedPointer());
-        return true;
-    }
-    return false;
+    return canvas.pd && canvas.pd->getMcp()->undoStep(canvas.patch.getUncheckedPointer(), false);
 }
 
 bool CanvasMcpLayer::redo()
 {
-    // Native redo entries exist only after native undos, which only undo entries newer than every MCP
-    // transaction (an MCP undo empties the native queue), so they go first here too.
-    if (canvas.patch.canRedo()) {
-        canvas.patch.redo();
-        return true;
-    }
-    if (canvas.pd && canvas.pd->getMcp()->hasMcpRedoTransaction(canvas.patch.getUncheckedPointer())) {
-        canvas.pd->getMcp()->redoMcpTransaction(canvas.patch.getUncheckedPointer());
-        return true;
-    }
-    return false;
+    return canvas.pd && canvas.pd->getMcp()->undoStep(canvas.patch.getUncheckedPointer(), true);
 }
 
 bool CanvasMcpLayer::canUndo()
 {
-    if (canvas.pd && canvas.pd->getMcp()->hasMcpTransaction(canvas.patch.getUncheckedPointer())) return true;
     return canvas.patch.canUndo();
 }
 
@@ -603,6 +579,5 @@ bool CanvasMcpLayer::handleContextMenuResult(int const result)
 
 bool CanvasMcpLayer::canRedo()
 {
-    if (canvas.pd && canvas.pd->getMcp()->hasMcpRedoTransaction(canvas.patch.getUncheckedPointer())) return true;
     return canvas.patch.canRedo();
 }

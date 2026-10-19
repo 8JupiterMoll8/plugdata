@@ -8,9 +8,9 @@
 // inbound OSC messages through it (Plan 3 P3.3).
 
 #include "MCPBridge.h"
+#include "PluginProcessor.h" // logWarning (the argument-count guard)
 #include "MCPBridgeInternal.h"
 #include "Mcp/McpAudit.h"
-#include "PluginProcessor.h" // logWarning in replayPd
 
 MCPBridge::VerbTable const& MCPBridge::commandTable()
 {
@@ -82,13 +82,3 @@ void MCPBridge::replyUnknownVerb(const juce::String& domain, const juce::String&
     sender.send(reply);
 }
 
-// An undo/redo step whose verb the table does not serve is already moved to the other
-// stack by the caller; say so instead of dropping it silently (P3.4 S9, S5 review note (b)).
-void MCPBridge::replayPd(const juce::String& action, const juce::OSCMessage& msg)
-{
-    if (!dispatchRegistered("pd", action, msg)) {
-        juce::String const line = "MCP undo/redo: no handler for /pd/" + action + ", the step was not replayed";
-        if (processor) processor->logWarning(line);
-        sendConsoleLog(line, false);
-    }
-}

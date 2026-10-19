@@ -4,83 +4,9 @@
  // WARRANTIES, see the file, "LICENSE.txt," in this distribution.
 */
 
-// batch_atomic stages 4-5 (P3.4 S9): the undo record and the reply, on the command worker.
+// batch_atomic stage 4 (P3.4 S9): the reply, on the command worker.
 
 #include "MCPBridgeCmdBatch.h"
-
-void mcp::BatchJob::recordUndo(const juce::OSCMessage& msg)
-{
-    // Stage 2: Register with Unified C++ Transaction Engine for GUI Ctrl+Z / Undo
-    if (processor && cnv && !processor->getMcp()->session.isExecutingMcpUndoRedo) {
-        if (created > 0 || connected > 0 || disconnected > 0 || edited > 0 || deleted > 0) {
-            juce::OSCMessage invMsg { juce::OSCAddressPattern("/pd/batch_atomic") };
-            invMsg.addArgument(canvasName);
-            invMsg.addArgument(juce::String("inv_" + correlationId));
-
-            // Header counts: deletes, disconnects, edits, creates, connects
-            invMsg.addArgument(static_cast<float>(pendingCreates.size()));               // deleteCount
-            invMsg.addArgument(static_cast<float>(allConns.size()));                     // disconnectCount
-            invMsg.addArgument(static_cast<float>(editUndoEntries.size()));              // editCount
-            invMsg.addArgument(static_cast<float>(deletedSnapshots.size()));             // createCount
-            invMsg.addArgument(static_cast<float>(preDisconnects.size() + deletedWires.size())); // connectCount
-
-            // 1. DELETES: delete all objects created in pendingCreates
-            for (auto const& pc : pendingCreates) {
-                invMsg.addArgument(pc.tempId);
-            }
-
-            // 2. DISCONNECTS: disconnect all connections made in allConns
-            for (auto const& c : allConns) {
-                invMsg.addArgument(c.srcId);
-                invMsg.addArgument(static_cast<float>(c.srcOut));
-                invMsg.addArgument(c.destId);
-                invMsg.addArgument(static_cast<float>(c.destIn));
-            }
-
-            // 3. EDITS: edit each object back to its pre-mutation text
-            for (auto const& eu : editUndoEntries) {
-                invMsg.addArgument(eu.objectId);
-                invMsg.addArgument(eu.type);
-                invMsg.addArgument(static_cast<float>(eu.args.size()));
-                for (auto const& a : eu.args) invMsg.addArgument(a);
-            }
-
-            // 4. CREATES: recreate every deleted object (tempId, x, y, kind, type, args...)
-            for (auto const& ds : deletedSnapshots) {
-                invMsg.addArgument(ds.tempId);
-                invMsg.addArgument(static_cast<float>(ds.x));
-                invMsg.addArgument(static_cast<float>(ds.y));
-                invMsg.addArgument(ds.kind);
-                invMsg.addArgument(ds.type);
-                invMsg.addArgument(static_cast<float>(ds.args.size()));
-                for (auto const& a : ds.args) invMsg.addArgument(a);
-            }
-
-            // 5. CONNECTS: reconnect wires cut in the forward (pre-disconnect
-            //    + every wire that touched a deleted object)
-            for (auto const& pdc : preDisconnects) {
-                invMsg.addArgument(pdc.srcId);
-                invMsg.addArgument(static_cast<float>(pdc.srcOut));
-                invMsg.addArgument(pdc.destId);
-                invMsg.addArgument(static_cast<float>(pdc.destIn));
-            }
-            for (auto const& w : deletedWires) {
-                invMsg.addArgument(w.srcId);
-                invMsg.addArgument(static_cast<float>(w.srcOut));
-                invMsg.addArgument(w.destId);
-                invMsg.addArgument(static_cast<float>(w.destIn));
-            }
-
-            // Layout flags: no autolayout on undo
-            invMsg.addArgument(0.0f);
-            invMsg.addArgument(static_cast<float>(layoutPad));
-            invMsg.addArgument(static_cast<float>(layoutSnap));
-            invMsg.addArgument(0.0f);
-
-            processor->getMcp()->pushMcpTransaction(cnv, canvasName, msg, invMsg);
-        }
-    }
-}
 
 juce::OSCMessage mcp::BatchJob::buildReply()
 {

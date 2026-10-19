@@ -7,6 +7,7 @@
 // Bridge commands: layout (tidy, align, zoom, deoverlap, guard, compose, pillars, flow) (Plan 3 P3.3): handlers moved unchanged out of MCPBridge::handlePdDomain.
 
 #include "MCPBridgeCmdCommon.h"
+#include "Mcp/McpNativeUndo.h"
 
 void MCPBridge::pdTidy(const juce::String& action, const juce::OSCMessage& msg)
 {
@@ -76,7 +77,7 @@ void MCPBridge::pdAlign(const juce::String& action, const juce::OSCMessage& msg)
                     return;
                 }
 
-                resetCanvasUndo(proc, canvasName);
+                // P4.4: plugdata's own align registered its undo, in the canvas's one history: no flush.
                 bridge->sendReply("/pd/align/reply/" + correlationId, 1.0f);
             });
         } else {
@@ -205,6 +206,7 @@ void MCPBridge::pdDeoverlap(const juce::String& action, const juce::OSCMessage& 
         }
 
         int moved = 0;
+        auto const before = mcp::undo::positions(cnv); // P4.4: one undo step for the whole pass
         for (auto& r : rects) {
             int ox = 0, oy = 0, ow = 0, oh = 0;
             pd::Interface::getObjectBounds(cnv, r.g, &ox, &oy, &ow, &oh);
@@ -215,7 +217,7 @@ void MCPBridge::pdDeoverlap(const juce::String& action, const juce::OSCMessage& 
         }
         if (moved > 0) {
             canvas_dirty(cnv, 1);
-            resetCanvasUndo(processor, canvasName);
+            mcp::undo::movedSince(cnv, before);
         }
         sys_unlock();
 
@@ -252,9 +254,10 @@ void MCPBridge::pdLayoutGuard(const juce::String& action, const juce::OSCMessage
     }
 
     sys_lock();
+    auto const before = mcp::undo::positions(cnv); // P4.4: one undo step, only when something moved
     int moved = sanitizeLayout(processor, cnv, guardPad, guardSnap);
     int occlusions = fixOccl ? fixOcclusions(processor, cnv, guardPad, guardSnap) : 0;
-    if (moved > 0 || occlusions > 0) resetCanvasUndo(processor, canvasName);
+    if (moved > 0 || occlusions > 0) mcp::undo::movedSince(cnv, before);
     sys_unlock();
 
     processor->getMcp()->enqueuePd([p = processor] { p->getMcp()->synchroniseCanvases(); });
@@ -279,8 +282,9 @@ void MCPBridge::pdCompose(const juce::String& action, const juce::OSCMessage& ms
     if (!cnv) { sendReply(replyAddr, 0.0f); return; }
 
     sys_lock();
+    auto const before = mcp::undo::positions(cnv); // P4.4: one undo step, only when something moved
     int moved = composeLayout(processor, cnv, canvasName, pad, snap);
-    if (moved > 0) resetCanvasUndo(processor, canvasName);
+    if (moved > 0) mcp::undo::movedSince(cnv, before);
     sys_unlock();
 
     processor->getMcp()->enqueuePd([p = processor] { p->getMcp()->synchroniseCanvases(); });
@@ -361,6 +365,7 @@ void MCPBridge::pdPillars(const juce::String& action, const juce::OSCMessage& ms
         }
 
         int moved = 0;
+        auto const before = mcp::undo::positions(cnv); // P4.4: one undo step for the whole pass
         for (auto& r : rects) {
             int ox = 0, oy = 0, ow = 0, oh = 0;
             pd::Interface::getObjectBounds(cnv, r.g, &ox, &oy, &ow, &oh);
@@ -371,7 +376,7 @@ void MCPBridge::pdPillars(const juce::String& action, const juce::OSCMessage& ms
         }
         if (moved > 0) {
             canvas_dirty(cnv, 1);
-            resetCanvasUndo(processor, canvasName);
+            mcp::undo::movedSince(cnv, before);
         }
         sys_unlock();
 
@@ -582,6 +587,7 @@ void MCPBridge::pdFlow(const juce::String& action, const juce::OSCMessage& msg)
         }
 
         int moved = 0;
+        auto const before = mcp::undo::positions(cnv); // P4.4: one undo step for the whole pass
         for (auto& r : rects) {
             int ox = 0, oy = 0, ow = 0, oh = 0;
             pd::Interface::getObjectBounds(cnv, r.g, &ox, &oy, &ow, &oh);
@@ -592,7 +598,7 @@ void MCPBridge::pdFlow(const juce::String& action, const juce::OSCMessage& msg)
         }
         if (moved > 0) {
             canvas_dirty(cnv, 1);
-            resetCanvasUndo(processor, canvasName);
+            mcp::undo::movedSince(cnv, before);
         }
         sys_unlock();
 

@@ -460,7 +460,7 @@ public:
     static juce::String canonicalCanvasKey(t_canvas* cnv);
 
     friend class ProbeManager;
-    friend class McpHost; // replays undo/redo transactions through replayPd
+    friend class McpHost;
     friend struct mcp::BatchJob; // batch_atomic stages (P3.4 S9) use the layout and diagnose helpers
 
 private:
@@ -473,8 +473,6 @@ private:
     bool dispatchRegistered(const juce::String& domain, const juce::String& pathVerb, const juce::OSCMessage& msg);
     // A message no row serves gets /bridge/unknown_verb [address, domain, verb] (capability unknown_verb_reply).
     void replyUnknownVerb(const juce::String& domain, const juce::String& pathVerb, const juce::OSCMessage& msg);
-    // McpHost undo/redo replays a recorded /pd transaction (batch_atomic, move_batch_id) by its verb.
-    void replayPd(const juce::String& action, const juce::OSCMessage& msg);
     // P3.4 S11: /pd/debug_stall_audio <ms> <corrId>, a table row only with PLUGDATA_MCP_AUDIT=1 (see commandTable).
     void pdDebugStallAudio(const juce::String& action, const juce::OSCMessage& msg);
 
