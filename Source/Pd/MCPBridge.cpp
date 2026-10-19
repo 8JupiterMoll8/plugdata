@@ -4,6 +4,7 @@
  // WARRANTIES, see the file, "LICENSE.txt," in this distribution.
 */
 
+#include <cmath>
 #include "MCPBridgeCmdCommon.h"
 #include "Mcp/McpRtGuard.h"
 #include "Mcp/McpAudit.h"
@@ -3759,14 +3760,27 @@ void MCPBridge::sendReferenceImage(const juce::String& path, float x, float y, f
     sender.send(msg);
 }
 
+// P4.2 S4: the one place a reply number gets its OSC type. A whole number goes out as int32 (a count, an index),
+// anything else as float32. Values are unchanged; TypeScript reads both as Number.
+static void addReplyNumber(juce::OSCMessage& msg, double value)
+{
+    constexpr double int32Limit = 2147483647.0;
+    if (std::isfinite(value) && value == std::floor(value) && std::abs(value) <= int32Limit)
+        msg.addInt32(static_cast<juce::int32>(value));
+    else
+        msg.addFloat32(static_cast<float>(value));
+}
+
 void MCPBridge::sendReply(const juce::String& addressPattern, const juce::Array<juce::var>& args)
 {
     if (!canReply()) return;
 
     juce::OSCMessage msg { juce::OSCAddressPattern(addressPattern) };
     for (auto const& v : args) {
-        if (v.isDouble() || v.isInt() || v.isInt64()) {
-            msg.addArgument(static_cast<float>(v));
+        if (v.isInt() || v.isInt64()) {
+            msg.addInt32(static_cast<juce::int32>(static_cast<juce::int64>(v)));
+        } else if (v.isDouble()) {
+            addReplyNumber(msg, static_cast<double>(v));
         } else {
             msg.addArgument(v.toString());
         }
@@ -3779,7 +3793,7 @@ void MCPBridge::sendReply(const juce::String& addressPattern, float val)
     if (!canReply()) return;
 
     juce::OSCMessage msg { juce::OSCAddressPattern(addressPattern) };
-    msg.addArgument(val);
+    addReplyNumber(msg, static_cast<double>(val));
     sender.send(msg);
 }
 
