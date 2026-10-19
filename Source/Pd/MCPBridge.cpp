@@ -167,6 +167,13 @@ bool MCPBridge::start()
     return active.load();
 }
 
+namespace {
+std::int64_t v2NowMs() // the router's clock (ReplyQueue::nowMs is the same steady clock)
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+}
+
 bool MCPBridge::startV2()
 {
     if (v2Server.running())
@@ -184,6 +191,7 @@ bool MCPBridge::startV2()
     };
     // P4.1 S3: requests in, sessions in and out, the async deadline clock. All on V2 threads: they only post.
     config.onRequest = [this](int session, mcp::v2::Request request) { return admitV2(session, std::move(request)); };
+    config.onStatus = [this](int session, mcp::v2::Request request) { return v2Router.status(session, request.id, request.key, v2NowMs()); };
     config.onSessionOpened = [this](int session, bool telemetry) { v2Router.sessionOpened(session, telemetry); };
     config.onSessionClosed = [this](int session) { v2Router.sessionClosed(session); };
     config.onTick = [this] {
@@ -202,15 +210,9 @@ bool MCPBridge::startV2()
 void MCPBridge::stopV2()
 {
     v2Server.stop(); // sessions get bye{shutting_down}; their pending requests are dropped as they close
-    v2Router.close();
+    v2Router.close(v2NowMs());
 }
 
-namespace {
-std::int64_t v2NowMs() // the router's clock (ReplyQueue::nowMs is the same steady clock)
-{
-    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-}
-}
 
 // V2Read thread: the same verb resolution as dispatchRegistered, the schema row, admission, then the identical
 // juce::OSCMessage a datagram would give, posted to the one command worker.
@@ -260,6 +262,8 @@ std::optional<mcp::v2::RequestAnswer> MCPBridge::admitV2(int session, mcp::v2::R
     auto admission = v2Router.admit(session, request, meta, v2NowMs());
     if (admission.reply)
         return mcp::v2::RequestAnswer { std::move(*admission.reply), admission.closeSession };
+    if (!admission.origin)
+        return std::nullopt; // S4: joined a running request under its key: it must NOT run again (S4 review CRITICAL)
     auto work = std::make_shared<mcp::v2::Work>(admission.origin, [gate = v2Done](mcp::v2::OriginPtr const& o) { gate->done(o); });
     if (!commandWorker.post(Command { std::move(*message), work })) {
         work->disarm(); // answered here instead

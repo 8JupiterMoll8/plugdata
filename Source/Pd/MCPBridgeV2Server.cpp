@@ -432,6 +432,8 @@ private:
             }
             [[fallthrough]];
         case Kind::Status:
+            if (f.kind == Kind::Status && shared->config.onStatus)
+                return post(shared->config.onStatus(sessionNo, f.req));
             return post(encodeRejected(f.req.id, ErrorCode::ProtocolUnsupported, "this bridge does not serve v2 requests yet"));
         case Kind::Claim:
         case Kind::Release:

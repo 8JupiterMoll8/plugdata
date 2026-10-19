@@ -24,6 +24,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -156,11 +157,15 @@ struct V2Link {
     std::vector<std::string> finalIds;
     int next = 0;
 
-    void sendReq(std::string const& id, char const* address, std::string const& args, bool noReply = false)
+    // S4: every request carries an idempotency key (mutating verbs need one); `key` "" = a fresh one.
+    void sendReq(std::string const& id, char const* address, std::string const& args, bool noReply = false, std::string key = {})
     {
+        static int keySeq = 0;
+        if (key.empty())
+            key = "mbt:" + std::to_string(++keySeq);
         sentIds.push_back(id);
         client.sendFrame(R"({"t":"req","id":)" + mcp::v2::json::quote(id) + ",\"verb\":" + mcp::v2::json::quote(address)
-            + ",\"args\":" + args + (noReply ? ",\"noReply\":true}" : "}"));
+            + ",\"key\":" + mcp::v2::json::quote(key) + ",\"args\":" + args + (noReply ? ",\"noReply\":true}" : "}"));
     }
 
     // The next frame (stashed ones first) matching `want`, waiting up to timeoutMs; others are stashed.
@@ -879,18 +884,24 @@ void clearMain(Harness& v1, char const* corr)
     sleepMs(200);
 }
 
-// A batch_atomic of `count` plain [f] boxes, over v2; true when it created them all.
-bool v2Boxes(V2Link& link, std::string const& id, int count, int first)
+// The args of a batch_atomic of `count` plain [f] boxes named n<first>... (corr id `id`).
+std::string boxArgs(std::string const& id, int count, int first, std::string const& canvas = "main")
 {
     std::vector<mcp::v2::Arg> args;
     auto const s = [&](std::string v) { mcp::v2::Arg a; a.s = std::move(v); args.push_back(std::move(a)); };
     auto const i = [&](int v) { mcp::v2::Arg a; a.type = 'i'; a.i = v; args.push_back(a); };
-    s("main"); s(id); i(0); i(0); i(0); i(count); i(0);
+    s(canvas); s(id); i(0); i(0); i(0); i(count); i(0);
     for (int k = first; k < first + count; ++k) {
         s("n" + std::to_string(k)); i((k % 100) * 70); i((k / 100) * 30); s("obj"); s("f"); i(0);
     }
     i(0); i(5); i(10); i(0);
-    link.sendReq(id, "/pd/batch_atomic", mcp::v2::encodeArgs(args));
+    return mcp::v2::encodeArgs(args);
+}
+
+// A batch_atomic of `count` plain [f] boxes, over v2; true when it created them all.
+bool v2Boxes(V2Link& link, std::string const& id, int count, int first)
+{
+    link.sendReq(id, "/pd/batch_atomic", boxArgs(id, count, first));
     auto const f = link.take([&](auto const& v) { auto const* fin = v.find("final"); return field(v, "id") == id && fin && fin->boolean; }, 60000);
     if (!f || field(*f, "outcome") != "applied")
         return false;
@@ -965,6 +976,171 @@ void runV2DispatchCases(Harness& h, MCPBridge& bridge)
         CHECK(seen && parseJson(*seen)["objects"][0]["id"].toString() == "renamed_by_v1");
         clearMain(v1, "c6");
     }
+}
+
+// P4.1 S4: a welcomed v2 session of the bridge's own listener.
+std::unique_ptr<V2Link> v2Connect()
+{
+    auto const [port, token] = v2Discovery();
+    auto link = std::make_unique<V2Link>(port);
+    link->client.sendFrame(mcp::v2::test::helloJson(token));
+    CHECK(link->take([](auto const& v) { return field(v, "t") == "welcome"; }, 3000).has_value());
+    return link;
+}
+
+std::optional<mcp::v2::json::Value> finalFor(V2Link& link, std::string const& id, int ms = 5000)
+{
+    return link.take([&](auto const& v) { auto const* f = v.find("final"); return field(v, "id") == id && f && f->boolean; }, ms);
+}
+
+bool replayed(std::optional<mcp::v2::json::Value> const& f)
+{
+    auto const* r = f ? f->find("replayed") : nullptr;
+    return r && r->boolean;
+}
+
+int objectCount(Harness& v1, char const* corr)
+{
+    auto const c = v1.call("/pd/census", { "main", corr }, std::string("/pd/census/reply/") + corr);
+    return c ? static_cast<int>(parseJson(*c)["objectCount"]) : -1;
+}
+
+std::pair<int, int> positionOf(Harness& v1, char const* id, char const* corr)
+{
+    auto const r = v1.call("/pd/typeof", { "main", id, corr }, std::string("/pd/typeof/reply/") + corr);
+    if (!r || r->args.size() < 4)
+        return { -1, -1 };
+    return { static_cast<int>(r->num(2)), static_cast<int>(r->num(3)) };
+}
+
+// `status` from a new session until the stored final is there (the first request may still be running).
+std::optional<mcp::v2::json::Value> statusUntilFinal(V2Link& link, std::string const& id, std::string const& key)
+{
+    for (int attempt = 0; attempt < 40; ++attempt) {
+        link.client.sendFrame(R"({"t":"status","id":)" + mcp::v2::json::quote(id) + ",\"key\":" + mcp::v2::json::quote(key) + "}");
+        auto const f = link.take([&](auto const& v) { return field(v, "id") == id; }, 2000);
+        if (f && field(*f, "t") == "rep")
+            return f;
+        if (f && field(*f, "state") == "in_flight")
+            return finalFor(link, id, 5000); // joined: the final comes to this id
+        sleepMs(100);
+    }
+    return std::nullopt;
+}
+
+void runV2IdempotencyCases(Harness& v1)
+{
+    std::printf("v2 idempotency\n");
+    clearMain(v1, "i0");
+    auto a = v2Connect();
+
+    // 1. A batch sent twice with one key builds once; the second final is the first, replayed.
+    a->sendReq("ib1", "/pd/batch_atomic", boxArgs("ib1", 1, 100), false, "idem:1");
+    auto const first = finalFor(*a, "ib1");
+    CHECK(first && field(*first, "outcome") == "applied" && !replayed(first));
+    a->sendReq("ib1-r", "/pd/batch_atomic", boxArgs("ib1", 1, 100), false, "idem:1");
+    auto const second = finalFor(*a, "ib1-r");
+    CHECK(second && replayed(second) && field(*second, "address") == "/pd/batch_atomic/reply/ib1");
+    CHECK(objectCount(v1, "ic1") == 1);
+    // the same key for other content is refused, nothing applied
+    a->sendReq("ib1-x", "/pd/batch_atomic", boxArgs("ib1", 1, 101), false, "idem:1");
+    auto const conflict = finalFor(*a, "ib1-x");
+    auto const* ce = conflict ? conflict->find("error") : nullptr;
+    CHECK(conflict && ce && field(*ce, "code") == "key_conflict");
+    CHECK(objectCount(v1, "ic2") == 1);
+
+    // 2. rename_id twice with one key: renamed once, the second answer replayed (not "no such id").
+    a->sendReq("ir1", "/pd/rename_id", R"([{"t":"s","v":"main"},{"t":"s","v":"ir1"},{"t":"s","v":"n100"},{"t":"s","v":"idem_box"}])", false, "idem:2");
+    auto const rn = finalFor(*a, "ir1");
+    a->sendReq("ir1-r", "/pd/rename_id", R"([{"t":"s","v":"main"},{"t":"s","v":"ir1"},{"t":"s","v":"n100"},{"t":"s","v":"idem_box"}])", false, "idem:2");
+    auto const rn2 = finalFor(*a, "ir1-r");
+    CHECK(rn && rn2 && replayed(rn2) && field(*rn2, "address") == field(*rn, "address"));
+    CHECK(rn2 && rn2->find("args") && rn2->find("args")->items.size() > 0 && rn2->find("args")->items[0].find("v")->number == 1);
+
+    // 3. An undo sent twice with one key undoes one step.
+    auto const move = [&](char const* id, int x, int y) {
+        a->sendReq(id, "/pd/move_batch_id", std::string(R"([{"t":"s","v":"main"},{"t":"s","v":")") + id
+            + R"("},{"t":"s","v":"idem_box"},{"t":"i","v":)" + std::to_string(x) + R"(},{"t":"i","v":)" + std::to_string(y) + "}]");
+        auto const f = finalFor(*a, id);
+        CHECK(f && field(*f, "outcome") == "applied");
+        sleepMs(300);
+    };
+    move("im1", 300, 200);
+    move("im2", 400, 250);
+    CHECK(positionOf(v1, "idem_box", "ip1") == std::make_pair(400, 250));
+    a->sendReq("iu1", "/pd/undo", R"([{"t":"s","v":"main"},{"t":"s","v":"iu1"}])", false, "idem:3");
+    CHECK(finalFor(*a, "iu1").has_value());
+    sleepMs(800);
+    CHECK(positionOf(v1, "idem_box", "ip2") == std::make_pair(300, 200));
+    a->sendReq("iu1-r", "/pd/undo", R"([{"t":"s","v":"main"},{"t":"s","v":"iu1"}])", false, "idem:3");
+    CHECK(replayed(finalFor(*a, "iu1-r")));
+    sleepMs(800);
+    CHECK(positionOf(v1, "idem_box", "ip3") == std::make_pair(300, 200)); // not a second undo
+
+    // 3b. S4 review CRITICAL: a resend that arrives while the first is still QUEUED joins it and never runs. A slow
+    // read (a census of 2,000 boxes in a subpatch) keeps the worker busy; an undo and its resend (same key) wait
+    // behind it. One undo takes back the last move; a second run would take back the move before it too. (The MCP
+    // undo stack is per root patch: the blocker must not be an undo step, and the boxes are built first.)
+    {
+        a->sendReq("sp1", "/pd/batch_atomic",
+            R"([{"t":"s","v":"main"},{"t":"s","v":"sp1"},{"t":"i","v":0},{"t":"i","v":0},{"t":"i","v":0},{"t":"i","v":1},{"t":"i","v":0},)"
+            R"({"t":"s","v":"idemsub"},{"t":"i","v":600},{"t":"i","v":400},{"t":"s","v":"obj"},{"t":"s","v":"pd"},{"t":"i","v":1},{"t":"s","v":"idemsub"},)"
+            R"({"t":"i","v":0},{"t":"i","v":5},{"t":"i","v":10},{"t":"i","v":0}])");
+        auto const sub = finalFor(*a, "sp1");
+        CHECK(sub && field(*sub, "outcome") == "applied");
+        a->sendReq("sb1", "/pd/batch_atomic", boxArgs("sb1", 2000, 1000, "idemsub"));
+        auto const fb = finalFor(*a, "sb1", 60000);
+        CHECK(fb && field(*fb, "outcome") == "applied");
+        move("im4", 350, 220);
+        move("im5", 380, 240);
+        a->sendReq("sc1", "/pd/census", R"([{"t":"s","v":"idemsub"},{"t":"s","v":"sc1"}])"); // the blocker
+        a->sendReq("su1", "/pd/undo", R"([{"t":"s","v":"main"},{"t":"s","v":"su1"}])", false, "idem:queued-undo");
+        a->sendReq("su1-r", "/pd/undo", R"([{"t":"s","v":"main"},{"t":"s","v":"su1"}])", false, "idem:queued-undo");
+        auto const fc = finalFor(*a, "sc1", 20000);
+        auto const fu = finalFor(*a, "su1", 20000);
+        auto const fr = finalFor(*a, "su1-r", 20000);
+        CHECK(fc && field(*fc, "outcome") == "applied");
+        CHECK(fu && !replayed(fu) && fr && replayed(fr));
+        sleepMs(1500);
+        auto const at = positionOf(v1, "idem_box", "ip3b");
+        if (at != std::make_pair(350, 220))
+            std::printf("  idem_box at %d,%d after the queued undo\n", at.first, at.second);
+        CHECK(at == std::make_pair(350, 220)); // one step back, not two
+    }
+
+    // 4. Lost reply (batch): the session closes right after sending; a new session asks status, then resends:
+    // the stored final, replayed, and the box exists once.
+    int const before = objectCount(v1, "ic3");
+    {
+        auto lost = v2Connect();
+        lost->sendReq("lb1", "/pd/batch_atomic", boxArgs("lb1", 1, 200), false, "idem:lost-batch");
+    } // closed before reading anything
+    auto b = v2Connect();
+    auto const st = statusUntilFinal(*b, "lb1-s", "idem:lost-batch");
+    CHECK(st && field(*st, "outcome") == "applied" && replayed(st));
+    b->sendReq("lb1-r", "/pd/batch_atomic", boxArgs("lb1", 1, 200), false, "idem:lost-batch");
+    CHECK(replayed(finalFor(*b, "lb1-r")));
+    CHECK(objectCount(v1, "ic4") == before + 1);
+
+    // 5. Lost reply (undo): one step undone, however often the client asks or resends.
+    move("im3", 500, 300);
+    CHECK(positionOf(v1, "idem_box", "ip4") == std::make_pair(500, 300));
+    {
+        auto lost = v2Connect();
+        lost->sendReq("lu1", "/pd/undo", R"([{"t":"s","v":"main"},{"t":"s","v":"lu1"}])", false, "idem:lost-undo");
+    }
+    auto const ust = statusUntilFinal(*b, "lu1-s", "idem:lost-undo");
+    CHECK(ust && replayed(ust));
+    b->sendReq("lu1-r", "/pd/undo", R"([{"t":"s","v":"main"},{"t":"s","v":"lu1"}])", false, "idem:lost-undo");
+    CHECK(replayed(finalFor(*b, "lu1-r")));
+    sleepMs(800);
+    CHECK(positionOf(v1, "idem_box", "ip5") == std::make_pair(350, 220)); // exactly one undo
+
+    // 6. status of a key never seen: unknown_key.
+    b->client.sendFrame(R"({"t":"status","id":"nk1","key":"idem:never"})");
+    auto const nk = b->take([](auto const& v) { return field(v, "id") == "nk1"; }, 2000);
+    CHECK(nk && field(*nk, "t") == "status" && field(*nk, "state") == "unknown_key");
+    clearMain(v1, "i9");
 }
 
 // P4.1 S3: the handler cases a second time, through a v2 session of the bridge's own listener, with the same
@@ -1202,6 +1378,7 @@ int main()
             Harness harness { *bridge, replies };
             runCases(harness);
             runV2Pass(harness, *bridge);
+            runV2IdempotencyCases(harness);
             runV2WithoutUdpCases(*bridge, [&] {
                 bridge->setReplySinkForTests([&replies](juce::OSCMessage const& msg) { replies.push(msg); });
             });

@@ -31,6 +31,7 @@
 #pragma once
 
 #include "MCPBridgeV2Codec.h"
+#include "MCPBridgeV2Store.h"
 
 #include <algorithm>
 #include <atomic>
@@ -70,6 +71,7 @@ struct Origin {
     std::int64_t deadlineMs = 0; // effective: the request's, else the verb's, clamped; 0 = none
     std::int64_t startBy = 0;    // ms on the router's clock: not started by then = rejected{deadline}; 0 = none
     std::size_t bytes = 0;       // counted against the session's in-flight budget until done
+    std::string key;             // S4: idempotency key ("" = none); its final goes into the store
 };
 using OriginPtr = std::shared_ptr<Origin const>;
 
@@ -172,13 +174,9 @@ public:
     // A `req` from `session` (V2Read thread). `verb` is the schema row the bridge resolved, nullptr = unknown.
     Admission admit(int session, Request const& req, v2schema::VerbMeta const* verb, std::int64_t now)
     {
-        using v2schema::Outcome;
-        auto const refuse = [&](ErrorCode code, std::string const& message) {
-            return Admission { nullptr, encodeSynth(req.id, Outcome::Rejected, code, message) };
-        };
         if (!verb)
-            return refuse(ErrorCode::UnknownVerb, "no verb " + json::truncateUtf8(req.verb, 128));
-        auto origin = std::make_shared<Origin>();
+            return refusal(req.id, ErrorCode::UnknownVerb, "no verb " + json::truncateUtf8(req.verb, 128));
+        auto origin = std::make_shared<Origin>(); // filled here, frozen (OriginPtr) once admitted
         origin->session = session;
         origin->id = req.id;
         origin->corrToken = corrTokenOf(req, *verb);
@@ -190,38 +188,17 @@ public:
         origin->bytes = req.verb.size() + 16;
         for (auto const& a : req.args)
             origin->bytes += a.s.size() + 8;
+        std::uint64_t const fingerprint = verb->keyRequired ? fingerprintOf(req.verb, req.args) : 0;
 
-        std::lock_guard<std::mutex> const l(lock);
-        if (closed)
-            return refuse(ErrorCode::ShuttingDown, "the bridge is stopping");
-        // A second request with the id (or corr token) of one still in flight breaks the protocol. Answering it by
-        // that id would settle the LIVE request for the client ("rejected": nothing applied) while it goes on to
-        // apply, so the session is closed instead (S3 verification review M2).
-        auto const protocolBreak = [&](std::string const& what) {
-            return Admission { nullptr, encodeBye(ErrorCode::BadFrame, "a request with " + what + " is in flight"), true };
-        };
-        if (!req.noReply) {
-            if (entries.count(keyOf(*origin)))
-                return protocolBreak("id " + json::truncateUtf8(req.id, 64));
-            if (!origin->corrToken.empty() && byToken.count(origin->corrToken))
-                return protocolBreak("corr id " + json::truncateUtf8(origin->corrToken, 64));
+        FinalPtr replay;
+        Admission out;
+        {
+            std::lock_guard<std::mutex> const l(lock);
+            out = admitLocked(session, req, std::move(origin), fingerprint, now, replay);
         }
-        auto const known = inFlight.find(session);
-        Load const now0 = known != inFlight.end() ? known->second : Load {};
-        if (now0.count >= v2schema::kInFlightPerSession)
-            return refuse(ErrorCode::Busy, "more than " + std::to_string(v2schema::kInFlightPerSession) + " requests in flight");
-        if (now0.bytes + origin->bytes > kInFlightBytesPerSession)
-            return refuse(ErrorCode::Busy, "more than " + std::to_string(kInFlightBytesPerSession >> 20) + " MiB of requests in flight");
-        auto& load = inFlight[session];
-        if (!req.noReply) {
-            entries.emplace(keyOf(*origin), Entry { origin });
-            if (!origin->corrToken.empty())
-                byToken.emplace(origin->corrToken, keyOf(*origin));
-            pending.fetch_add(1);
-        }
-        ++load.count;
-        load.bytes += origin->bytes;
-        return Admission { std::move(origin), std::nullopt };
+        if (replay)
+            out.reply = encodeFinal(req.id, *replay, true); // ran before: not again (encoded outside the lock)
+        return out;
     }
 
     // The worker is about to run the request: false (and the final sent, if one is owed) when it is too late.
@@ -248,13 +225,12 @@ public:
                 return true; // a closed session's request runs (S4's store will keep its result)
             }
         }
-        finish(*origin, encodeSynth(origin->id, v2schema::Outcome::Rejected, ErrorCode::Deadline,
-            "not started within its deadline: nothing was applied"));
+        finish(*origin, synth("rejected", ErrorCode::Deadline, "not started within its deadline: nothing was applied"), false, now);
         return false;
     }
 
     // True when the message should also (or only) go to the v1 UDP target.
-    bool route(OutMessage const& m, Origin const* origin, std::int64_t /*now*/)
+    bool route(OutMessage const& m, Origin const* origin, std::int64_t now)
     {
         // Rule 1
         auto const slash = m.address.find_last_of('/');
@@ -269,7 +245,7 @@ public:
                 } else {
                     auto const o = it->second.origin;
                     l.unlock();
-                    deliver(*o, patternFinal(*o->verb, m.address, token, false).value_or(false), m);
+                    deliver(*o, patternFinal(*o->verb, m.address, token, false).value_or(false), m, now);
                     return false;
                 }
             } else if (recentSet.count(token)) {
@@ -285,7 +261,7 @@ public:
                     known = mine(*origin) != entries.end();
                 }
                 if (known)
-                    deliver(*origin, *final, m);
+                    deliver(*origin, *final, m, now);
                 return false;
             }
         }
@@ -340,9 +316,10 @@ public:
         }
         if (!stillPending)
             return;
-        finish(*origin, encodeSynth(origin->id, v2schema::Outcome::Unknown, ErrorCode::NoReplyVerb,
+        finish(*origin, synth("unknown", ErrorCode::NoReplyVerb,
             origin->verb->replyMode == v2schema::ReplyMode::None ? "this verb sends no reply: it ran, its effect is not confirmed"
-                                                                 : "the handler finished without a final reply"));
+                                                                 : "the handler finished without a final reply"),
+            true, now);
     }
 
     // Requests still queued past their start deadline end rejected{deadline} (begin() then skips them); async
@@ -365,9 +342,9 @@ public:
             }
         }
         for (auto const& o : notStarted)
-            finish(*o, encodeSynth(o->id, v2schema::Outcome::Rejected, ErrorCode::Deadline, "not started within its deadline: nothing was applied"));
+            finish(*o, synth("rejected", ErrorCode::Deadline, "not started within its deadline: nothing was applied"), false, now);
         for (auto const& o : expired)
-            finish(*o, encodeSynth(o->id, v2schema::Outcome::Unknown, ErrorCode::Timeout, "no final reply within the deadline"));
+            finish(*o, synth("unknown", ErrorCode::Timeout, "no final reply within the deadline"), true, now);
     }
 
     void sessionOpened(int session, bool telemetry)
@@ -387,7 +364,8 @@ public:
                 break;
             }
         for (auto it = entries.begin(); it != entries.end();) {
-            if (it->second.origin->session == session) {
+            // S4: a keyed request completes into the store although nobody listens: a reconnect asks `status`
+            if (it->second.origin->session == session && it->second.origin->key.empty()) {
                 eraseIndexes(*it->second.origin);
                 remember(it->second.origin->corrToken); // a later timer reply on it is v2's: dropped, not v1's
                 it = entries.erase(it);
@@ -397,28 +375,59 @@ public:
         }
     }
 
+    // `status{id, key}` (V2Read thread): the stored final under `id` (replayed), else a status frame: in_flight (the
+    // asker joins: the final comes to `id` too) or unknown_key (never seen, refused before it ran, or expired).
+    std::string status(int session, std::string const& id, std::string const& key, std::int64_t now)
+    {
+        if (key.empty())
+            return statusFrame(id, key, "unknown_key");
+        FinalPtr done;
+        {
+            std::lock_guard<std::mutex> const l(lock);
+            auto const st = store.status(key, now);
+            if (st.state == Store::State::InFlight) {
+                store.join(key, { session, id }); // past the waiter cap it is only told; it may ask again
+                return statusFrame(id, key, "in_flight");
+            }
+            if (st.state != Store::State::Done)
+                return statusFrame(id, key, "unknown_key");
+            done = st.final;
+        }
+        return encodeFinal(id, *done, true); // encoded outside the lock (a final can be MBs)
+    }
+
     // The request could not be queued after admission: forget it (the caller answers it). Its Work is never made.
     void drop(OriginPtr const& origin)
     {
         if (!origin)
             return;
-        std::lock_guard<std::mutex> const l(lock);
-        release(*origin);
-        auto const it = mine(*origin);
-        if (it == entries.end())
-            return;
-        eraseIndexes(*origin);
-        entries.erase(it);
+        std::vector<Waiter> waiters;
+        {
+            std::lock_guard<std::mutex> const l(lock);
+            release(*origin);
+            if (!origin->key.empty())
+                waiters = store.abandon(origin->key);
+            auto const it = mine(*origin);
+            if (it != entries.end()) {
+                eraseIndexes(*origin);
+                entries.erase(it);
+            }
+        }
+        for (auto const& w : waiters) // they joined between admission and the failed post: nothing ran
+            sink.send(w.session, encodeSynth(w.id, v2schema::Outcome::Rejected, ErrorCode::ShuttingDown, "the bridge is not running commands"));
     }
 
     // The bridge is stopping: pending requests are dropped (their sessions get bye{shutting_down}); new ones refused.
-    void close()
+    void close(std::int64_t now)
     {
         std::lock_guard<std::mutex> const l(lock);
         closed = true;
         notToRun.clear();
-        for (auto const& [key, e] : entries)
+        for (auto const& [key, e] : entries) {
             remember(e.origin->corrToken);
+            if (!e.origin->key.empty())
+                store.complete(e.origin->key, std::make_shared<StoredFinal const>(synth("unknown", ErrorCode::ShuttingDown, "the bridge stopped before this request finished")), now);
+        }
         entries.clear();
         byToken.clear();
         inFlight.clear();
@@ -437,6 +446,87 @@ public:
     std::size_t pendingCount() const { return static_cast<std::size_t>(pending.load()); }
 
 private:
+    static Admission refusal(std::string const& id, ErrorCode code, std::string const& message)
+    {
+        return Admission { nullptr, encodeSynth(id, v2schema::Outcome::Rejected, code, message) };
+    }
+
+    static std::string statusFrame(std::string const& id, std::string const& key, char const* state)
+    {
+        return std::string(R"({"t":"status","id":)") + json::quote(id) + ",\"key\":" + json::quote(key) + ",\"state\":\"" + state + "\"}";
+    }
+
+    // Caller holds `lock`. `replay` is set when the answer is a stored final (encoded by the caller, unlocked).
+    Admission admitLocked(int session, Request const& req, std::shared_ptr<Origin> origin, std::uint64_t fingerprint, std::int64_t now, FinalPtr& replay)
+    {
+        auto const* verb = origin->verb;
+        if (closed)
+            return refusal(req.id, ErrorCode::ShuttingDown, "the bridge is stopping");
+        // A verb that changes the patch always owes a final and needs a key; noReply is the realtime lane only.
+        if (verb->keyRequired && req.noReply)
+            return refusal(req.id, ErrorCode::BadFrame, "noReply is for realtime verbs: this verb needs a key and gets a final");
+        bool const keyed = verb->keyRequired;
+        if (keyed && req.key.empty())
+            return refusal(req.id, ErrorCode::KeyRequired, "this verb changes something: send an idempotency key");
+        // A second request with the id (or corr token) of one still in flight breaks the protocol, unless it is the
+        // same keyed request again. Answering it by that id would settle the LIVE request for the client, so the
+        // session is closed instead (S3 verification review M2).
+        auto const protocolBreak = [&](std::string const& what) {
+            return Admission { nullptr, encodeBye(ErrorCode::BadFrame, "a request with " + what + " is in flight"), true };
+        };
+        auto const live = entries.find(keyOf(*origin));
+        // S4 first: a resend under a known key is not a duplicate (it carries the same corr token by design).
+        if (keyed) {
+            auto const seen = store.peek(req.key, fingerprint, now);
+            switch (seen.state) {
+            case Store::State::Done:
+                if (live != entries.end())
+                    return protocolBreak("id " + json::truncateUtf8(req.id, 64)); // that id is taken by a live request
+                replay = seen.final;
+                return Admission {};
+            case Store::State::InFlight:
+                if (live != entries.end()) {
+                    if (live->second.origin->key != req.key)
+                        return protocolBreak("id " + json::truncateUtf8(req.id, 64));
+                    return Admission { nullptr, statusFrame(req.id, req.key, "in_flight") }; // this id gets the final anyway
+                }
+                if (!store.join(req.key, { session, req.id }))
+                    return Admission { nullptr, statusFrame(req.id, req.key, "in_flight") }; // enough askers: ask status later
+                return Admission {}; // joined: nothing to run, the running request's final comes to this id too
+            case Store::State::Conflict:
+                return refusal(req.id, ErrorCode::KeyConflict, "this key was used for another request");
+            case Store::State::New:
+                break;
+            }
+        }
+        if (!req.noReply) {
+            if (live != entries.end())
+                return protocolBreak("id " + json::truncateUtf8(req.id, 64));
+            if (!origin->corrToken.empty() && byToken.count(origin->corrToken))
+                return protocolBreak("corr id " + json::truncateUtf8(origin->corrToken, 64));
+        }
+        auto const known = inFlight.find(session);
+        Load const now0 = known != inFlight.end() ? known->second : Load {};
+        if (now0.count >= v2schema::kInFlightPerSession)
+            return refusal(req.id, ErrorCode::Busy, "more than " + std::to_string(v2schema::kInFlightPerSession) + " requests in flight");
+        if (now0.bytes + origin->bytes > kInFlightBytesPerSession)
+            return refusal(req.id, ErrorCode::Busy, "more than " + std::to_string(kInFlightBytesPerSession >> 20) + " MiB of requests in flight");
+        if (keyed) {
+            store.begin(req.key, fingerprint, now); // every check passed: the key is in flight from now
+            origin->key = req.key;                  // not shared with anyone yet
+        }
+        auto& load = inFlight[session];
+        if (!req.noReply) {
+            entries.emplace(keyOf(*origin), Entry { origin });
+            if (!origin->corrToken.empty())
+                byToken.emplace(origin->corrToken, keyOf(*origin));
+            pending.fetch_add(1);
+        }
+        ++load.count;
+        load.bytes += origin->bytes;
+        return Admission { std::move(origin), std::nullopt };
+    }
+
     struct Entry {
         OriginPtr origin;
         bool started = false;
@@ -533,35 +623,49 @@ private:
             : "applied";
     }
 
-    void deliver(Origin const& o, bool final, OutMessage const& m)
+    static StoredFinal synth(std::string outcome, ErrorCode code, std::string message)
+    {
+        StoredFinal f;
+        f.outcome = std::move(outcome);
+        f.error = std::make_pair(code, std::move(message));
+        return f;
+    }
+
+    void deliver(Origin const& o, bool final, OutMessage const& m, std::int64_t now)
     {
         auto const outcome = outcomeOf(m.address);
-        std::optional<std::pair<ErrorCode, std::string>> error;
-        if (final && outcome == "rejected") {
+        if (!final) {
+            auto const frame = encodeRep(o.id, false, outcome, m.address, m.args);
+            if (frame.size() <= maxFrameBytes)
+                sink.send(o.session, frame); // a side reply too big for a frame is dropped
+            return;
+        }
+        StoredFinal f;
+        f.outcome = outcome;
+        f.address = m.address;
+        f.args = m.args;
+        if (outcome == "rejected") {
             std::string text;
             for (auto const& a : m.args)
                 if (a.type == 's') {
                     text = a.s;
                     break;
                 }
-            error = std::make_pair(ErrorCode::HandlerError, text);
+            f.error = std::make_pair(ErrorCode::HandlerError, text);
         }
-        auto frame = encodeRep(o.id, final, outcome, m.address, m.args, error);
-        if (frame.size() > maxFrameBytes) {
-            if (!final)
-                return; // a side reply too big for a frame is dropped
-            frame = encodeSynth(o.id, v2schema::Outcome::Unknown, ErrorCode::TooLarge,
-                "the reply (" + std::to_string(frame.size()) + " bytes) is over the frame limit; the request ran");
-        }
-        if (final)
-            finish(o, frame);
-        else
-            sink.send(o.session, frame);
+        auto const size = encodeFinal(o.id, f, true).size();
+        if (size > maxFrameBytes)
+            f = synth("unknown", ErrorCode::TooLarge, "the reply (" + std::to_string(size) + " bytes) is over the frame limit; the request ran");
+        finish(o, f, true, now);
     }
 
-    // Sends `frame` as the request's final, once: a second final for the same request is dropped.
-    void finish(Origin const& o, std::string const& frame)
+    // Sends the request's final, once (a second final for the same request is dropped). A keyed request's final
+    // goes into the store when the request ran (or may have), else its key is forgotten so a resend runs; requests
+    // that joined it by key get the same final under their own ids, marked replayed.
+    void finish(Origin const& o, StoredFinal const& f, bool ran, std::int64_t now)
     {
+        std::vector<Waiter> waiters;
+        auto const shared = std::make_shared<StoredFinal const>(f); // built before the lock: stored without a copy
         {
             std::lock_guard<std::mutex> const l(lock);
             auto const it = mine(o);
@@ -570,8 +674,12 @@ private:
             eraseIndexes(o);
             entries.erase(it);
             remember(o.corrToken);
+            if (!o.key.empty())
+                waiters = ran ? store.complete(o.key, shared, now) : store.abandon(o.key);
         }
-        sink.send(o.session, frame);
+        sink.send(o.session, encodeFinal(o.id, f, false));
+        for (auto const& w : waiters)
+            sink.send(w.session, encodeFinal(w.id, f, true));
     }
 
     // Caller holds `lock`. The admitted share of a request whose work is done (or that never got a Work).
@@ -616,6 +724,7 @@ private:
     std::unordered_set<Origin const*> notToRun;           // answered rejected{deadline} by tick(): begin() refuses
     std::deque<std::string> recent;                       // finished corr tokens, oldest first
     std::unordered_set<std::string> recentSet;
+    Store store;                                          // S4: one per boot (the router lives as long as the bridge)
     std::atomic<int> open { 0 };
     std::atomic<long> pending { 0 };
     bool closed = false;

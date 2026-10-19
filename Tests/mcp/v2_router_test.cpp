@@ -55,9 +55,13 @@ std::string code(json::Value const& v)
     return e ? str(*e, "code") : std::string("<none>");
 }
 
+int keySeq = 0;
+
+// Every request carries a fresh idempotency key (S4: mutating verbs need one); key tests set their own.
 Request req(std::string id, std::string verb, std::vector<std::string> sargs = {})
 {
     Request r;
+    r.key = "test:" + std::to_string(++keySeq);
     r.id = std::move(id);
     r.verb = std::move(verb);
     for (auto& s : sargs) {
@@ -248,7 +252,7 @@ int main()
                 ++busy;
         }
         CHECK(busy == 1);
-        r.close();
+        r.close(0);
         auto down = r.admit(1, req("V9N1", "/pd/census", { "main", "V9N1" }), findVerb("pd", "census"), 0);
         CHECK(!down.origin && down.reply && down.reply->find("shutting_down") != std::string::npos);
         CHECK(r.pendingCount() == 0);
@@ -279,17 +283,34 @@ int main()
         CHECK(sink.take(1).empty() && sink.take(2).empty());
     }
 
-    // 8. A closed session's requests are dropped; replies to them go nowhere (not UDP: they were v2's).
+    // 8. S4: a closed session's KEYED request still completes, into the store (a reconnect asks status or resends);
+    // an unkeyed one (a read) is dropped and its late reply goes nowhere.
     {
         FakeSink sink;
         Router r(sink);
         r.sessionOpened(1, false);
-        auto a = r.admit(1, req("V1N1", "/meter/start", { "m", "o", "V1N1" }), findVerb("meter", "start"), 0);
+        auto q = req("V1N1", "/meter/start", { "m", "o", "V1N1" });
+        q.key = "client-a:7";
+        auto a = r.admit(1, q, findVerb("meter", "start"), 0);
+        auto read = r.admit(1, [] { auto x = req("V1N2", "/pd/census", { "main", "V1N2" }); x.key.clear(); return x; }(), findVerb("pd", "census"), 0);
+        CHECK(a.origin && read.origin);
+        CHECK(r.begin(a.origin, 1));
         r.handlerDone(a.origin, 1);
         r.sessionClosed(1);
+        CHECK(r.pendingCount() == 1); // the keyed one
+        CHECK(!r.route(msg("/pd/census/reply/V1N2"), nullptr, 2)); // the read's token: dropped, not v1's
+        CHECK(!r.route(msg("/meter/result/V1N1", { "{}" }), nullptr, 3)); // completes into the store
+        sink.take(1);                                                   // (session 1 is gone)
+        r.sessionOpened(2, false);
+        std::string err;
+        auto const st = json::parse(r.status(2, "V2N1", "client-a:7", 10), err);
+        CHECK(st && str(*st, "id") == "V2N1" && isFinal(*st) && str(*st, "outcome") == "applied" && st->find("replayed"));
+        auto resend = q;
+        resend.id = "V2N2";
+        auto again = r.admit(2, resend, findVerb("meter", "start"), 4);
+        auto const rv = again.reply ? json::parse(*again.reply, err) : std::nullopt;
+        CHECK(!again.origin && rv && str(*rv, "id") == "V2N2" && str(*rv, "address") == "/meter/result/V1N1" && rv->find("replayed"));
         CHECK(r.pendingCount() == 0);
-        CHECK(!r.route(msg("/meter/result/V1N1"), nullptr, 2)); // the closed request's token: v2's, dropped (not v1's)
-        CHECK(sink.take(1).empty());
     }
 
     // 9. A reply carries typed args; a reply on a corr token that matches no declared pattern is a side reply.
@@ -486,6 +507,133 @@ int main()
         r.tick(11);
         CHECK(sink.take(1).size() == 1);
         CHECK(!r.begin(a.origin, 10)); // even with a clock read at the deadline itself
+    }
+
+    // 18. S4 keys: required for keyed verbs; a resend while in flight joins (same final, replayed); a different
+    // request under a used key is a conflict; a key refused before it ran is forgotten, so its resend runs.
+    {
+        FakeSink sink;
+        Router r(sink);
+        r.sessionOpened(1, false);
+        r.sessionOpened(2, false);
+        auto nokey = req("K0", "/pd/batch_atomic", { "main", "K0" });
+        nokey.key.clear();
+        auto refused = r.admit(1, nokey, findVerb("pd", "batch_atomic"), 0);
+        CHECK(!refused.origin && refused.reply && refused.reply->find("key_required") != std::string::npos);
+        auto readNoKey = req("K00", "/pd/census", { "main", "K00" });
+        readNoKey.key.clear();
+        CHECK(r.admit(1, readNoKey, findVerb("pd", "census"), 0).origin != nullptr); // reads need none
+
+        auto first = req("K1", "/pd/batch_atomic", { "main", "K1" });
+        first.key = "cli:1";
+        auto a = r.admit(1, first, findVerb("pd", "batch_atomic"), 0);
+        auto resend = first;
+        resend.id = "K1b"; // after a reconnect: new session, new id, same key and content
+        auto joined = r.admit(2, resend, findVerb("pd", "batch_atomic"), 1);
+        CHECK(a.origin && !joined.origin && !joined.reply); // nothing to run, nothing to say yet
+        CHECK(r.begin(a.origin, 2));
+        CHECK(!r.route(msg("/pd/batch_atomic/reply/K1", { "2" }), a.origin.get(), 3));
+        auto f1 = sink.take(1), f2 = sink.take(2);
+        CHECK(f1.size() == 1 && str(f1[0], "id") == "K1" && !f1[0].find("replayed"));
+        CHECK(f2.size() == 1 && str(f2[0], "id") == "K1b" && f2[0].find("replayed") && str(f2[0], "outcome") == "applied");
+
+        auto other = req("K2", "/pd/batch_atomic", { "main", "different" });
+        other.key = "cli:1";
+        auto conflict = r.admit(1, other, findVerb("pd", "batch_atomic"), 4);
+        CHECK(!conflict.origin && conflict.reply && conflict.reply->find("key_conflict") != std::string::npos);
+
+        auto late = req("K3", "/pd/batch_atomic", { "main", "K3" });
+        late.key = "cli:3";
+        late.deadlineMs = 10;
+        auto l = r.admit(1, late, findVerb("pd", "batch_atomic"), 0);
+        CHECK(!r.begin(l.origin, 50));
+        r.handlerDone(l.origin, 50);
+        sink.take(1);
+        late.id = "K3b";
+        late.deadlineMs = 0;
+        CHECK(r.admit(1, late, findVerb("pd", "batch_atomic"), 60).origin != nullptr); // forgotten: runs
+    }
+
+    // 19. S4 status: unknown key, in flight (the asker joins and gets the final), done (the final, replayed); a
+    // bridge stop records its keyed requests as unknown.
+    {
+        FakeSink sink;
+        Router r(sink);
+        r.sessionOpened(1, false);
+        r.sessionOpened(2, false);
+        std::string err;
+        auto const unknown = json::parse(r.status(2, "S1", "never:1", 10), err);
+        CHECK(unknown && str(*unknown, "t") == "status" && str(*unknown, "state") == "unknown_key");
+        auto q = req("S2", "/pd/batch_atomic", { "main", "S2" });
+        q.key = "cli:9";
+        auto a = r.admit(1, q, findVerb("pd", "batch_atomic"), 0);
+        auto const inflight = json::parse(r.status(2, "S2b", "cli:9", 10), err);
+        CHECK(inflight && str(*inflight, "state") == "in_flight");
+        CHECK(r.begin(a.origin, 1));
+        CHECK(!r.route(msg("/pd/batch_atomic/reply/S2", { "1" }), a.origin.get(), 2));
+        auto got = sink.take(2);
+        CHECK(got.size() == 1 && str(got[0], "id") == "S2b" && isFinal(got[0]) && got[0].find("replayed"));
+        auto const done = json::parse(r.status(2, "S2c", "cli:9", 10), err);
+        CHECK(done && str(*done, "id") == "S2c" && isFinal(*done) && str(*done, "address") == "/pd/batch_atomic/reply/S2");
+
+        auto q2 = req("S3", "/pd/batch_atomic", { "main", "S3" });
+        q2.key = "cli:10";
+        auto b = r.admit(1, q2, findVerb("pd", "batch_atomic"), 5);
+        CHECK(r.begin(b.origin, 6));
+        r.close(7);
+        r.reopen();
+        auto const stopped = json::parse(r.status(2, "S3b", "cli:10", 10), err);
+        CHECK(stopped && str(*stopped, "outcome") == "unknown" && stopped->find("error")
+            && str(*stopped->find("error"), "code") == "shutting_down");
+    }
+
+    // 20. S4 review: a join never runs anything (Admission without origin and reply); past the waiter cap a resend
+    // is told in_flight; an id reused under another key while live is a protocol break; noReply on a keyed verb is
+    // refused; a stopped request's unknown final survives reopen (stamped with the real clock).
+    {
+        FakeSink sink;
+        Router r(sink);
+        r.sessionOpened(1, false);
+        auto q = req("J1", "/pd/batch_atomic", { "main", "J1" });
+        q.key = "cli:j";
+        auto a = r.admit(1, q, findVerb("pd", "batch_atomic"), 0);
+        int joins = 0, told = 0;
+        for (int k = 0; k < 12; ++k) {
+            auto x = q;
+            x.id = "J1r" + std::to_string(k);
+            auto j = r.admit(1, x, findVerb("pd", "batch_atomic"), 1);
+            CHECK(!j.origin); // never runs again
+            if (!j.reply)
+                ++joins;
+            else if (j.reply->find("in_flight") != std::string::npos)
+                ++told;
+        }
+        CHECK(joins == static_cast<int>(kMaxWaiters) && told == 12 - static_cast<int>(kMaxWaiters));
+        auto same = q; // the same id and key again: told, not joined, no second final
+        auto s1 = r.admit(1, same, findVerb("pd", "batch_atomic"), 1);
+        CHECK(!s1.origin && s1.reply && s1.reply->find("in_flight") != std::string::npos);
+        auto other = req("J1", "/pd/batch_atomic", { "main", "zz" });
+        other.key = "cli:other";
+        auto ob = r.admit(1, other, findVerb("pd", "batch_atomic"), 1);
+        CHECK(!ob.origin && ob.closeSession); // live id under another key
+        CHECK(r.begin(a.origin, 2));
+        CHECK(!r.route(msg("/pd/batch_atomic/reply/J1", { "1" }), a.origin.get(), 3));
+        CHECK(sink.take(1).size() == 1 + kMaxWaiters); // the original and each joined id, once
+
+        auto nr = req("N1", "/pd/batch_atomic", { "main", "N1" });
+        nr.noReply = true;
+        auto refused = r.admit(1, nr, findVerb("pd", "batch_atomic"), 4);
+        CHECK(!refused.origin && refused.reply && refused.reply->find("bad_frame") != std::string::npos);
+
+        auto st = req("C1", "/pd/batch_atomic", { "main", "C1" });
+        st.key = "cli:c";
+        auto c = r.admit(1, st, findVerb("pd", "batch_atomic"), 100000);
+        CHECK(r.begin(c.origin, 100001));
+        r.close(100002);
+        r.reopen();
+        std::string err;
+        auto const after = json::parse(r.status(1, "C1s", "cli:c", 100003), err);
+        CHECK(after && str(*after, "outcome") == "unknown"); // not born expired
     }
 
     if (failures == 0)

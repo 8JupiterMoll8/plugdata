@@ -18,8 +18,8 @@
 //
 // One listener per process (a DAW may host several plugdata bridges): a second start() is refused.
 // The server answers hello, ping and bye itself. A `req` goes to ServerConfig::onRequest (S3: the bridge admits it
-// and posts it to its command worker); without that callback, and for `status` until S4, the answer is
-// rep{rejected, protocol_unsupported}.
+// and posts it to its command worker), a `status` to ServerConfig::onStatus (S4: the idempotency store); without
+// those callbacks the answer is rep{rejected, protocol_unsupported}.
 // Not on Windows yet (start() returns false; v1 UDP is unaffected).
 #pragma once
 
@@ -62,6 +62,8 @@ struct ServerConfig {
     // V2Read thread. Returns a frame to send at once (a refusal), or nullopt when the request was taken. Must not
     // wait for the bridge (it only posts).
     std::function<std::optional<RequestAnswer>(int session, Request request)> onRequest;
+    // V2Read thread, S4: the answer to `status{id, key}` (a frame); answered here, never queued behind a handler.
+    std::function<std::string(int session, Request request)> onStatus;
     std::function<void(int session, bool telemetry)> onSessionOpened; // after welcome
     std::function<void(int session)> onSessionClosed;                 // a welcomed session ended
     std::function<void()> onTick;                                     // V2Accept, about every 50 ms

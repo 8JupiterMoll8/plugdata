@@ -8,7 +8,7 @@
 
 namespace mcp::v2schema {
 
-inline constexpr char kSchemaHash[] = "ef24231851c22aca";
+inline constexpr char kSchemaHash[] = "f1bfe68fe555f5d8";
 inline constexpr int kProtocol = 2;
 
 enum class VerbClass : std::uint8_t { Read, Mutate, Heavy, Long, Realtime };
