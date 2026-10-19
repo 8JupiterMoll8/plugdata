@@ -623,7 +623,7 @@ void McpHost::pushMcpTransaction(t_canvas* cnv, const juce::String& canvasName, 
 {
     {
         juce::ScopedLock sl(session.mcpUndoLock);
-        session.mcpUndoStack[cnv].push_back({ canvasName, forward, inverse, replayAction });
+        session.mcpUndoStack[cnv].push_back({ canvasName, mcp::undoCommandFrom(forward), mcp::undoCommandFrom(inverse), replayAction });
         if (session.mcpUndoStack[cnv].size() > 50) {
             session.mcpUndoStack[cnv].erase(session.mcpUndoStack[cnv].begin());
         }
@@ -655,7 +655,7 @@ void McpHost::undoMcpTransaction(t_canvas* cnv)
     // stack map while we hold mcpUndoLock.
     if (mcpBridge && tx) {
         session.isExecutingMcpUndoRedo = true;
-        mcpBridge->replayPd(tx->replayAction, tx->inverse);
+        mcpBridge->replayPd(tx->replayAction, mcp::oscMessageFrom(tx->inverse));
         session.isExecutingMcpUndoRedo = false;
     }
     postMessage([this] {
@@ -680,7 +680,7 @@ void McpHost::redoMcpTransaction(t_canvas* cnv)
 
     if (mcpBridge && tx) {
         session.isExecutingMcpUndoRedo = true;
-        mcpBridge->replayPd(tx->replayAction, tx->forward);
+        mcpBridge->replayPd(tx->replayAction, mcp::oscMessageFrom(tx->forward));
         session.isExecutingMcpUndoRedo = false;
     }
     postMessage([this] {

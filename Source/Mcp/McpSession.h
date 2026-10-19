@@ -17,6 +17,7 @@
 #include <juce_osc/juce_osc.h>
 
 #include "Utility/Config.h"
+#include "Mcp/McpUndoCommand.h" // P4.2 S6: the undo log holds typed commands
 
 extern "C" {
 #include <m_pd.h>
@@ -25,8 +26,8 @@ extern "C" {
 
 struct McpTransaction {
     juce::String canvasName;
-    juce::OSCMessage forward;
-    juce::OSCMessage inverse;
+    mcp::UndoCommand forward; // typed (P4.2 S6); replayed as an OSC message by undo and redo
+    mcp::UndoCommand inverse;
     // Which /pd action the forward/inverse messages are replayed through.
     // Defaults to batch_atomic (create/connect/edit/delete); moves use move_batch_id.
     juce::String replayAction = "batch_atomic";

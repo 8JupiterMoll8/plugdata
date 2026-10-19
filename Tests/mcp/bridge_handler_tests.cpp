@@ -1028,6 +1028,22 @@ std::optional<mcp::v2::json::Value> statusUntilFinal(V2Link& link, std::string c
     return std::nullopt;
 }
 
+// P4.2 S6: the undo log holds a typed command; a bridge message survives the round trip through it unchanged.
+void runUndoCommandCases()
+{
+    std::printf("undo command round trip\n");
+    juce::OSCMessage m { juce::OSCAddressPattern("/pd/x") };
+    m.addInt32(7);
+    m.addFloat32(0.5f);
+    m.addString("a b");
+    auto const back = mcp::oscMessageFrom(mcp::undoCommandFrom(m));
+    CHECK(back.getAddressPattern().toString() == "/pd/x");
+    CHECK(back.size() == 3);
+    CHECK(back.size() == 3 && back[0].isInt32() && back[0].getInt32() == 7);
+    CHECK(back.size() == 3 && back[1].isFloat32() && back[1].getFloat32() == 0.5f);
+    CHECK(back.size() == 3 && back[2].isString() && back[2].getString() == "a b");
+}
+
 // S6: two v2 sessions. The one that changed the patch last is the editor: the other is told once (owner_changed),
 // a read changes nothing, and a second change by the editor tells nobody.
 void runV2OwnershipCases(Harness& v1)
@@ -1444,6 +1460,7 @@ int main()
             runV2Pass(harness, *bridge);
             runV2IdempotencyCases(harness);
             runV2OwnershipCases(harness);
+            runUndoCommandCases();
             runZeroArgCases(harness);
             runV2WithoutUdpCases(*bridge, [&] {
                 bridge->setReplySinkForTests([&replies](juce::OSCMessage const& msg) { replies.push(msg); });
