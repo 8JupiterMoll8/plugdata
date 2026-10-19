@@ -262,8 +262,13 @@ int main()
             CHECK((v.replyMode == v2::ReplyMode::None) == (v.replyCount == 0));
             CHECK(v.cls != v2::VerbClass::Realtime || v.replyMode == v2::ReplyMode::None);
             CHECK(v.cls == v2::VerbClass::Realtime || v.deadlineMs > 0);
+            CHECK(v.mutating == (v.effect != v2::Effect::None));
+            CHECK(v.keyRequired == (v.mutating && v.cls != v2::VerbClass::Realtime));
+            CHECK(v.needsLease == (v.effect == v2::Effect::Patch || v.effect == v2::Effect::Live || v.effect == v2::Effect::File));
         }
         CHECK(v2::findVerb("pd", "batch_atomic")->deadlineMs == 12000);
+        CHECK(!v2::findVerb("pd", "select")->needsLease && v2::findVerb("pd", "select")->keyRequired); // ui: no lease, still de-duplicated
+        CHECK(v2::findVerb("pd", "undo")->needsLease);
         CHECK(v2::findVerb("pd", "no_such_verb") == nullptr);
         CHECK(std::string(v2::kErrorCodeNames[static_cast<int>(v2::ErrorCode::UnknownVerb)]) == "unknown_verb");
 
