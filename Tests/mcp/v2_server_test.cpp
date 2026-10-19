@@ -443,7 +443,7 @@ int main()
                 return RequestAnswer { encodeBye(ErrorCode::BadFrame, "reused id"), true };
             return std::nullopt;
         };
-        c.onSessionOpened = [&](int session, bool telemetry) { std::lock_guard<std::mutex> l(m); opened.emplace_back(session, telemetry); };
+        c.onSessionOpened = [&](int session, bool telemetry, std::string const&) { std::lock_guard<std::mutex> l(m); opened.emplace_back(session, telemetry); };
         c.onSessionClosed = [&](int session) { std::lock_guard<std::mutex> l(m); closed.push_back(session); };
         c.onTick = [&] { ++ticks; };
         CHECK(s.start(c, why));

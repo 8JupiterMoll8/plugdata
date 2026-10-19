@@ -636,6 +636,83 @@ int main()
         CHECK(after && str(*after, "outcome") == "unknown"); // not born expired
     }
 
+    // 21. S6 session ownership: the newest session that changes the patch is the editor. The one it displaces gets
+    // one owner_changed (naming it); a read-only request changes nothing; artist events go to the editor, else to
+    // the newest session; the status summary names every session and the editor.
+    {
+        FakeSink sink;
+        Router r(sink);
+        r.sessionOpened(1, false, "alpha");
+        r.sessionOpened(2, false, "beta");
+        auto a1 = r.admit(1, req("V1N1", "/pd/batch_atomic", { "main", "V1N1" }), findVerb("pd", "batch_atomic"), 0);
+        CHECK(a1.origin && !a1.reply);
+        CHECK(sink.take(1).empty() && sink.take(2).empty()); // no earlier editor: no notice
+        CHECK(r.sessionsSummary() == "alpha (editing), beta (watching)");
+
+        auto b1 = r.admit(2, req("V2N1", "/pd/batch_atomic", { "main", "V2N1" }), findVerb("pd", "batch_atomic"), 1);
+        CHECK(b1.origin && !b1.reply);
+        auto told = sink.take(1);
+        CHECK(told.size() == 1 && str(told[0], "t") == "evt" && str(told[0], "class") == "session");
+        CHECK(told.size() == 1 && str(told[0], "address") == "owner_changed");
+        CHECK(told.size() == 1 && told[0].find("args") && told[0].find("args")->items.size() == 1
+            && str(told[0].find("args")->items[0], "v") == "beta");
+        CHECK(sink.take(2).empty()); // the new editor is not told it changed
+        CHECK(r.sessionsSummary() == "alpha (watching), beta (editing)");
+
+        auto b2 = r.admit(2, req("V2N2", "/pd/batch_atomic", { "main", "V2N2" }), findVerb("pd", "batch_atomic"), 2);
+        CHECK(b2.origin && sink.take(1).empty() && sink.take(2).empty()); // already the editor: no notice
+
+        auto read = r.admit(1, req("V1N3", "/bridge/capabilities"), findVerb("bridge", "capabilities"), 3);
+        CHECK(read.origin && sink.take(1).empty() && sink.take(2).empty()); // a read changes no editor
+        CHECK(r.sessionsSummary() == "alpha (watching), beta (editing)");
+
+        auto a2 = r.admit(1, req("V1N4", "/pd/batch_atomic", { "main", "V1N4" }), findVerb("pd", "batch_atomic"), 4);
+        CHECK(a2.origin && !a2.reply);
+        auto back = sink.take(2);
+        CHECK(back.size() == 1 && str(back[0], "address") == "owner_changed");
+        CHECK(back.size() == 1 && back[0].find("args") && str(back[0].find("args")->items[0], "v") == "alpha");
+        CHECK(sink.take(1).empty());
+
+        // artist events: to the editor only, never to UDP while a v2 session is connected
+        CHECK(!r.route(msg("/pd/ui/note", { "t1", "warmer" }), nullptr, 5));
+        CHECK(sink.take(1).size() == 1 && sink.take(2).empty());
+
+        // the editor leaves: the newest connected session gets artist events, and nobody is told
+        r.sessionClosed(1);
+        CHECK(r.sessionsSummary() == "beta (watching)");
+        CHECK(!r.route(msg("/pd/ui/note", { "t2", "brighter" }), nullptr, 6));
+        CHECK(sink.take(2).size() == 1);
+        auto c1 = r.admit(2, req("V2N5", "/pd/batch_atomic", { "main", "V2N5" }), findVerb("pd", "batch_atomic"), 7);
+        CHECK(c1.origin && sink.take(1).empty() && sink.take(2).empty());
+    }
+
+    // 22. S6 follow-up: status{id, key} from the session that owns the live request does not join it (the final
+    // comes to its id once). Another session asking for the same key joins and gets the final under its own id.
+    {
+        FakeSink sink;
+        Router r(sink);
+        r.sessionOpened(1, false);
+        r.sessionOpened(2, false);
+        auto q = req("S1", "/pd/batch_atomic", { "main", "S1" });
+        auto a = r.admit(1, q, findVerb("pd", "batch_atomic"), 0);
+        CHECK(a.origin && r.begin(a.origin, 1));
+        std::string err;
+        auto own = json::parse(r.status(1, "S1", q.key, 2), err);
+        CHECK(own && str(*own, "t") == "status" && str(*own, "state") == "in_flight");
+        auto other = json::parse(r.status(2, "S2", q.key, 2), err);
+        CHECK(other && str(*other, "state") == "in_flight");
+        CHECK(!r.route(msg("/pd/batch_atomic/reply/S1", { "1" }), a.origin.get(), 3));
+        r.handlerDone(a.origin, 4);
+        auto to1 = sink.take(1);
+        int finals1 = 0;
+        for (auto const& f : to1)
+            if (isFinal(f) && str(f, "id") == "S1")
+                ++finals1;
+        CHECK(finals1 == 1); // the owner's own final, once: not a second one from its own status
+        auto to2 = sink.take(2);
+        CHECK(to2.size() == 1 && isFinal(to2[0]) && str(to2[0], "id") == "S2");
+    }
+
     if (failures == 0)
         std::printf("v2_router_test: all passed\n");
     return failures == 0 ? 0 : 1;

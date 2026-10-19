@@ -64,7 +64,7 @@ struct ServerConfig {
     std::function<std::optional<RequestAnswer>(int session, Request request)> onRequest;
     // V2Read thread, S4: the answer to `status{id, key}` (a frame); answered here, never queued behind a handler.
     std::function<std::string(int session, Request request)> onStatus;
-    std::function<void(int session, bool telemetry)> onSessionOpened; // after welcome
+    std::function<void(int session, bool telemetry, std::string const& name)> onSessionOpened; // after welcome (S6: name)
     std::function<void(int session)> onSessionClosed;                 // a welcomed session ended
     std::function<void()> onTick;                                     // V2Accept, about every 50 ms
 };

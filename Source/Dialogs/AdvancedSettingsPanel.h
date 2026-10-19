@@ -155,7 +155,7 @@ public:
             void timerCallback() override
             {
                 auto const status = processor ? processor->getMcp()->getMcpBridgeStatus() : String("unavailable");
-                auto const colour = status == "connected"         ? Colours::green
+                auto const colour = status.startsWith("connected") ? Colours::green
                                     : status == "waiting for server" ? Colours::orange
                                                                      : Colours::red;
                 statusLabel.setText(status, dontSendNotification);

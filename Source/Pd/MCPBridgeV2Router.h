@@ -20,7 +20,11 @@
 //      (rule 2b: an `uncorrelated` pattern is final only for a request sent without an id); any other non-event
 //      message with an origin belonged to v2 and is dropped;
 //   3. else it is an event if the schema lists it: telemetry to every subscribed session and to UDP, artist to the
-//      newest session only (to UDP while no v2 session is connected); anything else is a v1 reply: UDP only.
+//      editor only (S6: the session that changed the patch last, else the newest session; never UDP while a v2
+//      session is connected); anything else is a v1 reply: UDP only.
+// Session ownership (S6, O1-O2): a request whose verb needs the edit lease (effect patch, live or file) makes its
+// session the editor. The session it displaced gets one owner_changed{by} frame; nothing is sent when the editor
+// does not change. Reads and ui/session verbs never change the editor.
 // Finals the handlers never send are synthesized: rejected{unknown_verb | busy | bad_frame | deadline |
 // shutting_down} at admission, start or while still queued; unknown{no_reply_verb} when a sync or fire-and-forget
 // request is done without one; unknown{timeout} for an async request past its deadline after it started;
@@ -53,6 +57,7 @@ namespace mcp::v2 {
 inline constexpr std::size_t kInFlightBytesPerSession = 64u << 20; // admitted request bytes not yet done
 inline constexpr std::int64_t kMaxDeadlineMs = 600000;              // the store's TTL: a longer one is clamped
 inline constexpr std::size_t kRecentTokens = 1024;                  // finished tokens whose late replies are dropped
+inline constexpr std::size_t kMaxNameBytes = 64;                    // a session's client name in the status line
 
 // Where frames go: the server's sessions.
 class Sink {
@@ -157,6 +162,18 @@ inline std::string encodeEvt(bool artist, std::string_view address, std::vector<
         + json::quote(address) + ",\"args\":" + encodeArgs(args) + "}";
 }
 
+// An envelope event the bridge itself sends to one session (S6: owner_changed); listed in the schema's sessionEvents.
+inline std::string encodeSessionEvt(std::string_view address, std::vector<Arg> const& args)
+{
+    return std::string(R"({"t":"evt","class":"session","address":)") + json::quote(address) + ",\"args\":" + encodeArgs(args) + "}";
+}
+
+// The editor changed: `to` (the displaced editor) is told who now changes the patch.
+struct OwnerChange {
+    int to = 0;
+    std::string by;
+};
+
 class Router {
 public:
     explicit Router(Sink& out, std::size_t maxFrame = v2schema::kMaxFrameBytes)
@@ -191,13 +208,16 @@ public:
         std::uint64_t const fingerprint = verb->keyRequired ? fingerprintOf(req.verb, req.args) : 0;
 
         FinalPtr replay;
+        std::optional<OwnerChange> owner;
         Admission out;
         {
             std::lock_guard<std::mutex> const l(lock);
-            out = admitLocked(session, req, std::move(origin), fingerprint, now, replay);
+            out = admitLocked(session, req, std::move(origin), fingerprint, now, replay, owner);
         }
         if (replay)
             out.reply = encodeFinal(req.id, *replay, true); // ran before: not again (encoded outside the lock)
+        if (owner)
+            sink.send(owner->to, encodeSessionEvt("owner_changed", { textArg(owner->by) }));
         return out;
     }
 
@@ -274,8 +294,8 @@ public:
         {
             std::lock_guard<std::mutex> const l(lock);
             if (event->artist) {
-                if (!sessions.empty()) {
-                    to.push_back(sessions.back().no); // until S6 (O2): the newest session
+                if (auto const target = artistTargetLocked()) {
+                    to.push_back(*target); // O2: the editor, else the newest session
                     udp = false;
                 }
             } else {
@@ -347,10 +367,10 @@ public:
             finish(*o, synth("unknown", ErrorCode::Timeout, "no final reply within the deadline"), true, now);
     }
 
-    void sessionOpened(int session, bool telemetry)
+    void sessionOpened(int session, bool telemetry, std::string name = {})
     {
         std::lock_guard<std::mutex> const l(lock);
-        sessions.push_back({ session, telemetry });
+        sessions.push_back({ session, telemetry, json::truncateUtf8(name, kMaxNameBytes) });
         open.fetch_add(1);
     }
 
@@ -363,6 +383,8 @@ public:
                 open.fetch_sub(1);
                 break;
             }
+        if (editor == session)
+            editor = 0; // the next patch change makes its session the editor; nobody is told
         for (auto it = entries.begin(); it != entries.end();) {
             // S4: a keyed request completes into the store although nobody listens: a reconnect asks `status`
             if (it->second.origin->session == session && it->second.origin->key.empty()) {
@@ -386,7 +408,11 @@ public:
             std::lock_guard<std::mutex> const l(lock);
             auto const st = store.status(key, now);
             if (st.state == Store::State::InFlight) {
-                store.join(key, { session, id }); // past the waiter cap it is only told; it may ask again
+                // S6 follow-up: the session that owns the live request already gets its final under this id
+                auto const own = entries.find(entryKey(session, id));
+                bool const owns = own != entries.end() && own->second.origin->key == key;
+                if (!owns)
+                    store.join(key, { session, id }); // past the waiter cap it is only told; it may ask again
                 return statusFrame(id, key, "in_flight");
             }
             if (st.state != Store::State::Done)
@@ -394,6 +420,19 @@ public:
             done = st.final;
         }
         return encodeFinal(id, *done, true); // encoded outside the lock (a final can be MBs)
+    }
+
+    // S6: "alpha (editing), beta (watching)" for the status line; "" with no session. Newest last.
+    std::string sessionsSummary() const
+    {
+        std::lock_guard<std::mutex> const l(lock);
+        std::string out;
+        for (auto const& s : sessions) {
+            if (!out.empty())
+                out += ", ";
+            out += (s.name.empty() ? std::string("unnamed") : s.name) + (s.no == editor ? " (editing)" : " (watching)");
+        }
+        return out;
     }
 
     // The request could not be queued after admission: forget it (the caller answers it). Its Work is never made.
@@ -456,8 +495,10 @@ private:
         return std::string(R"({"t":"status","id":)") + json::quote(id) + ",\"key\":" + json::quote(key) + ",\"state\":\"" + state + "\"}";
     }
 
-    // Caller holds `lock`. `replay` is set when the answer is a stored final (encoded by the caller, unlocked).
-    Admission admitLocked(int session, Request const& req, std::shared_ptr<Origin> origin, std::uint64_t fingerprint, std::int64_t now, FinalPtr& replay)
+    // Caller holds `lock`. `replay` is set when the answer is a stored final (encoded by the caller, unlocked);
+    // `owner` when this request changed the editor (S6: the displaced session is told by the caller, unlocked).
+    Admission admitLocked(int session, Request const& req, std::shared_ptr<Origin> origin, std::uint64_t fingerprint, std::int64_t now, FinalPtr& replay,
+        std::optional<OwnerChange>& owner)
     {
         auto const* verb = origin->verb;
         if (closed)
@@ -524,8 +565,49 @@ private:
         }
         ++load.count;
         load.bytes += origin->bytes;
+        if (verb->needsLease)
+            owner = takeEditorLocked(session);
         return Admission { std::move(origin), std::nullopt };
     }
+
+    // Caller holds `lock`. The session that changes the patch becomes the editor; the one it displaces is returned
+    // (only if it is still connected) so that it can be told.
+    std::optional<OwnerChange> takeEditorLocked(int session)
+    {
+        if (editor == session)
+            return std::nullopt;
+        std::optional<OwnerChange> displaced;
+        auto const newcomer = std::find_if(sessions.begin(), sessions.end(), [session](SessionRow const& s) { return s.no == session; });
+        if (editor != 0 && hasSessionLocked(editor) && newcomer != sessions.end())
+            displaced = OwnerChange { editor, newcomer->name.empty() ? std::string("unnamed") : newcomer->name };
+        editor = session;
+        return displaced;
+    }
+
+    // Caller holds `lock`. The artist's notes go to the editor while it is connected, else to the newest session.
+    std::optional<int> artistTargetLocked() const
+    {
+        if (sessions.empty())
+            return std::nullopt;
+        if (editor != 0 && hasSessionLocked(editor))
+            return editor;
+        return sessions.back().no;
+    }
+
+    bool hasSessionLocked(int session) const
+    {
+        return std::any_of(sessions.begin(), sessions.end(), [session](SessionRow const& s) { return s.no == session; });
+    }
+
+    static Arg textArg(std::string text)
+    {
+        Arg a;
+        a.type = 's';
+        a.s = std::move(text);
+        return a;
+    }
+
+    static std::string entryKey(int session, std::string const& id) { return std::to_string(session) + ":" + id; }
 
     struct Entry {
         OriginPtr origin;
@@ -537,13 +619,14 @@ private:
     struct SessionRow {
         int no;
         bool telemetry;
+        std::string name; // the client's name from hello (printable, capped); "" = none
     };
     struct Load {
         std::size_t count = 0;
         std::size_t bytes = 0;
     };
 
-    static std::string keyOf(Origin const& o) { return std::to_string(o.session) + ":" + o.id; }
+    static std::string keyOf(Origin const& o) { return entryKey(o.session, o.id); }
 
     // Caller holds `lock`. The entry of THIS request: an id may be reused once its final went out, and a late done
     // or final of the earlier request must not settle the newer one (S3 verification review M1).
@@ -721,6 +804,7 @@ private:
     std::unordered_map<std::string, std::string> byToken; // corr token -> entry key
     std::unordered_map<int, Load> inFlight;               // per session: admitted work not yet done
     std::vector<SessionRow> sessions;                     // in welcome order: back() is the newest
+    int editor = 0;                                       // S6: the session that changed the patch last; 0 = none
     std::unordered_set<Origin const*> notToRun;           // answered rejected{deadline} by tick(): begin() refuses
     std::deque<std::string> recent;                       // finished corr tokens, oldest first
     std::unordered_set<std::string> recentSet;

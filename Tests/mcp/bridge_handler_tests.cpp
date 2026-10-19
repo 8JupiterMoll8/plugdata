@@ -1028,6 +1028,32 @@ std::optional<mcp::v2::json::Value> statusUntilFinal(V2Link& link, std::string c
     return std::nullopt;
 }
 
+// S6: two v2 sessions. The one that changed the patch last is the editor: the other is told once (owner_changed),
+// a read changes nothing, and a second change by the editor tells nobody.
+void runV2OwnershipCases(Harness& v1)
+{
+    std::printf("v2 session ownership\n");
+    clearMain(v1, "o0");
+    auto a = v2Connect();
+    auto b = v2Connect();
+    auto isOwnerChanged = [](auto const& v) { return field(v, "t") == "evt" && field(v, "address") == "owner_changed"; };
+
+    a->sendReq("oa1", "/pd/batch_atomic", boxArgs("oa1", 1, 100), false, "own:1");
+    auto const firstFinal = finalFor(*a, "oa1");
+    CHECK(firstFinal && field(*firstFinal, "outcome") == "applied");
+    CHECK(!a->take(isOwnerChanged, 200)); // the first editor displaced nobody
+
+    b->sendReq("ob1", "/pd/batch_atomic", boxArgs("ob1", 1, 200), false, "own:2");
+    auto const told = a->take(isOwnerChanged, 3000);
+    CHECK(told && field(*told, "class") == "session");
+    CHECK(!b->take(isOwnerChanged, 200)); // the new editor is not told
+
+    b->sendReq("ob2", "/pd/batch_atomic", boxArgs("ob2", 1, 300), false, "own:3");
+    auto const secondFinal = finalFor(*b, "ob2");
+    CHECK(secondFinal && field(*secondFinal, "outcome") == "applied");
+    CHECK(!a->take(isOwnerChanged, 200)); // already the editor: nobody is told again
+}
+
 void runV2IdempotencyCases(Harness& v1)
 {
     std::printf("v2 idempotency\n");
@@ -1417,6 +1443,7 @@ int main()
             runCases(harness);
             runV2Pass(harness, *bridge);
             runV2IdempotencyCases(harness);
+            runV2OwnershipCases(harness);
             runZeroArgCases(harness);
             runV2WithoutUdpCases(*bridge, [&] {
                 bridge->setReplySinkForTests([&replies](juce::OSCMessage const& msg) { replies.push(msg); });

@@ -389,7 +389,7 @@ private:
         w.sessionQueueFrames = shared->config.sessionQueueFrames;
         post(encodeWelcome(w));
         if (shared->config.onSessionOpened)
-            shared->config.onSessionOpened(sessionNo, hello.telemetry);
+            shared->config.onSessionOpened(sessionNo, hello.telemetry, clientName);
         shared->log("MCP bridge v2: session " + sessionId + " connected (" + (clientName.empty() ? "unnamed" : clientName) + ")");
     }
 

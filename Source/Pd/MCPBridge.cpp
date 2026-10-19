@@ -192,7 +192,7 @@ bool MCPBridge::startV2()
     // P4.1 S3: requests in, sessions in and out, the async deadline clock. All on V2 threads: they only post.
     config.onRequest = [this](int session, mcp::v2::Request request) { return admitV2(session, std::move(request)); };
     config.onStatus = [this](int session, mcp::v2::Request request) { return v2Router.status(session, request.id, request.key, v2NowMs()); };
-    config.onSessionOpened = [this](int session, bool telemetry) { v2Router.sessionOpened(session, telemetry); };
+    config.onSessionOpened = [this](int session, bool telemetry, std::string const& name) { v2Router.sessionOpened(session, telemetry, name); };
     config.onSessionClosed = [this](int session) { v2Router.sessionClosed(session); };
     config.onTick = [this] {
         if (v2Router.hasPending())
@@ -324,6 +324,9 @@ bool MCPBridge::isConnected() const
 
 juce::String MCPBridge::getStatus() const
 {
+    // S6 (O3): the v2 sessions by name, the editor marked. Prefixed "connected", so panels match on the prefix.
+    if (auto const sessions = v2Router.sessionsSummary(); !sessions.empty())
+        return "connected: " + juce::String::fromUTF8(sessions.data(), static_cast<int>(sessions.size()));
     if (!active.load()) return statusMessage.isNotEmpty() ? ("error: " + statusMessage) : juce::String("disabled");
 
     auto const last = lastServerActivity.load();
