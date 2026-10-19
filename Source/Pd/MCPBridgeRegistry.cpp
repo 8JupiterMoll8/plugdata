@@ -45,6 +45,16 @@ bool MCPBridge::dispatchRegistered(const juce::String& domain, const juce::Strin
     if (handler == nullptr)
         return false;
 
+    // L31 (P4.1): some handlers read their first arguments unchecked; a shorter message would read past the end of
+    // the OSC message (a crash in a release build). Refused here, before the handler, on both lines (handlers are
+    // unchanged in P4.1; v2 refuses it earlier, by id).
+    if (auto const* meta = mcp::v2schema::findVerb(domainKey, verb); meta && msg.size() < meta->minArgs) {
+        if (processor)
+            processor->logWarning("MCP bridge: " + msg.getAddressPattern().toString() + " needs at least "
+                + juce::String(meta->minArgs) + " argument(s); ignored");
+        return true;
+    }
+
     mcp::audit::commandBegin(msg.getAddressPattern().toString().toRawUTF8());
     (this->**handler)(juce::String::fromUTF8(verb.c_str()), msg);
     mcp::audit::commandEnd();

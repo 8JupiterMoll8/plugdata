@@ -1143,6 +1143,44 @@ void runV2IdempotencyCases(Harness& v1)
     clearMain(v1, "i9");
 }
 
+// L31 (P4.1, before S5): 16 handlers read msg[0] unchecked; the schema's minArgs makes the dispatcher refuse a
+// shorter request on both lines. Every verb row gets a message with NO arguments over v1 (a handler that still
+// indexed past the end would crash this process), then the bridge must still answer; over v2 the guarded verbs are
+// refused by id. Skipped: verbs whose zero-argument defaults start jobs or write files outside the test's concern.
+void runZeroArgCases(Harness& h)
+{
+    std::printf("every verb with no arguments (L31)\n");
+    static std::string const skip[] = { "pd/render", "pd/record_start", "pd/mcp_reload_lua", "pd/save_patch", "pd/save_content",
+        "pd/encapsulate_to_file", "pd/gem_capture", "pd/screenshot_canvas", "transport/start", "seq/start" };
+    int sent = 0;
+    for (auto const& v : mcp::v2schema::kVerbs) {
+        std::string const row = std::string(v.domain) + "/" + (*v.verb ? v.verb : "zero_args");
+        if (std::find(std::begin(skip), std::end(skip), row) != std::end(skip))
+            continue;
+        h.fire(("/" + row).c_str(), {});
+        ++sent;
+        sleepMs(15);
+    }
+    sleepMs(1500);
+    auto const alive = h.call("/pd/ping", {}, "/pd/pong", 5000);
+    std::printf("  %d verbs sent with no arguments\n", sent);
+    CHECK(alive.has_value());
+
+    auto link = v2Connect();
+    int guarded = 0, refused = 0;
+    for (auto const& v : mcp::v2schema::kVerbs) {
+        if (v.minArgs == 0)
+            continue;
+        ++guarded;
+        auto const id = "Z" + std::to_string(guarded);
+        link->sendReq(id, ("/" + std::string(v.domain) + "/" + v.verb).c_str(), "[]");
+        auto const f = finalFor(*link, id, 3000);
+        auto const* e = f ? f->find("error") : nullptr;
+        refused += (f && field(*f, "outcome") == "rejected" && e && field(*e, "code") == "bad_frame") ? 1 : 0;
+    }
+    CHECK(guarded == 16 && refused == guarded);
+}
+
 // P4.1 S3: the handler cases a second time, through a v2 session of the bridge's own listener, with the same
 // expectations on the decoded replies (the evidence that the handlers did not change), then the v2-only cases.
 void runV2Pass(Harness& v1, MCPBridge& bridge)
@@ -1379,6 +1417,7 @@ int main()
             runCases(harness);
             runV2Pass(harness, *bridge);
             runV2IdempotencyCases(harness);
+            runZeroArgCases(harness);
             runV2WithoutUdpCases(*bridge, [&] {
                 bridge->setReplySinkForTests([&replies](juce::OSCMessage const& msg) { replies.push(msg); });
             });

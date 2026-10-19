@@ -259,6 +259,9 @@ std::optional<mcp::v2::RequestAnswer> MCPBridge::admitV2(int session, mcp::v2::R
             "not a valid OSC message: " + mcp::v2::json::truncateUtf8(request.verb, 128)), false };
     }
 
+    if (meta && static_cast<int>(request.args.size()) < meta->minArgs) // L31: the handler would read past the end
+        return mcp::v2::RequestAnswer { mcp::v2::encodeSynth(request.id, mcp::v2schema::Outcome::Rejected, mcp::v2::ErrorCode::BadFrame,
+            request.verb + " needs at least " + std::to_string(meta->minArgs) + " argument(s)"), false };
     auto admission = v2Router.admit(session, request, meta, v2NowMs());
     if (admission.reply)
         return mcp::v2::RequestAnswer { std::move(*admission.reply), admission.closeSession };
