@@ -1419,6 +1419,60 @@ void runZeroArgCases(Harness& h)
     CHECK(guarded == 16 && refused == guarded);
 }
 
+// S6.6 (audit A20): the live props of an IEM GUI carry its label, so a control the builder named (`hsl ... morph_s
+// morph_r morph`) can be read back as named. The label slot is iemgui_new_getnames' index + 2 in each constructor:
+// hsl/vsl/nbx 8, tgl 4, bng 6, hradio/vradio 6. An `empty` label is no label: the property is absent.
+void runIemLabelCases(Harness& h)
+{
+    std::printf("IEM props carry the label (S6.6)\n");
+    clearMain(h, "il0");
+    auto const created = h.call("/pd/batch_atomic",
+        { "main", "il1", 0, 0, 0, 8, 0,
+            "ilh", 40, 40, "obj", "hsl", 18,
+                "128", "15", "0", "1", "0", "0", "morph_s", "morph_r", "morph", "-2", "-8", "0", "10", "#fcfcfc", "#000000", "#000000", "0", "1",
+            "ilv", 40, 80, "obj", "vsl", 18,
+                "15", "128", "0", "1", "0", "0", "empty", "empty", "cut", "0", "-9", "0", "10", "#fcfcfc", "#000000", "#000000", "0", "1",
+            "iln", 40, 120, "obj", "nbx", 18,
+                "5", "14", "0", "1", "0", "0", "empty", "empty", "freq", "0", "-8", "0", "10", "#fcfcfc", "#000000", "#000000", "0", "256",
+            "ilt", 40, 160, "obj", "tgl", 14,
+                "15", "0", "empty", "empty", "gate", "0", "-8", "0", "10", "#fcfcfc", "#000000", "#000000", "0", "1",
+            "ilb", 40, 200, "obj", "bng", 14,
+                "15", "250", "50", "0", "empty", "empty", "hit", "0", "-8", "0", "10", "#fcfcfc", "#000000", "#000000",
+            "ilr", 40, 240, "obj", "hradio", 15,
+                "15", "1", "0", "8", "empty", "empty", "mode", "0", "-8", "0", "10", "#fcfcfc", "#000000", "#000000", "0",
+            "ilw", 40, 280, "obj", "vradio", 15,
+                "15", "1", "0", "8", "empty", "empty", "wave", "0", "-8", "0", "10", "#fcfcfc", "#000000", "#000000", "0",
+            "ile", 40, 320, "obj", "hsl", 18,
+                "128", "15", "0", "1", "0", "0", "empty", "empty", "empty", "-2", "-8", "0", "10", "#fcfcfc", "#000000", "#000000", "0", "1",
+            0, 5, 10, 0 },
+        "/pd/batch_atomic/reply/il1");
+    CHECK(created.has_value() && created->num(0) == 8);
+
+    int corr = 0;
+    auto propsOf = [&](char const* id) -> juce::var {
+        auto const c = "il_g" + std::to_string(++corr);
+        auto r = h.call("/pd/obj_get", { "main", c.c_str(), id }, "/pd/obj_get/reply/" + c, 3000);
+        return r ? parseJson(*r)["props"] : juce::var();
+    };
+
+    auto const slider = propsOf("ilh");
+    CHECK(slider["label"].toString() == "morph");
+    CHECK(slider["send"].toString() == "morph_s"); // the names the label sits next to are still read
+    CHECK(slider["receive"].toString() == "morph_r");
+    CHECK(static_cast<double>(slider["max"]) == 1.0);
+
+    struct Row { char const* id; char const* label; };
+    for (auto const& row : { Row { "ilv", "cut" }, Row { "iln", "freq" }, Row { "ilt", "gate" }, Row { "ilb", "hit" }, Row { "ilr", "mode" }, Row { "ilw", "wave" } }) {
+        auto const props = propsOf(row.id);
+        std::printf("  %s label '%s'\n", row.id, props["label"].toString().toRawUTF8());
+        CHECK(props["label"].toString() == row.label);
+    }
+
+    auto const unlabelled = propsOf("ile");
+    CHECK(unlabelled.isObject() && !unlabelled.hasProperty("label")); // `empty` is no label
+    clearMain(h, "il9");
+}
+
 // P4.1 S3: the handler cases a second time, through a v2 session of the bridge's own listener, with the same
 // expectations on the decoded replies (the evidence that the handlers did not change), then the v2-only cases.
 void runV2Pass(Harness& v1, MCPBridge& bridge)
@@ -1654,6 +1708,7 @@ int main()
             Harness harness { *bridge, replies };
             runCases(harness);
             runV2Pass(harness, *bridge);
+            runIemLabelCases(harness);
             runV2IdempotencyCases(harness);
             runV2OwnershipCases(harness);
             runZeroArgCases(harness);

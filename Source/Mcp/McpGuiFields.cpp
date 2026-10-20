@@ -10,6 +10,17 @@
 extern "C" void knob_get_snd(void* x);
 extern "C" void knob_get_rcv(void* x);
 
+namespace {
+// The label an IEM GUI shows (S6.6, audit A20). Pd reads it in the constructor at iemgui_new_getnames' index + 2, so
+// it sits next to send and receive. `empty` and "" mean no label: the property is then left out, not set to "empty".
+void setIemLabel(juce::DynamicObject* props, t_iemgui const& gui)
+{
+    t_symbol* label = gui.x_lab;
+    if (label && label->s_name && label->s_name[0] && label != gensym("empty"))
+        props->setProperty("label", juce::String::fromUTF8(label->s_name));
+}
+} // namespace
+
 // Live `props` for a GUI object (shared by obj_get / obj_get_batch).
 juce::DynamicObject* mcpBuildGuiProps(const juce::String& className, t_object* obj)
 {
@@ -44,20 +55,26 @@ juce::DynamicObject* mcpBuildGuiProps(const juce::String& className, t_object* o
         props->setProperty("orientation", (int) s->x_orientation);
         if (s->x_gui.x_snd && s->x_gui.x_snd != gensym("empty")) props->setProperty("send", juce::String::fromUTF8(s->x_gui.x_snd->s_name));
         if (s->x_gui.x_rcv && s->x_gui.x_rcv != gensym("empty")) props->setProperty("receive", juce::String::fromUTF8(s->x_gui.x_rcv->s_name));
+        setIemLabel(props, s->x_gui);
     } else if (cls == "tgl") {
         auto* t = reinterpret_cast<t_toggle*>(obj);
         props->setProperty("value", (double) t->x_on);
         props->setProperty("nonzero", t->x_nonzero != 0);
+        setIemLabel(props, t->x_gui);
     } else if (cls == "hradio" || cls == "vradio") {
         auto* r = reinterpret_cast<t_radio*>(obj);
         props->setProperty("index", r->x_on);
         props->setProperty("value", (double) r->x_fval);
+        setIemLabel(props, r->x_gui);
     } else if (cls == "nbx") {
         auto* n = reinterpret_cast<t_my_numbox*>(obj);
         props->setProperty("value", (double) n->x_val);
         props->setProperty("min", (double) n->x_min);
         props->setProperty("max", (double) n->x_max);
         props->setProperty("log", n->x_lin0_log1 != 0);
+        setIemLabel(props, n->x_gui);
+    } else if (cls == "bng") {
+        setIemLabel(props, reinterpret_cast<t_bng*>(obj)->x_gui);
     } else if (cls == "vu") {
         auto* v = reinterpret_cast<t_vu*>(obj);
         props->setProperty("rms", (double) v->x_fr);
