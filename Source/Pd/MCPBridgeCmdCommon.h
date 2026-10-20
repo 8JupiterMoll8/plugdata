@@ -69,28 +69,15 @@ struct _outlet
 }
 
 // ── Undo-stack safety ──────────────────────────────────────────────
-// Free a canvas's Pd undo queue after an MCP mutation that removes or
-// replaces objects (delete / clear / load).
+// Free a canvas's Pd undo queue after an MCP op that replaces its content (load, clear, encapsulate/GOP) or a
+// structural change on a canvas that cannot register undo (a closed GOP module). Everything else registers Pd's own
+// undo actions (Plan 4 P4.4, Mcp/McpNativeUndo.h), so the queue stays valid and holds AI and manual edits.
 //
-// Why: MCP mutation paths (pasteDirect for create, removeObjectsAudioThread
-// for delete) and the wholesale clear/load paths intentionally do NOT
-// register Pd undo actions. But Pd's undo entries reference their target
-// objects by *index* (canvas_undo_apply stores u_index, resolved via
-// glist_nth; create/recreate/cut do the same). Deleting or clearing objects
-// shifts or frees those targets, leaving the queue holding stale
-// t_undo_action nodes whose data/indices no longer match the live list. The
-// next undo/redo walks them and dereferences freed memory — the observed
-// "unsupported undo command <garbage int>" heap-corruption crash.
-//
-// Since MCP never contributes correct undo actions, the only safe state for
-// the queue after such a mutation is EMPTY. Routes through
-// receiveSysMessage("mcp_clear_undo"), the path /pd/clear_undo uses; that
-// runs synchronously on the calling thread and takes the Pd lock itself
-// (canvas_undo_free -> canvas_suspend_dsp needs the lock, not a thread).
-// Plan 3 P3.4 S2: synchronous on purpose. Queued, the clear ran up to one
-// audio block later, after the caller had pushed its own MCP transaction
-// (finding L12: batch_atomic's undo never worked) or after the NEXT command
-// had pushed one (a move right after a batch lost its undo).
+// Why a flush there: Pd's undo entries reference their objects by *index* (glist_nth); an unregistered delete or a
+// wholesale replace shifts or frees those targets, and the next undo/redo walks stale t_undo_action nodes (the old
+// "unsupported undo command <garbage int>" heap-corruption crash). Routes through receiveSysMessage("mcp_clear_undo"),
+// the path /pd/clear_undo uses; it runs synchronously on the calling thread and takes the Pd lock itself
+// (canvas_undo_free -> canvas_suspend_dsp needs the lock). Plan 3 P3.4 S2: synchronous on purpose.
 // P3.4 S11: a diagnostic line from a thread that is not the Pd thread. Pd's post() runs plugdata's print hook,
 // which is not thread-safe there (TSan: console buffer and gensym races); this queues the line for the console
 // and sends the same /pd/log message the print hook used to send.

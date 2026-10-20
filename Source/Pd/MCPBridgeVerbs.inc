@@ -149,7 +149,7 @@ MCP_VERB(pd, "rename_id", pdRenameId)
 MCP_VERB(pd, "rename_id_batch", pdRenameIdBatch)
 MCP_VERB(pd, "get_mappings", pdGetMappings)
 
-// ── pd: legacy index forms, and move_batch_id (the undo/redo replay verb) ──
+// ── pd: legacy index forms, and move_batch_id ──
 MCP_VERB(pd, "create", pdCreate)
 MCP_VERB(pd, "create_batch", pdCreateBatch)
 MCP_VERB(pd, "connect_batch", pdConnectBatch)

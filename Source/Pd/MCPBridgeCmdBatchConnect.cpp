@@ -191,7 +191,10 @@ void mcp::BatchJob::connectPhase()
                 tentativeSigAdj[sg].push_back(dg);
             }
             if (obj_connect(so, cc.srcOut, d_o, cc.destIn)) {
-                mcp::undo::connect(cnv, so, cc.srcOut, d_o, cc.destIn); // P4.4
+                if (undoRegistrable) { // P4.4
+                    undo.ensure();
+                    mcp::undo::connect(cnv, so, cc.srcOut, d_o, cc.destIn);
+                }
                 connected++;
             }
             else

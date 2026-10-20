@@ -89,7 +89,7 @@ public:
     // GUI undo/redo of an already open view (never opens a tab).
     enum class UndoResult { NoView, Empty, Done };
     virtual UndoResult undo(t_canvas* cnv) = 0;
-    virtual bool redo(t_canvas* cnv) = 0; // false: no view
+    virtual UndoResult redo(t_canvas* cnv) = 0;
 
     // ── Screenshot ──────────────────────────────────────────────────────
     struct ScreenshotLabel {

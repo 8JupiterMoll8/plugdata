@@ -98,6 +98,8 @@ void MCPBridge::pdEncapsulate(const juce::String& action, const juce::OSCMessage
                 for (t_gobj* y = cnv->gl_list; y; y = y->g_next)
                     parentCountBefore++;
 
+                t_undo* const undoQueue = canvas_undo_get(cnv); // P4.4: roll back only what this op registered
+                t_undo_action* const undoBefore = undoQueue ? undoQueue->u_last : nullptr;
                 proc->getMcp()->gui().encapsulate(cnv, subpatchName, toEncapsulate);
 
                 // ── PHASE 2: POST-OP VERIFICATION + ROLLBACK ─────────────
@@ -105,7 +107,8 @@ void MCPBridge::pdEncapsulate(const juce::String& action, const juce::OSCMessage
                 // lost exactly N-1 objects, and the subpatch holds at least N. On
                 // mismatch, roll back with ONE native undo (encapsulateSelection
                 // wraps the whole op in a single "Encapsulate" undo sequence,
-                // Canvas.cpp:2571) — done BEFORE resetCanvasUndo() flushes the stack.
+                // Canvas.cpp:2571) — done BEFORE resetCanvasUndo() flushes the stack, and only when the op registered
+                // something (P4.4: otherwise the newest step is someone else's).
                 t_gobj* newestObj = pd::Interface::getNewest(cnv);
                 bool verified = false;
                 if (newestObj && pd_class(&newestObj->g_pd) == canvas_class) {
@@ -121,7 +124,8 @@ void MCPBridge::pdEncapsulate(const juce::String& action, const juce::OSCMessage
                 }
 
                 if (!verified) {
-                    pd::Interface::undo(cnv);            // single-step rollback
+                    if (undoQueue && undoQueue->u_last != undoBefore)
+                        pd::Interface::undo(cnv);        // single-step rollback of the Encapsulate sequence
                     proc->getMcp()->reconcileIdentity(canvasName); // re-align map post-rollback
                     bridge->sendReply("/pd/encapsulate/reply/" + correlationId, 0.0f);
                     return;
@@ -214,6 +218,8 @@ void MCPBridge::pdEncapsulateToFile(const juce::String& action, const juce::OSCM
                 for (t_gobj* y = cnv->gl_list; y; y = y->g_next)
                     parentCountBefore++;
 
+                t_undo* const undoQueue = canvas_undo_get(cnv); // P4.4: roll back only what this op registered
+                t_undo_action* const undoBefore = undoQueue ? undoQueue->u_last : nullptr;
                 proc->getMcp()->gui().encapsulate(cnv, abstrName, toEncapsulate);
 
                 // ── PHASE 2: POST-OP VERIFICATION + ROLLBACK ─────────────
@@ -235,7 +241,8 @@ void MCPBridge::pdEncapsulateToFile(const juce::String& action, const juce::OSCM
                         ok = (parentCountAfter == parentCountBefore - n + 1) && (subCount >= n);
                     }
                     if (!ok) {
-                        pd::Interface::undo(cnv);
+                        if (undoQueue && undoQueue->u_last != undoBefore)
+                            pd::Interface::undo(cnv);
                         proc->getMcp()->reconcileIdentity(canvasName);
                         bridge->sendReply("/pd/encapsulate_to_file/reply/" + correlationId, 0.0f);
                         return;

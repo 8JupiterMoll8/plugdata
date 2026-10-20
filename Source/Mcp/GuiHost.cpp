@@ -319,12 +319,13 @@ public:
         return UndoResult::Done;
     }
 
-    bool redo(t_canvas* cnv) override
+    UndoResult redo(t_canvas* cnv) override
     {
         Canvas* canvasComp = findOpenCanvas(proc, cnv);
-        if (!canvasComp) return false;
+        if (!canvasComp) return UndoResult::NoView;
+        if (!canvasComp->getMcpLayer().canRedo()) return UndoResult::Empty;
         canvasComp->redo();
-        return true;
+        return UndoResult::Done;
     }
 
     juce::String screenshot(t_canvas* cnv, float scale, LabelSource const* labelSource, juce::String const& correlationId) override;

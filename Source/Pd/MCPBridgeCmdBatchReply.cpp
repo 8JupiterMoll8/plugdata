@@ -84,12 +84,9 @@ juce::OSCMessage mcp::BatchJob::buildReply()
     if (canvasNotFound)
         reply.addArgument(canvasName); // the name that failed, for the receipt
 
-    // Undo-safety tail fact (appended LAST): 1 when this batch deleted
-    // objects and therefore flushed the Pd undo queue (MCP deletes never
-    // register undo actions, so the queue must be emptied to stay
-    // crash-safe). Old TS clients ignore the extra trailing atom; new
-    // clients surface it as _v2meta.undoReset so the AI knows native
-    // undo cannot step back past this mutation.
+    // Undo-safety tail fact (appended LAST): 1 when this batch flushed the canvas's Pd undo queue. Since P4.4 that
+    // happens only on a canvas that cannot register undo (a closed GOP module); elsewhere the batch is one step of
+    // the canvas's one history. Clients surface it as _v2meta.undoReset (undo cannot step back past this batch).
     reply.addArgument(static_cast<int32>(undoReset ? 1 : 0));
 
     // Layout-sanitize tail fact (appended LAST, PRD_CONTEXT_LAYOUT_GUARD

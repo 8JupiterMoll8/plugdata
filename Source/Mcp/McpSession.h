@@ -33,9 +33,6 @@ struct McpUndoGhost {
 };
 
 struct McpSession {
-    // True while an undo/redo step runs (P4.4: Pd's own queue); the batch de-dup skips its cache then.
-    // Atomic: written in the Pd context, read on the command worker.
-    std::atomic<bool> isExecutingMcpUndoRedo { false };
 
     struct AiMark { int state = 0; bool transient = false; };
     // PRD overlay: AI state marker for a gobj (0 = none). Used by Object::paint.
@@ -354,8 +351,13 @@ struct McpSession {
     // auto-clear can never erase a later *persistent* mark. Message-thread only.
     std::unordered_map<t_gobj*, AiMark> mcpAiOverlay;
     int mcpSuspendedDspState = 0;
-    // P4.4: per canvas, the ids undo/redo took away (newest last, bounded). Pd context only.
-    std::map<t_canvas*, std::vector<McpUndoGhost>> undoJournal;
+    // P4.4: per canvas, the ids undo/redo took away (newest last, bounded), with the canvas's liveness check.
+    // Pd context only.
+    struct UndoJournal {
+        std::function<bool()> alive;
+        std::vector<McpUndoGhost> ghosts;
+    };
+    std::map<t_canvas*, UndoJournal> undoJournal;
 
     // MCP zero-dropout WAV recorder — taps outputFifo directly in processBlock.
     // No canvas objects created, no DSP recompile, zero audio dropout.

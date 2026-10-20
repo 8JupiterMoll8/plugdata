@@ -58,9 +58,9 @@ public:
     // when there was nothing to take. Ids of objects the step takes away come back with the objects (undo journal).
     // Takes the Pd lock; any thread that may lock Pd.
     bool undoStep(t_canvas* cnv, bool redo);
-    bool canUndoStep(t_canvas* cnv, bool redo);
-    // The canvas is going away: drop its undo journal.
-    void forgetCanvasUndo(t_canvas* cnv);
+    // The undo journal of a canvas (Pd context); cleared when its queue is flushed.
+    std::vector<McpUndoGhost>& undoJournalFor(t_canvas* cnv);
+    void clearUndoJournal(t_canvas* cnv);
     // An MCP edit is about to take `obj` (named `id`) away in an undoable step: its id goes to the journal, so an
     // undo that brings the object back gives it the id again. Pd context (lock held).
     void journalId(t_canvas* cnv, std::string const& id, t_gobj* obj);

@@ -4,8 +4,8 @@
  // prefixes). PluginProcessor calls McpHost::handleSysMessage first; every other
  // selector returns false and falls through to plugdata's own switch as before.
  // Each selector is one row of McpSysVerbs.inc. The id-addressed forms were removed
- // with the legacy /pd verbs that sent them (P3.3 S9); mcp_move_batch_id stays because
- // McpHost undo/redo replays a move transaction through it.
+ // with the legacy /pd verbs that sent them (P3.3 S9); mcp_move_batch_id stays: /pd/move_batch_id routes here
+ // (it registers one Pd motion step since P4.4).
  */
 #include "Mcp/McpSysCommon.h"
 #include "Mcp/McpNativeUndo.h"
@@ -237,7 +237,11 @@ void McpHost::sysClearUndo(SmallString const& selector, mcp::SysList const& list
     // /pd/clear_undo) still come here; batches and moves register Pd's own undo actions instead.
     processor.setThis();
     sys_lock();
-    auto wipeCanvasUndo = [](t_canvas* c) { resetNativeUndo(c); };
+    // The undo journal goes with the queue: its ghosts belong to entries that no longer exist (P4.4 review).
+    auto wipeCanvasUndo = [this](t_canvas* c) {
+        resetNativeUndo(c);
+        clearUndoJournal(c);
+    };
 
     if (list.size() >= 1) {
         auto canvas_symbol = list[0].toString();
@@ -621,9 +625,8 @@ void McpHost::sysMoveBatchId(SmallString const& selector, mcp::SysList const& li
         sys_lock();
         t_canvas* canvas = getCanvasBySymbol(canvas_symbol);
         if (canvas) {
-            // P4.4: one undo step (Pd's own motion entry), in the canvas's one history.
-            mcp::undo::beginStep(canvas);
-            mcp::undo::motion(canvas);
+            // P4.4: one undo step (Pd's own motion entry) in the canvas's one history, only when something moved.
+            auto const before = mcp::undo::positions(canvas);
             for (int i = 2; i + 2 < list.size(); i += 3) {
                 auto object_id = list[i].toString();
                 int x = (int)list[i+1].getFloat();
@@ -635,9 +638,10 @@ void McpHost::sysMoveBatchId(SmallString const& selector, mcp::SysList const& li
                     movedCount++;
                 }
             }
-            mcp::undo::endStep(canvas);
-            if (movedCount > 0)
+            if (movedCount > 0) {
+                mcp::undo::movedSince(canvas, before);
                 canvas_dirty(canvas, 1);
+            }
         }
         sys_unlock();
 

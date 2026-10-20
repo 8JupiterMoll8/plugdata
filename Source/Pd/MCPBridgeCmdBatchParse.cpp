@@ -250,8 +250,4 @@ void mcp::BatchJob::parse(const juce::OSCMessage& msg)
     if (cursor < msg.size()) layoutSnap = static_cast<int>(getArgFloat(msg[cursor++]));
     if (cursor < msg.size()) autoFixOcclusions = getArgFloat(msg[cursor++]) > 0.5f;
 
-    if (processor->getMcp()->session.isExecutingMcpUndoRedo) {
-        autoLayout = false;
-        autoFixOcclusions = false;
-    }
 }

@@ -6,6 +6,8 @@
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_dsp/juce_dsp.h>
 
+#include <cstring>
+
 #include "PluginProcessor.h"
 #include "Mcp/McpHost.h"
 #include "Pd/MCPBridge.h"
@@ -619,17 +621,45 @@ std::string objectText(t_gobj* g)
     return text;
 }
 constexpr size_t kUndoJournalMax = 512;
+
+// The fork's line~/vline~ ignore their creation argument (the batch seeds it, MCPBridgeCmdBatchParse.cpp): an
+// undo or redo that rebuilds one from its saved text must seed it again, or [line~ 440] restarts at 0.
+void reseedLine(t_gobj* g)
+{
+    t_object* ob = pd_checkobject(&g->g_pd);
+    if (!ob || !ob->te_binbuf || binbuf_getnatom(ob->te_binbuf) < 2) return;
+    t_atom const* v = binbuf_getvec(ob->te_binbuf);
+    if (v[0].a_type != A_SYMBOL || v[1].a_type != A_FLOAT) return;
+    auto const* name = v[0].a_w.w_symbol->s_name;
+    if (std::strcmp(name, "line~") != 0 && std::strcmp(name, "vline~") != 0) return;
+    t_atom f;
+    SETFLOAT(&f, v[1].a_w.w_float);
+    pd_typedmess(&ob->ob_pd, gensym("float"), 1, &f);
+}
 } // namespace
 
-bool McpHost::canUndoStep(t_canvas* cnv, bool redo)
+// P4.4: the canvas's journal of ids its undo/redo steps (and AI deletes) took away. Keyed by the canvas pointer but
+// checked through the identity service's liveness hook, so a new canvas at a reused address never inherits it.
+std::vector<McpUndoGhost>& McpHost::undoJournalFor(t_canvas* cnv)
 {
-    PdLockScope lock(processor);
-    return redo ? mcp::undo::canRedo(cnv) : mcp::undo::canUndo(cnv);
+    auto& j = session.undoJournal[cnv];
+    if (!j.alive || !j.alive()) {
+        j.ghosts.clear();
+        pd::WeakReference ref(cnv, &processor);
+        j.alive = [ref] { return ref.isValid(); };
+    }
+    return j.ghosts;
+}
+
+void McpHost::clearUndoJournal(t_canvas* cnv)
+{
+    session.undoJournal.erase(cnv);
 }
 
 // P4.4: one step of the canvas's own undo queue (AI and manual edits alike). Pd recreates the objects an undo or
 // redo brings back, so their ids would be lost: the ids of objects the step takes away go to the canvas's journal,
-// and an object that comes back without an id gets the journal id with the same text and position (newest first).
+// and an object the step rebuilds without an id gets a journal id back (same text and place; else, for a retype,
+// the only ghost at the same place).
 bool McpHost::undoStep(t_canvas* cnv, bool redo)
 {
     PdLockScope lock(processor);
@@ -638,19 +668,24 @@ bool McpHost::undoStep(t_canvas* cnv, bool redo)
 
     struct Before { std::string id; t_gobj* obj; std::string text; int x, y, index; };
     std::vector<Before> before;
-    if (auto* ids = identity.findCanvas(cnv)) {
+    std::unordered_map<t_gobj*, std::string> textBefore; // every box, to see which ones the step rebuilt
+    {
         std::unordered_map<t_gobj*, int> indexOf; // only objects in the list are read: a map entry may be stale
         int i = 0;
-        for (t_gobj* g = cnv->gl_list; g; g = g->g_next) indexOf[g] = i++;
-        for (auto const& [id, obj] : *ids) {
-            auto const at = indexOf.find(obj);
-            if (at == indexOf.end()) continue;
-            t_object* ob = pd_checkobject(&obj->g_pd);
-            before.push_back({ id, obj, objectText(obj), ob ? ob->te_xpix : 0, ob ? ob->te_ypix : 0, at->second });
+        for (t_gobj* g = cnv->gl_list; g; g = g->g_next) {
+            indexOf[g] = i++;
+            textBefore[g] = objectText(g);
+        }
+        if (auto* ids = identity.findCanvas(cnv)) {
+            for (auto const& [id, obj] : *ids) {
+                auto const at = indexOf.find(obj);
+                if (at == indexOf.end()) continue;
+                t_object* ob = pd_checkobject(&obj->g_pd);
+                before.push_back({ id, obj, textBefore[obj], ob ? ob->te_xpix : 0, ob ? ob->te_ypix : 0, at->second });
+            }
         }
     }
 
-    session.isExecutingMcpUndoRedo = true;
     {
         mcp::undo::EditorScope editor(cnv);
         if (redo)
@@ -658,11 +693,10 @@ bool McpHost::undoStep(t_canvas* cnv, bool redo)
         else
             pd::Interface::undo(cnv);
     }
-    session.isExecutingMcpUndoRedo = false;
 
     std::unordered_set<t_gobj*> live;
     for (t_gobj* g = cnv->gl_list; g; g = g->g_next) live.insert(g);
-    auto& journal = session.undoJournal[cnv];
+    auto& journal = undoJournalFor(cnv);
     bool changed = false;
     for (auto const& b : before) {
         // Still bound to a live object (the same one, or the one the retype hook moved it to): kept. Gone, or
@@ -677,32 +711,62 @@ bool McpHost::undoStep(t_canvas* cnv, bool redo)
     if (journal.size() > kUndoJournalMax)
         journal.erase(journal.begin(), journal.begin() + static_cast<long>(journal.size() - kUndoJournalMax));
 
-    std::vector<std::string> ids; // resolve() may drop stale entries, so not while walking the map
-    if (auto* map = identity.findCanvas(cnv))
-        for (auto const& entry : *map) ids.push_back(entry.first);
-    std::unordered_set<t_gobj*> tracked;
-    for (auto const& id : ids)
-        if (t_gobj* obj = identity.resolve(cnv, id)) tracked.insert(obj);
-    // Two passes: the same text at the same place (an object brought back), then the same place and index with
-    // another text (a retype undone or redone: Pd recreates the box where it was).
-    for (int pass = 0; pass < 2; ++pass) {
-        int index = 0;
-        for (t_gobj* g = cnv->gl_list; g; g = g->g_next, ++index) {
+    // The boxes the step rebuilt (new, or a new text at an old address).
+    std::vector<t_gobj*> rebuilt;
+    for (t_gobj* g = cnv->gl_list; g; g = g->g_next) {
+        auto const it = textBefore.find(g);
+        if (it == textBefore.end() || it->second != objectText(g)) rebuilt.push_back(g);
+    }
+    for (auto* g : rebuilt) reseedLine(g);
+
+    if (!journal.empty() && !rebuilt.empty()) {
+        std::vector<std::string> ids; // resolve() may drop stale entries, so not while walking the map
+        if (auto* map = identity.findCanvas(cnv))
+            for (auto const& entry : *map) ids.push_back(entry.first);
+        std::unordered_set<t_gobj*> tracked;
+        for (auto const& id : ids)
+            if (t_gobj* obj = identity.resolve(cnv, id)) tracked.insert(obj);
+        auto bind = [&](t_gobj* g, std::vector<McpUndoGhost>::iterator ghost) {
+            if (identity.resolve(cnv, ghost->id)) return; // the id is in use again: leave it there
+            if (identity.bind(cnv, ghost->id, g) == mcp::IdentityService::BindResult::Refused) return;
+            journal.erase(ghost);
+            tracked.insert(g);
+            changed = true;
+        };
+        // Pass 1: the same text at the same place (an object brought back), newest ghost first.
+        for (auto* g : rebuilt) {
             if (tracked.count(g)) continue;
             t_object* ob = pd_checkobject(&g->g_pd);
             if (!ob) continue;
             auto const text = objectText(g);
-            for (auto it = journal.rbegin(); it != journal.rend(); ++it) {
-                bool const samePlace = it->x == ob->te_xpix && it->y == ob->te_ypix;
-                if (!samePlace || (pass == 0 ? it->text != text : it->index != index)) continue;
-                if (identity.resolve(cnv, it->id)) continue; // the id is in use again: leave it there
-                if (identity.bind(cnv, it->id, g) != mcp::IdentityService::BindResult::Refused) {
-                    journal.erase(std::next(it).base());
-                    tracked.insert(g);
-                    changed = true;
+            for (auto it = journal.end(); it != journal.begin();) {
+                --it;
+                if (it->text == text && it->x == ob->te_xpix && it->y == ob->te_ypix) {
+                    bind(g, it);
+                    break;
                 }
-                break;
             }
+        }
+        // Pass 2: another text at the same place (a retype undone or redone). Pd puts the box back at its old
+        // index, not the one it had (a retype moves it to the end), so the place decides, and only when exactly one
+        // ghost and one rebuilt box share it.
+        for (auto* g : rebuilt) {
+            if (tracked.count(g)) continue;
+            t_object* ob = pd_checkobject(&g->g_pd);
+            if (!ob) continue;
+            int boxesHere = 0;
+            for (auto* h : rebuilt) {
+                t_object* hb = pd_checkobject(&h->g_pd);
+                if (hb && !tracked.count(h) && hb->te_xpix == ob->te_xpix && hb->te_ypix == ob->te_ypix) ++boxesHere;
+            }
+            auto match = journal.end();
+            int ghostsHere = 0;
+            for (auto it = journal.begin(); it != journal.end(); ++it)
+                if (it->x == ob->te_xpix && it->y == ob->te_ypix) {
+                    ++ghostsHere;
+                    match = it;
+                }
+            if (boxesHere == 1 && ghostsHere == 1) bind(g, match);
         }
     }
     if (changed) identity.bumpVersion(cnv);
@@ -716,18 +780,14 @@ bool McpHost::undoStep(t_canvas* cnv, bool redo)
 
 void McpHost::journalId(t_canvas* cnv, std::string const& id, t_gobj* obj)
 {
-    if (!cnv || !obj) return;
+    // Only a real binding: a request may name an object by an index fallback ("obj_3", "2"), not an id.
+    if (!cnv || !obj || identity.resolve(cnv, id) != obj) return;
     int index = 0;
     for (t_gobj* g = cnv->gl_list; g && g != obj; g = g->g_next) ++index;
     t_object* ob = pd_checkobject(&obj->g_pd);
-    auto& journal = session.undoJournal[cnv];
+    auto& journal = undoJournalFor(cnv);
     journal.push_back({ id, objectText(obj), ob ? ob->te_xpix : 0, ob ? ob->te_ypix : 0, index });
     if (journal.size() > kUndoJournalMax)
         journal.erase(journal.begin());
 }
 
-void McpHost::forgetCanvasUndo(t_canvas* cnv)
-{
-    PdLockScope lock(processor);
-    session.undoJournal.erase(cnv);
-}

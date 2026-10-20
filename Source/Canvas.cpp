@@ -2529,7 +2529,7 @@ void Canvas::undo()
     }
 
     // Tell pd to undo the last action
-    if (!mcpLayer->undo()) // MCP-HOOK(canvasLifecycle): an MCP transaction first; false = nothing to undo
+    if (!mcpLayer->undo()) // MCP-HOOK(canvasLifecycle): the one history (AI and manual); false = nothing to undo
         return;
 
     // Load state from pd
@@ -2545,7 +2545,7 @@ void Canvas::undo()
 void Canvas::redo()
 {
     // Tell pd to undo the last action
-    if (!mcpLayer->redo()) // MCP-HOOK(canvasLifecycle): an MCP transaction first; false = nothing to redo
+    if (!mcpLayer->redo()) // MCP-HOOK(canvasLifecycle): the one history (AI and manual); false = nothing to redo
         return;
 
     // Load state from pd

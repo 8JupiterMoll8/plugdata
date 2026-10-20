@@ -489,9 +489,8 @@ bool CanvasMcpLayer::keyPressedForCanvas(KeyPress const& key)
 
 void CanvasMcpLayer::canvasDestroyed()
 {
-    // Drop this canvas's undo journal (P4.4), so a later canvas at the same address never inherits it.
-    if (!canvas.isGraph)
-        canvas.pd->getMcp()->forgetCanvasUndo(canvas.patch.getUncheckedPointer());
+    // Nothing to drop (P4.4): a closed tab keeps its Pd canvas and its undo queue, and the undo journal checks the
+    // canvas's liveness itself, so a later canvas at the same address never inherits it.
 }
 
 void CanvasMcpLayer::canvasSynchronised()

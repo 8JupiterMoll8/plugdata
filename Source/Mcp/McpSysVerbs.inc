@@ -22,7 +22,7 @@ MCP_SYS("mcp_selection_gate", sysSelectionGate)    // Pd only
 MCP_SYS("mcp_move", sysMove)                       // Pd only
 MCP_SYS("mcp_clear_selection", sysClearSelection)  // bridge: /pd/clear_selection
 MCP_SYS("mcp_move_batch", sysMoveBatch)            // bridge: /pd/move_batch (index form)
-MCP_SYS("mcp_move_batch_id", sysMoveBatchId)       // bridge: /pd/move_batch_id (the undo/redo replay verb)
+MCP_SYS("mcp_move_batch_id", sysMoveBatchId)       // bridge: /pd/move_batch_id
 MCP_SYS("mcp_clear_ids", sysClearIds)              // bridge: /pd/clear, clear_ids, load_content
 MCP_SYS("mcp_clear_undo", sysClearUndo)            // bridge: /pd/clear_undo, encapsulate_gop, resetCanvasUndo (batch_atomic and others)
 

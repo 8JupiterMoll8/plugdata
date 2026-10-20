@@ -30,15 +30,16 @@ void mcp::BatchJob::runPdJob()
         // Plan 4 P4.4: the whole batch is ONE step of the canvas's own undo queue (decision 9). Each phase registers
         // Pd's own undo action as it changes the canvas, in order, so older entries (manual or AI) stay valid and
         // nothing is flushed. Pd drops the sequence again when nothing was registered.
-        mcp::undo::beginStep(cnv);
+        undoRegistrable = mcp::undo::registrable(cnv);
+        undo.cnv = undoRegistrable ? cnv : nullptr; // a null canvas never opens the step
         disconnectPhase();
         deletePhase(canonStr);
         editPhase(canonStr);
         createPhase(canonStr);
         connectPhase();
         // The layout guard moves objects after this job (message thread): their positions now are what undo restores.
-        if (autoLayout) mcp::undo::motion(cnv);
-        mcp::undo::endStep(cnv);
+        if (autoLayout && undo.open) mcp::undo::motion(cnv);
+        undo.close();
         scanConnections(canonStr);
 
         canvas_dirty(cnv, 1);
@@ -166,7 +167,10 @@ void mcp::BatchJob::disconnectPhase()
             // is a silent no-op for a missing wire, but we counted
             // the attempt ("1 disconnect(s)" while removing nothing).
             if (so && d_o && pd::Interface::hasConnection(cnv, so, pdc.srcOut, d_o, pdc.destIn)) {
-                mcp::undo::disconnect(cnv, so, pdc.srcOut, d_o, pdc.destIn);
+                if (undoRegistrable) {
+                    undo.ensure();
+                    mcp::undo::disconnect(cnv, so, pdc.srcOut, d_o, pdc.destIn);
+                }
                 obj_disconnect(so, pdc.srcOut, d_o, pdc.destIn);
                 disconnected++;
             }
@@ -191,7 +195,10 @@ void mcp::BatchJob::deletePhase(const std::string& canonStr)
         }
     }
     if (toDelete.size() > 0) {
-        mcp::undo::cut(cnv, toDelete);
+        if (undoRegistrable) {
+            undo.ensure();
+            mcp::undo::cut(cnv, toDelete);
+        }
         mcp::PdOps::removeObjectsAudioThread(cnv, toDelete);
     }
 }
@@ -205,6 +212,7 @@ void mcp::BatchJob::editPhase(const std::string& canonStr)
             t_object* o = pd::Interface::checkObject(obj);
             if (o) {
                 // P4.4: Pd's text_setto registers this retype as UNDO_RECREATE itself.
+                undo.ensure(); // text_setto's own entries go inside this batch's step
                 mcp::PdOps::renameObject(cnv, obj, pe.newText.toRawUTF8(), pe.newText.length());
                 t_gobj* newObj = nullptr; bool still = false;
                 for (t_gobj* y = cnv->gl_list; y; y = y->g_next)
@@ -427,6 +435,9 @@ void mcp::BatchJob::createPhase(const std::string& canonStr)
             }
         }
         // P4.4: the survivors sit at the end of the canvas: one paste entry over them.
-        mcp::undo::pasteAppended(cnv, created);
+        if (undoRegistrable && created > 0) {
+            undo.ensure();
+            mcp::undo::pasteAppended(cnv, created);
+        }
     }
 }

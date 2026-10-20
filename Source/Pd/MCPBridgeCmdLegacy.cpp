@@ -4,7 +4,7 @@
  // WARRANTIES, see the file, "LICENSE.txt," in this distribution.
 */
 
-// Bridge commands: index-based create/connect/disconnect/delete/move, and move_batch_id (the undo/redo replay verb). Plan 3 P3.3: handlers moved unchanged out of MCPBridge::handlePdDomain; S9 removed the other id-addressed forms (batch_atomic covers them).
+// Bridge commands: index-based create/connect/disconnect/delete/move, and move_batch_id. Plan 3 P3.3: handlers moved unchanged out of MCPBridge::handlePdDomain; S9 removed the other id-addressed forms (batch_atomic covers them).
 
 #include "MCPBridgeCmdCommon.h"
 

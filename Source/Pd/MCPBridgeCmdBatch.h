@@ -16,6 +16,7 @@
 #pragma once
 
 #include "MCPBridgeCmdCommon.h"
+#include "Mcp/McpNativeUndo.h"
 
 namespace mcp {
 
@@ -91,7 +92,10 @@ struct BatchJob {
     // Unknown names must NOT silently fall back to the focused/root
     // canvas — name the failure instead of mutating the wrong patch.
     bool canvasNotFound = false;
-    bool undoReset = false; // the reply's undoReset fact: always false since P4.4 (no flush)
+    // P4.4: the batch's undo step (opened on the first registered action) and whether the canvas registers at all.
+    mcp::undo::Step undo;
+    bool undoRegistrable = true;
+    bool undoReset = false; // the reply's undoReset fact: true only when an unregistrable canvas was flushed
     bool pdLockBusy = false; // P3.4 S11: parse could not take the Pd lock within 2 s (nothing applied)
 
     void parse(const juce::OSCMessage& msg);
@@ -105,6 +109,7 @@ struct BatchJob {
     void scanConnections(const std::string& canonStr);
     void runLayoutGuard(MCPBridge& bridge);
     void frameCreated(MCPBridge& bridge);
+    void flushIfUnregistered();
     juce::OSCMessage buildReply();
 };
 

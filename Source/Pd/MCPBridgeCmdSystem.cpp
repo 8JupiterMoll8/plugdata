@@ -154,8 +154,15 @@ static void pdUndoStep(MCPBridge& bridge, PluginProcessor* processor, juce::OSCM
     }
     bridge.postMessage([proc = processor, cnv, replyAddr, redo, b = &bridge]() {
         if (mcpCanvasGone(cnv)) { b->sendReply(replyAddr, 0.0f); return; } // P3.4 S4: closed since the handler ran
-        bool const stepped = proc->getMcp()->undoStep(cnv, redo);
-        if (stepped) proc->getMcp()->synchroniseCanvases();
+        // An open canvas view runs plugdata's own undo (its tail: sync, selection, sidebar), which steps through
+        // the same McpHost::undoStep; without a view the step runs directly.
+        auto& gui = proc->getMcp()->gui();
+        auto const viaView = redo ? gui.redo(cnv) : gui.undo(cnv);
+        bool stepped = viaView == McpGuiHost::UndoResult::Done;
+        if (viaView == McpGuiHost::UndoResult::NoView) {
+            stepped = proc->getMcp()->undoStep(cnv, redo);
+            if (stepped) proc->getMcp()->synchroniseCanvases();
+        }
         b->sendReply(replyAddr, stepped ? 1.0f : 0.0f);
     });
 }

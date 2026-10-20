@@ -133,6 +133,17 @@ void mcp::BatchJob::frameCreated(MCPBridge& bridge)
     }
 }
 
+// P4.4: a canvas that cannot register Pd undo (a closed GOP module, McpNativeUndo.h registrable()) keeps the old
+// rule: after a structural change its queue is flushed, so no stale index entry survives.
+void mcp::BatchJob::flushIfUnregistered()
+{
+    if (undoRegistrable || !cnv) return;
+    if (created > 0 || connected > 0 || edited > 0 || deleted > 0 || disconnected > 0) {
+        resetCanvasUndo(processor, canvasName);
+        undoReset = true;
+    }
+}
+
 void MCPBridge::pdBatchAtomic(const juce::String& action, const juce::OSCMessage& msg)
 {
     // /pd/batch_atomic <canvas> <corrId> <deleteCount> <disconnectCount> <editCount> <createCount> <connectCount> [data...]
@@ -157,7 +168,7 @@ void MCPBridge::pdBatchAtomic(const juce::String& action, const juce::OSCMessage
         static std::deque<std::string> s_batchDedupOrder;
         static constexpr int BATCH_DEDUP_MAX = 128;
         static constexpr uint64_t BATCH_DEDUP_TTL_MS = 30000;
-        if (!processor->getMcp()->session.isExecutingMcpUndoRedo) {
+        {
             std::string corrKey = correlationId.toStdString();
             uint64_t nowMs = juce::Time::currentTimeMillis();
             auto it = s_batchDedupCache.find(corrKey);
@@ -227,11 +238,12 @@ void MCPBridge::pdBatchAtomic(const juce::String& action, const juce::OSCMessage
 
         job.runLayoutGuard(*this);
         job.frameCreated(*this);
+        job.flushIfUnregistered();
         auto reply = job.buildReply();
 
         sender.send(reply);
         // R3a — store reply in dedup cache (LRU + TTL, for retry idempotency).
-        if (!processor->getMcp()->session.isExecutingMcpUndoRedo) {
+        {
             uint64_t nowMs = juce::Time::currentTimeMillis();
             std::string corrKey = correlationId.toStdString();
             s_batchDedupCache.insert_or_assign(corrKey, BatchDedupEntry{nowMs, reply});

@@ -95,7 +95,7 @@ public:
     void objectCreatedByDoubleClick();
     void canvasDestroyed();
     void canvasSynchronised();
-    // Canvas::undo/redo: an MCP transaction first, then the native stack. False: nothing done.
+    // Canvas::undo/redo: one step of the canvas's one history (McpHost::undoStep, P4.4). False: nothing done.
     bool undo();
     bool redo();
     bool canUndo(); // an MCP transaction or the native stack (also the editor's undo button state)

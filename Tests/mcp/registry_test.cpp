@@ -176,7 +176,7 @@ int main()
         CHECK(!reported("bridge", "unknown_verb"));
 
         // The id-addressed verbs batch_atomic covers are gone (P3.3 S9); the index forms and
-        // move_batch_id (the undo/redo replay verb) stay.
+        // move_batch_id stay.
         for (char const* gone : { "create_id", "create_batch_id", "connect_id", "connect_batch_id", "disconnect_id",
                  "disconnect_batch_id", "delete_id", "delete_batch_id", "edit_id", "move_id" })
             CHECK(reported("pd", gone));

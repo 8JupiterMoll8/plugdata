@@ -7,6 +7,7 @@
 #pragma once
 
 #include "Pd/Interface.h"
+#include "Mcp/McpNativeUndo.h"
 
 extern "C" {
 extern int garray_getname(t_garray* x, t_symbol** namep);
@@ -151,6 +152,12 @@ struct PdOps {
         if (!cnv) return;
 
         if (!cnv->gl_editor) {
+            // P4.4: registered like any other MCP delete (one history, no stale index entries); a canvas that
+            // cannot register (a closed GOP module) has its queue flushed instead.
+            if (mcp::undo::registrable(cnv))
+                mcp::undo::cut(cnv, objects);
+            else
+                mcp::undo::flush(cnv);
             removeObjectsAudioThread(cnv, objects);
             return;
         }

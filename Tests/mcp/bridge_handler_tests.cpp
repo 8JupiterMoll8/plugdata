@@ -391,7 +391,7 @@ void runPdContextCases(PluginProcessor& processor, AudioControl& audio)
     }
 }
 
-// L6 (P3.4 S9): an MCP flush of the native undo queue (every batch does one) must leave Pd's UNDO_INIT
+// L6 (P3.4 S9): an MCP flush of the native undo queue (load, clear, encapsulate since P4.4) must leave Pd's UNDO_INIT
 // head action in place: canvas_undo_undo walks back to it, and without it the first GUI action after an
 // AI edit could be undone off the end of the queue, after which the next GUI edit crashed.
 void runNativeUndoCases(PluginProcessor& processor)
@@ -534,6 +534,56 @@ void runSharedUndoCases(Harness& h, PluginProcessor& processor)
     CHECK(pos("su_l1") == l1 && pos("su_l2") == l2);
     CHECK(step("undo")); // the build before it is still in the history
     CHECK(text("su_l1").empty() && text("su_l2").empty());
+
+    // 7. Retype of a box that is NOT the last one (Pd moves a retyped box to the end; undo puts it back at its old
+    //    index): undo and redo keep the id (review 2026-10-20, HIGH).
+    auto const cm = next("sum");
+    CHECK(batch({ "main", cm, 0, 0, 0, 3, 0,
+        "su_m1", 900, 300, "obj", "f", 1, "1",
+        "su_m2", 900, 350, "obj", "f", 1, "2",
+        "su_m3", 900, 400, "obj", "f", 1, "3",
+        0, 5, 10, 0 }, cm));
+    auto const cr2 = next("sur");
+    CHECK(batch({ "main", cr2, 0, 0, 1, 0, 0, "su_m2", "i", 1, "7", 0, 5, 10, 0 }, cr2));
+    CHECK(text("su_m2") == "i 7");
+    CHECK(step("undo"));
+    CHECK(text("su_m2") == "f 2");
+    CHECK(step("redo"));
+    CHECK(text("su_m2") == "i 7");
+
+    // 8. A batch with the layout guard on is still ONE step: undo takes back the box and the guard's moves.
+    auto const m1 = pos("su_m1");
+    auto const cy = next("suy");
+    CHECK(batch({ "main", cy, 0, 0, 0, 1, 0, "su_y", 900, 300, "obj", "f", 1, "8", 1, 5, 10, 1 }, cy));
+    CHECK(!text("su_y").empty());
+    CHECK(step("undo"));
+    CHECK(text("su_y").empty() && pos("su_m1") == m1);
+
+    // 9. An AI call that changes nothing leaves no step and keeps the redo history (the step opens lazily).
+    CHECK(step("redo")); // su_y back
+    CHECK(step("undo")); // and gone again: one redo is waiting
+    auto const cz = next("suz");
+    CHECK(batch({ "main", cz, 1, 0, 0, 0, 0, "su_no_such_box", 0, 5, 10, 0 }, cz));
+    CHECK(step("redo"));
+    CHECK(!text("su_y").empty());
+
+    // 10. A closed (non-GOP) subpatch has its own history; an AI edit there is undone there.
+    auto const cs = next("sus");
+    CHECK(batch({ "main", cs, 0, 0, 0, 1, 0, "su_sub", 1100, 300, "obj", "pd", 1, "su_sub", 0, 5, 10, 0 }, cs));
+    auto const cs2 = next("sus");
+    CHECK(batch({ "pd-su_sub", cs2, 0, 0, 0, 1, 0, "su_in", 40, 40, "obj", "f", 1, "5", 0, 5, 10, 0 }, cs2));
+    auto inText = [&](char const* id) -> std::string {
+        auto const c = next("sut");
+        auto r = h.call("/pd/obj_get", { "pd-su_sub", c, id }, ("/pd/obj_get/reply/" + c).toStdString(), 2000);
+        return r ? parseJson(*r)["text"].toString().toStdString() : std::string();
+    };
+    CHECK(inText("su_in") == "f 5");
+    auto const cu = next("suu");
+    auto u = h.call("/pd/undo", { "pd-su_sub", cu }, ("/pd/undo/reply/" + cu).toStdString());
+    sleepMs(300);
+    CHECK(u.has_value() && u->num(0) == 1);
+    CHECK(inText("su_in").empty());
+    CHECK(text("su_sub") == "pd su_sub"); // the parent's history is untouched
 }
 
 // P3.5 S0: the identity service will detect GUI edits by recomputing a per-canvas stamp (object count plus a hash
@@ -935,7 +985,7 @@ void runCases(Harness& h)
         CHECK(r.has_value() && r->num(0) == 1);
     }
 
-    // ── move, undo, redo (McpHost replays the transaction through the command table) ─────────────
+    // ── move, undo, redo (one step of the canvas's Pd undo queue, P4.4) ───────────────────────────
     auto position = [&](char const* id, char const* corr) -> std::pair<int, int> {
         auto r = h.call("/pd/typeof", { "main", id, corr }, std::string("/pd/typeof/reply/") + corr);
         if (!r || r->args.size() < 4) return { -1, -1 };
