@@ -551,7 +551,7 @@ void PluginProcessor::updateSearchPaths()
 
     auto librariesTree = settingsFile->getProperty<VarArray>("libraries");
 
-    // Remove empty entries from the back: removing while the range-for walks the array is a use-after-free (L24).
+    // Remove empty entries from the back: removing while the range-for walks the array is a use-after-free (L24). MCP-CARRIED(l24-library-remove)
     for (int i = librariesTree.size() - 1; i >= 0; --i) {
         if (librariesTree[i].toString().isEmpty())
             librariesTree.remove(i);
