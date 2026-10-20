@@ -7,6 +7,7 @@
 // Bridge commands: meters, probes and armed captures (Plan 3 P3.3): handlers moved unchanged out of MCPBridge::handleMeterDomain.
 
 #include "MCPBridgeCmdCommon.h"
+#include "MCPBridgeTraceTaps.h"
 
 
 void MCPBridge::meterStart(const juce::String& meterAction, const juce::OSCMessage& msg)
@@ -546,10 +547,22 @@ void MCPBridge::meterMaster(const juce::String& meterAction, const juce::OSCMess
 void MCPBridge::meterTrace(const juce::String& meterAction, const juce::OSCMessage& msg)
 {
     if (!processor) return;
-    // /meter/trace <canvasName> <correlationId>
+    // /meter/trace <canvasName> <correlationId>                             the trace of the last audio block
+    // /meter/trace <canvasName> <correlationId> arm <windowMs> [focusCsv]  T2b: open a window of taps (armSignalTrace)
+    // /meter/trace <canvasName> <correlationId> read                       T2b: close it, answer the trace of its peaks
     if (msg.size() < 1) return;
     auto canvasName = normalizeCanvas(getArgString(msg[0]));
     juce::String correlationId = msg.size() > 1 ? getArgString(msg[1]) : "0";
+    juce::String const traceMode = msg.size() > 2 ? getArgString(msg[2]) : juce::String();
+    if (traceMode == "arm") {
+        int const windowMs = msg.size() > 3 ? static_cast<int>(getArgFloat(msg[3])) : 500;
+        armSignalTrace(canvasName, correlationId, windowMs, msg.size() > 4 ? getArgString(msg[4]) : juce::String());
+        return;
+    }
+    if (traceMode == "read") {
+        readSignalTrace(correlationId);
+        return;
+    }
 
     bool justActivated = activateProbing();
     if (justActivated) {
@@ -573,4 +586,181 @@ void MCPBridge::meterTrace(const juce::String& meterAction, const juce::OSCMessa
 
     sendReply("/meter/trace/reply/" + correlationId, json);
     return;
+}
+
+// ── T2b: the armed signal trace ──────────────────────────────────────────────────────────────────────────────────
+// A triggered voice is silent between notes, so the trace of the last block cannot see it. arm opens a tap on the
+// signal outlets of the canvas (probe slots in window mode: each keeps the largest block peak since it started) and
+// returns after the first audio block; the caller fires the note; read closes the window and answers the same trace
+// JSON as the plain verb, computed from the window's peaks, plus `window` (blocks, taps, cap, sampled, what was left
+// out) and `levels` (the peak of every tapped outlet). More signal outlets than free slots: the taps are spread along
+// the signal path and `focus` objects are always tapped (MCPBridgeTraceTaps.h).
+
+namespace {
+std::vector<std::string> splitFocus(juce::String const& csv)
+{
+    juce::StringArray tokens;
+    tokens.addTokens(csv, ",", "");
+    std::vector<std::string> out;
+    for (auto const& t : tokens) {
+        auto const name = t.trim();
+        if (name.isNotEmpty()) out.emplace_back(name.toRawUTF8());
+    }
+    return out;
+}
+} // namespace
+
+void MCPBridge::releaseTraceWindow()
+{
+    std::unique_ptr<TraceWindow> old;
+    {
+        juce::ScopedLock const lock(traceWindowLock);
+        old = std::move(traceWindow);
+    }
+    if (!old) return;
+    for (auto const& tap : old->taps) {
+        float peak = 0.0f;
+        int blocks = 0;
+        probeManager.finishWindowTap(tap.probeId, peak, blocks);
+    }
+}
+
+void MCPBridge::armSignalTrace(const juce::String& canvasName, const juce::String& correlationId, int windowMs, const juce::String& focusCsv)
+{
+    auto const replyAddress = "/meter/trace/reply/" + correlationId;
+    windowMs = juce::jlimit(50, 2000, windowMs);
+
+    t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
+    if (!cnv) {
+        sendReply(replyAddress, "{\"armed\":false,\"error\":\"canvas not found: " + jsonEscape(canvasName) + "\"}");
+        return;
+    }
+    releaseTraceWindow(); // a new arm replaces an open window (its slots are free for this one)
+
+    if (activateProbing())
+        juce::Thread::sleep(5);
+
+    int const cap = MAX_PROBES - probeManager.getActiveProbeCount();
+    if (cap <= 0) {
+        sendReply(replyAddress, "{\"armed\":false,\"cap\":0,\"error\":\"no free probe slot (" + juce::String(MAX_PROBES) + " probes are running)\"}");
+        return;
+    }
+
+    auto window = std::make_unique<TraceWindow>();
+    window->canvasName = canvasName;
+    window->windowMs = windowMs;
+    window->cap = cap;
+    window->armedAtMs = juce::Time::getMillisecondCounter();
+
+    sys_lock();
+    auto const plan = planTraceTaps(processor, cnv, splitFocus(focusCsv), cap);
+    int const epoch = ugen_getsortno();
+    for (auto const& tap : plan.taps) {
+        int const id = probeManager.startProbe(tap.oc, epoch, canvasName, tap.target, tap.outlet, juce::String(), windowMs + ProbeManager::WINDOW_TAP_GRACE_MS, true);
+        if (id > 0) window->taps.push_back({ static_cast<uint32_t>(id), tap.name, tap.outlet, tap.cls });
+    }
+    sys_unlock();
+    window->untapped = plan.untapped;
+    window->signalOutlets = plan.signalOutlets;
+    window->sampled = plan.sampled || window->taps.size() < plan.taps.size();
+
+    if (window->taps.empty()) {
+        sendReply(replyAddress, "{\"armed\":false,\"cap\":" + juce::String(cap) + ",\"signalOutlets\":" + juce::String(plan.signalOutlets)
+                  + ",\"error\":\"no signal outlet with a connection to tap on this canvas\"}");
+        return;
+    }
+    if (!isTimerRunning())
+        startTimer(15); // the timer ends a window nobody reads
+
+    // Settle: wait for the first audio block to reach a tap, so the caller's note lands inside the window.
+    auto sawBlock = [this, &window] {
+        for (auto const& tap : window->taps)
+            for (auto& probe : probeManager.probes)
+                if (probe.probeId == tap.probeId && probe.windowBlocks.load(std::memory_order_acquire) > 0)
+                    return true;
+        return false;
+    };
+    bool settled = sawBlock();
+    for (int waited = 0; waited < 120 && !settled; waited += 4) {
+        juce::Thread::sleep(4);
+        settled = sawBlock();
+    }
+
+    juce::String const json = "{\"armed\":true,\"canvas\":\"" + jsonEscape(canvasName) + "\",\"windowMs\":" + juce::String(windowMs)
+        + ",\"taps\":" + juce::String(static_cast<int>(window->taps.size())) + ",\"cap\":" + juce::String(cap)
+        + ",\"signalOutlets\":" + juce::String(window->signalOutlets) + ",\"sampled\":" + (window->sampled ? "true" : "false")
+        + ",\"settled\":" + (settled ? "true" : "false") + "}";
+    {
+        juce::ScopedLock const lock(traceWindowLock);
+        traceWindow = std::move(window);
+    }
+    sendReply(replyAddress, json);
+}
+
+void MCPBridge::readSignalTrace(const juce::String& correlationId)
+{
+    auto const replyAddress = "/meter/trace/reply/" + correlationId;
+    std::unique_ptr<TraceWindow> window;
+    {
+        juce::ScopedLock const lock(traceWindowLock);
+        window = std::move(traceWindow);
+    }
+    if (!window) {
+        sendReply(replyAddress, "{\"error\":\"no armed trace window (arm one first: /meter/trace <canvas> <id> arm <windowMs>)\"}");
+        return;
+    }
+
+    TraceWindowView view;
+    int maxBlocks = 0;
+    juce::String levels;
+    juce::String unread;
+    for (auto const& tap : window->taps) {
+        float peak = 0.0f;
+        int blocks = 0;
+        bool const got = probeManager.finishWindowTap(tap.probeId, peak, blocks);
+        if (!levels.isEmpty()) levels += ",";
+        levels += "{\"tempId\":\"" + jsonEscape(juce::String(tap.name)) + "\",\"class\":\"" + jsonEscape(tap.cls) + "\",\"outlet\":" + juce::String(tap.outlet);
+        if (got && blocks > 0) {
+            view.peaks[tap.name + ":" + std::to_string(tap.outlet)] = peak;
+            maxBlocks = std::max(maxBlocks, blocks);
+            levels += ",\"peakDb\":" + juce::String(mcp::trace::peakToDb(peak), 1) + ",\"blocks\":" + juce::String(blocks) + "}";
+        } else {
+            if (!unread.isEmpty()) unread += ",";
+            unread += "\"" + jsonEscape(juce::String(tap.name)) + ":" + juce::String(tap.outlet) + "\"";
+            levels += ",\"peakDb\":null,\"blocks\":0}";
+        }
+    }
+    juce::String untapped;
+    int shown = 0;
+    for (auto const& name : window->untapped) {
+        if (shown++ >= 80) break; // enough to name; the count says the rest
+        if (!untapped.isEmpty()) untapped += ",";
+        untapped += "\"" + jsonEscape(juce::String(name)) + "\"";
+    }
+    juce::String const windowJson = "\"window\":{\"armedMs\":" + juce::String(window->windowMs)
+        + ",\"ms\":" + juce::String(static_cast<int>(juce::Time::getMillisecondCounter() - window->armedAtMs))
+        + ",\"blocks\":" + juce::String(maxBlocks) + ",\"taps\":" + juce::String(static_cast<int>(window->taps.size()))
+        + ",\"cap\":" + juce::String(window->cap) + ",\"signalOutlets\":" + juce::String(window->signalOutlets)
+        + ",\"sampled\":" + (window->sampled ? "true" : "false") + ",\"unread\":[" + unread + "],\"untapped\":[" + untapped
+        + "],\"untappedCount\":" + juce::String(static_cast<int>(window->untapped.size())) + "}";
+    if (maxBlocks == 0) {
+        sendReply(replyAddress, "{\"error\":\"no audio block ran in the window (is DSP on and the audio device running?)\"," + windowJson + ",\"levels\":[" + levels + "]}");
+        return;
+    }
+    view.extraJson = "," + windowJson + ",\"levels\":[" + levels + "]";
+
+    t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(window->canvasName);
+    if (!cnv) {
+        sendReply(replyAddress, "{\"error\":\"canvas not found: " + jsonEscape(window->canvasName) + "\"," + windowJson + "}");
+        return;
+    }
+    sys_lock();
+    juce::String json;
+    try {
+        json = computeSignalTrace(processor, cnv, window->canvasName, &view);
+    } catch (...) {
+        json = "{\"error\":\"trace failed: exception under sys_lock\"}";
+    }
+    sys_unlock();
+    sendReply(replyAddress, json);
 }

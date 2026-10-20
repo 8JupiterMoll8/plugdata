@@ -164,7 +164,8 @@ public:
     // Telemetry hooks (Source/Mcp/McpTelemetry.cpp).
     void selectionChanged(SmallArray<juce::Component*>& objects);
     void sendSelectionTelemetry(String const& selector, SmallArray<pd::Atom> const& list);
-    void consoleMessage(String const& message, bool isError);
+    // `object` is the Pd object that printed the line (null when none): an error line is pushed with its tempId (T2b).
+    void consoleMessage(String const& message, bool isError, void* object = nullptr);
 
     // The mcp_* Pd system messages (Source/Mcp/McpSysCommands.cpp). Returns false for
     // every other selector, which PluginProcessor::receiveSysMessage then handles.

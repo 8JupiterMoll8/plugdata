@@ -2379,9 +2379,9 @@ void PluginProcessor::titleChanged()
     }
 }
 
-void PluginProcessor::onConsoleMessage(String const& message, bool isError)
+void PluginProcessor::onConsoleMessage(String const& message, bool isError, void* object)
 {
-    mcp->consoleMessage(message, isError); // MCP-HOOK(telemetry)
+    mcp->consoleMessage(message, isError, object); // MCP-HOOK(telemetry)
 }
 
 // This creates new instances of the plugin..

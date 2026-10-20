@@ -85,7 +85,7 @@ void McpHost::sendSelectionTelemetry(String const& selector, SmallArray<pd::Atom
 // Every console line, after plugdata's console has it (Pd thread; the gensym interning of
 // each line is a P3.4 item). Was the tail of pd::Instance's console handler +
 // PluginProcessor::onConsoleMessage.
-void McpHost::consoleMessage(String const& message, bool const isError)
+void McpHost::consoleMessage(String const& message, bool const isError, void* const object)
 {
     // Forward to PlugData receiver for MCP bridge
     libpd_set_instance(static_cast<t_pdinstance*>(processor.instance));
@@ -97,6 +97,13 @@ void McpHost::consoleMessage(String const& message, bool const isError)
         pd_typedmess(s->s_thing, gensym("list"), 2, atoms);
     }
     if (mcpBridge) {
-        mcpBridge->sendConsoleLog(message, isError);
+        // T2b: the object that printed the line (an error, or a warning such as "inlet: expected ..."), as its
+        // tempId. The pointer is only compared with the registry's (never dereferenced: the object may be
+        // mid-deletion). Pd printed this line with the Pd lock held, which is also what the identity registry needs;
+        // PdLockScope is recursive. Plain post() lines carry no object, so the lookup is rare.
+        juce::String objectId;
+        if (object)
+            objectId = getStableId(static_cast<t_gobj*>(object));
+        mcpBridge->sendConsoleLog(message, isError, objectId);
     }
 }

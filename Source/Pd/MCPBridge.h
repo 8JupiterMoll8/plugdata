@@ -20,6 +20,9 @@
 #include <functional>
 #include <memory>
 #include <type_traits>
+#include <string>
+#include <unordered_map>
+#include <vector>
 #include "Utility/Config.h"
 #include "Pd/Instance.h"
 #include "Pd/MCPIdentity.h" // renameStableId (also used by PluginProcessor.cpp; finding C6)
@@ -161,6 +164,12 @@ struct ActiveProbe {
     juce::int64 startTimeMs = 0;
     bool spectral = false; // If true, run FFT on completion instead of simple RMS/peak
 
+    // T2b (armed signal trace): a WINDOW tap keeps the largest block peak since it started in `windowPeak` (no result
+    // queue, no ring, no reply of its own); the trace read collects it and stops it. The audio tick is its only writer.
+    std::atomic<bool> windowMode { false };
+    std::atomic<float> windowPeak { 0.0f };
+    std::atomic<int> windowBlocks { 0 };
+
     moodycamel::ReaderWriterQueue<ProbeResult> resultQueue { 256 };
 
     // P3.4 S11 (TSan): written by the audio tick while the timer may copy it: relaxed atomics, no tearing UB.
@@ -177,7 +186,12 @@ public:
     explicit ProbeManager(MCPBridge* owner);
 
     void audioTick();
-    int startProbe(t_outconnect* oc, int epoch, const juce::String& canvasName, const juce::String& tempId, int outletIndex, const juce::String& correlationId, int durationMs);
+    int startProbe(t_outconnect* oc, int epoch, const juce::String& canvasName, const juce::String& tempId, int outletIndex, const juce::String& correlationId, int durationMs, bool windowMode = false);
+    // T2b: close the window tap `probeId` and hand back its peak (linear) and the blocks it saw; false when the slot
+    // was reused or the tap ended (then nothing was measured for it). Message/command thread, never the audio thread.
+    bool finishWindowTap(uint32_t probeId, float& peakOut, int& blocksOut);
+    // T2b: a window tap lives at most this long past its window if nobody reads it (a lost read must not hold slots).
+    static constexpr int WINDOW_TAP_GRACE_MS = 4000;
     void stopProbe(uint32_t probeId, const juce::String& correlationId = {});
     void stopAllProbes(const juce::String& correlationId = {});
     void collectResults();
@@ -398,7 +412,9 @@ public:
     // PRD overlay: forward an artist-typed note (from an inline note editor) to
     // the MCP as /pd/ui/note <targetTempId> <text>.
     void sendArtistNote(const juce::String& targetId, const juce::String& text);
-    void sendConsoleLog(const juce::String& message, bool isError);
+    // `objectId`: the tempId of the object that printed the line (T2b), sent as a second argument of /pd/error or
+    // /pd/log after the text; empty when the line has no object or it is not in the registry.
+    void sendConsoleLog(const juce::String& message, bool isError, const juce::String& objectId = {});
     void sendPrompt(const juce::String& promptText);
     // PRD Copilot: prompt from the floating selection pill, carrying the selected
     // objects' stable tempIds (resolved in C++ — the identity source of truth) so
@@ -509,7 +525,31 @@ private:
     };
 
     static MasterMeterResult computeMasterMeter(PluginProcessor* processor, t_canvas* cnv, const juce::String& canvasName);
-    static juce::String computeSignalTrace(PluginProcessor* processor, t_canvas* cnv, const juce::String& canvasName);
+    // T2b (armed trace): what an armed window measured. `peaks` maps "<object name>:<outlet>" to the largest linear
+    // peak that outlet reached in the window; a signal outlet without an entry was not tapped (its level is unread,
+    // not silent). `extraJson` is appended to the trace reply (the window facts and the per-tap levels).
+    struct TraceWindowView {
+        std::unordered_map<std::string, float> peaks;
+        juce::String extraJson;
+    };
+    // The taps an armed trace opens: at most `cap` signal outlets of the canvas (`focus` objects first, then spread
+    // along the signal path), with the probe target of each. Caller holds the Pd lock.
+    struct TraceTapPlan {
+        struct Tap {
+            std::string name;     // the trace's name for the object (tempId, else "class#index")
+            juce::String target;  // what resolveProbeTarget takes: the tempId, else the object's index
+            int outlet = 0;
+            juce::String cls;
+            t_outconnect* oc = nullptr;
+        };
+        std::vector<Tap> taps;
+        std::vector<std::string> untapped; // "<name>:<outlet>" of the signal outlets left out
+        int signalOutlets = 0;
+        bool sampled = false;
+    };
+    static TraceTapPlan planTraceTaps(PluginProcessor* processor, t_canvas* cnv, const std::vector<std::string>& focus, int cap);
+    // With `window` the levels are the window's peaks instead of the last audio block (plain trace when null).
+    static juce::String computeSignalTrace(PluginProcessor* processor, t_canvas* cnv, const juce::String& canvasName, const TraceWindowView* window = nullptr);
 
     // Context-aware layout (PRD_CONTEXT_LAYOUT_GUARD): connected components of
     // the wire graph, classified as signal / bus / control. Read-only, fast.
@@ -641,6 +681,29 @@ private:
     juce::CriticalSection seqLock;
 
     ProbeManager probeManager;
+
+    // T2b: the open armed-trace window (arm ... read), one at a time. The taps are probe slots in window mode.
+    struct TraceWindowTap {
+        uint32_t probeId = 0;
+        std::string name;
+        int outlet = 0;
+        juce::String cls;
+    };
+    struct TraceWindow {
+        juce::String canvasName;
+        std::vector<TraceWindowTap> taps;
+        std::vector<std::string> untapped;
+        juce::int64 armedAtMs = 0;
+        int windowMs = 0;
+        int cap = 0;
+        int signalOutlets = 0;
+        bool sampled = false;
+    };
+    juce::CriticalSection traceWindowLock;
+    std::unique_ptr<TraceWindow> traceWindow;
+    void armSignalTrace(const juce::String& canvasName, const juce::String& correlationId, int windowMs, const juce::String& focusCsv);
+    void readSignalTrace(const juce::String& correlationId);
+    void releaseTraceWindow(); // stops the taps of an open window, if any
 
     // Monitor tap (solo/mute): the target is re-resolved on the timer so a
     // deleted/rewired node can never leave a dangling s_vec on the audio thread.

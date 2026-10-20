@@ -279,6 +279,10 @@ std::vector<std::string> MCPBridge::capabilityList() const
         "meter_control",
         "meter_spectral_arm",
         "meter_trace",
+        // T2b: /meter/trace ... arm <windowMs> [focus] / read: the trace of a window's peaks (a triggered voice)
+        "meter_trace_armed",
+        // T2b: /pd/error carries the tempId of the object that raised the line, as a second argument
+        "console_object",
         "array_bulk",
         "census",
         "typeof",

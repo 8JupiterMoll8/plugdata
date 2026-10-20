@@ -210,7 +210,7 @@ public:
     virtual void clearTextEditor(uint64_t ptr) = 0;
     virtual bool isTextEditorDialogShown(uint64_t ptr) = 0;
     
-    virtual void onConsoleMessage(String const& message, bool isError) {} // MCP-HOOK(telemetry)
+    virtual void onConsoleMessage(String const& message, bool isError, void* object) {} // MCP-HOOK(telemetry) object: the Pd object that printed the line, or null
 
     virtual void receiveSysMessage(SmallString const& selector, SmallArray<pd::Atom> const& list) = 0;
 

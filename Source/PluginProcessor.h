@@ -49,7 +49,7 @@ public:
 
     McpHost* getMcp() const { return mcp.get(); } // MCP-HOOK(host)
     bool getIsProcessingAudio() const noexcept { return isProcessingAudio.load(std::memory_order_relaxed); }
-    void onConsoleMessage(String const& message, bool isError) override;
+    void onConsoleMessage(String const& message, bool isError, void* object) override; // MCP-HOOK(telemetry)
 
     static AudioProcessor::BusesProperties buildBusesProperties();
 

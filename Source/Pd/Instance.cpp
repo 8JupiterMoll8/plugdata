@@ -103,7 +103,7 @@ public:
                     }
                 }
 
-                this->instance->onConsoleMessage(String::fromUTF8(content.data()), isError); // MCP-HOOK(telemetry)
+                this->instance->onConsoleMessage(String::fromUTF8(content.data()), isError, object); // MCP-HOOK(telemetry)
             };
 
         printConcatBuffer[messageLength] = '\0';

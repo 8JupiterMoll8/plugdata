@@ -123,6 +123,35 @@ public:
         return found;
     }
 
+    // A one-line list of what arrived and is still unread (for a failure message).
+    std::string describe()
+    {
+        std::lock_guard<std::mutex> const lock(mutex);
+        std::string out;
+        for (auto const& r : all)
+            out += r.address + (r.args.empty() ? "" : "(" + r.str(0).substr(0, 60) + ") ");
+        return out;
+    }
+
+    // The first console line (/pd/error or /pd/log) whose text contains `needle`, waiting up to timeoutMs.
+    std::optional<Reply> waitForConsoleLine(std::string const& needle, int timeoutMs)
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        std::optional<Reply> found;
+        changed.wait_for(lock, std::chrono::milliseconds(timeoutMs), [&] {
+            for (size_t i = 0; i < all.size(); ++i) {
+                bool const console = all[i].address == "/pd/error" || all[i].address == "/pd/log";
+                if (console && all[i].str(0).find(needle) != std::string::npos) {
+                    found = all[i];
+                    all.erase(all.begin(), all.begin() + static_cast<long>(i) + 1);
+                    return true;
+                }
+            }
+            return false;
+        });
+        return found;
+    }
+
 private:
     std::mutex mutex;
     std::condition_variable changed;
@@ -253,6 +282,17 @@ struct Harness {
         if (v2)
             return callV2(address, args, replyAddress, timeoutMs);
         bridge.oscMessageReceived(message(address, args));
+        return replies.waitFor(replyAddress, timeoutMs);
+    }
+
+    // The same with the arguments built at run time (a batch of many objects). v1 only.
+    std::optional<Reply> callList(char const* address, std::vector<A> const& args, std::string const& replyAddress, int timeoutMs = 5000)
+    {
+        replies.clear();
+        juce::OSCMessage msg { juce::OSCAddressPattern(address) };
+        for (auto const& a : args)
+            msg.addArgument(a.value);
+        bridge.oscMessageReceived(msg);
         return replies.waitFor(replyAddress, timeoutMs);
     }
 
@@ -860,6 +900,185 @@ void runAudioStallCases(Harness& h, AudioControl& audio)
     CHECK(again.has_value() && again->num(0) > -60.0);
     h.fire("/pd/dsp", { 0 });
     h.call("/pd/batch_atomic", { "main", "s83x", 2, 0, 0, 0, 0, "s83o", "s83d", 0, 5, 10, 0 }, "/pd/batch_atomic/reply/s83x");
+}
+
+// T2b (armed signal trace): /meter/trace <canvas> <corr> arm <windowMs> <focusCsv> opens a tap on the signal outlets
+// (at most the free probe slots) and keeps the peak of each over the window; /meter/trace <canvas> <corr> read closes
+// it and answers the trace JSON computed from those window peaks, plus `window` and `levels`. A triggered voice is
+// silent between notes, so the plain trace (the last audio block) cannot see it; the armed one does.
+double levelOf(juce::var const& json, char const* tempId)
+{
+    auto const levels = json["levels"];
+    if (auto* arr = levels.getArray())
+        for (auto const& l : *arr)
+            if (l["tempId"].toString() == tempId)
+                return static_cast<double>(l["peakDb"]);
+    return -1e9;
+}
+
+void runArmedTraceCases(Harness& h)
+{
+    std::printf("armed signal trace (T2b)\n");
+    // A gated voice: osc~ -> vca (*~) -> out (*~ 0.5) -> dac~; the VCA's right inlet is [line~] fed by [r t2bgate].
+    auto made = h.call("/pd/batch_atomic",
+        { "main", "t2b1", 0, 0, 0, 6, 6,
+            "t2b_osc", 600, 40, "obj", "osc~", 1, "440",
+            "t2b_vca", 600, 100, "obj", "*~", 0,
+            "t2b_out", 600, 140, "obj", "*~", 1, "0.5",
+            "t2b_dac", 600, 180, "obj", "dac~", 0,
+            "t2b_rx", 700, 40, "obj", "r", 1, "t2bgate",
+            "t2b_env", 700, 70, "obj", "line~", 0,
+            "t2b_osc", 0, "t2b_vca", 0,
+            "t2b_env", 0, "t2b_vca", 1,
+            "t2b_vca", 0, "t2b_out", 0,
+            "t2b_out", 0, "t2b_dac", 0,
+            "t2b_out", 0, "t2b_dac", 1,
+            "t2b_rx", 0, "t2b_env", 0,
+            0, 5, 10, 0 },
+        "/pd/batch_atomic/reply/t2b1");
+    CHECK(made.has_value() && made->num(0) == 6);
+    h.fire("/pd/dsp", { 1 });
+    sleepMs(300);
+
+    // The plain trace is unchanged: no window fields.
+    auto plain = h.call("/meter/trace", { "main", "t2bp" }, "/meter/trace/reply/t2bp");
+    CHECK(plain.has_value());
+    if (plain) {
+        auto const json = parseJson(*plain);
+        CHECK(json.hasProperty("chokePoint"));
+        CHECK(!json.hasProperty("window"));
+    }
+
+    // Armed, the gate opened and released inside the window: the VCA sounded, and the trace reads that.
+    auto armed = h.call("/meter/trace", { "main", "t2ba", "arm", 900, "" }, "/meter/trace/reply/t2ba");
+    CHECK(armed.has_value());
+    if (armed) {
+        auto const json = parseJson(*armed);
+        CHECK(static_cast<bool>(json["armed"]));
+        CHECK(static_cast<int>(json["taps"]) >= 4);
+        CHECK(static_cast<int>(json["cap"]) == 16);
+        CHECK(!static_cast<bool>(json["sampled"]));
+    }
+    // The gate: the note opens the envelope (a jump to 1, then back to 0), set on the envelope object itself so the
+    // test does not depend on a receiver binding.
+    auto up = h.call("/pd/obj_set", { "main", "t2bg1", "t2b_env", 0, "float", 1, 1.0 }, "/pd/obj_set/reply/t2bg1");
+    CHECK(up.has_value() && up->num(0) == 1.0);
+    sleepMs(200);
+    h.call("/pd/obj_set", { "main", "t2bg0", "t2b_env", 0, "float", 1, 0.0 }, "/pd/obj_set/reply/t2bg0");
+    sleepMs(150);
+    auto read = h.call("/meter/trace", { "main", "t2br", "read" }, "/meter/trace/reply/t2br");
+    CHECK(read.has_value());
+    if (read) {
+        auto const json = parseJson(*read);
+        CHECK(static_cast<int>(json["window"]["blocks"]) > 0);
+        CHECK(levelOf(json, "t2b_vca") > -20.0); // the voice sounded while the note was held
+        CHECK(levelOf(json, "t2b_env") > -3.0);  // the envelope reached ~1
+        CHECK(json["chokePoint"].toString() != "t2b_vca");
+        auto const* silentEnv = json["silentEnvelopes"].getArray();
+        CHECK(silentEnv != nullptr && !silentEnv->contains("t2b_env"));
+    }
+
+    // The same voice and a window with no note: the VCA reads silent over the whole window, and the trace says why.
+    auto quietArm = h.call("/meter/trace", { "main", "t2bb", "arm", 400, "" }, "/meter/trace/reply/t2bb");
+    CHECK(quietArm.has_value());
+    sleepMs(250);
+    auto quiet = h.call("/meter/trace", { "main", "t2bc", "read" }, "/meter/trace/reply/t2bc");
+    CHECK(quiet.has_value());
+    if (quiet) {
+        auto const json = parseJson(*quiet);
+        CHECK(levelOf(json, "t2b_vca") < -80.0);
+        CHECK(levelOf(json, "t2b_osc") > -20.0); // the oscillator runs all the time
+        auto const* silentEnv = json["silentEnvelopes"].getArray();
+        CHECK(silentEnv != nullptr && silentEnv->contains("t2b_env"));
+        CHECK(json["reason"].toString().containsIgnoreCase("envelope") || json["reason"].toString().containsIgnoreCase("multiplier"));
+    }
+
+    // A read with no window open is refused, not answered with a stale trace.
+    auto none = h.call("/meter/trace", { "main", "t2bd", "read" }, "/meter/trace/reply/t2bd");
+    CHECK(none.has_value() && parseJson(*none).hasProperty("error"));
+
+    // More signal outlets than probe slots: sampled along the path, the cap reported, a focus object always tapped.
+    std::vector<A> args { "main", "t2b2", 0, 0, 0, 20, 19 };
+    for (int i = 0; i < 20; ++i) {
+        args.push_back(juce::String("t2c_") + juce::String(i));
+        args.push_back(300);
+        args.push_back(40 + i * 20);
+        args.push_back("obj");
+        args.push_back(i == 0 ? "osc~" : "*~");
+        args.push_back(1);
+        args.push_back(i == 0 ? "220" : "0.9");
+    }
+    for (int i = 1; i < 20; ++i) {
+        args.push_back(juce::String("t2c_") + juce::String(i - 1));
+        args.push_back(0);
+        args.push_back(juce::String("t2c_") + juce::String(i));
+        args.push_back(0);
+    }
+    for (int v : { 0, 5, 10, 0 })
+        args.push_back(v);
+    auto big = h.callList("/pd/batch_atomic", args, "/pd/batch_atomic/reply/t2b2");
+    CHECK(big.has_value() && big->num(0) == 20);
+    sleepMs(100);
+    auto capped = h.call("/meter/trace", { "main", "t2be", "arm", 300, "t2c_7" }, "/meter/trace/reply/t2be");
+    CHECK(capped.has_value());
+    if (capped) {
+        auto const json = parseJson(*capped);
+        CHECK(static_cast<bool>(json["armed"]));
+        CHECK(static_cast<int>(json["taps"]) == 16);
+        CHECK(static_cast<int>(json["cap"]) == 16);
+        CHECK(static_cast<bool>(json["sampled"]));
+        CHECK(static_cast<int>(json["signalOutlets"]) >= 20);
+    }
+    sleepMs(150);
+    auto capRead = h.call("/meter/trace", { "main", "t2bf", "read" }, "/meter/trace/reply/t2bf");
+    CHECK(capRead.has_value());
+    if (capRead) {
+        auto const json = parseJson(*capRead);
+        CHECK(levelOf(json, "t2c_7") > -40.0); // the focus object was tapped and sounds
+        auto const* levels = json["levels"].getArray();
+        CHECK(levels != nullptr && levels->size() == 16);
+    }
+    // The probe slots are free again after the read.
+    auto status = h.call("/meter/status", { "t2bs" }, "/meter/status/reply/t2bs");
+    CHECK(status.has_value() && status->num(0) == 0);
+
+    h.fire("/pd/dsp", { 0 });
+    std::vector<A> cleanup { "main", "t2bx", 26, 0, 0, 0, 0 };
+    for (char const* id : { "t2b_osc", "t2b_vca", "t2b_out", "t2b_dac", "t2b_rx", "t2b_env" })
+        cleanup.push_back(id);
+    for (int i = 0; i < 20; ++i)
+        cleanup.push_back(juce::String("t2c_") + juce::String(i));
+    for (int v : { 0, 5, 10, 0 })
+        cleanup.push_back(v);
+    h.callList("/pd/batch_atomic", cleanup, "/pd/batch_atomic/reply/t2bx");
+}
+
+// T2b (console errors carry their object): a console line raised by an object comes with that object's tempId as
+// a second argument of /pd/error or /pd/log (the first stays the text, as before).
+void runConsoleObjectCases(Harness& h)
+{
+    std::printf("console error carries its object (T2b)\n");
+    auto made = h.call("/pd/batch_atomic",
+        { "main", "t2e1", 0, 0, 0, 2, 1,
+            "t2e_rx", 900, 40, "obj", "r", 1, "t2berr",
+            "t2e_add", 900, 80, "obj", "+", 1, "1",
+            "t2e_rx", 0, "t2e_add", 0,
+            0, 5, 10, 0 },
+        "/pd/batch_atomic/reply/t2e1");
+    CHECK(made.has_value() && made->num(0) == 2);
+    // A message [+ 1] does not understand makes the object print "+: no method for 'foo'"; the line comes with the
+    // object's tempId. Sent to the object itself (obj_set), not through a receiver.
+    h.fire("/pd/obj_set", { "main", "t2ee", "t2e_add", 0, "foo", 0 });
+    auto const line = h.replies.waitForConsoleLine("foo", 3000);
+    CHECK(line.has_value());
+    if (!line)
+        std::printf("  unread replies: %s\n", h.replies.describe().c_str());
+    if (line) {
+        std::printf("  console line: %s [%s]\n", line->str(0).c_str(), line->address.c_str());
+        CHECK(line->args.size() == 2);
+        CHECK(line->str(1) == "t2e_add");
+    }
+    h.call("/pd/batch_atomic", { "main", "t2ex", 2, 0, 0, 0, 0, "t2e_rx", "t2e_add", 0, 5, 10, 0 }, "/pd/batch_atomic/reply/t2ex");
 }
 
 // MIDI capture (P3.4 S6): the audio thread only queues raw note on/off; the bridge pairs them off the audio
@@ -1720,6 +1939,8 @@ int main()
             runNativeUndoCases(processor);
             runSharedUndoCases(harness, processor);
             runAudioStallCases(harness, audioControl);
+            runArmedTraceCases(harness);
+            runConsoleObjectCases(harness);
             runMidiCaptureCases(processor, audioControl);
             runStampCostCases(processor);
             runIdentityValidityCases(processor);

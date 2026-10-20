@@ -6,6 +6,7 @@
 
 #include <cmath>
 #include "MCPBridgeCmdCommon.h"
+#include "MCPBridgeTraceTaps.h"
 #include "Mcp/McpRtGuard.h"
 #include "Mcp/McpAudit.h"
 #include <juce_cryptography/juce_cryptography.h> // SHA-256 of the .pd in the identity sidecar (P3.5 S7)
@@ -745,14 +746,19 @@ MCPBridge::MasterMeterResult MCPBridge::computeMasterMeter(PluginProcessor* proc
     return res;
 }
 
-juce::String MCPBridge::computeSignalTrace(PluginProcessor* processor, t_canvas* cnv, const juce::String& canvasName)
-{
-    if (!processor || !cnv) return "{\"error\":\"canvas not available\"}";
-
-    // 1. Map objects and tempIds
+namespace {
+// The objects of a canvas as the trace names them: the stable tempId, else "<class>#<position in gl_list>". Caller
+// holds the Pd lock. Shared by the trace and by the armed trace's tap plan, so both key an object the same way.
+struct TraceObjects {
     std::vector<t_gobj*> objs;
     std::vector<juce::String> names;
     std::vector<juce::String> classNames;
+    std::vector<bool> hasTempId;
+};
+
+TraceObjects collectTraceObjects(PluginProcessor* processor, t_canvas* cnv)
+{
+    TraceObjects out;
     std::unordered_map<t_gobj*, juce::String> ptrToId;
     auto const* canvasIds = processor->getMcp()->identity.findCanvas(cnv);
     if (canvasIds)
@@ -762,21 +768,40 @@ juce::String MCPBridge::computeSignalTrace(PluginProcessor* processor, t_canvas*
     int idx = 0;
     for (t_gobj* y = cnv->gl_list; y; y = y->g_next, ++idx) {
         if (!y) continue;
-        objs.push_back(y);
+        out.objs.push_back(y);
         t_class* cl = pd_class(&y->g_pd);
         const char* cName = cl ? class_getname(cl) : nullptr;
         juce::String clStr = cName ? juce::String(cName) : juce::String("unknown");
-        classNames.push_back(clStr);
-        names.push_back(ptrToId.count(y)
-            ? ptrToId[y]
-            : (clStr + "#" + juce::String(idx)));
+        out.classNames.push_back(clStr);
+        bool const known = ptrToId.count(y) > 0;
+        out.hasTempId.push_back(known);
+        out.names.push_back(known ? ptrToId[y] : (clStr + "#" + juce::String(idx)));
     }
+    return out;
+}
+} // namespace
+
+using mcp::trace::peakToDb;
+
+juce::String MCPBridge::computeSignalTrace(PluginProcessor* processor, t_canvas* cnv, const juce::String& canvasName, const TraceWindowView* window)
+{
+    if (!processor || !cnv) return "{\"error\":\"canvas not available\"}";
+
+    // 1. Map objects and tempIds
+    auto traceObjects = collectTraceObjects(processor, cnv);
+    auto& objs = traceObjects.objs;
+    auto& names = traceObjects.names;
+    auto& classNames = traceObjects.classNames;
 
     int numObjs = (int)objs.size();
     std::vector<float> maxInPeak(numObjs, 0.0f);
     std::vector<float> maxOutPeak(numObjs, 0.0f);
     std::vector<int> incomingSigWires(numObjs, 0);
     std::vector<int> outgoingSigWires(numObjs, 0);
+    // T2b (armed window): signal wires whose source outlet was not tapped carry no reading. They still count as wires
+    // (the path exists) but add no level, and an object whose outgoing wires are ALL unread is not judged silent.
+    std::vector<int> unreadOutWires(numObjs, 0);
+    std::vector<int> unreadInWires(numObjs, 0);
     std::vector<std::unordered_map<int, float>> inletPeaks(numObjs);
     std::vector<std::unordered_map<int, std::vector<int>>> inletSources(numObjs);
     // CONTROL wires (non-signal): inlet -> upstream object indices. Needed to
@@ -802,22 +827,36 @@ juce::String MCPBridge::computeSignalTrace(PluginProcessor* processor, t_canvas*
         }
 
         float wirePeak = 0.0f;
-        t_signal* sig = outconnect_get_signal(oc);
-        if (sig && sig->s_vec && sig->s_n > 0) {
-            for (int k = 0; k < sig->s_n; ++k) {
-                float val = std::abs(sig->s_vec[k]);
-                if (val > wirePeak) wirePeak = val;
+        bool wireRead = true;
+        if (window) {
+            // The peak this outlet reached over the armed window (not the last block), if it was tapped.
+            auto const hit = window->peaks.find(std::string(names[si].toRawUTF8()) + ":" + std::to_string(lt.tr_outno));
+            if (hit != window->peaks.end()) wirePeak = hit->second;
+            else wireRead = false;
+        } else {
+            t_signal* sig = outconnect_get_signal(oc);
+            if (sig && sig->s_vec && sig->s_n > 0) {
+                for (int k = 0; k < sig->s_n; ++k) {
+                    float val = std::abs(sig->s_vec[k]);
+                    if (val > wirePeak) wirePeak = val;
+                }
             }
         }
 
         outgoingSigWires[si]++;
-        if (wirePeak > maxOutPeak[si]) maxOutPeak[si] = wirePeak;
-
         incomingSigWires[di]++;
+        inletSources[di][lt.tr_inno].push_back(si);
+        if (!wireRead) {
+            unreadOutWires[si]++;
+            unreadInWires[di]++;
+            continue;
+        }
+        if (wirePeak > maxOutPeak[si]) maxOutPeak[si] = wirePeak;
         if (wirePeak > maxInPeak[di]) maxInPeak[di] = wirePeak;
         inletPeaks[di][lt.tr_inno] = std::max(inletPeaks[di][lt.tr_inno], wirePeak);
-        inletSources[di][lt.tr_inno].push_back(si);
     }
+    // An object is judged on its output only when something about that output was read.
+    auto outRead = [&](int i) { return outgoingSigWires[i] == 0 || unreadOutWires[i] < outgoingSigWires[i]; };
 
     constexpr float ALIVE_THRESH = 1e-4f; // -80 dBFS
     std::vector<juce::String> liveSources;
@@ -829,6 +868,7 @@ juce::String MCPBridge::computeSignalTrace(PluginProcessor* processor, t_canvas*
     for (int i = 0; i < numObjs; ++i) {
         const juce::String& c = classNames[i];
         if (c == "dac~") dacIndex = i;
+        if (!outRead(i)) continue; // T2b: an outlet nobody tapped says nothing about the object
 
         bool isGen = (c == "osc~" || c == "phasor~" || c == "noise~" || c == "sig~" ||
                       c == "tabread4~" || c == "tabread~" || c == "tabplay~" || c == "adc~");
@@ -925,6 +965,7 @@ juce::String MCPBridge::computeSignalTrace(PluginProcessor* processor, t_canvas*
         // working send~. Skip them; a genuinely dangling send~ (no matching
         // receiver) still surfaces via the "never reaches dac~" fallback below.
         if (c == "dac~" || c == "throw~" || c == "out~" || c == "send~" || c == "s~") continue;
+        if (!outRead(i)) continue; // T2b: not tapped, not judged
 
         if (maxInPeak[i] >= ALIVE_THRESH && maxOutPeak[i] < ALIVE_THRESH) {
             chokeIndex = i;
@@ -932,7 +973,9 @@ juce::String MCPBridge::computeSignalTrace(PluginProcessor* processor, t_canvas*
                 float inlet1Signal = inletPeaks[i].count(1) ? inletPeaks[i][1] : 0.0f;
                 if (inletSources[i].count(1) && !inletSources[i][1].empty()) {
                     int srcI = inletSources[i][1][0];
-                    if (inlet1Signal < ALIVE_THRESH) {
+                    if (!outRead(srcI)) {
+                        chokeReason = "multiplier output is silent; the signal on inlet 1 (from '" + names[srcI] + "') was not tapped in this window";
+                    } else if (inlet1Signal < ALIVE_THRESH) {
                         chokeReason = "multiplier control inlet 1 is zero from envelope '" + names[srcI] + "' (envelope did not trigger or [r gate] missing)"
                                     + gateSelUpstreamNote(srcI);
                     } else {
@@ -968,7 +1011,10 @@ juce::String MCPBridge::computeSignalTrace(PluginProcessor* processor, t_canvas*
                 }
             }
         } else if (!liveSources.empty()) {
-            if (dacIndex >= 0 && maxInPeak[dacIndex] < ALIVE_THRESH) {
+            if (dacIndex >= 0 && unreadInWires[dacIndex] > 0 && maxInPeak[dacIndex] < ALIVE_THRESH) {
+                // T2b: some of the wires into dac~ were not tapped, so "never reaches dac~" cannot be claimed.
+                chokeReason = "the window did not tap every wire into dac~; read 'levels' for where the signal stops";
+            } else if (dacIndex >= 0 && maxInPeak[dacIndex] < ALIVE_THRESH) {
                 chokeReason = "signal generated by '" + liveSources[0] + "' never reaches dac~ (broken signal path)";
                 chokeIndex = dacIndex;
             } else {
@@ -1041,19 +1087,80 @@ juce::String MCPBridge::computeSignalTrace(PluginProcessor* processor, t_canvas*
     for (size_t k = 0; k < stageOrder.size(); ++k) {
         int i = stageOrder[k];
         if (k > 0) json += ",";
-        float inDbS = maxInPeak[i] > 1e-7f ? (20.0f * std::log10(maxInPeak[i])) : -100.0f;
+        float inDbS = peakToDb(maxInPeak[i]);
         bool sink = (classNames[i] == "dac~" || classNames[i] == "out~");
-        float outDbS = sink ? inDbS : (maxOutPeak[i] > 1e-7f ? (20.0f * std::log10(maxOutPeak[i])) : -100.0f);
+        float outDbS = sink ? inDbS : peakToDb(maxOutPeak[i]);
+        // T2b: a level nobody tapped is null, never -100 (that would read as a measured silence).
+        bool const inUnread = incomingSigWires[i] > 0 && unreadInWires[i] == incomingSigWires[i];
+        bool const outUnread = !sink && !outRead(i);
         json += "{\"tempId\":\"" + jsonEscape(names[i]) + "\",\"class\":\"" + jsonEscape(classNames[i]) + "\",";
-        json += "\"inDb\":" + juce::String(inDbS, 1) + ",\"outDb\":" + juce::String(outDbS, 1);
+        json += "\"inDb\":" + (inUnread ? juce::String("null") : juce::String(inDbS, 1))
+              + ",\"outDb\":" + (outUnread ? juce::String("null") : juce::String(outDbS, 1));
+        if (window)
+            json += juce::String(",\"measured\":") + ((inUnread || outUnread) ? "false" : "true");
         if (i == chokeIndex && chokeReason.isNotEmpty())
             json += ",\"note\":\"" + jsonEscape(chokeReason) + "\"";
         json += "}";
     }
     json += "],\"stagesTruncated\":" + juce::String((int)stageOrder.size() >= 40 ? "true" : "false");
+    if (window)
+        json += window->extraJson;
     json += "}";
 
     return json;
+}
+
+MCPBridge::TraceTapPlan MCPBridge::planTraceTaps(PluginProcessor* processor, t_canvas* cnv, const std::vector<std::string>& focus, int cap)
+{
+    TraceTapPlan plan;
+    if (!processor || !cnv) return plan;
+
+    auto const objects = collectTraceObjects(processor, cnv);
+    int const numObjs = static_cast<int>(objects.objs.size());
+    std::unordered_map<t_gobj*, int> indexOf;
+    for (int i = 0; i < numObjs; ++i)
+        indexOf[objects.objs[static_cast<size_t>(i)]] = i;
+
+    // One tap per signal outlet that has a connection (the first connection stands for the outlet: they share a signal).
+    std::vector<mcp::trace::SignalOutlet> outlets;
+    std::vector<mcp::trace::SignalEdge> edges;
+    std::vector<t_outconnect*> firstConnection;
+    std::unordered_map<long long, int> outletSlot;
+    t_linetraverser lt;
+    linetraverser_start(&lt, cnv);
+    while (t_outconnect* oc = linetraverser_next_nosize(&lt)) {
+        if (lt.tr_outlet->o_sym != gensym("signal")) continue;
+        auto const si = indexOf.find(&lt.tr_ob->ob_g);
+        auto const di = indexOf.find(&lt.tr_ob2->ob_g);
+        if (si == indexOf.end() || di == indexOf.end()) continue;
+        edges.push_back({ si->second, di->second });
+        long long const key = static_cast<long long>(si->second) * 1024 + lt.tr_outno;
+        if (outletSlot.emplace(key, static_cast<int>(outlets.size())).second) {
+            outlets.push_back({ si->second, lt.tr_outno, std::string(objects.names[static_cast<size_t>(si->second)].toRawUTF8()) });
+            firstConnection.push_back(oc);
+        }
+    }
+    plan.signalOutlets = static_cast<int>(outlets.size());
+
+    auto const ordered = mcp::trace::orderAlongSignal(outlets, edges, numObjs);
+    auto const choice = mcp::trace::chooseTaps(outlets, ordered, focus, cap);
+    plan.sampled = choice.sampled;
+    std::vector<char> picked(outlets.size(), 0);
+    for (int idx : choice.picked) {
+        picked[static_cast<size_t>(idx)] = 1;
+        auto const& o = outlets[static_cast<size_t>(idx)];
+        TraceTapPlan::Tap tap;
+        tap.name = o.name;
+        tap.target = objects.hasTempId[static_cast<size_t>(o.obj)] ? objects.names[static_cast<size_t>(o.obj)] : juce::String(o.obj);
+        tap.outlet = o.outlet;
+        tap.cls = objects.classNames[static_cast<size_t>(o.obj)];
+        tap.oc = firstConnection[static_cast<size_t>(idx)];
+        plan.taps.push_back(std::move(tap));
+    }
+    for (int idx : ordered)
+        if (!picked[static_cast<size_t>(idx)])
+            plan.untapped.push_back(outlets[static_cast<size_t>(idx)].name + ":" + std::to_string(outlets[static_cast<size_t>(idx)].outlet));
+    return plan;
 }
 
 juce::String MCPBridge::computeClusters(PluginProcessor* processor, t_canvas* cnv, const juce::String& canvasName)
@@ -3256,6 +3363,17 @@ void ProbeManager::audioTick()
         if (n <= 0) continue;
         float* vec = signal->s_vec;
 
+        if (probe.windowMode.load(std::memory_order_relaxed)) {
+            // T2b: an armed-trace tap keeps the largest block peak since it started; no queue, no ring.
+            float blockPeak = 0.0f;
+            for (int i = 0; i < n; i++)
+                blockPeak = std::max(blockPeak, std::abs(vec[i]));
+            if (blockPeak > probe.windowPeak.load(std::memory_order_relaxed))
+                probe.windowPeak.store(blockPeak, std::memory_order_relaxed);
+            probe.windowBlocks.store(probe.windowBlocks.load(std::memory_order_relaxed) + 1, std::memory_order_release);
+            continue;
+        }
+
         float sumSq = 0.0f, peak = 0.0f;
         for (int i = 0; i < n; i++) {
             float s = vec[i];
@@ -3276,12 +3394,32 @@ void ProbeManager::audioTick()
     }
 }
 
-int ProbeManager::startProbe(t_outconnect* oc, int const epoch, const juce::String& canvasName, const juce::String& tempId, int outletIndex, const juce::String& correlationId, int durationMs)
+bool ProbeManager::finishWindowTap(uint32_t probeId, float& peakOut, int& blocksOut)
 {
     for (auto& probe : probes) {
+        if (probe.probeId != probeId || !probe.windowMode.load(std::memory_order_acquire)) continue;
+        // The tap may have ended by itself (grace period); its peak stays in the slot until the slot is reused.
+        probe.active.store(false, std::memory_order_release);
+        probe.outconnect.store(nullptr, std::memory_order_release);
+        probe.windowMode.store(false, std::memory_order_release);
+        peakOut = probe.windowPeak.load(std::memory_order_relaxed);
+        blocksOut = probe.windowBlocks.load(std::memory_order_acquire);
+        return true;
+    }
+    return false;
+}
+
+int ProbeManager::startProbe(t_outconnect* oc, int const epoch, const juce::String& canvasName, const juce::String& tempId, int outletIndex, const juce::String& correlationId, int durationMs, bool windowMode)
+{
+    for (auto& probe : probes) {
+        // A window tap that has ended but was not read keeps its slot's numbers until the slot is needed.
         if (!probe.active.load(std::memory_order_acquire)) {
             ProbeResult discard;
             while (probe.resultQueue.try_dequeue(discard)) {}
+            probe.windowPeak.store(0.0f, std::memory_order_relaxed);
+            probe.windowBlocks.store(0, std::memory_order_relaxed);
+            probe.spectral = false;
+            probe.windowMode.store(windowMode, std::memory_order_release);
 
             probe.probeId = nextProbeId.fetch_add(1);
             if (probe.probeId == 0) probe.probeId = nextProbeId.fetch_add(1);
@@ -3391,11 +3529,23 @@ void ProbeManager::collectResults()
             }
             sys_unlock();
             if (!oc) {
-                bridge->sendReply((probe.spectral ? "/meter/spectral/error/" : "/meter/error/") + probe.correlationId,
-                                  "probe target deleted: " + (err.isNotEmpty() ? err : probe.tempId));
+                // T2b: a window tap has no request to answer; the trace read reports the outlet as unread.
+                if (!probe.windowMode.load(std::memory_order_acquire))
+                    bridge->sendReply((probe.spectral ? "/meter/spectral/error/" : "/meter/error/") + probe.correlationId,
+                                      "probe target deleted: " + (err.isNotEmpty() ? err : probe.tempId));
                 probe.spectral = false;
                 continue;
             }
+        }
+
+        if (probe.windowMode.load(std::memory_order_acquire)) {
+            // T2b: nobody read this window tap in time: end it quietly (its slot is free again); a late read
+            // still finds the peak until the slot is reused.
+            if (now - probe.startTimeMs >= static_cast<juce::int64>(probe.durationMs)) {
+                probe.active.store(false, std::memory_order_release);
+                probe.outconnect.store(nullptr, std::memory_order_release);
+            }
+            continue;
         }
 
         ProbeResult item;
@@ -3664,12 +3814,14 @@ void MCPBridge::sendSelectionTelemetry(const juce::String& selector, const Small
     sender.send(msg);
 }
 
-void MCPBridge::sendConsoleLog(const juce::String& message, bool isError)
+void MCPBridge::sendConsoleLog(const juce::String& message, bool isError, const juce::String& objectId)
 {
     if (!canReply()) return;
 
     juce::OSCMessage msg { juce::OSCAddressPattern(isError ? "/pd/error" : "/pd/log") };
     msg.addArgument(message);
+    if (objectId.isNotEmpty())
+        msg.addArgument(objectId); // T2b: the culprit; the text stays argument 0, as before
     sender.send(msg);
 }
 
