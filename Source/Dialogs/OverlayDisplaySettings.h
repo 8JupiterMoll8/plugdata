@@ -25,11 +25,11 @@ public:
         String groupName;
         String settingName;
         String toolTip;
-        ValueTree overlayState;
+        DynamicObject::Ptr overlayState;
         Overlay group;
 
     public:
-        OverlaySelector(ValueTree const& settings, Overlay const groupType, String nameOfSetting, String nameOfGroup, String toolTipString)
+        OverlaySelector(DynamicObject::Ptr settings, Overlay const groupType, String nameOfSetting, String nameOfGroup, String toolTipString)
             : groupName(std::move(nameOfGroup))
             , settingName(std::move(nameOfSetting))
             , toolTip(std::move(toolTipString))
@@ -62,12 +62,12 @@ public:
 
             textLabel.setText(groupName, dontSendNotification);
             textLabel.setTooltip(toolTip);
-            textLabel.setFont(Font(14));
+            textLabel.setFont(Font(FontOptions(14)));
             addAndMakeVisible(textLabel);
 
-            auto const editState = static_cast<int>(settings.getProperty("edit"));
-            auto const lockState = static_cast<int>(settings.getProperty("lock"));
-            auto const altState = static_cast<int>(settings.getProperty("alt"));
+            auto const editState = static_cast<int>(settings->getProperty("edit"));
+            auto const lockState = static_cast<int>(settings->getProperty("lock"));
+            auto const altState = static_cast<int>(settings->getProperty("alt"));
 
             buttons[Edit]->setToggleState(static_cast<bool>(editState & group), dontSendNotification);
             buttons[Lock]->setToggleState(static_cast<bool>(lockState & group), dontSendNotification);
@@ -80,7 +80,7 @@ public:
         {
             auto const name = button->getName();
 
-            int buttonBit = overlayState.getProperty(name);
+            int buttonBit = overlayState->getProperty(name);
 
             button->setToggleState(!button->getToggleState(), dontSendNotification);
 
@@ -90,7 +90,8 @@ public:
                 buttonBit = buttonBit & ~group;
             }
 
-            overlayState.setProperty(name, buttonBit, nullptr);
+            overlayState->setProperty(name, buttonBit);
+            SettingsFile::getInstance()->triggerSettingsChange("overlays");
         }
 
         void resized() override
@@ -109,12 +110,9 @@ public:
         }
     };
 
-    explicit OverlayDisplaySettings(pd::Instance* pd)
-        : pd(pd)
+    explicit OverlayDisplaySettings()
     {
-        auto const settingsTree = SettingsFile::getInstance()->getValueTree();
-
-        auto const overlayTree = settingsTree.getChildWithName("Overlays");
+        auto overlayTree = SettingsFile::getInstance()->getProperty<DynamicObject>("overlays");
 
         canvasLabel.setText("Canvas", dontSendNotification);
         canvasLabel.setFont(Fonts::getSemiBoldFont().withHeight(14));
@@ -128,6 +126,10 @@ public:
         connectionLabel.setFont(Fonts::getSemiBoldFont().withHeight(14));
         addAndMakeVisible(connectionLabel);
 
+        aiLabel.setText("AI Copilot", dontSendNotification); // MCP-CARRIED(overlay-ai-toggles)
+        aiLabel.setFont(Fonts::getSemiBoldFont().withHeight(14));
+        addAndMakeVisible(aiLabel);
+
         canvas.add(new OverlaySelector(overlayTree, Origin, "origin", "Origin", "Origin point of canvas"));
         canvas.add(new OverlaySelector(overlayTree, Border, "border", "Border", "Plugin / window workspace size"));
 
@@ -139,6 +141,14 @@ public:
         connection.add(new OverlaySelector(overlayTree, Order, "order", "Order", "Trigger order of multiple outlets"));
         connection.add(new OverlaySelector(overlayTree, Behind, "behind", "Behind", "Connection cables behind objects"));
 
+        aiGroup.add(new OverlaySelector(overlayTree, AIState, "ai_state", "Markers", "AI change breadcrumbs: light up what changed, then fade (changed / proposed / error)")); // MCP-CARRIED(overlay-ai-toggles)
+        aiGroup.add(new OverlaySelector(overlayTree, AIRegions, "ai_regions", "Regions", "Titled modular bay backplates"));
+        aiGroup.add(new OverlaySelector(overlayTree, AIAnnotations, "ai_annotations", "Notes", "In-canvas explanation tags"));
+        aiGroup.add(new OverlaySelector(overlayTree, AIGhosts, "ai_ghosts", "Ghosts", "Proposed uncommitted changes"));
+        aiGroup.add(new OverlaySelector(overlayTree, AIHud, "ai_hud", "Cinema HUD", "Cinema subtitle & status bar"));
+        aiGroup.add(new OverlaySelector(overlayTree, AISketch, "ai_sketch", "Sketch", "Live stylus and mouse sketch ink layer"));
+        aiGroup.add(new OverlaySelector(overlayTree, AIReferences, "ai_references", "References", "Pasted schematics & reference images layer"));
+
         debugModeValue.referTo(SettingsFile::getInstance()->getPropertyAsValue("debug_connections"));
         debugModeValue.addListener(this);
         connectionDebugToggle.reset(new PropertiesPanel::BoolComponent("Debug", debugModeValue, { "No", "Yes" }));
@@ -148,63 +158,72 @@ public:
         groups[0] = &canvas;
         groups[1] = &object;
         groups[2] = &connection;
+        groups[3] = &aiGroup; // MCP-CARRIED(overlay-ai-toggles)
 
         for (auto const& group : groups) {
             for (auto const& item : *group) {
                 addAndMakeVisible(item);
             }
         }
-        setSize(335, 200);
+        setSize(500, 260); // MCP-CARRIED(overlay-ai-toggles)
     }
 
     void valueChanged(Value& v) override
     {
         if (v.refersToSameSourceAs(debugModeValue)) {
-            pd->lockAudioThread();
             set_plugdata_debugging_enabled(getValue<bool>(debugModeValue));
-            pd->unlockAudioThread();
         }
     }
 
     void resized() override
     {
-        auto bounds = getLocalBounds().reduced(4, 0).withTrimmedTop(24);
+        auto bounds = getLocalBounds().reduced(6, 0).withTrimmedTop(24); // MCP-CARRIED(overlay-ai-toggles)
 
         constexpr auto labelHeight = 26;
         constexpr auto itemHeight = 28;
 
-        auto leftSide = bounds.removeFromLeft(bounds.proportionOfWidth(0.5f)).withTrimmedRight(4);
-        auto rightSide = bounds.withTrimmedLeft(4);
+        auto colWidth = bounds.getWidth() / 3; // MCP-CARRIED(overlay-ai-toggles)
+        auto col1 = bounds.removeFromLeft(colWidth).withTrimmedRight(4);
+        auto col2 = bounds.removeFromLeft(colWidth).withTrimmedLeft(2).withTrimmedRight(2);
+        auto col3 = bounds.withTrimmedLeft(4);
 
-        canvasLabel.setBounds(leftSide.removeFromTop(labelHeight));
+        canvasLabel.setBounds(col1.removeFromTop(labelHeight)); // MCP-CARRIED(overlay-ai-toggles)
         for (auto const& item : canvas) {
-            item->setBounds(leftSide.removeFromTop(itemHeight));
+            item->setBounds(col1.removeFromTop(itemHeight)); // MCP-CARRIED(overlay-ai-toggles)
         }
 
-        leftSide.removeFromTop(2);
-        objectLabel.setBounds(leftSide.removeFromTop(labelHeight));
+        col1.removeFromTop(2); // MCP-CARRIED(overlay-ai-toggles)
+        objectLabel.setBounds(col1.removeFromTop(labelHeight));
         for (auto const& item : object) {
-            item->setBounds(leftSide.removeFromTop(itemHeight));
+            item->setBounds(col1.removeFromTop(itemHeight)); // MCP-CARRIED(overlay-ai-toggles)
         }
 
-        connectionLabel.setBounds(rightSide.removeFromTop(labelHeight));
+        connectionLabel.setBounds(col2.removeFromTop(labelHeight)); // MCP-CARRIED(overlay-ai-toggles)
         for (auto const& item : connection) {
-            item->setBounds(rightSide.removeFromTop(itemHeight));
+            item->setBounds(col2.removeFromTop(itemHeight)); // MCP-CARRIED(overlay-ai-toggles)
         }
 
-        connectionDebugToggle->setBounds(rightSide.removeFromTop(itemHeight));
+        connectionDebugToggle->setBounds(col2.removeFromTop(itemHeight)); // MCP-CARRIED(overlay-ai-toggles)
+
+        aiLabel.setBounds(col3.removeFromTop(labelHeight));
+        for (auto const& item : aiGroup) {
+            item->setBounds(col3.removeFromTop(itemHeight));
+        }
     }
 
     void paint(Graphics& g) override
     {
-        g.setColour(findColour(PlugDataColour::popupMenuTextColourId));
+        auto const& colours = getThemeColours(*this);
+
+        g.setColour(colours.popupMenuTextColour);
         g.setFont(Fonts::getBoldFont().withHeight(15));
         g.drawText("Overlays", 0, 0, getWidth(), 24, Justification::centred);
 
-        g.setColour(findColour(PlugDataColour::toolbarOutlineColourId));
+        g.setColour(colours.toolbarOutlineColour);
         g.drawLine(4, 24, getWidth() - 8, 24);
 
         for (auto const& group : groups) {
+            if (group->isEmpty()) continue; // MCP-CARRIED(overlay-ai-toggles)
             auto groupBounds = group->getFirst()->getBounds().getUnion(group->getLast()->getBounds());
 
             bool const isConnectionGroup = group == &connection;
@@ -213,11 +232,11 @@ public:
             }
 
             // draw background rectangle
-            g.setColour(findColour(PlugDataColour::popupMenuBackgroundColourId).contrasting(0.035f));
+            g.setColour(colours.popupMenuBackgroundColour.contrasting(0.035f));
             g.fillRoundedRectangle(groupBounds.toFloat(), Corners::largeCornerRadius);
 
             // draw outline rectangle
-            g.setColour(findColour(PlugDataColour::toolbarOutlineColourId));
+            g.setColour(colours.toolbarOutlineColour);
             g.drawRoundedRectangle(groupBounds.toFloat(), Corners::largeCornerRadius, 1.0f);
 
             // draw lines between items
@@ -235,7 +254,7 @@ public:
 
         isShowing = true;
 
-        auto overlayDisplaySettings = std::make_unique<OverlayDisplaySettings>(editor->pd);
+        auto overlayDisplaySettings = std::make_unique<OverlayDisplaySettings>();
         editor->showCalloutBox(std::move(overlayDisplaySettings), bounds);
     }
 
@@ -247,17 +266,17 @@ public:
 private:
     static inline bool isShowing = false;
 
-    Label canvasLabel, objectLabel, connectionLabel;
+    Label canvasLabel, objectLabel, connectionLabel, aiLabel; // MCP-CARRIED(overlay-ai-toggles)
 
-    StackArray<OwnedArray<OverlaySelector>*, 3> groups;
+    StackArray<OwnedArray<OverlaySelector>*, 4> groups; // MCP-CARRIED(overlay-ai-toggles)
 
     OwnedArray<OverlaySelector> canvas;
     OwnedArray<OverlaySelector> object;
     OwnedArray<OverlaySelector> connection;
+    OwnedArray<OverlaySelector> aiGroup; // MCP-CARRIED(overlay-ai-toggles)
 
     Value debugModeValue;
     std::unique_ptr<PropertiesPanel::BoolComponent> connectionDebugToggle;
-    pd::Instance* pd;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(OverlayDisplaySettings)
 };

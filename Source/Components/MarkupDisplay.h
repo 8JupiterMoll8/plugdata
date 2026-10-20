@@ -140,7 +140,7 @@ public:
         : urlHandler(urlHandler)
     {
         colours = nullptr;
-        defaultColour = findColour(PlugDataColour::canvasTextColourId);
+        defaultColour = getThemeColours(*this).canvasTextColour;
     }
     // static utility methods
     static Colour parseHexColourStatic(String s, Colour const defaultColour)
@@ -251,14 +251,8 @@ protected:
             } else {
                 auto parseLink = [this, &attributedString](String& link, String& linkText) {
                     if (link.isNotEmpty()) {
-#if JUCE_MAC
-                        auto start = attributedString.getText().length();
-                        auto end = start + linkText.length();
-#else
-                        // macOS version of TextLayout considers whitespace as a character, but the Windows/Linux versions don't!
                         auto start = attributedString.getText().replace(" ", "").replace("\n", "").replace("\r", "").replace("\t", "").length();
                         auto end = start + linkText.replace(" ", "").replace("\n", "").replace("\r", "").replace("\t", "").length();
-#endif
                         links.add({ link, start, end });
                         link = "";
                     }
@@ -319,7 +313,7 @@ protected:
                             tagRecognized = true;
                         } else if (tag.startsWith("l:")) {
                             currentLink = tag.substring(2);
-                            nextColour = findColour(PlugDataColour::dataColourId); // link colour is just data colour for now
+                            nextColour = getThemeColours(*this).dataColour; // link colour is just data colour for now
                             tagRecognized = true;
                         } else if (tag.startsWith("/l")) {
                             currentLink = "";
@@ -352,12 +346,7 @@ protected:
                             font = Fonts::getBoldFont().withHeight(15);
                         }
                         if (italic) {
-                            // italic only seems to work on macOS...
-#if JUCE_MAC
-                            font = Fonts::getVariableFont().italicised().withHeight(15);
-#else
-                            font = Fonts::getDefaultFont().withHeight(15);
-#endif
+                            font = Fonts::getDefaultFont().italicised().withHeight(15);
                         }
                     }
                 }
@@ -420,27 +409,36 @@ public:
     void parseMarkup(StringArray const& lines, Font const font) override
     {
         attributedString = parsePureText(lines, font);
+        cachedLayoutWidth = -1.0f;
     }
 
     float getHeightRequired(float const width) override
     {
-        TextLayout layout;
-        layout.createLayout(attributedString, width);
-        return layout.getHeight();
+        return getLayout(width).getHeight();
     }
 
     void paint(Graphics& g) override
     {
-        TextLayout layout;
-        layout.createLayout(attributedString, getWidth());
-        layout.draw(g, getLocalBounds().toFloat());
+        getLayout(static_cast<float>(getWidth())).draw(g, getLocalBounds().toFloat());
     }
 
     void resized() override
     {
-        TextLayout layout;
-        layout.createLayout(attributedString, getWidth());
-        updateLinkBounds(layout);
+        updateLinkBounds(getLayout(static_cast<float>(getWidth())));
+    }
+
+private:
+    TextLayout cachedLayout;
+    float cachedLayoutWidth = -1.0f;
+
+    TextLayout& getLayout(float width)
+    {
+        if (!approximatelyEqual(width, cachedLayoutWidth)) {
+            cachedLayout = TextLayout();
+            cachedLayout.createLayout(attributedString, width);
+            cachedLayoutWidth = width;
+        }
+        return cachedLayout;
     }
 };
 
@@ -452,13 +450,12 @@ public:
     {
         attributedString.append(lines.joinIntoString("\n"), font, defaultColour);
         setRepaintsOnMouseActivity(true);
+        cachedLayoutWidth = -1.0f;
     }
 
     float getHeightRequired(float const width) override
     {
-        TextLayout layout;
-        layout.createLayout(attributedString, width);
-        return layout.getHeight();
+        return getLayout(width).getHeight();
     }
 
     void paint(Graphics& g) override
@@ -466,15 +463,7 @@ public:
         g.setColour(findColour(PlugDataColour::canvasBackgroundColourId).darker(isMouseOver() ? 0.20f : 0.15f));
         g.fillRoundedRectangle(getLocalBounds().toFloat(), Corners::defaultCornerRadius);
 
-        TextLayout layout;
-        layout.createLayout(attributedString, getWidth());
-        layout.draw(g, getLocalBounds().translated(8, 8).toFloat());
-    }
-
-    void resized() override
-    {
-        TextLayout layout;
-        layout.createLayout(attributedString, getWidth());
+        getLayout(static_cast<float>(getWidth())).draw(g, getLocalBounds().translated(8, 8).toFloat());
     }
 
     void mouseUp(MouseEvent const& event) override
@@ -482,6 +471,20 @@ public:
         if (urlHandler) {
             urlHandler->handleURL(attributedString.getText());
         }
+    }
+
+private:
+    TextLayout cachedLayout;
+    float cachedLayoutWidth = -1.0f;
+
+    TextLayout& getLayout(float width)
+    {
+        if (!approximatelyEqual(width, cachedLayoutWidth)) {
+            cachedLayout = TextLayout();
+            cachedLayout.createLayout(attributedString, width);
+            cachedLayoutWidth = width;
+        }
+        return cachedLayout;
     }
 };
 
@@ -511,13 +514,13 @@ public:
         this->iconsize = iconsize;
         this->margin = margin;
         this->linewidth = linewidth;
+        cachedLayoutWidth = -1.0f;
     }
 
     float getHeightRequired(float const width) override
     {
-        TextLayout layout;
-        layout.createLayout(attributedString, width - iconsize - 2 * (margin + linewidth));
-        return jmax(layout.getHeight(), static_cast<float>(iconsize));
+        auto const textWidth = width - iconsize - 2 * (margin + linewidth);
+        return jmax(getLayout(textWidth).getHeight(), static_cast<float>(iconsize));
     }
 
     void paint(Graphics& g) override
@@ -549,7 +552,10 @@ public:
         // draw lines left and right
         g.fillRect(Rectangle<int>(iconsize, 0, linewidth, getHeight()));
         g.fillRect(Rectangle<int>(getWidth() - linewidth, 0, linewidth, getHeight()));
-        attributedString.draw(g, Rectangle<float>(iconsize + margin + linewidth, 0, getWidth() - iconsize - 2 * (margin + linewidth), getHeight()));
+
+        auto const textBounds = Rectangle<float>(iconsize + margin + linewidth, 0,
+            getWidth() - iconsize - 2 * (margin + linewidth), getHeight());
+        getLayout(textBounds.getWidth()).draw(g, textBounds);
     }
 
 private:
@@ -560,6 +566,19 @@ private:
         warning };
     ParagraphType type;
     int iconsize, margin, linewidth;
+
+    TextLayout cachedLayout;
+    float cachedLayoutWidth = -1.0f;
+
+    TextLayout& getLayout(float width)
+    {
+        if (!approximatelyEqual(width, cachedLayoutWidth)) {
+            cachedLayout = TextLayout();
+            cachedLayout.createLayout(attributedString, width);
+            cachedLayoutWidth = width;
+        }
+        return cachedLayout;
+    }
 };
 
 class TableBlock final : public Block {
@@ -584,7 +603,7 @@ public:
         table.cells.clear();
         for (auto line : lines) {
             // find all cells in this line
-            auto const row = new OwnedArray<Cell>();
+            auto const row = new OwnedArray<Table::Cell>();
             while (line.containsAnyOf("^|")) {
                 bool const isHeader = line.startsWith("^");
                 line = line.substring(1);                          // remove left delimiter
@@ -594,11 +613,14 @@ public:
                     line = line.substring(nextDelimiter); // drop everything up to right delimiter
                     // TODO: use the number of whitespace characters on either side of rawString to determine justification
                     // TODO: implement || -> previous cell spans two columns
-                    AttributedString attributedString = parsePureText(rawString.trim(), isHeader ? font.boldened() : font);
-                    TextLayout layout;
-                    layout.createLayout(attributedString, 1.0e7f);
-                    updateLinkBounds(layout);
-                    row->add(new Cell { attributedString, isHeader, layout.getWidth(), layout.getHeight() });
+                    auto* cell = new Table::Cell();
+                    cell->s = parsePureText(rawString.trim(), isHeader ? font.boldened() : font);
+                    cell->isHeader = isHeader;
+                    cell->layout.createLayout(cell->s, 1.0e7f);
+                    updateLinkBounds(cell->layout);
+                    cell->width = cell->layout.getWidth();
+                    cell->height = cell->layout.getHeight();
+                    row->add(cell);
                 }
             }
             table.cells.add(row);
@@ -606,24 +628,24 @@ public:
         // compute column widths
         table.columnwidths.clear();
         for (int i = 0; i < table.cells.size(); i++) {
-            OwnedArray<Cell> const* row = table.cells[i];
+            OwnedArray<Table::Cell> const* row = table.cells[i];
             for (int j = 0; j < row->size(); j++) {
-                if (j < table.columnwidths.size()) {
+                if (j < static_cast<int>(table.columnwidths.size())) {
                     table.columnwidths[j] = jmax(table.columnwidths[j], (*row)[j]->width);
                 } else {
-                    table.columnwidths[j] = (*row)[j]->width;
+                    table.columnwidths.add((*row)[j]->width);
                 }
             }
         }
         // compute row heights
         table.rowheights.clear();
         for (int i = 0; i < table.cells.size(); i++) {
-            OwnedArray<Cell> const* row = table.cells[i];
+            OwnedArray<Table::Cell> const* row = table.cells[i];
             float rowheight = 0;
             for (int j = 0; j < row->size(); j++) {
                 rowheight = jmax(rowheight, (*row)[j]->height);
             }
-            table.rowheights[i] = rowheight;
+            table.rowheights.add(rowheight);
         }
         table.setBounds(0, 0, getWidthRequired() + table.leftmargin + table.cellgap, getHeightRequired(0.f));
     }
@@ -665,12 +687,6 @@ public:
     bool canExtendBeyondMargin() override { return true; }
 
 private:
-    typedef struct {
-        AttributedString s;
-        bool isHeader;
-        float width;
-        float height;
-    } Cell;
     class InnerViewport final : public Viewport {
     public:
         // Override the mouse event methods to forward them to the parent Viewport
@@ -711,6 +727,14 @@ private:
     };
     class Table final : public Component {
     public:
+        struct Cell {
+            AttributedString s;
+            bool isHeader = false;
+            float width = 0.0f;
+            float height = 0.0f;
+            TextLayout layout;
+        };
+
         void paint(Graphics& g) override
         {
             float y = 0.f; // Y coordinate of cell's top left corner
@@ -718,16 +742,16 @@ private:
                 float x = leftmargin;                   // X coordinate of cell's top left corner
                 OwnedArray<Cell> const* row = cells[i]; // get current row
                 for (int j = 0; j < row->size(); j++) {
-                    Cell c = *(*row)[j];       // get current cell
-                    if (c.isHeader) {          // if it's a header cell...
-                        g.setColour(bgHeader); // ...set header background colour
-                    } else {                   // otherwise...
-                        g.setColour(bg);       // ...set regular background colour
+                    Cell const& c = *(*row)[j]; // get current cell (by reference -- copying would also copy the TextLayout)
+                    if (c.isHeader) {           // if it's a header cell...
+                        g.setColour(bgHeader);  // ...set header background colour
+                    } else {                    // otherwise...
+                        g.setColour(bg);        // ...set regular background colour
                     }
                     // fill background
                     g.fillRect(x, y, columnwidths[j] + 2 * cellmargin, rowheights[i] + 2 * cellmargin);
-                    // draw cell text
-                    c.s.draw(g, Rectangle<float>(x + cellmargin, y + cellmargin, columnwidths[j], rowheights[i]));
+                    // draw cell text using the cached layout
+                    c.layout.draw(g, Rectangle<float>(x + cellmargin, y + cellmargin, columnwidths[j], rowheights[i]));
                     // move one cell to the right
                     x += columnwidths[j] + 2 * cellmargin + cellgap;
                 }
@@ -775,11 +799,11 @@ public:
         if (fileSource) {
             image = fileSource->getImageForFilename(filename);
         } else {
-            imageMissingMessage.append("no file source. ", Font(14), defaultColour);
+            imageMissingMessage.append("no file source. ", Font(FontOptions(14)), defaultColour);
             image = Image();
         }
         if (!image.isValid()) {
-            imageMissingMessage.append(filename + " not found.", Font(14), defaultColour);
+            imageMissingMessage.append(filename + " not found.", Font(FontOptions(14)), defaultColour);
         }
     }
 
@@ -798,12 +822,12 @@ public:
         if (fileSource) {
             image = fileSource->getImageForFilename(srcAttribute);
         } else {
-            imageMissingMessage.append("no file source. ", Font(14), defaultColour);
+            imageMissingMessage.append("no file source. ", Font(FontOptions(14)), defaultColour);
             image = Image();
         }
 
         if (!image.isValid()) {
-            imageMissingMessage.append(srcAttribute + " not found.", Font(14), defaultColour);
+            imageMissingMessage.append(srcAttribute + " not found.", Font(FontOptions(14)), defaultColour);
         }
     }
 
@@ -881,32 +905,43 @@ public:
                 attributedString = parsePureText(line, font);
             }
         }
+        cachedLayoutWidth = -1.0f;
     }
 
     float getHeightRequired(float const width) override
     {
-        TextLayout layout;
-        layout.createLayout(attributedString, width - indent - gap);
-        return layout.getHeight();
+        return getLayout(width - indent - gap).getHeight();
     }
 
     void paint(Graphics& g) override
     {
         label.draw(g, getLocalBounds().withTrimmedLeft(indent).toFloat());
-        attributedString.draw(g, getLocalBounds().withTrimmedLeft(indent + gap).toFloat());
+        auto const textBounds = getLocalBounds().withTrimmedLeft(indent + gap).toFloat();
+        getLayout(textBounds.getWidth()).draw(g, textBounds);
     }
 
     void resized() override
     {
-        TextLayout layout;
-        layout.createLayout(attributedString, getWidth() - indent - gap);
-        updateLinkBounds(layout);
+        updateLinkBounds(getLayout(static_cast<float>(getWidth() - indent - gap)));
     }
 
 private:
     AttributedString label;
     int indent;
     int gap;
+
+    TextLayout cachedLayout;
+    float cachedLayoutWidth = -1.0f;
+
+    TextLayout& getLayout(float width)
+    {
+        if (!approximatelyEqual(width, cachedLayoutWidth)) {
+            cachedLayout = TextLayout();
+            cachedLayout.createLayout(attributedString, width);
+            cachedLayoutWidth = width;
+        }
+        return cachedLayout;
+    }
 };
 
 class MarkupDisplayComponent final : public Component {
@@ -1126,18 +1161,18 @@ public:
                 b->parseMarkup(clines, font);
                 content.addAndMakeVisible(b);
                 blocks.add(b);
-            } else if (ListItem::isListItem(line)) {    // if we find a list item...
-                auto* b = new ListItem(urlHandler); // ...create a new object...
-                b->setColours(&colours);                // ...set its colour palette...
-                if (Block::containsLink(line)) {        // ...and, if there's a link...
-                    line = b->consumeLink(line);        // ...preprocess line...
+            } else if (ListItem::isListItem(line)) { // if we find a list item...
+                auto* b = new ListItem(urlHandler);  // ...create a new object...
+                b->setColours(&colours);             // ...set its colour palette...
+                if (Block::containsLink(line)) {     // ...and, if there's a link...
+                    line = b->consumeLink(line);     // ...preprocess line...
                 }
                 b->parseItemMarkup(line, font, indentPerSpace, labelGap); // ...parse it...
                 content.addAndMakeVisible(b);                             // ...add the object to content component...
                 blocks.add(b);                                            // ...and the block list...
                 li++;                                                     // ...and go to next line.
             } else if (AdmonitionBlock::isAdmonitionLine(line)) {         // if we find an admonition...
-                auto* b = new AdmonitionBlock(urlHandler);     // ...create a new object...
+                auto* b = new AdmonitionBlock(urlHandler);                // ...create a new object...
                 b->setColours(&colours);                                  // ...set its colour palette...
                 if (Block::containsLink(line)) {                          // ...and, if there's a link...
                     line = b->consumeLink(line);                          // ...preprocess line...
@@ -1147,7 +1182,7 @@ public:
                 blocks.add(b);                                                         // ...and the block list...
                 li++;                                                                  // ...and go to next line.
             } else if (ImageBlock::isImageLine(line)) {                                // if we find an image...
-                auto* b = new ImageBlock(urlHandler);                            // ...create a new object...
+                auto* b = new ImageBlock(urlHandler);                                  // ...create a new object...
                 if (Block::containsLink(line)) {                                       // ...and, if there's a link...
                     line = b->consumeLink(line);                                       // ...preprocess line...
                 }
@@ -1156,7 +1191,7 @@ public:
                 blocks.add(b);                              // ...and the block list...
                 li++;                                       // ...and go to next line.
             } else if (ImageBlock::isHTMLImageLine(line)) { // if we find an image...
-                auto* b = new ImageBlock(urlHandler); // ...create a new object...
+                auto* b = new ImageBlock(urlHandler);       // ...create a new object...
                 if (Block::containsLink(line)) {            // ...and, if there's a link...
                     line = b->consumeLink(line);            // ...preprocess line...
                 }
@@ -1165,7 +1200,7 @@ public:
                 blocks.add(b);                                // ...and the block list...
                 li++;                                         // ...and go to next line.
             } else if (TableBlock::isTableLine(line)) {       // if we find a table...
-                auto* b = new TableBlock(urlHandler);   // ...create a new object...
+                auto* b = new TableBlock(urlHandler);         // ...create a new object...
                 b->setColours(&colours);                      // ...set its colour palette...
                 b->setBGColours(tableBG, tableBGHeader);      // ...its background colours...
                 b->setMargins(tableMargin, tableGap, margin); // ...and its margins.
@@ -1174,19 +1209,19 @@ public:
                     tlines.add(line);                         // ...add it to table lines...
                     line = lines[++li];                       // ...and read next line.
                 }
-                b->parseMarkup(tlines, font);             // ...parse the collected lines...
-                content.addAndMakeVisible(b);             // ...add the object to content component...
-                blocks.add(b);                            // ...and the block list.
-            } else if (Block::containsLink(line)) {       // ...if we got here and there's a link...
+                b->parseMarkup(tlines, font);        // ...parse the collected lines...
+                content.addAndMakeVisible(b);        // ...add the object to content component...
+                blocks.add(b);                       // ...and the block list.
+            } else if (Block::containsLink(line)) {  // ...if we got here and there's a link...
                 auto* b = new TextBlock(urlHandler); // ...set up a new text block object...
-                b->setColours(&colours);                  // ...set its colours...
-                line = b->consumeLink(line);              // ...preprocess line...
-                b->parseMarkup(line, font);               // ...parse markup...
-                content.addAndMakeVisible(b);             // ...add the object to content component...
-                blocks.add(b);                            // ...and the block list...
-                li++;                                     // ...and go to next line.
-            } else {                                      // otherwise we assume that we have a text block
-                StringArray blines;                       // set up text block lines
+                b->setColours(&colours);             // ...set its colours...
+                line = b->consumeLink(line);         // ...preprocess line...
+                b->parseMarkup(line, font);          // ...parse markup...
+                content.addAndMakeVisible(b);        // ...add the object to content component...
+                blocks.add(b);                       // ...and the block list...
+                li++;                                // ...and go to next line.
+            } else {                                 // otherwise we assume that we have a text block
+                StringArray blines;                  // set up text block lines
                 bool blockEnd = false;
                 while (!ListItem::isListItem(line) &&           // while line is not part of a list...
                     !TableBlock::isTableLine(line) &&           // ...nor a table...
@@ -1200,10 +1235,10 @@ public:
                     blockEnd &= line.isNotEmpty();              // ...and finish shouldEndBloc...
                 }
                 auto* b = new TextBlock(urlHandler); // set up a new text block object...
-                b->setColours(&colours);                  // ...set its colours...
-                b->parseMarkup(blines, font);             // ...parse markup...
-                content.addAndMakeVisible(b);             // ...add the object to content component...
-                blocks.add(b);                            // ...and the block list.
+                b->setColours(&colours);             // ...set its colours...
+                b->parseMarkup(blines, font);        // ...parse markup...
+                content.addAndMakeVisible(b);        // ...add the object to content component...
+                blocks.add(b);                       // ...and the block list.
             }
         }
 
@@ -1216,21 +1251,21 @@ public:
     void setURLHandler(URLHandler* uh) { urlHandler = uh; }
 
 private:
-    StringPairArray colours;       // colour palette
-    Colour bg;                     // background colour
-    Colour tableBG, tableBGHeader; // table background colours
-    int tableMargin, tableGap;     // table margins
-    int indentPerSpace, labelGap;  // list item indents
-    BouncingViewport viewport;     // a viewport to scroll the content
-    Component content;             // a component with the content
-    OwnedArray<Block> blocks;      // representation of the document as blocks
-    int margin;                    // content margin in pixels
-    int iconsize;                  // admonition icon size in pixels
-    int admargin;                  // admonition margin in pixels
-    int adlinewidth;               // admonition line width in pixels
-    FileSource* fileSource;        // data source for image files, etc.
-    URLHandler* urlHandler;        // URL handler for custom URLs
-    Font font;                     // default font for regular text
+    StringPairArray colours;         // colour palette
+    Colour bg;                       // background colour
+    Colour tableBG, tableBGHeader;   // table background colours
+    int tableMargin, tableGap;       // table margins
+    int indentPerSpace, labelGap;    // list item indents
+    BouncingViewport viewport;       // a viewport to scroll the content
+    Component content;               // a component with the content
+    OwnedArray<Block> blocks;        // representation of the document as blocks
+    int margin;                      // content margin in pixels
+    int iconsize;                    // admonition icon size in pixels
+    int admargin;                    // admonition margin in pixels
+    int adlinewidth;                 // admonition line width in pixels
+    FileSource* fileSource;          // data source for image files, etc.
+    URLHandler* urlHandler;          // URL handler for custom URLs
+    Font font = Font(FontOptions()); // default font for regular text
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MarkupDisplayComponent)
 };

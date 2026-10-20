@@ -6,9 +6,58 @@
 
 #pragma once
 
+#include <bit>
+#include <nanovg_async.h>
 #include "Utility/Config.h"
 #include "Utility/Fonts.h"
+#include "Utility/SettingsFile.h"
 #include "Constants.h"
+
+struct PlugDataColours {
+    Colour toolbarBackgroundColour;
+    Colour toolbarTextColour;
+    Colour toolbarActiveColour;
+    Colour toolbarHoverColour;
+    Colour toolbarOutlineColour;
+    Colour activeTabBackgroundColour;
+    Colour canvasBackgroundColour;
+    Colour canvasTextColour;
+    Colour canvasDotsColour;
+    Colour presentationBackgroundColour;
+    Colour guiObjectBackgroundColour;
+    Colour guiObjectInternalOutlineColour;
+    Colour textObjectBackgroundColour;
+    Colour objectOutlineColour;
+    Colour objectSelectedOutlineColour;
+    Colour commentTextColour;
+    Colour outlineColour;
+    Colour ioletAreaColour;
+    Colour ioletOutlineColour;
+    Colour dataColour;
+    Colour connectionColour;
+    Colour signalColour;
+    Colour gemColour;
+    Colour dialogBackgroundColour;
+    Colour sidebarBackgroundColour;
+    Colour sidebarTextColour;
+    Colour sidebarActiveBackgroundColour;
+    Colour panelBackgroundColour;
+    Colour panelForegroundColour;
+    Colour panelTextColour;
+    Colour panelActiveBackgroundColour;
+    Colour popupMenuBackgroundColour;
+    Colour popupMenuActiveBackgroundColour;
+    Colour popupMenuTextColour;
+    Colour scrollbarThumbColour;
+    Colour graphAreaColour;
+    Colour gridLineColour;
+    Colour caretColour;
+};
+
+static inline NVGcolor nvgColour(Colour const& c)
+{
+    return std::bit_cast<NVGcolor>(c); // Both store as BGRA internally
+}
 
 inline UnorderedMap<PlugDataColour, std::tuple<String, String, String>> const PlugDataColourNames = {
 
@@ -30,7 +79,7 @@ inline UnorderedMap<PlugDataColour, std::tuple<String, String, String>> const Pl
     { gridLineColourId, { "Grid line", "grid_colour", "Canvas" } },
 
     { guiObjectBackgroundColourId, { "GUI object background", "default_object_background", "Object" } },
-    { guiObjectInternalOutlineColour, { "GUI object internal outline colour", "gui_internal_outline_colour", "Object" } },
+    { guiObjectInternalOutlineColourId, { "GUI object internal outline colour", "gui_internal_outline_colour", "Object" } },
     { textObjectBackgroundColourId, { "Object background", "text_object_background", "Object" } },
     { commentTextColourId, { "Comment text", "comment_text_colour", "Object" } },
     { objectOutlineColourId, { "Object outline", "object_outline_colour", "Object" } },
@@ -48,10 +97,6 @@ inline UnorderedMap<PlugDataColour, std::tuple<String, String, String>> const Pl
     { toolbarOutlineColourId, { "Outline", "toolbar_outline_colour", "Other" } },
     { scrollbarThumbColourId, { "Scrollbar thumb", "scrollbar_thumb", "Other" } },
 
-    { levelMeterActiveColourId, { "Level meter active", "levelmeter_active", "Level Meter" } },
-    { levelMeterBackgroundColourId, { "Level meter track", "levelmeter_background", "Level Meter" } },
-    { levelMeterThumbColourId, { "Level meter thumb", "levelmeter_thumb", "Level Meter" } },
-
     { panelBackgroundColourId, { "Panel background", "panel_background", "Properties Panel" } },
     { panelForegroundColourId, { "Panel foreground", "panel_foreground", "Properties Panel" } },
     { panelTextColourId, { "Panel text", "panel_text", "Properties Panel" } },
@@ -62,16 +107,21 @@ inline UnorderedMap<PlugDataColour, std::tuple<String, String, String>> const Pl
     { sidebarActiveBackgroundColourId, { "Sidebar background active", "sidebar_background_active", "Sidebar" } },
 };
 
-struct PlugDataLook final : public LookAndFeel_V4 {
+struct PlugDataLook final : public LookAndFeel_V4
+    , public SettingsFileListener {
 
     // Makes sure fonts get initialised
     SharedResourcePointer<Fonts> fonts;
 
     PlugDataLook();
 
+    void settingsChanged(String const& name, var const& value) override;
+
     void fillResizableWindowBackground(Graphics& g, int w, int h, BorderSize<int> const& border, ResizableWindow& window) override;
 
     void drawResizableWindowBorder(Graphics&, int w, int h, BorderSize<int> const& border, ResizableWindow&) override { }
+
+    void drawKeymapChangeButton (Graphics&, int width, int height, Button&, const String& keyDescription) override;
 
     void drawCallOutBoxBackground(CallOutBox& box, Graphics& g, Path const& path, Image& cachedImage) override;
 
@@ -109,6 +159,8 @@ struct PlugDataLook final : public LookAndFeel_V4 {
         Drawable const* icon, Colour const* textColourToUse) override;
 
     int getMenuWindowFlags() override;
+
+    Component* getParentComponentForMenuOptions(PopupMenu::Options const& options) override;
 
     int getPopupMenuBorderSize() override;
 
@@ -156,58 +208,67 @@ struct PlugDataLook final : public LookAndFeel_V4 {
 
     void setColours(UnorderedMap<PlugDataColour, Colour>& colours);
 
-    static void setDefaultFont(String const& fontName);
+    void setTheme(DynamicObject::Ptr themeTree);
 
-    static String const defaultThemesXml;
-
-    static void resetColours(ValueTree themesTree);
-
-    static Colour getThemeColour(ValueTree themeTree, PlugDataColour colourId);
-
-    void setTheme(ValueTree themeTree);
-
-    static StringArray getAllThemes();
-
-    static bool getUseStraightConnections();
-
-    bool getUseFlagOutline() const;
-    bool getUseSyntaxHighlighting() const;
+    PlugDataColours const& getColours() const noexcept { return colours; }
+    String const& getCurrentTheme() const noexcept { return currentTheme; }
 
     enum ConnectionStyle {
         ConnectionStyleDefault = 1,
         ConnectionStyleVanilla,
         ConnectionStyleThin
     };
-    static inline ConnectionStyle useConnectionStyle = ConnectionStyleDefault;
-    static ConnectionStyle getConnectionStyle();
-
-    bool useFlagOutline = false;
-    bool useSyntaxHighlighting = false;
-
-    static inline bool useSquareIolets;
-    static inline bool useIoletSpacingEdge;
-    static inline bool useGradientConnectionLook;
-
-    static bool getUseIoletSpacingEdge();
-    static bool getUseSquareIolets();
-
-    static bool getUseGradientConnectionLook();
-
-    static bool isFixedIoletPosition();
-
-    static inline bool useStraightConnections = false;
-
-    static inline String currentTheme = "light";
     static inline StringArray selectedThemes = { "light", "dark" };
+
+    static StringArray getAllThemes();
+    static void setDefaultFont(String const& fontName);
+    static void resetColours();
+    static Colour getThemeColour(DynamicObject::Ptr themeTree, PlugDataColour colourId);
+    void applyDefaultFont();
+
+    ConnectionStyle getConnectionStyle() const noexcept { return useConnectionStyle; }
+    bool getUseStraightConnections() const noexcept { return useStraightConnections; }
+    bool getUseFlagOutline() const noexcept { return useFlagOutline; }
+    bool getUseSyntaxHighlighting() const noexcept { return useSyntaxHighlighting; }
+    bool getUseIoletSpacingEdge() const noexcept { return useIoletSpacingEdge; }
+    bool getUseSquareIolets() const noexcept { return useSquareIolets; }
+    bool getUseGradientConnectionLook() const noexcept { return useGradientConnectionLook; }
+    bool isFixedIoletPosition() const noexcept { return useSquareIolets && useIoletSpacingEdge; }
+    int getIoletSize() const noexcept { return useTouchMode ? 15 : 13; }
+    float getObjectCornerRadius() const noexcept { return objectCornerRadius; }
 
 #if JUCE_IOS
     void setMainComponent(Component* c) { mainComponent = c; }
     Component::SafePointer<Component> mainComponent;
 #endif
 
-#if JUCE_IOS
-    static constexpr int ioletSize = 15;
-#else
-    static constexpr int ioletSize = 13;
-#endif
+    static String const defaultThemesJSON;
+
+private:
+    PlugDataColours colours;
+    ConnectionStyle useConnectionStyle = ConnectionStyleDefault;
+    bool useFlagOutline = false;
+    bool useSyntaxHighlighting = false;
+    bool useSquareIolets = false;
+    bool useIoletSpacingEdge = false;
+    bool useGradientConnectionLook = false;
+    bool useStraightConnections = false;
+    bool useTouchMode = false;
+    float objectCornerRadius = 2.75f;
+    String currentTheme = "light";
 };
+
+inline PlugDataLook& getPlugDataLook(Component& component) noexcept
+{
+    return static_cast<PlugDataLook&>(component.getLookAndFeel());
+}
+
+inline PlugDataLook const& getPlugDataLook(Component const& component) noexcept
+{
+    return static_cast<PlugDataLook const&>(component.getLookAndFeel());
+}
+
+inline PlugDataColours const& getThemeColours(Component const& component) noexcept
+{
+    return getPlugDataLook(component).getColours();
+}

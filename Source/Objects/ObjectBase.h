@@ -10,10 +10,11 @@
 #include "Pd/MessageListener.h"
 #include "Constants.h"
 #include "ObjectParameters.h"
+#include "LookAndFeel.h"
 #include "Utility/SynchronousValue.h"
 #include "NVGSurface.h"
 #include "Utility/NVGUtils.h"
-#include "Utility/CachedTextRender.h"
+#include "Utility/NVGGraphicsContext.h"
 #include "Object.h"
 #include "Canvas.h"
 
@@ -29,12 +30,6 @@ class Object;
 class ObjectLabel : public Label
     , public NVGComponent {
 
-    hash32 lastTextHash = 0;
-    NVGImage image;
-    float lastScale = 1.0f;
-    bool updateColour = false;
-    Colour lastColour;
-
 public:
     explicit ObjectLabel()
         : NVGComponent(this)
@@ -44,43 +39,40 @@ public:
         setMinimumHorizontalScale(0.2f);
         setEditable(false, false);
         setInterceptsMouseClicks(false, false);
+        setColour(Label::textColourId, Colours::white);
+
+        setCachedComponentImage(new NVGSurface::InvalidationChecker([this](){
+            commandBufferDirty = true;
+        }));
     }
 
-    virtual void renderLabel(NVGcontext* nvg, float const scale)
+    void setLabelColour(Colour c)
     {
-        auto const w = roundToInt(scale * static_cast<float>(getWidth()));
-        auto const h = roundToInt(scale * static_cast<float>(getHeight()));
-
-        auto const textHash = hash(getText());
-        if (image.needsUpdate(w, h) || updateColour || lastTextHash != textHash || lastScale != scale) {
-            updateImage(nvg, scale);
-            lastTextHash = textHash;
-            lastScale = scale;
-            updateColour = false;
-        } else {
-            nvgSave(nvg);
-            // Need to invert scale to make it render on a pixel grid correctly
-            nvgScale(nvg, 1.0f / scale, 1.0f / scale);
-
-            image.render(nvg, Rectangle<int>(w, h), true);
-            nvgRestore(nvg);
-        }
-    }
-
-    void colourChanged() override
-    {
-        lastColour = findColour(Label::textColourId);
-        updateColour = true;
-
-        // Flag this component as dirty
+        setColour(Label::textColourId, c);
         repaint();
     }
 
-    void updateImage(NVGcontext* nvg, float const scale)
+    void render(NVGGraphicsContext& llgc)
     {
-        // TODO: use single channel image texture
-        image.renderJUCEComponent(nvg, *this, scale);
+        auto* nvg = llgc.getContext();
+
+        if(commandBufferDirty) {
+            commandBuffer.clear();
+            nanovg::ScopedCommandRecorder recorder(nvg, commandBuffer);
+            renderLabel(llgc);
+            commandBufferDirty = false;
+        }
+
+        nanovg::replay(nvg, commandBuffer);
     }
+
+    virtual void renderLabel(NVGGraphicsContext& llgc)
+    {
+        llgc.renderComponent(*this);
+    }
+
+    bool commandBufferDirty : 1 = true;
+    nanovg::CommandBuffer commandBuffer;
 };
 
 class ObjectBase : public Component
@@ -88,7 +80,7 @@ class ObjectBase : public Component
     , public SettableTooltipClient
     , public NVGComponent {
 
-    struct ObjectSizeListener final : public juce::ComponentListener
+    struct ObjectSizeListener final : public ComponentListener
         , public Value::Listener {
 
         explicit ObjectSizeListener(Object* obj);
@@ -131,7 +123,7 @@ public:
     virtual void hideEditor() { }
 
     virtual bool isTransparent() { return false; }
-    
+
     // Some objects need to show/hide iolets when send/receive symbols are set
     virtual bool hideInlet() { return false; }
     virtual bool hideOutlet() { return false; }
@@ -150,8 +142,6 @@ public:
 
     virtual void tabChanged() { }
 
-    void render(NVGcontext* nvg) override;
-
     virtual void getMenuOptions(PopupMenu& menu);
 
     // Flag to make object visible or hidden inside a GraphOnParent
@@ -162,10 +152,17 @@ public:
     virtual void lock(bool isLocked);
 
     // Returns the Pd class name of the object
-    String getType() const;
+    SmallString getType() const;
 
     // Returns the Pd class name of the object with the library prefix in front of it, eg "else"
-    String getTypeWithOriginPrefix() const;
+    SmallString getTypeWithOriginPrefix() const;
+
+    enum MessageCallbackType {
+        Sync,
+        Async
+    };
+
+    void sendMessage(SmallString const& message, SmallArray<pd::Atom> const& args = { }, MessageCallbackType callbackType = MessageCallbackType::Sync);
 
     void moveToFront();
     void moveForward();
@@ -192,7 +189,7 @@ public:
     void receiveMessage(t_symbol* symbol, SmallArray<pd::Atom> const& atoms) override;
 
     static ObjectBase* createGui(pd::WeakReference ptr, Object* parent);
-        
+
     void updateProperties();
 
     // Override this to return parameters that will be shown in the inspector
@@ -203,14 +200,14 @@ public:
     virtual void updateSizeProperty() { }
 
     virtual void updateLabel() { }
-        
+
     // Implement this if you want to allow toggling an object by dragging over it in run mode
     virtual void toggleObject(Point<int> position) { }
     virtual void untoggleObject() { }
 
     virtual ObjectLabel* getLabel(int idx = 0);
 
-    virtual String getText();
+    virtual SmallString getText();
 
     virtual bool checkHvccCompatibility();
 
@@ -219,20 +216,18 @@ public:
     // Global flag to find out if any GUI object is currently being interacted with
     static bool isBeingEdited();
 
-    // Gets the scale factor we need to use of we want to draw images inside the component
-    float getImageScale();
-    
+    PlugDataColours const& getThemeColours() const;
+
     ComponentBoundsConstrainer* getConstrainer() const;
-            
-    enum ResizeDirection
-    {
+
+    enum ResizeDirection {
         None,
         HorizontalOnly,
         VerticalOnly,
         DiagonalOnly,
         Any
     };
-        
+
     virtual ResizeDirection getAllowedResizeDirections() const;
 
 protected:
@@ -244,19 +239,21 @@ protected:
     void startEdition();
     void stopEdition();
 
+    // Returns pair of {name, isSubpatchOrAbstraction}
+    static std::pair<SmallString, bool> getTypeFromClass(pd::WeakReference classPtr);
+
     void setType();
 
     String getBinbufSymbol(int argIndex) const;
 
     virtual void propertyChanged(Value& v) { }
-    
+
     virtual void update() { }
 
     // Send a float value to Pd
     void sendFloatValue(float value);
-        
-    static bool recurseHvccCompatibility(String const& objectText, pd::Patch::Ptr patch, String const& prefix = "");
 
+    static bool recurseHvccCompatibility(SmallString const& objectText, pd::Patch::Ptr patch, String const& prefix = "");
 
     // Used by various ELSE objects, though sometimes with char*, sometimes with unsigned char*
     template<typename T>
@@ -275,12 +272,10 @@ public:
 
     OwnedArray<ObjectLabel> labels;
     ObjectParameters objectParameters;
-    
-protected:
-    String type;
-    PropertyListener propertyListener;
 
-    NVGImage imageRenderer;
+protected:
+    SmallString type;
+    PropertyListener propertyListener;
 
     virtual std::unique_ptr<ComponentBoundsConstrainer> createConstrainer();
 

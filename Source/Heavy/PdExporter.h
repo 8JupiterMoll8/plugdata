@@ -7,7 +7,6 @@
 
 class PdExporter final : public ExporterBase {
 public:
-    Value exportTypeValue = Value(var(2));
     Value copyToPath = Value(var(0));
 
     PropertiesPanel::BoolComponent* copyToPathProperty;
@@ -15,8 +14,10 @@ public:
     PdExporter(PluginEditor* editor, ExportingProgressView* exportingView)
         : ExporterBase(editor, exportingView)
     {
+        exportTypeValue = var(2);
+
         PropertiesArray properties;
-        properties.add(new PropertiesPanel::ComboComponent("Export type", exportTypeValue, { "Source code", "Binary" }));
+        properties.add(new PropertiesPanel::ComboComponent("Export type", exportTypeValue, getExportTypes()));
 
         copyToPathProperty = new PropertiesPanel::BoolComponent("Copy to externals path", copyToPath, { "No", "Yes" });
         properties.add(copyToPathProperty);
@@ -26,45 +27,48 @@ public:
         exportTypeValue.addListener(this);
     }
 
-    ValueTree getState() override
+    StringArray getExportTypes() const override
     {
-        ValueTree stateTree("PdExt");
-        stateTree.setProperty("inputPatchValue", getValue<String>(inputPatchValue), nullptr);
-        stateTree.setProperty("projectNameValue", getValue<String>(projectNameValue), nullptr);
-        stateTree.setProperty("projectCopyrightValue", getValue<String>(projectCopyrightValue), nullptr);
-
-        stateTree.setProperty("exportTypeValue", getValue<int>(exportTypeValue), nullptr);
-        stateTree.setProperty("copyToPath", getValue<int>(copyToPath), nullptr);
-
-        return stateTree;
+        return { "Source code", "Binary" };
     }
 
-    void setState(ValueTree& stateTree) override
+    void getState(DynamicObject::Ptr globalState) override
     {
-        auto const tree = stateTree.getChildWithName("PdExt");
-        inputPatchValue = tree.getProperty("inputPatchValue");
-        projectNameValue = tree.getProperty("projectNameValue");
-        projectCopyrightValue = tree.getProperty("projectCopyrightValue");
-        exportTypeValue = tree.getProperty("exportTypeValue");
-        copyToPath = tree.getProperty("copyToPath");
+        auto* state = new DynamicObject();
+        state->setProperty("input_patch_value", getValue<String>(inputPatchValue));
+        state->setProperty("project_name_value", getValue<String>(projectNameValue));
+        state->setProperty("project_copyright_value", getValue<String>(projectCopyrightValue));
+        state->setProperty("export_type_value", getValue<int>(exportTypeValue));
+        state->setProperty("copy_to_path", getValue<int>(copyToPath));
+        globalState->setProperty("pdext", state);
+    }
+
+    void setState(DynamicObject::Ptr globalState) override
+    {
+        auto const state = globalState->getProperty("pdext").getDynamicObject();
+        if (!state)
+            return;
+        inputPatchValue = state->getProperty("input_patch_value");
+        projectNameValue = state->getProperty("project_name_value");
+        projectCopyrightValue = state->getProperty("project_copyright_value");
+        exportTypeValue = state->getProperty("export_type_value");
+        copyToPath = state->getProperty("copy_to_path");
     }
 
     void valueChanged(Value& v) override
     {
+        ExporterBase::valueChanged(v);
+
         if (v.refersToSameSourceAs(exportTypeValue)) {
             copyToPathProperty->setEnabled(exportTypeValue == 2);
             if (exportTypeValue == 1) {
                 copyToPath = 0;
             }
-        } else {
-            ExporterBase::valueChanged(v);
         }
     }
 
     bool performExport(String const& pdPatch, String const& outdir, String const& name, String const& copyright, StringArray const& searchPaths) override
     {
-        exportingView->showState(ExportingProgressView::Exporting);
-
         auto const heavyPath = pathToString(heavyExecutable);
         StringArray args = { heavyPath.quoted(), pdPatch.quoted(), "-o", outdir.quoted() };
 
@@ -104,7 +108,9 @@ public:
 
         bool const generationExitCode = getExitCode();
         // Check if we need to compile
-        if (!generationExitCode && getValue<int>(exportTypeValue) == 2) {
+        if (!generationExitCode && getExportType() == 2) {
+            exportingView->reportStatus("Compiling");
+
             auto const workingDir = File::getCurrentWorkingDirectory();
 
             outputFile.setAsCurrentWorkingDirectory();
@@ -144,10 +150,14 @@ public:
             waitForProcessToFinish(-1);
             exportingView->flushConsole();
 
+            workingDir.setAsCurrentWorkingDirectory();
+
+            // A cancelled build doesn't get copied to the externals folder
+            if (shouldQuit)
+                return true;
+
             // Delay to get correct exit code
             Time::waitForMillisecondCounter(Time::getMillisecondCounter() + 300);
-
-            workingDir.setAsCurrentWorkingDirectory();
 
 #if JUCE_MAC
             auto external = outputFile.getChildFile(name + "~.pd_darwin");
@@ -158,6 +168,7 @@ public:
 #endif
 
             if (getValue<bool>(copyToPath)) {
+                exportingView->reportStatus("Copying");
                 exportingView->logToConsole("Copying to Externals folder...\n");
                 auto const copy_location = ProjectInfo::appDataDir.getChildFile("Externals").getChildFile(external.getFileName());
                 external.copyFileTo(copy_location.getFullPathName());

@@ -43,11 +43,9 @@ protected:
     double valueToRevertTo = 0.0;
     int maxPrecision = 6;
     Colour outlineColour, textColour;
-    Font font;
+    Font font = Font(FontOptions());
 
     std::unique_ptr<TextEditor> editor;
-
-    std::unique_ptr<NVGGraphicsContext> nvgCtx;
 
 public:
     std::function<void()> onTextChange = [] { };
@@ -138,7 +136,7 @@ public:
 
     int getDecimalAtPosition(int x, Rectangle<float>* position = nullptr) const;
 
-    virtual void render(NVGcontext* nvg);
+    virtual void render(NVGcontext* nvg, NVGGraphicsContext* llgc);
 
     void paint(Graphics& g) override;
 
@@ -159,7 +157,7 @@ class DraggableListNumber final : public DraggableNumber {
     int numberStartIdx = 0;
     int numberEndIdx = 0;
     bool targetFound = false;
-    
+
 public:
     explicit DraggableListNumber();
 
@@ -170,7 +168,7 @@ public:
 
     void paint(Graphics& g) override;
 
-    void render(NVGcontext* nvg) override;
+    void render(NVGcontext* nvg, NVGGraphicsContext* llgc) override;
 
     void textEditorReturnKeyPressed(TextEditor& editor) override;
 

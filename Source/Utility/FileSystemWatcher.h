@@ -59,28 +59,32 @@ public:
 
         virtual void filesystemChanged() { }
     };
-    
 
-    void addListener (Listener* newListener)
+    void addListener(Listener* newListener)
     {
-        listeners.add (newListener);
+        listeners.add(newListener);
     }
 
-    void removeListener (Listener* listener)
+    void removeListener(Listener* listener)
     {
-        listeners.remove (listener);
+        listeners.remove(listener);
     }
-    
+
     static void addGlobalIgnorePath(File const& pathToIgnore)
     {
         pathsToIgnore.add_unique(pathToIgnore);
     }
-    
+
     static void removeGlobalIgnorePath(File const& pathToIgnore)
     {
         pathsToIgnore.remove_one(pathToIgnore);
     }
-    
+
+    void unignorePath(File const& path)
+    {
+        unignoredPaths.add_unique(path);
+    }
+
 private:
     class Impl;
 
@@ -90,19 +94,29 @@ private:
         // If you want that to respond to hidden file changes, override this
         if (f.isHidden() || f.getFileName().startsWith("."))
             return;
-        
-        for(auto const& pathToIgnore : pathsToIgnore)
-        {
-            if(f.isAChildOf(pathToIgnore) || f == pathToIgnore) {
-                return;
-            }
+
+        if (isIgnored(f))
+            return;
+
+        listeners.call(&FileSystemWatcher::Listener::fileChanged, f, fsEvent);
+    }
+
+    bool isIgnored(File const& f) const
+    {
+        if (unignoredPaths.contains(f))
+            return false;
+
+        for (auto const& pathToIgnore : pathsToIgnore) {
+            if (f.isAChildOf(pathToIgnore) || f == pathToIgnore)
+                return true;
         }
-        
-        listeners.call (&FileSystemWatcher::Listener::fileChanged, f, fsEvent);
+
+        return false;
     }
 
     ListenerList<Listener> listeners;
     OwnedArray<Impl> watched;
+    SmallArray<File> unignoredPaths;
     static inline SmallArray<File> pathsToIgnore;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(FileSystemWatcher)

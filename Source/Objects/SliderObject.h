@@ -8,12 +8,12 @@
 class ReversibleSlider final : public Slider
     , public NVGComponent {
 
-    bool isInverted = false;
-    bool isVertical = false;
-    bool shiftIsDown = false;
-
-    bool isZeroRange = false;
+    bool isInverted : 1 = false;
+    bool isVertical : 1 = false;
+    bool shiftIsDown : 1 = false;
+    bool isZeroRange : 1 = false;
     float zeroRangeValue = 0.0f;
+    NVGcolor trackColour;
 
 public:
     ReversibleSlider()
@@ -111,7 +111,7 @@ public:
     {
         if (!e.mods.isLeftButtonDown())
             return;
-        
+
         auto const snaps = getSliderSnapsToMousePosition();
         if (snaps && shiftIsDown)
             setSliderSnapsToMousePosition(false); // We disable this temporarily, otherwise it breaks high accuracy mode
@@ -124,7 +124,7 @@ public:
     {
         if (!e.mods.isLeftButtonDown())
             return;
-        
+
         setMouseDragSensitivity(std::max<int>(1, isVertical ? getHeight() : getWidth()));
         Slider::mouseUp(e);
         shiftIsDown = false;
@@ -149,12 +149,17 @@ public:
         return Slider::valueToProportionOfLength(value);
     }
 
+    void setTrackColour(Colour const& c)
+    {
+        trackColour = nvgColour(c);
+    }
+
     void render(NVGcontext* nvg) override
     {
         auto const b = getLocalBounds().toFloat().reduced(1.0f);
 
         constexpr auto thumbSize = 4.0f;
-        auto const cornerSize = Corners::objectCornerRadius / 2.0f;
+        auto const cornerSize = getPlugDataLook(*this).getObjectCornerRadius() / 2.0f;
 
         Rectangle<float> bounds;
         if (isHorizontal()) {
@@ -164,10 +169,10 @@ public:
             auto const sliderPos = jmap<float>(valueToProportionOfLength(getValue()), 1.0f, 0.0f, b.getY(), b.getHeight() - thumbSize);
             bounds = Rectangle<float>(b.getWidth(), thumbSize).translated(b.getX(), sliderPos);
         }
-        nvgFillColor(nvg, convertColour(getLookAndFeel().findColour(Slider::trackColourId)));
-        nvgFillRoundedRect(nvg, bounds.getX(), bounds.getY(), bounds.getWidth(), bounds.getHeight(), cornerSize);
+        nanovg::nvgFillColor(nvg, trackColour);
+        nanovg::nvgFillRoundedRect(nvg, bounds.getX(), bounds.getY(), bounds.getWidth(), bounds.getHeight(), cornerSize);
     }
-        
+
     std::unique_ptr<AccessibilityHandler> createAccessibilityHandler() override { return nullptr; };
 };
 
@@ -183,6 +188,8 @@ class SliderObject final : public ObjectBase {
     Value max = SynchronousValue(0.0f);
     Value steadyOnClick = SynchronousValue(false);
     Value sizeProperty = SynchronousValue();
+
+    NVGcolor backgroundColour;
 
     float value = 0.0f;
 
@@ -255,8 +262,9 @@ public:
 
         iemHelper.update();
 
-        getLookAndFeel().setColour(Slider::backgroundColourId, Colour::fromString(iemHelper.secondaryColour.toString()));
-        getLookAndFeel().setColour(Slider::trackColourId, Colour::fromString(iemHelper.primaryColour.toString()));
+        backgroundColour = nvgColour(::getValue<Colour>(iemHelper.secondaryColour));
+        slider.setTrackColour(::getValue<Colour>(iemHelper.primaryColour));
+        repaint();
     }
 
     bool hideInlet() override
@@ -357,8 +365,8 @@ public:
         }
         case hash("color"): {
             iemHelper.receiveObjectMessage(symbol, atoms);
-            getLookAndFeel().setColour(Slider::backgroundColourId, Colour::fromString(iemHelper.secondaryColour.toString()));
-            getLookAndFeel().setColour(Slider::trackColourId, Colour::fromString(iemHelper.primaryColour.toString()));
+            backgroundColour = nvgColour(::getValue<Colour>(iemHelper.secondaryColour));
+            slider.setTrackColour(::getValue<Colour>(iemHelper.primaryColour));
             object->repaint();
             break;
         }
@@ -371,13 +379,13 @@ public:
 
     void render(NVGcontext* nvg) override
     {
+        auto const& colours = getThemeColours();
+
         auto const b = getLocalBounds().toFloat();
         bool const selected = object->isSelected() && !cnv->isGraph;
-        auto const outlineColour = cnv->editor->getLookAndFeel().findColour(selected ? PlugDataColour::objectSelectedOutlineColourId : objectOutlineColourId);
+        auto const outlineColour = nvgColour(selected ? colours.objectSelectedOutlineColour : colours.objectOutlineColour);
 
-        auto const bgColour = getLookAndFeel().findColour(Slider::backgroundColourId);
-
-        nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), convertColour(bgColour), convertColour(outlineColour), Corners::objectCornerRadius);
+        nanovg::nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), backgroundColour, outlineColour, getPlugDataLook(*this).getObjectCornerRadius());
 
         slider.render(nvg);
     }

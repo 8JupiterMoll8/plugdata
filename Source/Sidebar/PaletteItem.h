@@ -7,30 +7,31 @@
 #include "Components/Buttons.h"
 
 class PluginEditor;
-class PaletteDraggableList;
+class PaletteList;
 class ReorderButton;
-class PaletteItem final : public ObjectDragAndDrop {
+class PaletteItem final : public Component {
 public:
-    PaletteItem(PluginEditor* e, PaletteDraggableList* parent, ValueTree tree);
+    PaletteItem(PluginEditor* e, PaletteList* parent, ValueTree tree);
     ~PaletteItem() override;
 
     void paint(Graphics& g) override;
     void resized() override;
 
     void mouseDown(MouseEvent const& e) override;
+    void mouseDrag(MouseEvent const& e) override;
     void mouseUp(MouseEvent const& e) override;
     void mouseEnter(MouseEvent const& e) override;
     void mouseExit(MouseEvent const& e) override;
 
-    String getObjectString() override;
-
     void lookAndFeelChanged() override;
-
-    String getPatchStringName() override;
 
     bool hitTest(int x, int y) override;
 
     void deleteItem();
+
+    void animateToPosition(Rectangle<int> targetBounds);
+    void cancelAnimation(Rectangle<int> targetBounds);
+    Rectangle<int> getTargetBounds();
 
     static bool isSubpatchOrAbstraction(String const& patchAsString);
 
@@ -44,12 +45,29 @@ public:
     std::unique_ptr<ReorderButton> reorderButton;
 
     PluginEditor* editor;
-    PaletteDraggableList* paletteComp;
+    PaletteList* paletteComp;
     String paletteName, palettePatch;
     bool isSubpatch;
     SmallArray<bool> inlets, outlets;
 
+    Rectangle<int> animationStartBounds, animationEndBounds;
+    VBlankAnimatorUpdater updater { this };
+    Animator animator = ValueAnimatorBuilder { }
+                            .withEasing(Easings::createEaseInOut())
+                            .withDurationMs(260)
+                            .withValueChangedCallback([this](float v) {
+                                auto start = std::make_tuple(animationStartBounds.getX(), animationStartBounds.getY(), animationStartBounds.getWidth(), animationStartBounds.getHeight());
+                                auto end = std::make_tuple(animationEndBounds.getX(), animationEndBounds.getY(), animationEndBounds.getWidth(), animationEndBounds.getHeight());
+                                auto const [x, y, w, h] = makeAnimationLimits(start, end).lerp(v);
+                                setBounds(x, y, w, h);
+                            })
+                            .build();
+
 private:
     void setIsItemDragged(bool isActive);
+    Colour getBackgroundColour() const;
+    void updateTextColour();
+    void showColourPicker();
+
     bool isItemDragged = false;
 };

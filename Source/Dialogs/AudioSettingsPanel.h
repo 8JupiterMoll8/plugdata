@@ -41,7 +41,7 @@ public:
         g.setColour(findColour(TextButton::buttonColourId));
         g.fillRoundedRectangle(getLocalBounds().toFloat(), getHeight() / 2.0f);
 
-        g.setColour(findColour(PlugDataColour::levelMeterActiveColourId));
+        g.setColour(getThemeColours(*this).dataColour);
         g.fillRoundedRectangle(getLocalBounds().toFloat().withWidth(levelWidth), getHeight() / 2.0f);
     }
 
@@ -132,6 +132,8 @@ public:
     // Make background slightly darker to make it appear more like a subcomponent
     void paint(Graphics& g) override
     {
+        auto const& colours = getThemeColours(*this);
+
         bool const isDown = getValue<bool>(toggleStateValue);
         bool const isOver = isMouseOver();
 
@@ -140,13 +142,13 @@ public:
 
         if (isDown || isOver) {
             // Add some alpha to make it look good on any background...
-            g.setColour(findColour(PlugDataColour::sidebarActiveBackgroundColourId).contrasting(isOver ? 0.1f : 0.15f).withAlpha(0.25f));
+            g.setColour(colours.sidebarActiveBackgroundColour.contrasting(isOver ? 0.1f : 0.15f).withAlpha(0.25f));
             g.fillRoundedRectangle(buttonBounds, Corners::defaultCornerRadius);
         }
-        auto textColour = findColour(PlugDataColour::panelTextColourId);
+        auto textColour = colours.panelTextColour;
 
         if (!isEnabled()) {
-            textColour = findColour(PlugDataColour::panelTextColourId).withAlpha(0.5f);
+            textColour = colours.panelTextColour.withAlpha(0.5f);
         }
         Fonts::drawText(g, textOptions[isDown], bounds, textColour, 14.0f, Justification::centred);
 
@@ -485,15 +487,13 @@ public:
     explicit DAWAudioSettingsPanel(PluginProcessor* p)
         : processor(p)
     {
-        auto settingsTree = SettingsFile::getInstance()->getValueTree();
-
         tailLengthValue.referTo(processor->tailLength);
 
         latencyValue.addListener(this);
 
         latencyValue = processor->getLatencySamples() - pd::Instance::getBlockSize();
 
-        latencyNumberBox = new PropertiesPanel::EditableComponent<int>("Latency (samples)", latencyValue, true, 0, 1<<30);
+        latencyNumberBox = new PropertiesPanel::EditableComponent<int>("Latency (samples)", latencyValue, true, 0, 1 << 30);
         tailLengthNumberBox = new PropertiesPanel::EditableComponent<float>("Tail length (seconds)", tailLengthValue);
 
         dawSettingsPanel.addSection("Audio", { latencyNumberBox, tailLengthNumberBox });

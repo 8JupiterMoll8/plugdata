@@ -5,8 +5,10 @@
  */
 #pragma once
 
-// Eyedropper will create a snapshot of the top level component,
-// to allow the user to pick colours from anywhere in the app
+#include "PluginEditor.h"
+
+// Eyedropper samples the editor's rendered framebuffer, so it can pick colours
+// from anywhere in the (GPU-rendered) app UI
 class Eyedropper final : public Timer
     , public MouseListener {
     class EyedropperDisplayComponnent final : public Component {
@@ -64,7 +66,7 @@ class Eyedropper final : public Timer
 
             Path shadowPath;
             shadowPath.addEllipse(bounds);
-            StackShadow::renderDropShadow(hash("eyedropper"), g, shadowPath, Colours::black.withAlpha(0.85f), 8, { 0, 1 }, 0);
+            StackShadow::drawShadowForPath(g, hash("eyedropper"), shadowPath, 8, Colours::black.withAlpha(0.85f), 1);
 
             auto const circleBounds = bounds;
 
@@ -132,7 +134,8 @@ public:
         callback = [](Colour) { };
         colourDisplayer.hide();
         stopTimer();
-        topLevel->removeMouseListener(this);
+        if (topLevel)
+            topLevel->removeMouseListener(this);
         topLevel = nullptr;
     }
 
@@ -144,36 +147,50 @@ private:
 
     void timerCallback() override
     {
-        auto const position = topLevel->getMouseXYRelative();
-        auto const surfaceMousePosition = editor->nvgSurface.getLocalPoint(topLevel, position);
-        auto const mouseOverSurface = editor->nvgSurface.getLocalBounds().contains(surfaceMousePosition);
-
-        if (mouseOverSurface) {
-            editor->nvgSurface.setRenderThroughImage(true);
-            editor->nvgSurface.render();
+        if (!topLevel) {
+            stopTimer();
+            return;
         }
+        
+        auto const positionInTopLevel = topLevel->getMouseXYRelative();
+        colourDisplayer.setCentrePosition(topLevel->localPointToGlobal(positionInTopLevel));
 
-        componentImage = topLevel->createComponentSnapshot(topLevel->getLocalBounds(), false, 1.0f);
-        colourDisplayer.setCentrePosition(topLevel->localPointToGlobal(position));
-        colourDisplayer.setROI(componentImage, position);
-        setColour(componentImage.getPixelAt(position.x, position.y));
+        if (!editor)
+            return;
 
-        if (mouseOverSurface) {
-            editor->nvgSurface.setRenderThroughImage(false);
-        }
+        // The whole editor is rendered through OpenGL/Metal, so an ordinary
+        // component snapshot comes back empty. Sample the rendered framebuffer
+        // instead. We only read a small region around the cursor to keep the
+        // per-tick GPU read-back cheap.
+        auto const positionInEditor = editor->getLocalPoint(topLevel, positionInTopLevel);
+
+        constexpr int regionSize = 48;
+        auto const region = Rectangle<int>(0, 0, regionSize, regionSize)
+                                .withCentre(positionInEditor)
+                                .getIntersection(editor->getLocalBounds());
+        if (region.isEmpty())
+            return;
+
+        auto const image = editor->nvgSurface.renderToImage(region);
+        if (image.isNull())
+            return;
+
+        auto const positionInImage = positionInEditor - region.getTopLeft();
+        colourDisplayer.setROI(image, positionInImage);
+        setColour(image.getPixelAt(positionInImage.x, positionInImage.y));
     }
 
     std::function<void(Colour)> callback;
     int timerCount = 0;
-    Component* topLevel = nullptr;
+    Component::SafePointer<Component> topLevel = nullptr;
 
     EyedropperDisplayComponnent colourDisplayer;
-    Image componentImage;
     Colour currentColour;
-    PluginEditor* editor;
+    PluginEditor* editor = nullptr;
 };
 
-class ColourPicker final : public Component {
+class ColourPicker final : public Component
+    , public DeletedAtShutdown {
     class SelectorHolder final : public Component {
     public:
         explicit SelectorHolder(ColourPicker* parent)
@@ -222,6 +239,7 @@ public:
         _topLevelComponent = topLevelComponent;
 
         setCurrentColour(currentColour);
+        lookAndFeelChanged();
 
         // we need to put the selector into a holder, as launchAsynchronously will delete the component when its done
         auto selectorHolder = std::make_unique<SelectorHolder>(this);
@@ -294,29 +312,31 @@ public:
         update(dontSendNotification);
 
         updateMode();
-
-        lookAndFeelChanged();
     }
 
-    static ColourPicker& getInstance()
+    ~ColourPicker() override
     {
-        static ColourPicker instance;
-        return instance;
+        clearSingletonInstance();
     }
 
-    ~ColourPicker() override { }
+    void hideEyedropper()
+    {
+        eyedropper.hideEyedropper(true);
+    }
 
     void lookAndFeelChanged() override
     {
+        auto const& colours = getThemeColours(*this);
+
         for (auto* slider : sliders) {
             slider->onValueChange = [this] { changeColour(); };
             slider->setColour(Slider::textBoxOutlineColourId, Colours::transparentBlack);
-            slider->setColour(Slider::textBoxBackgroundColourId, findColour(PlugDataColour::popupMenuBackgroundColourId));
-            slider->setColour(Slider::textBoxTextColourId, findColour(PlugDataColour::popupMenuTextColourId));
+            slider->setColour(Slider::textBoxBackgroundColourId, colours.popupMenuBackgroundColour);
+            slider->setColour(Slider::textBoxTextColourId, colours.popupMenuTextColour);
         }
 
-        showRgb.setColour(TextButton::buttonOnColourId, findColour(PlugDataColour::toolbarHoverColourId));
-        showHex.setColour(TextButton::buttonOnColourId, findColour(PlugDataColour::toolbarHoverColourId));
+        showRgb.setColour(TextButton::buttonOnColourId, colours.toolbarHoverColour);
+        showHex.setColour(TextButton::buttonOnColourId, colours.toolbarHoverColour);
 
         hexEditor.setColour(Label::outlineWhenEditingColourId, Colours::transparentBlack);
     }
@@ -434,9 +454,11 @@ private:
 
     void paint(Graphics& g) override
     {
-        g.fillAll(findColour(PlugDataColour::popupMenuBackgroundColourId));
+        auto const& colours = getThemeColours(*this);
 
-        g.setColour(findColour(PlugDataColour::popupMenuTextColourId));
+        g.fillAll(colours.popupMenuBackgroundColour);
+
+        g.setColour(colours.popupMenuTextColour);
         g.setFont(14.0f);
 
         for (auto const& slider : sliders) {
@@ -506,36 +528,24 @@ private:
         {
             int const circleRadius = imageSize / 2;
 
-            colourWheelHSV = Image(Image::PixelFormat::ARGB, imageSize, imageSize, true);
+            colourWheelHSV = Image(Image::PixelFormat::ARGB, imageSize, imageSize, true, SoftwareImageType());
 
-            Graphics g(colourWheelHSV);
-
+            Image::BitmapData bitmapData(colourWheelHSV, Image::BitmapData::writeOnly);
             for (int y = 0; y < imageSize; ++y) {
                 for (int x = 0; x < imageSize; ++x) {
-                    // calculate the distance of this pixel from the center
                     float const dx = x - imageSize / 2.0f;
                     float const dy = y - imageSize / 2.0f;
                     float const distance = std::sqrt(dx * dx + dy * dy);
 
-                    // only draw within the circle
                     if (distance <= circleRadius) {
                         constexpr float antiAliasingRadius = 2.0f;
-                        // calculate the color at this pixel using HSV color space
                         float const hue = std::atan2(dy, dx);
                         float const saturation = distance / circleRadius;
-                        constexpr float value = 1.0f;
 
-                        // convert the HSV color to RGB
-                        Colour colour = Colour::fromHSV(hue / MathConstants<float>::twoPi, saturation, value, 1.0f);
+                        auto colour = Colour::fromHSV(hue / MathConstants<float>::twoPi, saturation, 1.0f, 1.0f);
 
-                        // calculate the alpha for anti-aliasing
                         float const alpha = std::min(1.0f, (circleRadius - distance) / antiAliasingRadius);
-
-                        // apply the alpha to the color
-                        colour = colour.withAlpha(alpha);
-
-                        // set the pixel to the calculated color
-                        colourWheelHSV.setPixelAt(x, y, colour);
+                        bitmapData.setPixelColour(x, y, colour.withAlpha(alpha));
                     }
                 }
             }
@@ -544,9 +554,10 @@ private:
         void paint(Graphics& g) override
         {
             // draw the image
+            g.setOpacity(1.0f);
             g.drawImageAt(colourWheelHSV, margin, margin);
 
-            g.setColour(findColour(PlugDataColour::outlineColourId));
+            g.setColour(getThemeColours(*this).outlineColour);
             g.drawEllipse(imageBounds.toFloat().reduced(0.5f), 1.0f);
         }
 
@@ -618,6 +629,7 @@ private:
 
         class ColourSpaceMarker final : public Component {
             ColourPicker& owner;
+
         public:
             explicit ColourSpaceMarker(ColourPicker& parent)
                 : owner(parent)
@@ -631,7 +643,8 @@ private:
 
                 Path shadowPath;
                 shadowPath.addEllipse(bounds);
-                StackShadow::renderDropShadow(hash("colour_space_marker"), g, shadowPath, Colours::black.withAlpha(0.75f), 6, { 0, 0 }, 0);
+
+                StackShadow::drawShadowForPath(g, hash("colour_space_marker"), shadowPath, 6, Colours::black.withAlpha(0.75f));
 
                 auto [hue, sat] = owner.getHS();
                 auto const colour = Colour::fromHSV(hue, sat, 1.0f, 1.0f);
@@ -688,7 +701,7 @@ private:
             g.setGradientFill(ColourGradient(colour, 0.0f, 0.0f, Colours::black, bounds.getHeight() / 2, bounds.getHeight() / 2, false));
             g.fillRoundedRectangle(bounds, radius);
 
-            g.setColour(findColour(PlugDataColour::outlineColourId));
+            g.setColour(getThemeColours(*this).outlineColour);
             g.drawRoundedRectangle(bounds, radius, 1.0f);
         }
 
@@ -723,6 +736,7 @@ private:
 
         class BrightnessSelectorMarker final : public Component {
             ColourPicker& owner;
+
         public:
             explicit BrightnessSelectorMarker(ColourPicker& parent)
                 : owner(parent)
@@ -736,7 +750,7 @@ private:
 
                 Path shadowPath;
                 shadowPath.addEllipse(bounds.reduced(2));
-                StackShadow::renderDropShadow(hash("colour_picker"), g, shadowPath, Colours::black.withAlpha(0.75f), 6, { 0, 1 }, 0);
+                StackShadow::drawShadowForPath(g, hash("colour_picker"), shadowPath, 6, Colours::black.withAlpha(0.75f), 1);
 
                 g.setColour(owner.getCurrentColour());
                 g.fillEllipse(bounds);
@@ -777,4 +791,6 @@ private:
     std::function<void(Colour)> callback = [](Colour) { };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ColourPicker)
+public:
+    JUCE_DECLARE_SINGLETON_INLINE(ColourPicker, false)
 };

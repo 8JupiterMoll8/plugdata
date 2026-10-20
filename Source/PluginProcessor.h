@@ -23,6 +23,8 @@
 #include "Pd/Instance.h"
 #include "Pd/Patch.h"
 
+#include "Mcp/McpHost.h" // MCP-HOOK(host)
+
 namespace pd {
 class Library;
 }
@@ -30,8 +32,9 @@ class Library;
 class PlugDataParameter;
 class Autosave;
 class InternalSynth;
+class Recorder;
 class SettingsFile;
-class StatusbarSource;
+class ToolbarSource;
 struct PlugDataLook;
 class PluginEditor;
 class ConnectionMessageDisplay;
@@ -43,6 +46,10 @@ public:
     PluginProcessor();
 
     ~PluginProcessor() override;
+
+    McpHost* getMcp() const { return mcp.get(); } // MCP-HOOK(host)
+    bool getIsProcessingAudio() const noexcept { return isProcessingAudio.load(std::memory_order_relaxed); }
+    void onConsoleMessage(String const& message, bool isError) override;
 
     static AudioProcessor::BusesProperties buildBusesProperties();
 
@@ -86,7 +93,7 @@ public:
 
     void getStateInformation(MemoryBlock& destData) override;
     void setStateInformation(void const* data, int sizeInBytes) override;
-        
+
     String findLostPatch(String const& name) const;
 
     pd::Patch::Ptr findPatchInPluginMode(int editorIndex);
@@ -107,7 +114,7 @@ public:
     void clearTextEditor(uint64_t ptr) override;
     bool isTextEditorDialogShown(uint64_t ptr) override;
 
-    void updateConsole(int numMessages, bool newWarning) override;
+    void updateConsole(SmallString const& message, bool isWarning, int numMessages, bool newWarning) override;
 
     void reloadAbstractions(File changedPatch, t_glist* except) override;
 
@@ -127,6 +134,7 @@ public:
         return nbus > 0;
     }
 
+    void settingsChanged(String const& name, var const& value) override;
     void settingsFileReloaded() override;
 
     static bool initialiseFilesystem();
@@ -164,15 +172,20 @@ public:
 
     void runBackupLoop();
 
-    int lastUIWidth = 1000, lastUIHeight = 650;
+    bool toggleRecording(PluginEditor* editor);
+
+    // Written from PluginEditor::resized() on the message thread, but read from
+    // getStateInformation(), which the host can call from any thread
+    AtomicValue<int> lastUIWidth = 1000, lastUIHeight = 660;
 
     AtomicValue<float>* volume;
-    ValueTree pluginModeTheme;
+    DynamicObject::Ptr pluginModeTheme;
     float pluginModeScale = 1.0f;
 
     String currentThemeName;
+    bool appliedIoletSpacingEdge = false;
 
-    SettingsFile* settingsFile;
+    SettingsFile* settingsFile = nullptr;
 
     std::unique_ptr<pd::Library> objectLibrary;
 
@@ -180,7 +193,7 @@ public:
 
     Value commandLocked = Value(var(false));
 
-    std::unique_ptr<StatusbarSource> statusbarSource;
+    std::unique_ptr<ToolbarSource> toolbarSource;
 
     Value tailLength = Value(0.0f);
 
@@ -230,7 +243,7 @@ private:
     AudioProcessLoadMeasurer cpuLoadMeasurer;
 
     bool midiByteIsSysex = false;
-    uint8 midiByteBuffer[512] = {};
+    uint8 midiByteBuffer[512] = { };
     size_t midiByteIndex = 0;
 
     SmallArray<pd::Atom> atoms_playhead;
@@ -247,9 +260,9 @@ private:
     std::unique_ptr<perfetto::TracingSession> tracingSession;
 #endif
 
-    static inline String const else_version = "ELSE v1.0-rc13";
-    static inline String const cyclone_version = "cyclone v0.9-2";
-    static inline String const heavylib_version = "heavylib v0.4.1";
+    static inline String const else_version = "ELSE v1.0-rc14";
+    static inline String const cyclone_version = "cyclone v0.9-4";
+    static inline String const heavylib_version = "heavylib v0.5.0";
     static inline String const gem_version = "Gem v0.94";
     // this gets updated with live version data later
     static String pdlua_version;
@@ -275,7 +288,7 @@ private:
     private:
         void handleAsyncUpdate() override
         {
-            auto const details = AudioProcessorListener::ChangeDetails {}.withParameterInfoChanged(true);
+            auto const details = AudioProcessorListener::ChangeDetails { }.withParameterInfoChanged(true);
             processor.updateHostDisplay(details);
         }
 
@@ -287,6 +300,10 @@ private:
     int backupRunLoopInterval;
     TimedCallback backupRunLoop = TimedCallback([this] { runBackupLoop(); });
     CriticalSection backupLoopLock;
-    std::atomic<bool> isProcessingAudio;
+    AtomicValue<bool> isProcessingAudio;
+    std::unique_ptr<Recorder> recorder;
+    // MCP: session state, identity, transactions and the bridge (Source/Mcp/McpHost.h).
+    std::unique_ptr<McpHost> mcp; // MCP-HOOK(host)
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PluginProcessor)
 };

@@ -1,0 +1,288 @@
+// Unit tests for mcp::CommandTable and the verb table (Plan 3 P3.3).
+// Build + run: scripts/test-bridge-safety.sh
+#include "../../Source/Pd/MCPBridgeRegistry.h"
+#include "../../Source/Pd/MCPBridgeV2Schema.generated.h"
+#include "sha256.h"
+
+#include <cstdio>
+#include <fstream>
+#include <map>
+#include <set>
+#include <sstream>
+#include <string>
+#include <vector>
+
+static int failures = 0;
+#define CHECK(cond)                                                            \
+    do {                                                                       \
+        if (!(cond)) {                                                         \
+            std::printf("  FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond);      \
+            ++failures;                                                        \
+        }                                                                      \
+    } while (0)
+
+template<typename Fn>
+static bool throws(Fn&& fn)
+{
+    try {
+        fn();
+    } catch (std::logic_error const&) {
+        return true;
+    }
+    return false;
+}
+
+using mcp::VerbSource;
+using Table = mcp::CommandTable<std::string>; // the handler is its own name
+
+int main()
+{
+    // 1. The table itself.
+    {
+        Table t;
+        t.setSource("pd", VerbSource::Path);
+        t.setSource("chat", VerbSource::PathOrArg0);
+        t.add("pd", "ping", "pdPing");
+        t.add("pd", "doc_get", "pdDocGet");
+        t.add("pd", "doc", "pdDocGet"); // alias: a second row, same handler
+        t.addDomain("chat", "chatMsg");
+
+        CHECK(*t.find("pd", "ping") == "pdPing");
+        CHECK(*t.find("pd", "doc") == *t.find("pd", "doc_get"));
+        CHECK(t.find("pd", "nope") == nullptr);   // unknown verb
+        CHECK(t.find("zzz", "ping") == nullptr);  // unknown domain
+        CHECK(*t.find("chat", "msg") == "chatMsg"); // verb-agnostic domain takes any verb
+        CHECK(*t.find("chat", "") == "chatMsg");
+        CHECK(t.hasDomain("pd") && !t.hasDomain("zzz"));
+        CHECK(t.size() == 4);
+
+        auto const keys = t.keys();
+        CHECK((keys == std::vector<std::string> { "pd/doc", "pd/doc_get", "pd/ping" }));
+        CHECK((t.domainKeys() == std::vector<std::string> { "chat" }));
+
+        // Registering twice, or in the wrong shape, is a startup failure.
+        CHECK(throws([&] { t.add("pd", "ping", "other"); }));
+        CHECK(throws([&] { t.add("pd", "", "x"); }));
+        CHECK(throws([&] { t.add("nodomain", "v", "x"); }));
+        CHECK(throws([&] { t.addDomain("pd", "x"); }));       // verb rows already there
+        CHECK(throws([&] { t.add("chat", "msg", "x"); }));    // domain handler already there
+        CHECK(throws([&] { t.addDomain("chat", "x"); }));
+        CHECK(throws([&] { t.setSource("pd", VerbSource::Arg0); }));
+        CHECK(*t.find("pd", "ping") == "pdPing"); // a refused row changed nothing
+    }
+
+    // 2. Where the verb comes from.
+    {
+        CHECK(mcp::resolveVerb(VerbSource::Path, "note", "x") == "note");
+        CHECK(mcp::resolveVerb(VerbSource::Path, "", "x").empty());
+        CHECK(mcp::resolveVerb(VerbSource::PathOrArg0, "read", "x") == "read");
+        CHECK(mcp::resolveVerb(VerbSource::PathOrArg0, "", "stats") == "stats"); // /array ["stats", ...]
+        CHECK(mcp::resolveVerb(VerbSource::PathOrArg0, "", "").empty());
+        CHECK(mcp::resolveVerb(VerbSource::Arg0, "ignored", "dsp") == "dsp");
+        CHECK(mcp::resolveVerb(VerbSource::Arg0, "ignored", "").empty());
+    }
+
+    // 2b. What is reported for a message no row serves (/bridge/unknown_verb).
+    {
+        Table t;
+        t.setSource("pd", VerbSource::Path);
+        t.setSource("array", VerbSource::PathOrArg0);
+        t.setSource("telemetry", VerbSource::Arg0);
+        t.setSource("chat", VerbSource::PathOrArg0);
+        t.setSource("bridge", VerbSource::PathOrArg0);
+        t.add("pd", "ping", "pdPing");
+        t.add("array", "stats", "arr");
+        t.add("telemetry", "dsp", "tele");
+        t.add("bridge", "connect", "bridgeConnect");
+        t.addDomain("chat", "chatMsg");
+
+        auto const miss = [&](char const* domain, char const* pathVerb, char const* arg0 = "") {
+            return mcp::unknownVerbOf(t, domain, pathVerb, arg0);
+        };
+        auto const is = [](std::optional<mcp::UnknownVerb> const& m, char const* domain, char const* verb) {
+            return m.has_value() && m->domain == domain && m->verb == verb;
+        };
+
+        CHECK(!miss("pd", "ping"));                       // a row serves it
+        CHECK(is(miss("pd", "nope"), "pd", "nope"));      // unknown verb of a known domain
+        CHECK(is(miss("pd", ""), "pd", ""));              // /pd alone: Path source, no verb
+        CHECK(is(miss("pd", "", "ping"), "pd", ""));      // a Path domain never reads the arguments
+        CHECK(is(miss("zzz", "foo"), "zzz", "foo"));      // unknown domain: the path verb
+        CHECK(is(miss("zzz", ""), "zzz", ""));            // /zzz alone: verb ""
+        CHECK(is(miss("zzz", "", "stats"), "zzz", ""));   // an undeclared domain has no flat form
+        CHECK(!miss("array", "stats"));                   // path form
+        CHECK(!miss("array", "", "stats"));               // flat form: /array ["stats", ...]
+        CHECK(is(miss("array", "", "bogus"), "array", "bogus"));
+        CHECK(is(miss("array", "bogus", "stats"), "array", "bogus")); // the path verb wins over argument 0
+        CHECK(!miss("telemetry", "anything", "dsp"));     // Arg0 domain: the path is ignored
+        CHECK(is(miss("telemetry", "dsp", "other"), "telemetry", "other"));
+        CHECK(!miss("chat", "whatever"));                 // verb-agnostic domain takes every verb
+        CHECK(!miss("chat", ""));
+        CHECK(!miss("bridge", "connect"));
+        CHECK(!miss("bridge", "unknown_verb"));           // the report itself: no echo, no loop
+        CHECK(!miss("bridge", "", "unknown_verb"));
+        CHECK(is(miss("bridge", "unknown_verbs"), "bridge", "unknown_verbs"));
+    }
+
+    // 3. The committed verb table (MCPBridgeVerbs.inc), read with test macros.
+    {
+        struct Row { std::string domain, verb, handler; };
+        std::vector<Row> verbRows, aliasRows, domainRows;
+        std::map<std::string, std::string> sources;
+#define MCP_SOURCE(domain, source) sources[#domain] = #source;
+#define MCP_VERB(domain, verb, handler) verbRows.push_back({ #domain, verb, #handler });
+#define MCP_ALIAS(domain, verb, handler) aliasRows.push_back({ #domain, verb, #handler });
+#define MCP_DOMAIN(domain, handler) domainRows.push_back({ #domain, "", #handler });
+#include "../../Source/Pd/MCPBridgeVerbs.inc"
+
+        // Every wire domain is declared, with the source oscMessageReceived always used.
+        std::map<std::string, std::string> const expected {
+            { "pd", "Path" }, { "param", "Path" }, { "trigger", "Path" }, { "telemetry", "Arg0" },
+            { "array", "PathOrArg0" }, { "bridge", "PathOrArg0" }, { "morph", "PathOrArg0" },
+            { "meter", "PathOrArg0" }, { "transport", "PathOrArg0" }, { "seq", "PathOrArg0" },
+            { "chat", "PathOrArg0" },
+        };
+        CHECK(sources == expected);
+
+        // The rows build into a table without a duplicate or a misplaced row.
+        Table t;
+        bool built = true;
+        try {
+            for (auto const& s : sources)
+                t.setSource(s.first, s.second == "Path" ? VerbSource::Path : s.second == "Arg0" ? VerbSource::Arg0 : VerbSource::PathOrArg0);
+            for (auto const& r : verbRows) t.add(r.domain, r.verb, r.handler);
+            for (auto const& r : aliasRows) t.add(r.domain, r.verb, r.handler);
+            for (auto const& r : domainRows) t.addDomain(r.domain, r.handler);
+        } catch (std::logic_error const& e) {
+            std::printf("  table error: %s\n", e.what());
+            built = false;
+        }
+        CHECK(built);
+
+        // The reply for the committed table: the sweep's made-up addresses, a dropped verb, a served flat form.
+        auto const reported = [&](char const* domain, char const* pathVerb, char const* arg0 = "") {
+            return mcp::unknownVerbOf(t, domain, pathVerb, arg0).has_value();
+        };
+        CHECK(reported("pd", "no_such_verb"));
+        CHECK(reported("pd", "agent"));                   // /pd/agent/response is sent by the TS server, never served
+        CHECK(reported("no_such_domain", "no_such_verb"));
+        CHECK(!reported("pd", "ping"));
+        CHECK(!reported("trigger", "no_such_verb"));      // domain handlers take every verb
+        CHECK(!reported("param", "any_bus"));
+        CHECK(!reported("chat", ""));
+        CHECK(!reported("array", "", "stats"));
+        CHECK(!reported("telemetry", "", "dsp"));
+        CHECK(reported("telemetry", "", "no_such_verb"));
+        CHECK(!reported("bridge", "unknown_verb"));
+
+        // The id-addressed verbs batch_atomic covers are gone (P3.3 S9); the index forms and
+        // move_batch_id stay.
+        for (char const* gone : { "create_id", "create_batch_id", "connect_id", "connect_batch_id", "disconnect_id",
+                 "disconnect_batch_id", "delete_id", "delete_batch_id", "edit_id", "move_id" })
+            CHECK(reported("pd", gone));
+        for (char const* kept : { "create", "create_batch", "connect", "connect_batch", "disconnect", "disconnect_batch",
+                 "delete", "delete_batch", "move_batch", "move_batch_id", "rename_id", "rename_id_batch", "register_id",
+                 "clear_ids", "get_mappings", "batch_atomic" })
+            CHECK(!reported("pd", kept));
+
+        // One handler per verb row: a second name for a handler is an MCP_ALIAS.
+        std::set<std::string> handlers;
+        for (auto const& r : verbRows) CHECK(handlers.insert(r.handler).second);
+        for (auto const& r : domainRows) CHECK(handlers.insert(r.handler).second);
+        for (auto const& r : aliasRows) {
+            bool found = false;
+            for (auto const& v : verbRows) found = found || (v.domain == r.domain && v.handler == r.handler);
+            CHECK(found); // an alias names a verb row of its own domain
+        }
+        std::printf("  verb table: %zu verbs, %zu aliases, %zu domain handlers\n", verbRows.size(), aliasRows.size(), domainRows.size());
+    }
+
+    // 4. The committed selector table of the mcp_* Pd system messages (McpSysVerbs.inc, Plan 3 P3.3 S7).
+    {
+        struct Row { std::string selector, handler; };
+        std::vector<Row> rows;
+#define MCP_SYS(selector, handler) rows.push_back({ selector, #handler });
+#include "../../Source/Mcp/McpSysVerbs.inc"
+
+        // The selectors that still have a sender: the 22 of the old double list minus the id-addressed
+        // forms and mcp_suspend_dsp / mcp_resume_dsp, which only the retired delete_batch_id used (P3.3 S9).
+        std::set<std::string> const expected {
+            "mcp_selection_gate", "mcp_move", "mcp_clear_selection", "mcp_move_batch", "mcp_move_batch_id",
+            "mcp_clear_ids", "mcp_clear_undo", "mcp_register_id", "mcp_rename_id", "mcp_get_mappings", "mcp_census",
+        };
+        std::set<std::string> selectors;
+        for (auto const& r : rows) selectors.insert(r.selector);
+        CHECK(selectors == expected);
+        CHECK(rows.size() == expected.size()); // no selector twice
+
+        // The rows build into a table; a selector of another family is not handled here.
+        Table t;
+        bool built = true;
+        try {
+            t.setSource("sys", VerbSource::Path);
+            for (auto const& r : rows) t.add("sys", r.selector, r.handler);
+        } catch (std::logic_error const& e) {
+            std::printf("  sys table error: %s\n", e.what());
+            built = false;
+        }
+        CHECK(built);
+        CHECK(t.find("sys", "mcp_census") != nullptr && *t.find("sys", "mcp_census") == "sysCensus");
+        CHECK(t.find("sys", "dsp") == nullptr);          // plugdata's own selectors fall through
+        CHECK(t.find("sys", "") == nullptr);
+        CHECK(t.find("sys", "mcp_nope") == nullptr);
+        CHECK(t.find("sys", "MCP_CENSUS") == nullptr);   // exact match, as the hash switch was
+
+        // One handler per selector, and the name follows the selector.
+        std::set<std::string> handlers;
+        for (auto const& r : rows) {
+            CHECK(handlers.insert(r.handler).second);
+            CHECK(r.selector.compare(0, 4, "mcp_") == 0);
+            CHECK(r.handler.compare(0, 3, "sys") == 0);
+        }
+        std::printf("  sys table: %zu selectors\n", rows.size());
+    }
+
+    // 5. The v2 schema (Plan 4 P4.1 S1): every verb-table row has metadata, and the copied source hashes to the
+    //    header's constant (both generated by scripts/protocol/gen-v2-schema.ts in the TS repo).
+    {
+        namespace v2 = mcp::v2schema;
+        std::size_t rowCount = 0;
+        auto const has = [](char const* domain, std::string const& verb) {
+            auto const* m = v2::findVerb(domain, verb);
+            return m != nullptr && m->firstReply + m->replyCount <= sizeof(v2::kReplies) / sizeof(v2::kReplies[0]);
+        };
+#define MCP_SOURCE(domain, source)
+#define MCP_VERB(domain, verb, handler) ++rowCount; CHECK(has(#domain, verb));
+#define MCP_ALIAS(domain, verb, handler) ++rowCount; CHECK(has(#domain, verb));
+#define MCP_DOMAIN(domain, handler) ++rowCount; CHECK(has(#domain, ""));
+#include "../../Source/Pd/MCPBridgeVerbs.inc"
+        CHECK(rowCount == v2::kVerbCount); // and no schema verb without a row
+
+        for (auto const& v : v2::kVerbs) {
+            CHECK((v.replyMode == v2::ReplyMode::None) == (v.replyCount == 0));
+            CHECK(v.cls != v2::VerbClass::Realtime || v.replyMode == v2::ReplyMode::None);
+            CHECK(v.cls == v2::VerbClass::Realtime || v.deadlineMs > 0);
+            CHECK(v.mutating == (v.effect != v2::Effect::None));
+            CHECK(v.keyRequired == (v.mutating && v.cls != v2::VerbClass::Realtime));
+            CHECK(v.needsLease == (v.effect == v2::Effect::Patch || v.effect == v2::Effect::Live || v.effect == v2::Effect::File));
+        }
+        CHECK(v2::findVerb("pd", "batch_atomic")->deadlineMs == 12000);
+        CHECK(!v2::findVerb("pd", "select")->needsLease && v2::findVerb("pd", "select")->keyRequired); // ui: no lease, still de-duplicated
+        CHECK(v2::findVerb("pd", "undo")->needsLease);
+        CHECK(v2::findVerb("pd", "no_such_verb") == nullptr);
+        CHECK(std::string(v2::kErrorCodeNames[static_cast<int>(v2::ErrorCode::UnknownVerb)]) == "unknown_verb");
+
+        std::string const here = __FILE__;
+        std::ifstream in(here.substr(0, here.rfind('/')) + "/../../docs/mcp-bridge/protocol-v2.schema.json", std::ios::binary);
+        std::stringstream text;
+        text << in.rdbuf();
+        CHECK(in.good() || in.eof());
+        CHECK(!text.str().empty());
+        CHECK(mcp::test::sha256Hex("abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"); // FIPS 180-4 vector
+        CHECK(mcp::test::sha256Hex(text.str()).substr(0, 16) == v2::kSchemaHash);
+        std::printf("  v2 schema: %zu verbs, hash %s\n", v2::kVerbCount, v2::kSchemaHash);
+    }
+
+    std::printf(failures ? "registry_test: %d FAILED\n" : "registry_test: OK\n", failures);
+    return failures ? 1 : 0;
+}

@@ -110,9 +110,9 @@ public:
         auto const scale = getValue<float>(canvasScale);
         auto const borderSize = std::max(12.0f, 12 / scale);
         if (mode == ResizerMode::Horizontal) {
-            border.setBorderThickness(juce::BorderSize<int>(0, borderSize, 0, borderSize));
+            border.setBorderThickness(BorderSize<int>(0, borderSize, 0, borderSize));
         } else {
-            border.setBorderThickness(juce::BorderSize<int>(borderSize, 0, borderSize, 0));
+            border.setBorderThickness(BorderSize<int>(borderSize, 0, borderSize, 0));
         }
     }
 
@@ -125,7 +125,7 @@ public:
 
     bool hitTest(int x, int y) override
     {
-        if (cnv->panningModifierDown() || ModifierKeys::getCurrentModifiers().isAnyModifierKeyDown())
+        if (cnv->panningModifierDown() || (cnv->viewport && cnv->viewport->isPerformingGesture()) || ModifierKeys::getCurrentModifiers().isAnyModifierKeyDown())
             return false;
 
         return true;
@@ -166,48 +166,17 @@ public:
 
     void render(NVGcontext* nvg) override
     {
+        auto const& colours = getThemeColours(*this);
+
         // draw background and outline
         auto const b = getBounds().reduced(tabMargin);
-        auto iCol = cnv->selectedOutlineCol;
+        auto iCol = nvgColour(colours.objectSelectedOutlineColour);
 
         iCol.a = 5; // Make the inner colour semi-transparent
-        nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), iCol, cnv->selectedOutlineCol, Corners::objectCornerRadius);
+        nanovg::nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), iCol, nvgColour(colours.objectSelectedOutlineColour), getPlugDataLook(*this).getObjectCornerRadius());
 
         // Draw handles at edge
-        auto getCorners = [this] {
-            auto const rect = getBounds().reduced(tabMargin);
-            constexpr float offset = 2.0f;
-
-            Array<Rectangle<float>> corners = { Rectangle<float>(9.0f, 9.0f).withCentre(rect.getTopLeft().toFloat()).translated(offset, offset), Rectangle<float>(9.0f, 9.0f).withCentre(rect.getBottomLeft().toFloat()).translated(offset, -offset),
-                Rectangle<float>(9.0f, 9.0f).withCentre(rect.getBottomRight().toFloat()).translated(-offset, -offset), Rectangle<float>(9.0f, 9.0f).withCentre(rect.getTopRight().toFloat()).translated(-offset, offset) };
-
-            return corners;
-        };
-
-        auto& resizeHandleImage = cnv->resizeHandleImage;
-        int angle = 360;
-        for (auto& corner : getCorners()) {
-            NVGScopedState scopedState(nvg);
-            // Rotate around centre
-            nvgTranslate(nvg, corner.getCentreX(), corner.getCentreY());
-            nvgRotate(nvg, degreesToRadians<float>(angle));
-            nvgTranslate(nvg, -4.5f, -4.5f);
-
-            nvgBeginPath(nvg);
-            nvgRect(nvg, 0, 0, 9, 9);
-            nvgFillPaint(nvg, nvgImageAlphaPattern(nvg, 0, 0, 9, 9, 0, resizeHandleImage.getImageId(), cnv->selectedOutlineCol));
-            nvgFill(nvg);
-            angle -= 90;
-        }
-// #define SPACER_TEXT
-#ifdef SPACER_TEXT
-        nvgBeginPath(nvg);
-        auto textPos = getPosition().translated(0, -25);
-        nvgFontSize(nvg, 20.0f);
-        nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
-        nvgFillColor(nvg, nvgRGBA(240, 240, 240, 255));
-        nvgText(nvg, textPos.x, textPos.y, String("Spacer size: " + String(spacer + 1.0f)).toRawUTF8(), nullptr);
-#endif
+        cnv->renderResizeHandles(nvg, nvgColour(colours.objectSelectedOutlineColour), b.toFloat().expanded(2.5f));
     }
 
 private:
@@ -236,6 +205,7 @@ Canvas::Canvas(PluginEditor* parent, pd::Patch::Ptr p, Component* parentGraph)
     , pathUpdater(new ConnectionPathUpdater(this))
     , globalMouseListener(this)
 {
+    mcpLayer = std::make_unique<CanvasMcpLayer>(*this); // MCP-HOOK(overlayPaint)
     selectedComponents.addChangeListener(this);
 
     addAndMakeVisible(objectLayer);
@@ -284,6 +254,13 @@ Canvas::Canvas(PluginEditor* parent, pd::Patch::Ptr p, Component* parentGraph)
     canvasBorderResizer->setCentrePosition(canvasOrigin.x + patchBounds.getWidth(), canvasOrigin.y + patchBounds.getHeight());
     addAndMakeVisible(canvasBorderResizer.get());
 
+    // initialize to default zoom
+    auto const defaultZoom = SettingsFile::getInstance()->getPropertyAsValue("default_zoom");
+    zoomScale.setValue(getValue<float>(defaultZoom) / 100.0f);
+    zoomScale.addListener(this);
+
+    setSize(infiniteCanvasSize, infiniteCanvasSize);
+
     // Check if canvas belongs to a graph
     if (parentGraph) {
         setLookAndFeel(&editor->getLookAndFeel());
@@ -295,9 +272,6 @@ Canvas::Canvas(PluginEditor* parent, pd::Patch::Ptr p, Component* parentGraph)
     }
     if (!isGraph) {
         auto* canvasViewport = new CanvasViewport(editor, this);
-
-        canvasViewport->setViewedComponent(this, false);
-
         canvasViewport->onScroll = [this] {
             if (suggestor) {
                 suggestor->updateBounds();
@@ -306,9 +280,6 @@ Canvas::Canvas(PluginEditor* parent, pd::Patch::Ptr p, Component* parentGraph)
                 graphArea->updateBounds();
             }
         };
-
-        canvasViewport->setScrollBarsShown(true, true, true, true);
-
         viewport.reset(canvasViewport); // Owned by the tabbar, but doesn't exist for graph!
         restoreViewportState();
     }
@@ -323,26 +294,12 @@ Canvas::Canvas(PluginEditor* parent, pd::Patch::Ptr p, Component* parentGraph)
     if (!isGraph)
         commandLocked.setValue(false);
 
-    // init border for testing
-    settingsChanged("border", SettingsFile::getInstance()->getPropertyAsValue("border"));
-
     // Add draggable border for setting graph position
     if (getValue<bool>(isGraphChild) && !isGraph) {
         graphArea = std::make_unique<GraphArea>(this);
         addAndMakeVisible(*graphArea);
         graphArea->setAlwaysOnTop(true);
     }
-
-    if (!isGraph) {
-        editor->nvgSurface.addBufferedObject(this);
-    }
-
-    setSize(infiniteCanvasSize, infiniteCanvasSize);
-
-    // initialize to default zoom
-    auto const defaultZoom = SettingsFile::getInstance()->getPropertyAsValue("default_zoom");
-    zoomScale.setValue(getValue<float>(defaultZoom) / 100.0f);
-    zoomScale.addListener(this);
 
     // Add lasso component
     addAndMakeVisible(&lasso);
@@ -387,10 +344,6 @@ Canvas::Canvas(PluginEditor* parent, pd::Patch::Ptr p, Component* parentGraph)
     parameters.addParamInt("Width", cDimensions, &patchWidth, 527, true, 0, 1 << 30, onInteractionFn);
     parameters.addParamInt("Height", cDimensions, &patchHeight, 327, true, 0, 1 << 30, onInteractionFn);
 
-    if (!isGraph) {
-        patch.setVisible(true);
-    }
-
     lookAndFeelChanged();
 }
 
@@ -400,15 +353,16 @@ Canvas::~Canvas()
         object->hideEditor();
     }
 
-    if (!isGraph) {
-        editor->nvgSurface.removeBufferedObject(this);
-    }
-
     saveViewportState();
     zoomScale.removeListener(this);
     editor->removeModifierKeyListener(this);
     pd->unregisterMessageListener(this);
+
+    mcpLayer->canvasDestroyed(); mcpLayer.reset(); // MCP-HOOK(canvasLifecycle) L28: gone before the objects, whose teardown can deselect
+
+    if (getValue<bool>(isGraphChild) && isGraph)
     patch.setVisible(false);
+
     selectedComponents.removeChangeListener(this);
 }
 
@@ -428,65 +382,15 @@ void Canvas::changeListenerCallback(ChangeBroadcaster* c)
         if (isSelectedDifferent(selectedComponents, previousSelectedComponents)) {
             previousSelectedComponents = selectedComponents;
             editor->updateSelection(this);
+            mcpLayer->updateSelectionPill(); // MCP-HOOK(canvasLifecycle)
         }
     }
 }
 
 void Canvas::lookAndFeelChanged()
 {
-    // Canvas colours
-    auto const& lnf = editor->getLookAndFeel();
-    canvasBackgroundColJuce = lnf.findColour(PlugDataColour::canvasBackgroundColourId);
-    canvasBackgroundCol = convertColour(canvasBackgroundColJuce);
-    canvasMarkingsColJuce = lnf.findColour(PlugDataColour::canvasDotsColourId).interpolatedWith(canvasBackgroundColJuce, 0.2f);
-    canvasMarkingsCol = convertColour(canvasMarkingsColJuce);
-    canvasTextColJuce = lnf.findColour(PlugDataColour::canvasTextColourId);
-
-    // Object colours
-    objectOutlineCol = convertColour(lnf.findColour(PlugDataColour::objectOutlineColourId));
-    outlineCol = convertColour(lnf.findColour(PlugDataColour::outlineColourId));
-    textObjectBackgroundCol = convertColour(lnf.findColour(PlugDataColour::textObjectBackgroundColourId));
-    ioletLockedCol = convertColour(canvasBackgroundColJuce.contrasting(0.5f));
-
-    commentTextCol = convertColour(lnf.findColour(PlugDataColour::commentTextColourId));
-
-    guiObjectInternalOutlineColJuce = lnf.findColour(PlugDataColour::guiObjectInternalOutlineColour);
-    guiObjectInternalOutlineCol = convertColour(guiObjectInternalOutlineColJuce);
-    guiObjectBackgroundColJuce = lnf.findColour(PlugDataColour::guiObjectBackgroundColourId);
-    guiObjectBackgroundCol = convertColour(guiObjectBackgroundColJuce);
-
-    auto const selectedColJuce = lnf.findColour(PlugDataColour::objectSelectedOutlineColourId);
-    selectedOutlineCol = convertColour(selectedColJuce);
-    transparentObjectBackgroundCol = convertColour(canvasBackgroundColJuce.contrasting(0.35f).withAlpha(0.1f));
-    indexTextCol = convertColour(selectedColJuce.contrasting());
-
-    graphAreaCol = convertColour(lnf.findColour(PlugDataColour::graphAreaColourId));
-
-    // Lasso colours
-    lassoCol = convertColour(selectedColJuce.withAlpha(0.075f));
-    lassoOutlineCol = convertColour(canvasBackgroundColJuce.interpolatedWith(selectedColJuce, 0.65f));
-
-    // Presentation mode colors
-    auto const presentationBackgroundColJuce = lnf.findColour(PlugDataColour::presentationBackgroundColourId);
-    presentationBackgroundCol = convertColour(presentationBackgroundColJuce);
-    presentationWindowOutlineCol = convertColour(presentationBackgroundColJuce.contrasting(0.3f));
-
-    // Connection / Iolet colours
-    auto const dataColJuce = lnf.findColour(PlugDataColour::dataColourId);
-    dataCol = convertColour(dataColJuce);
-    auto const sigColJuce = lnf.findColour(PlugDataColour::signalColourId);
-    sigCol = convertColour(sigColJuce);
-    auto const gemColJuce = lnf.findColour(PlugDataColour::gemColourId);
-    gemCol = convertColour(gemColJuce);
-    auto const baseColJuce = lnf.findColour(PlugDataColour::connectionColourId);
-    baseCol = convertColour(baseColJuce);
-
-    dataColBrighter = convertColour(dataColJuce.brighter());
-    sigColBrighter = convertColour(sigColJuce.brighter());
-    gemColBrigher = convertColour(gemColJuce.brighter());
-    baseColBrigher = convertColour(baseColJuce.brighter());
-
-    dotsLargeImage.setDirty(); // Make sure bg colour actually gets updated
+    dotsLargeImage.setDirty();
+    resizeHandleImage.setDirty();
 }
 
 void Canvas::parentHierarchyChanged()
@@ -499,43 +403,30 @@ void Canvas::parentHierarchyChanged()
     }
 }
 
-void Canvas::updateFramebuffers(NVGcontext* nvg)
+void Canvas::updateCanvasDots(NVGcontext* nvg)
 {
     auto const pixelScale = editor->getRenderScale();
     auto zoom = getValue<float>(zoomScale);
 
-    constexpr int resizerLogicalSize = 9;
-    float const viewScale = pixelScale * zoom;
-    int const resizerBufferSize = resizerLogicalSize * viewScale;
-
-    if (resizeHandleImage.needsUpdate(resizerBufferSize, resizerBufferSize)) {
-        resizeHandleImage = NVGImage(nvg, resizerBufferSize, resizerBufferSize, [viewScale](Graphics& g) {
-            g.addTransform(AffineTransform::scale(viewScale, viewScale));
-            auto const b = Rectangle<int>(0, 0, 9, 9);
-            // use the path with a hole in it to exclude the inner rounded rect from painting
-            Path outerArea;
-            outerArea.addRectangle(b);
-            outerArea.setUsingNonZeroWinding(false);
-
-            Path innerArea;
-            auto const innerRect = b.translated(Object::margin / 2, Object::margin / 2);
-            innerArea.addRoundedRectangle(innerRect, Corners::objectCornerRadius);
-            outerArea.addPath(innerArea);
-            g.reduceClipRegion(outerArea);
-
-            g.setColour(Colours::white); // For alpha image colour isn't important
-            g.fillRoundedRectangle(0.0f, 0.0f, 9.0f, 9.0f, Corners::resizeHanleCornerRadius); }, NVGImage::AlphaImage);
-    }
-
     auto gridLogicalSize = objectGrid.gridSize ? objectGrid.gridSize : 25;
-    auto gridSizeCommon = 300;
+    auto constexpr gridSizeCommon = 300;
     auto const gridBufferSize = gridSizeCommon * pixelScale * zoom;
 
     if (dotsLargeImage.needsUpdate(gridBufferSize, gridBufferSize) || lastObjectGridSize != gridLogicalSize) {
         lastObjectGridSize = gridLogicalSize;
 
-        dotsLargeImage = NVGImage(nvg, gridBufferSize, gridBufferSize, [this, zoom, viewScale, gridLogicalSize, gridSizeCommon](Graphics& g) {
-            g.addTransform(AffineTransform::scale(viewScale, viewScale));
+        dotsLargeImage.renderToFramebuffer(nvg, gridBufferSize, gridBufferSize, [this, gridBufferSize, gridLogicalSize, zoom, pixelScale](NVGcontext* nvg){
+            auto const& colours = getThemeColours(*this);
+
+
+            nanovg::viewport(nvg, 0, 0, gridBufferSize, gridBufferSize);
+            nanovg::clear(nvg);
+            nanovg::nvgBeginFrame(nvg, gridSizeCommon * zoom, gridSizeCommon * zoom, pixelScale);
+            nanovg::nvgScale(nvg, zoom, zoom);
+
+            nanovg::nvgFillColor(nvg, nvgColour(colours.canvasBackgroundColour));
+            nanovg::nvgFillRect(nvg, 0, 0, gridSizeCommon, gridSizeCommon);
+
             float const ellipseRadius = zoom < 1.0f ? jmap(zoom, 0.25f, 1.0f, 3.0f, 1.0f) : 1.0f;
 
             int decim = 0;
@@ -569,130 +460,194 @@ void Canvas::updateFramebuffers(NVGcontext* nvg)
             default: break;
             }
 
-            auto const majorDotColour = canvasMarkingsColJuce.withAlpha(std::min(zoom * 0.8f, 1.0f));
+            auto markingColour = colours.canvasDotsColour.interpolatedWith(colours.canvasBackgroundColour, 0.2f);
+            auto const majorDotColour = markingColour.withAlpha(std::min(zoom * 0.8f, 1.0f));
 
-            g.setColour(majorDotColour);
+            nanovg::nvgFillColor(nvg, nvgColour(majorDotColour));
+
             // Draw ellipses on the grid
             for (int x = 0; x <= gridSizeCommon; x += gridLogicalSize)
             {
                 for (int y = 0; y <= gridSizeCommon; y += gridLogicalSize)
                 {
+                    NVGcolor c = nvgColour(majorDotColour);
                     if (decim != 0) {
                         if (x % decim && y % decim)
                             continue;
-                        g.setColour(majorDotColour);
                         if (x % decim == 0 && y % decim == 0)
-                            g.setColour(canvasMarkingsColJuce);
+                            c = nvgColour(markingColour);
                     }
                     // Add half smallest dot offset so the dot isn't at the edge of the texture
                     // We remove this when we position the texture on the canvas
                     float const centerX = static_cast<float>(x) + 2.5f;
                     float const centerY = static_cast<float>(y) + 2.5f;
-                    g.fillEllipse(centerX - ellipseRadius, centerY - ellipseRadius, ellipseRadius * 2.0f, ellipseRadius * 2.0f);
+                    float const ellipseSize = ellipseRadius * 2.0f;
+                    nanovg::nvgDrawRoundedRect(nvg, centerX - ellipseRadius, centerY - ellipseRadius, ellipseSize, ellipseSize, c, c, ellipseRadius);
                 }
-            } }, NVGImage::RepeatImage, canvasBackgroundColJuce);
+            }
+
+            nanovg::nvgGlobalScissor(nvg, 0, 0, gridBufferSize, gridBufferSize);
+            nanovg::nvgEndFrameWithoutPublishing(nvg);
+        }, NVG_IMAGE_REPEATX | NVG_IMAGE_REPEATY);
+    }
+}
+
+void Canvas::renderResizeHandles(NVGcontext* nvg, NVGcolor const colour, Rectangle<float> const bounds)
+{
+    auto constexpr resizeHandleSize = 9.0f;
+    auto constexpr resizeHandleMargin = 1.0f;
+    auto constexpr resizeHandleImageSize = resizeHandleSize + resizeHandleMargin * 2.0f;
+
+    auto const scale = getValue<float>(zoomScale) * editor->getRenderScale();
+    auto const pixelSize = jlimit(8, 256, nextPowerOfTwo(static_cast<int>(std::ceil(resizeHandleImageSize * scale))));
+
+    if (resizeHandleImage.needsUpdate(pixelSize, pixelSize)) {
+        constexpr float kappa = 0.5522847498307936f;
+        auto const innerOffset = static_cast<float>(Object::margin) / 2.0f;
+        auto const outerRadius = jlimit(0.0f, resizeHandleSize * 0.5f, Corners::resizeHanleCornerRadius);
+        auto const innerRadius = jlimit(0.0f, resizeHandleSize - innerOffset, getPlugDataLook(*this).getObjectCornerRadius());
+        auto const outerControl = outerRadius * (1.0f - kappa);
+        auto const innerControl = innerRadius * (1.0f - kappa);
+
+        Path handleShape;
+        handleShape.startNewSubPath(outerRadius, 0.0f);
+        handleShape.lineTo(resizeHandleSize - outerRadius, 0.0f);
+        handleShape.cubicTo(resizeHandleSize - outerControl, 0.0f, resizeHandleSize, outerControl, resizeHandleSize, outerRadius);
+        handleShape.lineTo(resizeHandleSize, innerOffset);
+        handleShape.lineTo(innerOffset + innerRadius, innerOffset);
+        if (innerRadius > 0.0f) {
+            handleShape.cubicTo(innerOffset + innerControl, innerOffset, innerOffset, innerOffset + innerControl, innerOffset, innerOffset + innerRadius);
+        } else {
+            handleShape.lineTo(innerOffset, innerOffset);
+        }
+        handleShape.lineTo(innerOffset, resizeHandleSize);
+        handleShape.lineTo(outerRadius, resizeHandleSize);
+        handleShape.cubicTo(outerControl, resizeHandleSize, 0.0f, resizeHandleSize - outerControl, 0.0f, resizeHandleSize - outerRadius);
+        handleShape.lineTo(0.0f, outerRadius);
+        handleShape.cubicTo(0.0f, outerControl, outerControl, 0.0f, outerRadius, 0.0f);
+        handleShape.closeSubPath();
+
+        resizeHandleImage = NVGImage(nvg, pixelSize, pixelSize, [handleShape, pixelSize](Graphics& g) {
+            g.setColour(Colours::white);
+            g.fillPath(handleShape, AffineTransform::translation(resizeHandleMargin, resizeHandleMargin).scaled(pixelSize / resizeHandleImageSize));
+        }, NVGImage::AlphaImage);
+    }
+
+    if (!resizeHandleImage.isValid())
+        return;
+    
+    auto const imageId = resizeHandleImage.getImageId();
+    NVGScopedState scopedState(nvg);
+    for (int i = 0; i < 4; i++) {
+        bool const isRight = i == 1 || i == 2;
+        bool const isBottom = i >= 2;
+        auto const x = isRight ? bounds.getRight() + resizeHandleMargin : bounds.getX() - resizeHandleMargin;
+        auto const y = isBottom ? bounds.getBottom() + resizeHandleMargin : bounds.getY() - resizeHandleMargin;
+
+        nanovg::nvgFillPaint(nvg, nanovg::nvgImageAlphaPattern(nvg, x, y, resizeHandleImageSize, resizeHandleImageSize, i * MathConstants<float>::halfPi, imageId, colour));
+        nanovg::nvgFillRect(nvg, isRight ? x - resizeHandleImageSize : x, isBottom ? y - resizeHandleImageSize : y, resizeHandleImageSize, resizeHandleImageSize);
     }
 }
 
 // Callback from canvasViewport to perform actual rendering
 void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
-{    
+{
+    auto const& colours = getThemeColours(*this);
+
     constexpr auto halfSize = infiniteCanvasSize / 2;
     auto const zoom = getValue<float>(zoomScale);
     bool const isLocked = getValue<bool>(locked);
-    nvgSave(nvg);
+    nanovg::nvgSave(nvg);
 
     if (viewport) {
-        nvgTranslate(nvg, -viewport->getViewPositionX(), -viewport->getViewPositionY());
-        nvgScale(nvg, zoom, zoom);
+        nanovg::nvgTranslate(nvg, -viewport->getViewPositionX(), -viewport->getViewPositionY());
+        nanovg::nvgScale(nvg, zoom, zoom);
         invalidRegion = invalidRegion.translated(viewport->getViewPositionX(), viewport->getViewPositionY());
         invalidRegion /= zoom;
 
         if (isLocked) {
-            nvgFillColor(nvg, canvasBackgroundCol);
-            nvgFillRect(nvg, invalidRegion.getX(), invalidRegion.getY(), invalidRegion.getWidth(), invalidRegion.getHeight());
+            nanovg::nvgFillColor(nvg, nvgColour(colours.canvasBackgroundColour));
+            nanovg::nvgFillRect(nvg, invalidRegion.getX(), invalidRegion.getY(), invalidRegion.getWidth(), invalidRegion.getHeight());
         } else {
-            nvgBeginPath(nvg);
-            nvgRect(nvg, 0, 0, infiniteCanvasSize, infiniteCanvasSize);
-
             // Use least common multiple of grid sizes: 5,10,15,20,25,30 for texture size for now
             // We repeat the texture on GPU, this is so the texture does not become too small for GPU processing
             // There will be a best fit depending on CPU/GPU calcuations.
             // But currently 300 works well on GPU.
             {
                 constexpr auto gridSizeCommon = 300;
+                updateCanvasDots(nvg);
+
                 NVGScopedState scopedState(nvg);
                 // offset image texture by 2.5f so no dots are on the edge of the texture
-                nvgTranslate(nvg, canvasOrigin.x - 2.5f, canvasOrigin.x - 2.5f);
+                nanovg::nvgTranslate(nvg, canvasOrigin.x - 2.5f, canvasOrigin.x - 2.5f);
 
-                nvgFillPaint(nvg, nvgImagePattern(nvg, 0, 0, gridSizeCommon, gridSizeCommon, 0, dotsLargeImage.getImageId(), 1));
-                nvgFill(nvg);
+                nanovg::nvgFillPaint(nvg, nanovg::nvgImagePattern(nvg, 0, 0, gridSizeCommon, gridSizeCommon, 0, dotsLargeImage.getImage(), 1));
+                auto startPos = infiniteCanvasSize / 2;
+                nanovg::nvgFillRect(nvg, -startPos, -startPos, infiniteCanvasSize, infiniteCanvasSize);
             }
         }
     }
 
-    currentRenderArea = invalidRegion;
+    mcpLayer->paintUnderObjects(nvg, invalidRegion); // MCP-HOOK(overlayPaint)
 
-    auto drawBorder = [this, nvg, zoom](bool const bg, bool const fg) {
+    auto drawBorder = [this, nvg](bool const bg, bool const fg) {
+        auto const& colours = getThemeColours(*this);
+
         if (viewport && (showOrigin || showBorder) && !::getValue<bool>(presentationMode)) {
             NVGScopedState scopedState(nvg);
-            nvgBeginPath(nvg);
+            nanovg::nvgBeginPath(nvg);
 
             auto const borderWidth = getValue<float>(patchWidth);
             auto const borderHeight = getValue<float>(patchHeight);
             constexpr auto pos = Point<int>(halfSize, halfSize);
 
-            auto scaledStrokeSize = zoom < 1.0f ? jmap(zoom, 1.0f, 0.25f, 1.5f, 4.0f) : 1.5f;
-            if (zoom < 0.3f && editor->getRenderScale() <= 1.0f)
-                scaledStrokeSize = jmap(zoom, 0.3f, 0.25f, 4.0f, 8.0f);
-
             if (bg) {
-                nvgBeginPath(nvg);
-                nvgMoveTo(nvg, pos.x, pos.y);
-                nvgLineTo(nvg, pos.x, pos.y + (showOrigin ? halfSize : borderHeight));
-                nvgMoveTo(nvg, pos.x, pos.y);
-                nvgLineTo(nvg, pos.x + (showOrigin ? halfSize : borderWidth), pos.y);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgMoveTo(nvg, pos.x, pos.y);
+                nanovg::nvgLineTo(nvg, pos.x, pos.y + (showOrigin ? halfSize : borderHeight));
+                nanovg::nvgMoveTo(nvg, pos.x, pos.y);
+                nanovg::nvgLineTo(nvg, pos.x + (showOrigin ? halfSize : borderWidth), pos.y);
 
                 if (showBorder) {
-                    nvgMoveTo(nvg, pos.x + borderWidth, pos.y);
-                    nvgLineTo(nvg, pos.x + borderWidth, pos.y + borderHeight);
-                    nvgLineTo(nvg, pos.x, pos.y + borderHeight);
+                    nanovg::nvgMoveTo(nvg, pos.x + borderWidth, pos.y);
+                    nanovg::nvgLineTo(nvg, pos.x + borderWidth, pos.y + borderHeight);
+                    nanovg::nvgLineTo(nvg, pos.x, pos.y + borderHeight);
                 }
-                nvgLineStyle(nvg, NVG_LINE_SOLID);
-                nvgStrokeColor(nvg, canvasBackgroundCol);
-                nvgStrokeWidth(nvg, 8.0f);
-                nvgStroke(nvg);
+                nanovg::nvgLineStyle(nvg, NVG_LINE_SOLID);
+                nanovg::nvgStrokeColor(nvg, nvgColour(colours.canvasBackgroundColour));
+                nanovg::nvgStrokeWidth(nvg, 8.0f);
+                nanovg::nvgStroke(nvg);
 
-                nvgFillColor(nvg, canvasBackgroundCol);
-                nvgFillRect(nvg, pos.x - 1.0f, pos.y - 1.0f, 2, 2);
+                nanovg::nvgFillColor(nvg, nvgColour(colours.canvasBackgroundColour));
+                nanovg::nvgFillRect(nvg, pos.x - 1.0f, pos.y - 1.0f, 2, 2);
             }
 
-            nvgStrokeColor(nvg, canvasMarkingsCol);
-            nvgStrokeWidth(nvg, scaledStrokeSize);
-            nvgDashLength(nvg, 8.0f);
-            nvgLineStyle(nvg, NVG_LINE_DASHED);
+            nanovg::nvgStrokeColor(nvg, nvgColour(colours.canvasDotsColour.interpolatedWith(colours.canvasBackgroundColour, 0.2f)));
+            nanovg::nvgStrokeWidth(nvg, 1.5f);
+            nanovg::nvgDashLength(nvg, 8.0f);
+            nanovg::nvgLineStyle(nvg, NVG_LINE_DASHED);
 
             if (fg) {
-                nvgBeginPath(nvg);
-                nvgMoveTo(nvg, pos.x, pos.y);
-                nvgLineTo(nvg, pos.x, pos.y + (showOrigin ? halfSize : borderHeight));
-                nvgStroke(nvg);
-                nvgBeginPath(nvg);
-                nvgMoveTo(nvg, pos.x, pos.y);
-                nvgLineTo(nvg, pos.x + (showOrigin ? halfSize : borderWidth), pos.y);
-                nvgStroke(nvg);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgMoveTo(nvg, pos.x, pos.y);
+                nanovg::nvgLineTo(nvg, pos.x, pos.y + (showOrigin ? halfSize : borderHeight));
+                nanovg::nvgStroke(nvg);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgMoveTo(nvg, pos.x, pos.y);
+                nanovg::nvgLineTo(nvg, pos.x + (showOrigin ? halfSize : borderWidth), pos.y);
+                nanovg::nvgStroke(nvg);
             }
             if (showBorder && fg) {
-                nvgStrokeWidth(nvg, scaledStrokeSize);
-                nvgLineStyle(nvg, NVG_LINE_DASHED);
-                nvgBeginPath(nvg);
-                nvgMoveTo(nvg, pos.x + borderWidth, pos.y + borderHeight);
-                nvgLineTo(nvg, pos.x + borderWidth, pos.y);
-                nvgStroke(nvg);
-                nvgBeginPath(nvg);
-                nvgMoveTo(nvg, pos.x + borderWidth, pos.y + borderHeight);
-                nvgLineTo(nvg, pos.x, pos.y + borderHeight);
-                nvgStroke(nvg);
+                nanovg::nvgStrokeWidth(nvg, 1.5f);
+                nanovg::nvgLineStyle(nvg, NVG_LINE_DASHED);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgMoveTo(nvg, pos.x + borderWidth, pos.y + borderHeight);
+                nanovg::nvgLineTo(nvg, pos.x + borderWidth, pos.y);
+                nanovg::nvgStroke(nvg);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgMoveTo(nvg, pos.x + borderWidth, pos.y + borderHeight);
+                nanovg::nvgLineTo(nvg, pos.x, pos.y + borderHeight);
+                nanovg::nvgStroke(nvg);
 
                 canvasBorderResizer->render(nvg);
             }
@@ -727,34 +682,31 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
             NVGScopedState scopedState(nvg);
 
             // background colour to crop outside of border area
-            nvgBeginPath(nvg);
-            nvgRect(nvg, 0, 0, infiniteCanvasSize, infiniteCanvasSize);
-            nvgPathWinding(nvg, NVG_HOLE);
-            nvgRoundedRect(nvg, pos.getX(), pos.getY(), borderWidth, borderHeight, windowCorner);
-            nvgFillColor(nvg, presentationBackgroundCol);
-            nvgFill(nvg);
+            nanovg::nvgBeginPath(nvg);
+            nanovg::nvgRect(nvg, 0, 0, infiniteCanvasSize, infiniteCanvasSize);
+            nanovg::nvgPathWinding(nvg, NVG_HOLE);
+            nanovg::nvgRoundedRect(nvg, pos.getX(), pos.getY(), borderWidth, borderHeight, windowCorner);
+            nanovg::nvgFillColor(nvg, nvgColour(colours.presentationBackgroundColour));
+            nanovg::nvgFill(nvg);
 
             // background drop shadow to simulate a virtual plugin
-            nvgBeginPath(nvg);
-            nvgRect(nvg, 0, 0, infiniteCanvasSize, infiniteCanvasSize);
-            nvgPathWinding(nvg, NVG_HOLE);
-            nvgRoundedRect(nvg, pos.getX(), pos.getY(), borderWidth, borderHeight, windowCorner);
+            nanovg::nvgBeginPath(nvg);
+            nanovg::nvgRect(nvg, 0, 0, infiniteCanvasSize, infiniteCanvasSize);
+            nanovg::nvgPathWinding(nvg, NVG_HOLE);
+            nanovg::nvgRoundedRect(nvg, pos.getX(), pos.getY(), borderWidth, borderHeight, windowCorner);
 
             int const shadowSize = 24 / scale;
             auto borderArea = Rectangle<int>(0, 0, borderWidth, borderHeight).expanded(shadowSize);
             if (presentationShadowImage.needsUpdate(borderArea.getWidth(), borderArea.getHeight())) {
-                presentationShadowImage = NVGImage(nvg, borderArea.getWidth(), borderArea.getHeight(), [borderArea, shadowSize, windowCorner](Graphics& g) {
-                    auto shadowPath = Path();
-                    shadowPath.addRoundedRectangle(borderArea.reduced(shadowSize).withPosition(shadowSize, shadowSize), windowCorner);
-                    StackShadow::renderDropShadow(0, g, shadowPath, Colours::white.withAlpha(0.3f), shadowSize, Point<int>(0, 2)); }, NVGImage::AlphaImage);
+                presentationShadowImage = NVGImage(nvg, borderArea.getWidth(), borderArea.getHeight(), [borderArea, shadowSize, windowCorner](Graphics& g) { StackShadow::drawShadowForRect(g, borderArea.reduced(shadowSize).withPosition(shadowSize, shadowSize), shadowSize, windowCorner, 0.3f, 2); }, NVGImage::AlphaImage);
             }
-            auto const shadowImage = nvgImageAlphaPattern(nvg, pos.getX() - shadowSize, pos.getY() - shadowSize, borderArea.getWidth(), borderArea.getHeight(), 0, presentationShadowImage.getImageId(), convertColour(Colours::black));
+            auto const shadowImage = nanovg::nvgImageAlphaPattern(nvg, pos.getX() - shadowSize, pos.getY() - shadowSize, borderArea.getWidth(), borderArea.getHeight(), 0, presentationShadowImage.getImageId(), nvgColour(Colours::black));
 
-            nvgStrokeColor(nvg, presentationWindowOutlineCol);
-            nvgStrokeWidth(nvg, 0.5f / scale);
-            nvgFillPaint(nvg, shadowImage);
-            nvgFill(nvg);
-            nvgStroke(nvg);
+            nanovg::nvgStrokeColor(nvg, nvgColour(colours.presentationBackgroundColour.contrasting(0.3f)));
+            nanovg::nvgStrokeWidth(nvg, 0.5f / scale);
+            nanovg::nvgFillPaint(nvg, shadowImage);
+            nanovg::nvgFill(nvg);
+            nanovg::nvgStroke(nvg);
         }
     }
     // render connections infront or behind objects depending on lock mode or overlay setting
@@ -773,9 +725,11 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
         connection->render(nvg);
     }
 
+    mcpLayer->paintOverObjects(nvg); // MCP-HOOK(overlayPaint)
+
     if (graphArea) {
         NVGScopedState scopedState(nvg);
-        nvgTranslate(nvg, graphArea->getX(), graphArea->getY());
+        nanovg::nvgTranslate(nvg, graphArea->getX(), graphArea->getY());
         graphArea->render(nvg);
     }
 
@@ -784,7 +738,7 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
     if (viewport && lasso.isVisible() && !lasso.getBounds().isEmpty()) {
         auto lassoBounds = lasso.getBounds();
         lassoBounds = lassoBounds.withSize(jmax(lasso.getWidth(), 2), jmax(lasso.getHeight(), 2));
-        nvgDrawRoundedRect(nvg, lassoBounds.getX(), lassoBounds.getY(), lassoBounds.getWidth(), lassoBounds.getHeight(), lassoCol, lassoOutlineCol, 0.0f);
+        nanovg::nvgDrawRoundedRect(nvg, lassoBounds.getX(), lassoBounds.getY(), lassoBounds.getWidth(), lassoBounds.getHeight(), nvgColour(colours.objectSelectedOutlineColour.withAlpha(0.075f)), nvgColour(colours.canvasBackgroundColour.interpolatedWith(colours.objectSelectedOutlineColour, 0.65f)), 0.0f);
     }
 
     suggestor->renderAutocompletion(nvg);
@@ -804,12 +758,16 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
     if (objectsDistributeResizer)
         objectsDistributeResizer->render(nvg);
 
-    nvgRestore(nvg);
+    mcpLayer->paintViewportFrame(nvg, zoom); // MCP-HOOK(overlayPaint)
+
+    nanovg::nvgRestore(nvg);
 
     // Draw scrollbars
     if (viewport) {
-        reinterpret_cast<CanvasViewport*>(viewport.get())->render(nvg, viewport->getLocalArea(this, invalidRegion));
+        viewport->render(nvg, viewport->getLocalArea(this, invalidRegion));
     }
+
+    mcpLayer->paintScreenOverlay(nvg); // MCP-HOOK(overlayPaint)
 }
 
 void Canvas::renderAllObjects(NVGcontext* nvg, Rectangle<int> const area)
@@ -819,7 +777,7 @@ void Canvas::renderAllObjects(NVGcontext* nvg, Rectangle<int> const area)
             auto b = obj->getBounds();
             if (b.intersects(area) && obj->isVisible()) {
                 NVGScopedState scopedState(nvg);
-                nvgTranslate(nvg, b.getX(), b.getY());
+                nanovg::nvgTranslate(nvg, b.getX(), b.getY());
                 obj->render(nvg);
             }
         }
@@ -832,9 +790,6 @@ void Canvas::renderAllConnections(NVGcontext* nvg, Rectangle<int> const area)
 {
     if (!connectionLayer.isVisible())
         return;
-
-    // TODO: Can we clean this up? We will want to have selected connections in-front,
-    //  and take precedence over non-selected for resize handles
 
     SmallArray<Connection*> connectionsToDraw;
     SmallArray<Connection*> connectionsToDrawSelected;
@@ -849,7 +804,7 @@ void Canvas::renderAllConnections(NVGcontext* nvg, Rectangle<int> const area)
                 connection->render(nvg);
             else
                 connectionsToDrawSelected.add(connection);
-            if (showConnectionOrder) {
+            if (showConnectionOrder && mcpLayer->isTargeted(connection)) { // MCP-HOOK(overlayTarget)
                 connectionsToDraw.add(connection);
             }
         }
@@ -885,11 +840,7 @@ void Canvas::settingsChanged(String const& name, var const& value)
         showBorder = static_cast<int>(value);
         repaint();
         break;
-    case hash("edit"):
-    case hash("lock"):
-    case hash("run"):
-    case hash("alt"):
-    case hash("alt_mode"): {
+    case hash("overlays"): {
         updateOverlays();
         break;
     }
@@ -922,18 +873,18 @@ int Canvas::getOverlays() const
 {
     int overlayState = 0;
 
-    auto const overlaysTree = SettingsFile::getInstance()->getValueTree().getChildWithName("Overlays");
+    auto const overlaysTree = SettingsFile::getInstance()->getProperty<DynamicObject>("overlays");
 
-    auto const altModeEnabled = overlaysTree.getProperty("alt_mode") && !isGraph;
+    auto const altModeEnabled = overlaysTree->getProperty("alt_mode") && !isGraph;
 
     if (!locked.getValue()) {
-        overlayState = overlaysTree.getProperty("edit");
+        overlayState = overlaysTree->getProperty("edit");
     }
     if (locked.getValue() || commandLocked.getValue()) {
-        overlayState = overlaysTree.getProperty("lock");
+        overlayState = overlaysTree->getProperty("lock");
     }
     if (altModeEnabled) {
-        overlayState = overlaysTree.getProperty("alt");
+        overlayState = overlaysTree->getProperty("alt");
     }
 
     return overlayState;
@@ -949,6 +900,7 @@ void Canvas::updateOverlays()
     connectionsBehind = overlayState & Behind;
     showObjectActivity = overlayState & ActivationState;
     showIndex = overlayState & Index;
+    mcpLayer->updateOverlays(overlayState); // MCP-HOOK(overlayPaint)
     showConnectionDirection = overlayState & Direction;
     showConnectionActivity = overlayState & ConnectionActivity;
 
@@ -961,23 +913,22 @@ void Canvas::updateOverlays()
 void Canvas::jumpToOrigin()
 {
     if (viewport)
-        viewport->setViewPosition((canvasOrigin + Point<int>(1, 1)).transformedBy(getTransform()));
+        viewport->setViewPositionAnimated((canvasOrigin.toFloat() + Point<float>(1, 1)) * getValue<float>(zoomScale));
 }
 
 void Canvas::restoreViewportState()
 {
     if (viewport) {
-        viewport->setViewPosition((patch.lastViewportPosition + canvasOrigin).transformedBy(getTransform()));
         zoomScale.setValue(patch.lastViewportScale);
-        setTransform(AffineTransform().scaled(patch.lastViewportScale));
+        viewport->setViewPosition((patch.lastViewportPosition + canvasOrigin.toFloat()) * patch.lastViewportScale);
     }
 }
 
 void Canvas::saveViewportState()
 {
     if (viewport) {
-        patch.lastViewportPosition = viewport->getViewPosition().transformedBy(getTransform().inverted()) - canvasOrigin;
         patch.lastViewportScale = getValue<float>(zoomScale);
+        patch.lastViewportPosition = ((viewport->getViewPosition() / patch.lastViewportScale) - canvasOrigin.toFloat());
     }
 }
 
@@ -986,45 +937,33 @@ void Canvas::zoomToFitAll()
     if (objects.empty() || !viewport)
         return;
 
-    auto scale = getValue<float>(zoomScale);
-
-    auto regionOfInterest = Rectangle<int>(canvasOrigin.x, canvasOrigin.y, 20, 20);
-
+    auto regionOfInterest = Rectangle<float>(canvasOrigin.x, canvasOrigin.y, 20, 20);
     if (!presentationMode.getValue()) {
         for (auto const* object : objects) {
-            regionOfInterest = regionOfInterest.getUnion(object->getBounds().reduced(Object::margin));
+            regionOfInterest = regionOfInterest.getUnion(object->getBounds().toFloat());
         }
     }
+    regionOfInterest = regionOfInterest.expanded(24); // Nice margin
 
-    // Add a bit of margin to make it nice
-    regionOfInterest = regionOfInterest.expanded(16);
+    auto const viewportW = static_cast<float>(viewport->getWidth());
+    auto const viewportH = static_cast<float>(viewport->getHeight());
 
-    auto const viewArea = viewport->getViewArea() / scale;
+    auto const scaleX = viewportW / regionOfInterest.getWidth();
+    auto const scaleY = viewportH / regionOfInterest.getHeight();
 
-    auto const roiHeight = static_cast<float>(regionOfInterest.getHeight());
-    auto const roiWidth = static_cast<float>(regionOfInterest.getWidth());
+    auto targetScale = std::clamp(jmin(scaleX, scaleY), 0.25f, 3.0f);
 
-    auto const scaleWidth = viewArea.getWidth() / roiWidth;
-    auto const scaleHeight = viewArea.getHeight() / roiHeight;
-    scale = jmin(scaleWidth, scaleHeight);
-    scale = std::clamp(scale, 0.05f, 3.0f);
+    // zoomScale = targetScale;
 
-    auto transform = getTransform();
-    transform = transform.scaled(scale);
-    setTransform(transform);
+    auto const roiCentreScaled = regionOfInterest.getCentre() * targetScale;
+    auto const screenCentre = Point<float>(viewportW * 0.5f, viewportH * 0.5f);
 
-    scale = std::sqrt(std::abs(transform.getDeterminant()));
-    zoomScale.setValue(scale);
-
-    auto const viewportCentre = viewport->getViewArea().withZeroOrigin().getCentre();
-    auto const newViewPos = regionOfInterest.transformedBy(getTransform()).getCentre() - viewportCentre;
-    viewport->setViewPosition(newViewPos);
+    auto const targetViewPos = roiCentreScaled - screenCentre;
+    viewport->setViewPositionAnimated(targetViewPos, targetScale);
 }
 
 void Canvas::tabChanged()
 {
-    patch.setCurrent();
-
     synchronise();
     updateDrawables();
 
@@ -1039,20 +978,26 @@ void Canvas::tabChanged()
     editor->repaint(); // Make sure everything it up to date
 }
 
-void Canvas::save(std::function<void()> const& nestedCallback)
+pd::Patch::Ptr Canvas::getPatchToSave() const
 {
-    auto const* canvasToSave = this;
+    // Subpatches get saved as part of the patch that contains them, which may be open in another window
     if (patch.isSubpatch()) {
-        for (auto const& parentCanvas : editor->getCanvases()) {
-            if (patch.getRoot() == parentCanvas->patch.getRawPointer()) {
-                canvasToSave = parentCanvas;
-            }
+        auto const* root = patch.getRoot();
+        for (auto const& openedPatch : pd->patches) {
+            if (openedPatch->getRawPointer() == root)
+                return openedPatch;
         }
     }
 
-    if (canvasToSave->patch.getCurrentFile().existsAsFile()) {
-        canvasToSave->patch.savePatch();
-        SettingsFile::getInstance()->addToRecentlyOpened(canvasToSave->patch.getCurrentURL());
+    return refCountedPatch;
+}
+
+void Canvas::save(std::function<void()> const& nestedCallback)
+{
+    auto const patchToSave = getPatchToSave();
+    if (patchToSave->getCurrentFile().existsAsFile()) {
+        patchToSave->savePatch();
+        SettingsFile::getInstance()->addToRecentlyOpened(patchToSave->getCurrentURL());
         pd->titleChanged();
         nestedCallback();
     } else {
@@ -1062,20 +1007,23 @@ void Canvas::save(std::function<void()> const& nestedCallback)
 
 void Canvas::saveAs(std::function<void()> const& nestedCallback)
 {
-    Dialogs::showSaveDialog([this, nestedCallback](URL const& resultURL) mutable {
+    // The dialog stays attached to this canvas, even when saving a parent patch:
+    // on iOS, the file picker is shown inside it, and the parent patch's tab might not be visible
+    auto const patchToSave = getPatchToSave();
+    Dialogs::showSaveDialog([this, patchToSave, nestedCallback](URL const& resultURL) mutable {
         auto result = resultURL.getLocalFile();
         if (result.getFullPathName().isNotEmpty()) {
             if (result.exists())
                 result.deleteFile();
-            
-            patch.savePatch(resultURL);
-            SettingsFile::getInstance()->addToRecentlyOpened(resultURL);
+
+            patchToSave->savePatch(resultURL);
+            SettingsFile::getInstance()->addToRecentlyOpened(patchToSave->getCurrentURL());
             pd->titleChanged();
         }
 
         nestedCallback();
     },
-        "*.pd", "Patch", this);
+        "*.pd", "Patch", this, false, patchToSave->getPatchFile().getFileNameWithoutExtension());
 }
 
 void Canvas::handleAsyncUpdate()
@@ -1114,8 +1062,12 @@ void Canvas::performSynchronise()
     bool const needsFlush = !alreadyFlushed;
     ScopedValueSetter<bool> flushGuard(alreadyFlushed, true);
     // By flushing twice, we can make sure that any message sent before this point will be dequeued
-    if (needsFlush && !isGraph)
-        pd->doubleFlushMessageQueue();
+    if (needsFlush && !isGraph) { // MCP-CARRIED(sync-flush-while-audio)
+        if (!pd->getIsProcessingAudio())
+            pd->doubleFlushMessageQueue();
+        else
+            pd->flushMessageQueue(); // MCP-CARRIED(sync-flush-while-audio)
+    }
 
     // Remove deleted connections
     for (int n = connections.size() - 1; n >= 0; n--) {
@@ -1164,7 +1116,7 @@ void Canvas::performSynchronise()
             object->toFront(false);
             if (object->gui && object->gui->getLabel())
                 object->gui->getLabel()->toFront(false);
-            
+
             if (object->gui)
                 object->gui->updateProperties();
         }
@@ -1232,8 +1184,10 @@ void Canvas::performSynchronise()
         }
     }
 
+    mcpLayer->canvasSynchronised(); // MCP-HOOK(canvasLifecycle): paths for bridge-built wires
+
     if (!isGraph) {
-        setTransform(AffineTransform().scaled(getValue<float>(zoomScale)));
+        viewport->updateCanvasTransform();
     }
 
     if (graphArea)
@@ -1262,7 +1216,8 @@ void Canvas::shiftKeyChanged(bool const isHeld)
     shiftDown = isHeld;
 
     if (!isGraph) {
-        SettingsFile::getInstance()->getValueTree().getChildWithName("Overlays").setProperty("alt_mode", altDown && shiftDown, nullptr);
+        SettingsFile::getInstance()->getProperty<DynamicObject>("overlays")->setProperty("alt_mode", altDown && shiftDown);
+        SettingsFile::getInstance()->triggerSettingsChange("overlays");
     }
 
     if (!isHeld)
@@ -1273,7 +1228,7 @@ void Canvas::shiftKeyChanged(bool const isHeld)
         Iolet* targetInlet = nullptr;
         for (auto const& object : objects) {
             for (auto const& iolet : object->iolets) {
-                if (iolet->isTargeted && iolet != connectingOutlet) {
+                if (iolet->isTargeted() && iolet != connectingOutlet) {
                     targetInlet = iolet;
                     break;
                 }
@@ -1281,15 +1236,15 @@ void Canvas::shiftKeyChanged(bool const isHeld)
         }
 
         if (targetInlet) {
-            bool const inverted = connectingOutlet->isInlet;
+            bool const inverted = connectingOutlet->isInlet();
             if (inverted)
                 std::swap(connectingOutlet, targetInlet);
 
             if (auto x = patch.getPointer()) {
-                auto* outObj = connectingOutlet->object->getPointer();
-                auto* inObj = targetInlet->object->getPointer();
-                auto const outletIndex = connectingOutlet->ioletIdx;
-                auto const inletIndex = targetInlet->ioletIdx;
+                auto* outObj = connectingOutlet->getObject()->getPointer();
+                auto* inObj = targetInlet->getObject()->getPointer();
+                auto const outletIndex = connectingOutlet->getIndex();
+                auto const inletIndex = targetInlet->getIndex();
 
                 SmallArray<t_gobj*> selectedObjects;
                 for (auto const* object : getSelectionOfType<Object>()) {
@@ -1330,9 +1285,13 @@ void Canvas::altKeyChanged(bool const isHeld)
     altDown = isHeld;
 
     if (!isGraph) {
-        SettingsFile::getInstance()->getValueTree().getChildWithName("Overlays").setProperty("alt_mode", altDown && shiftDown, nullptr);
+        SettingsFile::getInstance()->getProperty<DynamicObject>("overlays")->setProperty("alt_mode", altDown && shiftDown);
+        SettingsFile::getInstance()->triggerSettingsChange("overlays");
     }
 }
+
+void Canvas::mouseMove(MouseEvent const& e) { mcpLayer->mouseMove(e); } // MCP-HOOK(canvasInput)
+void Canvas::mouseExit(MouseEvent const& e) { mcpLayer->mouseExit(e); } // MCP-HOOK(canvasInput)
 
 void Canvas::mouseDown(MouseEvent const& e)
 {
@@ -1350,10 +1309,18 @@ void Canvas::mouseDown(MouseEvent const& e)
 
     auto* source = e.originalComponent;
 
+    if (mcpLayer->mouseDownEarly(e)) // MCP-HOOK(canvasInput)
+        return;
+
     // Left-click
     if (!e.mods.isRightButtonDown()) {
 
+        if (mcpLayer->mouseDownLeft(e)) // MCP-HOOK(canvasInput)
+            return;
+
         if (source == this) {
+            if (mcpLayer->mouseDownOnGlass(e)) // MCP-HOOK(canvasInput)
+                return;
             dragState.duplicateOffset = { 0, 0 };
             dragState.lastDuplicateOffset = { 0, 0 };
             dragState.wasDuplicated = false;
@@ -1393,6 +1360,8 @@ void Canvas::mouseDown(MouseEvent const& e)
     }
     // Right click
     else {
+        if (mcpLayer->mouseDownRight(e)) // MCP-HOOK(canvasInput)
+            return;
         Dialogs::showCanvasRightClickMenu(this, source, e.getScreenPosition());
     }
 }
@@ -1400,7 +1369,7 @@ void Canvas::mouseDown(MouseEvent const& e)
 bool Canvas::hitTest(int const x, int const y)
 {
     // allow panning to happen anywhere, even when in presentation mode
-    if (panningModifierDown())
+    if (panningModifierDown() || (viewport && viewport->isPerformingGesture()))
         return true;
 
     // disregard mouse drag if outside of patch
@@ -1413,8 +1382,19 @@ bool Canvas::hitTest(int const x, int const y)
 
 void Canvas::mouseDrag(MouseEvent const& e)
 {
-    if (canvasRateReducer.tooFast() || panningModifierDown())
+    if (mcpLayer->mouseDrag(e)) // MCP-HOOK(canvasInput)
         return;
+
+    if (canvasRateReducer.tooFast())
+        return;
+
+    if (panningModifierDown() || (viewport && viewport->isPerformingGesture())) {
+        if (isDraggingLasso) {
+            lasso.endLasso();
+            isDraggingLasso = false;
+        }
+        return;
+    }
 
     if (connectingWithDrag) {
         for (auto* obj : objects) {
@@ -1487,7 +1467,7 @@ bool Canvas::autoscroll(MouseEvent const& e)
     }
 
     if (x != oldX || y != oldY) {
-        viewport->setViewPosition(x, y);
+        viewport->setViewPosition(Point<float>(x, y));
         return true;
     }
 
@@ -1496,13 +1476,17 @@ bool Canvas::autoscroll(MouseEvent const& e)
 
 void Canvas::mouseUp(MouseEvent const& e)
 {
+    if (mcpLayer->mouseUp(e)) // MCP-HOOK(canvasInput)
+        return;
+
     setPanDragMode(false);
     setMouseCursor(MouseCursor::NormalCursor);
 
     connectionCancelled = false;
 
     // Double-click canvas to create new object
-    if (e.mods.isLeftButtonDown() && e.getNumberOfClicks() == 2 && e.originalComponent == this && !isGraph && !getValue<bool>(locked)) {
+    if (!mcpLayer->isPointOverNote(e.getPosition()) && e.mods.isLeftButtonDown() && e.getNumberOfClicks() == 2 && e.originalComponent == this && !isGraph && !getValue<bool>(locked)) { // MCP-HOOK(canvasInput)
+        mcpLayer->objectCreatedByDoubleClick(); // MCP-HOOK(canvasInput)
         auto* newObject = objects.add(this, "", e.getPosition());
         deselectAll();
         setSelected(newObject, true); // Select newly created object
@@ -1562,14 +1546,27 @@ void Canvas::updateSidebarSelection()
             toShow.add(object);
         }
 
-        editor->sidebar->showParameters(toShow, allParameters, showOnSelect);
+        if (auto* s = editor->getSidebarForPanel(Sidebar::InspectorPanel))
+            s->showParameters(toShow, allParameters, showOnSelect);
+
+        if (auto* s = editor->getSidebarForPanel(Sidebar::ObjectReferencePanel))
+            s->updateReference(lassoSelection.size() == 1 ? lassoSelection[0]->getType().toString() : String());
+
+        mcpLayer->updateSelectionPill(); // MCP-HOOK(canvasLifecycle)
     });
 }
 
 bool Canvas::keyPressed(KeyPress const& key)
 {
+    if (auto const handled = mcpLayer->keyPressedEarly(key)) // MCP-HOOK(canvasInput)
+        return *handled;
+
     if (editor->getCurrentCanvas() != this || isGraph)
         return false;
+
+    if (mcpLayer->keyPressedForCanvas(key)) // MCP-HOOK(canvasInput)
+        return true;
+    pd->keyHandler.sendKeyPress(key); // Send keypress for listers to #key, #keyup and #keyname
 
     int const keycode = key.getKeyCode();
 
@@ -1594,8 +1591,6 @@ bool Canvas::keyPressed(KeyPress const& key)
             totalBounds = totalBounds.getUnion(object->getBounds());
         }
 
-        // TODO: consider calculating the totalBounds with object->getBounds().reduced(Object::margin)
-        // then adding viewport padding in screen pixels so it's consistent regardless of scale
         auto const scale = ::getValue<float>(zoomScale);
         constexpr auto viewportPadding = 10;
 
@@ -1613,7 +1608,7 @@ bool Canvas::keyPressed(KeyPress const& key)
         } else if (totalBounds.getBottom() > viewY + viewHeight) {
             viewY = totalBounds.getBottom() - viewHeight;
         }
-        viewport->setViewPosition(viewX * scale, viewY * scale);
+        viewport->setViewPosition(Point<float>(viewX * scale, viewY * scale));
         return true;
     };
 
@@ -1661,16 +1656,21 @@ void Canvas::deselectAll(bool const broadcastChange)
         selectedComponents.removeChangeListener(this);
 
     selectedComponents.deselectAll();
-    editor->sidebar->hideParameters();
+    if (auto* s = editor->getSidebarForPanel(Sidebar::InspectorPanel))
+        s->hideParameters();
+    if (mcpLayer) mcpLayer->updateSelectionPill(); // MCP-HOOK(canvasLifecycle): the pill follows the selection (L28: none while the canvas dies)
 
     if (!broadcastChange) {
-        // Add back the listener, but make sure it's added back 'after' the last event on the message queue
-        MessageManager::callAsync([this] { selectedComponents.addChangeListener(this); });
+        MessageManager::callAsync([_this = SafePointer(this)] {
+            if (_this)
+                _this->selectedComponents.addChangeListener(_this);
+        });
     }
 }
 
 void Canvas::hideAllActiveEditors()
 {
+    mcpLayer->hideSelectionPill(); // MCP-HOOK(canvasLifecycle)
     for (auto* object : objects) {
         object->hideEditor();
     }
@@ -1727,7 +1727,7 @@ void Canvas::focusLost(FocusChangeType cause)
     });
 }
 
-void Canvas::dragAndDropPaste(String const& patchString, Point<int> const mousePos, int const patchWidth, int const patchHeight, String const& name)
+void Canvas::dragAndDropPaste(String const& patchString, Point<int> const mousePos, int const patchWidth, int const patchHeight)
 {
     locked = false;
     presentationMode = false;
@@ -1741,10 +1741,8 @@ void Canvas::dragAndDropPaste(String const& patchString, Point<int> const mouseP
             _this->grabKeyboardFocus();
     });
 
-    auto undoText = String("Add object");
-    if (name.isNotEmpty())
-        undoText = String("Add " + name.toLowerCase());
-
+    auto args = StringArray::fromTokens(patchString, false);
+    auto undoText = args.size() > 4 ? String("Add " + args[4]) : String("Add object");
     patch.startUndoSequence(undoText);
 
     auto const patchSize = Point<int>(patchWidth, patchHeight);
@@ -1759,10 +1757,7 @@ void Canvas::dragAndDropPaste(String const& patchString, Point<int> const mouseP
     // Load state from pd
     performSynchronise();
 
-    patch.setCurrent();
-
     SmallArray<t_gobj*> pastedObjects;
-
     if (auto patchPtr = patch.getPointer()) {
         for (auto* object : objects) {
             auto* objectPtr = object->getPointer();
@@ -1782,6 +1777,9 @@ void Canvas::dragAndDropPaste(String const& patchString, Point<int> const mouseP
 
 void Canvas::pasteSelection()
 {
+    if (mcpLayer->pasteImageFromClipboard()) // MCP-HOOK(canvasInput): a clipboard image becomes a reference image
+        return;
+
     patch.startUndoSequence("Paste object/s");
 
     // Paste at mousePos, adds padding if pasted the same place
@@ -1800,8 +1798,6 @@ void Canvas::pasteSelection()
 
     // Load state from pd
     performSynchronise();
-
-    patch.setCurrent();
 
     SmallArray<t_gobj*> pastedObjects;
 
@@ -1896,7 +1892,7 @@ void Canvas::duplicateSelection()
         selectionBounds = selectionBounds.getUnion(obj->getBounds());
     }
 
-    selectionBounds = selectionBounds.transformedBy(getTransform());
+    selectionBounds = selectionBounds * getValue<float>(zoomScale);
 
     // Adjust the viewport position to ensure the duplicated objects are visible
     auto const viewportPos = viewport->getViewPosition();
@@ -1918,7 +1914,7 @@ void Canvas::duplicateSelection()
         }
 
         // Set the new viewport position
-        viewport->setViewPosition(viewportPos + Point<int>(deltaX, deltaY));
+        viewport->setViewPosition(viewportPos + Point<float>(deltaX, deltaY));
     }
 
     dragState.wasDuplicated = true;
@@ -1935,7 +1931,8 @@ void Canvas::removeSelection()
 {
     patch.startUndoSequence("Remove object/s");
     // Make sure object isn't selected and stop updating gui
-    editor->sidebar->hideParameters();
+    if (auto* s = editor->getSidebarForPanel(Sidebar::InspectorPanel))
+        s->hideParameters();
 
     // Find selected objects and make them selected in pd
     SmallArray<t_gobj*> objects;
@@ -2084,47 +2081,75 @@ void Canvas::triggerizeSelection()
     }
 }
 
-void Canvas::encapsulateSelection()
+void Canvas::encapsulateSelection(String const& subpatchName) // MCP-CARRIED(encapsulate-named)
 {
-    auto selectedObjects = getSelectionOfType<Object>();
+    encapsulateSelection(subpatchName, getSelectionOfType<Object>());
+}
+
+// The MCP bridge encapsulates an explicit object list under a chosen name, so the
+// selection and the "pd" name are parameters here (the menu command passes neither).
+void Canvas::encapsulateSelection(String const& subpatchName, SmallArray<Object*> const& objectsToEncapsulate) // MCP-CARRIED(encapsulate-named)
+{
+    auto selectedObjects = objectsToEncapsulate;
+
+    if(auto* sidebar = editor->getSidebarForPanel(Sidebar::SidePanel::InspectorPanel))
+        sidebar->clearInspector();
 
     // Sort by index in pd patch
     selectedObjects.sort([this](auto const* a, auto const* b) -> bool {
         return objects.index_of(a) < objects.index_of(b);
     });
 
-    // If two connections have the same target inlet/outlet, we only need 1 [inlet/outlet] object
-    auto usedIolets = SmallArray<Iolet*>();
-    auto targetIolets = UnorderedMap<Iolet*, SmallArray<Iolet*>>();
-
-    auto newInternalConnections = String();
-    auto newExternalConnections = UnorderedMap<int, SmallArray<Iolet*>>();
-
-    // First, find all the incoming and outgoing connections
-    for (auto* connection : connections) {
-        if (selectedObjects.contains(connection->inobj.get()) && !selectedObjects.contains(connection->outobj.get())) {
-            auto* inlet = connection->inlet.get();
-            targetIolets[inlet].add(connection->outlet.get());
-            usedIolets.add_unique(inlet);
-        }
-    }
-    for (auto* connection : connections) {
-        if (selectedObjects.contains(connection->outobj.get()) && !selectedObjects.contains(connection->inobj.get())) {
-            auto* outlet = connection->outlet.get();
-            targetIolets[outlet].add(connection->inlet.get());
-            usedIolets.add_unique(outlet);
+    // Objects without a valid pointer can't be copied, so they can't be part of the subpatch
+    auto encapsulatedObjects = SmallArray<Object*>();
+    auto encapsulatedPointers = SmallArray<t_gobj*>();
+    auto selectionBounds = Rectangle<int>();
+    for (auto* object : selectedObjects) {
+        if (auto* ptr = object->getPointer()) {
+            encapsulatedObjects.add(object);
+            encapsulatedPointers.add(ptr);
+            selectionBounds = selectionBounds.getUnion(object->getObjectBounds());
         }
     }
 
-    auto newEdgeObjects = String();
+    if (encapsulatedObjects.empty())
+        return;
 
-    usedIolets.sort([](auto* a, auto* b) -> bool {
-        // Inlets before outlets
-        if (a->isInlet != b->isInlet)
-            return a->isInlet;
+    struct IoletGroup {
+        bool isInlet;
+        bool isSignal;
+        SmallArray<Iolet*> internalIolets; // iolets on the objects that move into the subpatch
+        SmallArray<Iolet*> externalIolets; // iolets on the objects that stay behind
+    };
 
-        auto apos = a->getCanvasBounds().getPosition();
-        auto bpos = b->getCanvasBounds().getPosition();
+    auto internalIolets = SmallArray<Iolet*>();
+    auto externalIoletsFor = UnorderedMap<Iolet*, SmallArray<Iolet*>>();
+
+    for (auto* connection : connections) {
+        bool const inletInside = encapsulatedObjects.contains(connection->inobj.get());
+        bool const outletInside = encapsulatedObjects.contains(connection->outobj.get());
+
+        // Connections that are entirely inside or entirely outside the selection stay as they are
+        if (inletInside == outletInside)
+            continue;
+
+        auto* internalIolet = inletInside ? connection->inlet.get() : connection->outlet.get();
+        auto* externalIolet = inletInside ? connection->outlet.get() : connection->inlet.get();
+        if (!internalIolet || !externalIolet)
+            continue;
+
+        internalIolets.add_unique(internalIolet);
+        externalIoletsFor[internalIolet].add_unique(externalIolet);
+    }
+
+    // Inlets before outlets, then left to right. Pd numbers a subpatch's iolets by the horizontal
+    // position of the [inlet]/[outlet] objects, so this is also the order we lay them out in below
+    internalIolets.sort([](auto* a, auto* b) -> bool {
+        if (a->isInlet() != b->isInlet())
+            return a->isInlet();
+
+        auto const apos = a->getCanvasBounds().getPosition();
+        auto const bpos = b->getCanvasBounds().getPosition();
 
         if (apos.x == bpos.x) {
             return apos.y < bpos.y;
@@ -2133,76 +2158,120 @@ void Canvas::encapsulateSelection()
         return apos.x < bpos.x;
     });
 
-    int i = 0;
-    int numIn = 0;
-    for (auto* iolet : usedIolets) {
-        auto type = String(iolet->isInlet ? "inlet" : "outlet") + String(iolet->isSignal ? "~" : "");
-        auto* targetEdge = targetIolets[iolet][0];
-        auto pos = targetEdge->object->getObjectBounds().getPosition();
-        newEdgeObjects += "#X obj " + String(pos.x) + " " + String(pos.y) + " " + type + ";\n";
+    auto ioletGroups = SmallArray<IoletGroup>();
+    for (auto* iolet : internalIolets) {
+        auto const& externalIolets = externalIoletsFor[iolet];
 
-        int objIdx = selectedObjects.index_of(iolet->object);
-        int ioletObjectIdx = selectedObjects.size() + i;
-        if (iolet->isInlet) {
-            newInternalConnections += "#X connect " + String(ioletObjectIdx) + " 0 " + String(objIdx) + " " + String(iolet->ioletIdx) + ";\n";
-            numIn++;
-        } else {
-            newInternalConnections += "#X connect " + String(objIdx) + " " + String(iolet->ioletIdx) + " " + String(ioletObjectIdx) + " 0;\n";
+        // An inlet fed only by control-rate wires from outside becomes [inlet], not [inlet~]
+        bool const isSignal = iolet->isInlet() // MCP-CARRIED(encapsulate-control-inlets)
+            ? std::any_of(externalIolets.begin(), externalIolets.end(), [](auto* source) { return source->isSignal(); })
+            : iolet->isSignal();
+
+        IoletGroup* group = nullptr;
+        for (auto& candidate : ioletGroups) {
+            // A signal and a data iolet can never share an object, even if they connect to the same things
+            if (candidate.isInlet != iolet->isInlet() || candidate.isSignal != isSignal) // MCP-CARRIED(encapsulate-control-inlets)
+                continue;
+            if (candidate.externalIolets.size() != externalIolets.size())
+                continue;
+
+            if (std::all_of(externalIolets.begin(), externalIolets.end(), [&candidate](auto* target) { return candidate.externalIolets.contains(target); })) {
+                group = &candidate;
+                break;
+            }
         }
 
-        for (auto* target : targetIolets[iolet]) {
-            newExternalConnections[i].add(target);
+        if (!group) {
+            ioletGroups.add(IoletGroup { iolet->isInlet(), isSignal, {}, externalIolets }); // MCP-CARRIED(encapsulate-control-inlets)
+            group = &ioletGroups.back();
         }
 
-        i++;
+        group->internalIolets.add(iolet);
+    }
+
+    constexpr int ioletObjectSpacing = 45;
+
+    auto newIoletObjects = String();
+    auto newInternalConnections = String();
+
+    int numInlets = 0;
+    int lastX[2] = {};
+    bool hasPlaced[2] = {};
+
+    for (int i = 0; i < static_cast<int>(ioletGroups.size()); i++) {
+        auto const& group = ioletGroups[i];
+        int const row = group.isInlet ? 0 : 1;
+
+        // Put the object above (or below) the iolet it feeds, but never to the left of the previous one:
+        // pd derives the iolet index from the horizontal position, and the connections below rely on it
+        int x = group.internalIolets[0]->getCanvasBounds().getCentreX() - canvasOrigin.x;
+        if (hasPlaced[row])
+            x = jmax(x, lastX[row] + ioletObjectSpacing);
+        lastX[row] = x;
+        hasPlaced[row] = true;
+
+        int const y = group.isInlet ? selectionBounds.getY() - ioletObjectSpacing : selectionBounds.getBottom() + ioletObjectSpacing;
+        auto const type = String(group.isInlet ? "inlet" : "outlet") + String(group.isSignal ? "~" : "");
+        newIoletObjects += "#X obj " + String(x) + " " + String(y) + " " + type + ";\n";
+
+        int const ioletObjectIdx = static_cast<int>(encapsulatedObjects.size()) + i;
+        for (auto* internalIolet : group.internalIolets) {
+            int const objIdx = encapsulatedObjects.index_of(internalIolet->getObject());
+            if (objIdx < 0)
+                continue;
+
+            if (group.isInlet) {
+                newInternalConnections += "#X connect " + String(ioletObjectIdx) + " 0 " + String(objIdx) + " " + String(internalIolet->getIndex()) + ";\n";
+            } else {
+                newInternalConnections += "#X connect " + String(objIdx) + " " + String(internalIolet->getIndex()) + " " + String(ioletObjectIdx) + " 0;\n";
+            }
+        }
+
+        numInlets += group.isInlet;
     }
 
     patch.deselectAll();
 
-    auto bounds = Rectangle<int>();
-    SmallArray<t_gobj*> objects;
-    for (auto* object : selectedObjects) {
-        if (auto* ptr = object->getPointer()) {
-            bounds = bounds.getUnion(object->getBounds());
-            objects.add(ptr);
-        }
-    }
-    auto centre = bounds.getCentre() - canvasOrigin;
-
-    auto copypasta = String("#N canvas 733 172 450 300 0 1;\n") + "$$_COPY_HERE_$$" + newEdgeObjects + newInternalConnections + "#X restore " + String(centre.x) + " " + String(centre.y) + " pd;\n";
+    auto const centre = selectionBounds.getCentre();
+    auto const nameToken = (subpatchName.isEmpty() || subpatchName == "pd") ? String("pd") : ("pd " + subpatchName); // MCP-CARRIED(encapsulate-named)
+    auto copypasta = String("#N canvas 733 172 450 300 0 1;\n") + "$$_COPY_HERE_$$" + newIoletObjects + newInternalConnections + "#X restore " + String(centre.x) + " " + String(centre.y) + " " + nameToken + ";\n";
 
     // Apply the changed on Pd's thread
     if (auto patchPtr = patch.getPointer()) {
         int size;
-        char const* text = pd::Interface::copy(patchPtr.get(), &size, objects);
+        char const* text = pd::Interface::copy(patchPtr.get(), &size, encapsulatedPointers);
         auto copied = String::fromUTF8(text, size);
 
         // Wrap it in an undo sequence, to allow undoing everything in 1 step
         patch.startUndoSequence("Encapsulate");
 
-        pd::Interface::removeObjects(patchPtr.get(), objects);
+        pd::Interface::removeObjects(patchPtr.get(), encapsulatedPointers);
 
         auto replacement = copypasta.replace("$$_COPY_HERE_$$", copied);
 
         pd::Interface::paste(patchPtr.get(), replacement.toRawUTF8());
-        auto lastObject = patch.getObjects().back();
-        if (!lastObject.isValid())
-            return;
 
-        auto* newObject = pd::Interface::checkObject(lastObject.getRaw<t_pd>());
-        if (!newObject) {
-            patch.endUndoSequence("Encapsulate");
-            pd->unlockAudioThread();
-            return;
-        }
+        auto patchObjects = patch.getObjects();
+        t_object* newObject = nullptr;
+        if (!patchObjects.empty() && patchObjects.back().isValid())
+            newObject = pd::Interface::checkObject(patchObjects.back().getRaw<t_pd>());
 
-        for (auto& [idx, iolets] : newExternalConnections) {
-            for (auto* iolet : iolets) {
-                if (auto* externalObject = reinterpret_cast<t_object*>(iolet->object->getPointer())) {
-                    if (iolet->isInlet) {
-                        pd::Interface::createConnection(patchPtr.get(), newObject, idx - numIn, externalObject, iolet->ioletIdx);
+        if (newObject) {
+            for (int i = 0; i < static_cast<int>(ioletGroups.size()); i++) {
+                auto const& group = ioletGroups[i];
+
+                // Inlets and outlets are numbered separately, and all the inlet groups come first
+                int const subpatchIoletIdx = group.isInlet ? i : i - numInlets;
+
+                for (auto* externalIolet : group.externalIolets) {
+                    auto* externalObject = reinterpret_cast<t_object*>(externalIolet->getObject()->getPointer());
+                    if (!externalObject)
+                        continue;
+
+                    if (group.isInlet) {
+                        pd::Interface::createConnection(patchPtr.get(), externalObject, externalIolet->getIndex(), newObject, subpatchIoletIdx);
                     } else {
-                        pd::Interface::createConnection(patchPtr.get(), externalObject, iolet->ioletIdx, newObject, idx);
+                        pd::Interface::createConnection(patchPtr.get(), newObject, subpatchIoletIdx, externalObject, externalIolet->getIndex());
                     }
                 }
             }
@@ -2245,8 +2314,7 @@ void Canvas::cancelConnectionCreation()
         connectingWithDrag = false;
         connectionCancelled = true;
         if (nearestIolet) {
-            nearestIolet->isTargeted = false;
-            nearestIolet->repaint();
+            nearestIolet->setTargeted(false);
             nearestIolet = nullptr;
         }
     }
@@ -2461,7 +2529,8 @@ void Canvas::undo()
     }
 
     // Tell pd to undo the last action
-    patch.undo();
+    if (!mcpLayer->undo()) // MCP-HOOK(canvasLifecycle): the one history (AI and manual); false = nothing to undo
+        return;
 
     // Load state from pd
     synchronise();
@@ -2476,7 +2545,8 @@ void Canvas::undo()
 void Canvas::redo()
 {
     // Tell pd to undo the last action
-    patch.redo();
+    if (!mcpLayer->redo()) // MCP-HOOK(canvasLifecycle): the one history (AI and manual); false = nothing to redo
+        return;
 
     // Load state from pd
     synchronise();
@@ -2528,8 +2598,13 @@ void Canvas::valueChanged(Value& v)
         bool const editMode = !getValue<bool>(v);
 
         if (auto ptr = patch.getPointer()) {
+            if (ptr->gl_edit != editMode) {
             pd->sendDirectMessage(ptr.get(), "editmode", { static_cast<float>(editMode) });
         }
+        }
+
+        for(auto* object : objects)
+            object->repaint();
 
         cancelConnectionCreation();
         deselectAll();
@@ -2638,8 +2713,10 @@ void Canvas::setSelected(Component* component, bool const shouldNowBeSelected, b
     }
 
     if (!broadcastChange) {
-        // Add back the listener, but make sure it's added back 'after' the last event on the message queue
-        MessageManager::callAsync([this] { selectedComponents.addChangeListener(this); });
+        MessageManager::callAsync([_this = SafePointer(this)] {
+            if (_this)
+                _this->selectedComponents.addChangeListener(_this);
+        });
     }
 }
 
@@ -2658,7 +2735,7 @@ bool Canvas::checkPanDragMode()
 
 bool Canvas::setPanDragMode(bool const shouldPan)
 {
-    if (auto* v = dynamic_cast<CanvasViewport*>(viewport.get())) {
+    if (auto* v = viewport.get()) {
         v->enableMousePanning(shouldPan);
         return true;
     }
@@ -2718,13 +2795,12 @@ ObjectParameters& Canvas::getInspectorParameters()
 
 bool Canvas::panningModifierDown() const
 {
-    if(isGraph)
+    if (isGraph)
         return false;
-    
-#if JUCE_IOS
-    return OSUtils::ScrollTracker::isScrolling();
-#endif
-    
+
+    if (viewport->isPerformingGesture())
+        return true;
+
     auto const& commandManager = editor->commandManager;
     // check the command manager for the keycode that is assigned to pan drag key
     auto const panDragKeycode = commandManager.getKeyMappings()->getKeyPressesAssignedToCommand(CommandIDs::PanDragKey).getFirst().getKeyCode();
@@ -2774,6 +2850,22 @@ void Canvas::receiveMessage(t_symbol* symbol, SmallArray<pd::Atom> const& atoms)
         synchronise();
         break;
     }
+    case hash("array"): {
+        if (isGraph) {
+            // Async because this will destroy the current canvas, which the caller might be in the middle of using
+            MessageManager::callAsync([_this = SafePointer<Canvas>(this)]() {
+                if (!_this)
+                    return;
+                if (auto* object = _this->findParentComponentOfClass<Object>()) {
+                    _this->setSelected(object, false);
+                    if (auto* s = _this->editor->getSidebarForPanel(Sidebar::InspectorPanel))
+                        s->hideParameters();
+                    object->setType(object->gui->getText().toString(), object->gui->ptr);
+                }
+            });
+        }
+        break;
+    }
     case hash("editmode"): {
         if (::getValue<bool>(commandLocked))
             return;
@@ -2799,7 +2891,11 @@ void Canvas::receiveMessage(t_symbol* symbol, SmallArray<pd::Atom> const& atoms)
 
         break;
     }
-    case hash("coords"):
+    case hash("goprect"): {
+        if (graphArea)
+            graphArea->updateBounds();
+        break;
+    }
     case hash("donecanvasdialog"): {
         synchroniseSplitCanvas();
         break;
@@ -2815,9 +2911,11 @@ void Canvas::resized()
     objectLayer.setBounds(getLocalBounds());
 }
 
-void Canvas::activateCanvasSearchHighlight(Object* obj)
+void Canvas::activateCanvasSearchHighlight(Point<float> viewPos, Object* obj)
 {
-    canvasSearchHighlight.reset(std::make_unique<CanvasSearchHighlight>(this, obj).release());
+    canvasSearchHighlight = std::make_unique<CanvasSearchHighlight>(this, obj);
+    if (viewport)
+        canvasSearchHighlight->chainAnimation(viewport->getMoveAnimation(viewPos));
 }
 
 void Canvas::removeCanvasSearchHighlight()

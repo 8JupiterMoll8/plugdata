@@ -24,44 +24,34 @@ public:
         panel.addSection("WASM", properties);
     }
 
-    ValueTree getState() override
+    void getState(DynamicObject::Ptr globalState) override
     {
-        ValueTree stateTree("WASM");
-
-        stateTree.setProperty("inputPatchValue", getValue<String>(inputPatchValue), nullptr);
-        stateTree.setProperty("projectNameValue", getValue<String>(projectNameValue), nullptr);
-        stateTree.setProperty("projectCopyrightValue", getValue<String>(projectCopyrightValue), nullptr);
-        stateTree.setProperty("emsdkPathValue", getValue<String>(emsdkPathValue), nullptr);
-
-        return stateTree;
+        auto* state = new DynamicObject();
+        state->setProperty("input_patch_value", getValue<String>(inputPatchValue));
+        state->setProperty("project_name_value", getValue<String>(projectNameValue));
+        state->setProperty("project_copyright_value", getValue<String>(projectCopyrightValue));
+        state->setProperty("emsdk_path_value", getValue<String>(emsdkPathValue));
+        globalState->setProperty("wasm", state);
     }
 
-    void setState(ValueTree& stateTree) override
+    void setState(DynamicObject::Ptr globalState) override
     {
-        auto const tree = stateTree.getChildWithName("WASM");
-        inputPatchValue = tree.getProperty("inputPatchValue");
-        projectNameValue = tree.getProperty("projectNameValue");
-        projectCopyrightValue = tree.getProperty("projectCopyrightValue");
-        emsdkPathValue = tree.getProperty("emsdkPathValue");
+        auto const state = globalState->getProperty("wasm").getDynamicObject();
+        if (!state)
+            return;
+        inputPatchValue = state->getProperty("input_patch_value");
+        projectNameValue = state->getProperty("project_name_value");
+        projectCopyrightValue = state->getProperty("project_copyright_value");
+        emsdkPathValue = state->getProperty("emsdk_path_value");
     }
 
-    void valueChanged(Value& v) override
+    bool canPerformExport() const override
     {
-        ExporterBase::valueChanged(v);
-
-        String const emsdkPath = getValue<String>(emsdkPathValue);
-
-        if (emsdkPath.isNotEmpty()) {
-            exportButton.setEnabled(true);
-        } else {
-            exportButton.setEnabled(false);
-        }
+        return ExporterBase::canPerformExport() && getValue<String>(emsdkPathValue).isNotEmpty();
     }
 
     bool performExport(String const& pdPatch, String const& outdir, String const& name, String const& copyright, StringArray const& searchPaths) override
     {
-        exportingView->showState(ExportingProgressView::Exporting);
-
         auto const heavyPath = pathToString(heavyExecutable);
         StringArray args = { heavyPath.quoted(), pdPatch.quoted(), "-o", outdir.quoted() };
         args.add("-n" + name);
@@ -92,6 +82,7 @@ public:
         auto buildScript = "source " + emsdkPath + "/emsdk_env.sh; " + compileString;
 #endif
 
+        exportingView->reportStatus("Compiling");
         startShellScript(buildScript);
 
         waitForProcessToFinish(-1);

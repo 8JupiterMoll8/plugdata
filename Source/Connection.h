@@ -6,11 +6,11 @@
 
 #pragma once
 
+#include <juce_animation/juce_animation.h>
 #include <m_pd.h>
 
 #include <readerwriterqueue.h>
 #include "Constants.h"
-#include "Objects/AllGuis.h"
 #include "Iolet.h"       // Move to impl
 #include "Pd/Instance.h" // Move to impl
 #include "Pd/MessageListener.h"
@@ -22,12 +22,11 @@
 using PathPlan = SmallArray<Point<float>>;
 
 class Canvas;
-class Connection final : public DrawablePath
+class Connection final : public Component
     , public ComponentListener
     , public ChangeListener
     , public pd::MessageListener
-    , public NVGComponent
-    , public MultiTimer {
+    , public NVGComponent {
 public:
     int inIdx;
     int outIdx;
@@ -42,7 +41,11 @@ public:
     Connection(Canvas* parent, Iolet* start, Iolet* end, t_outconnect* oc);
     ~Connection() override;
 
-    static Path getNonSegmentedPath(Point<float> start, Point<float> end);
+    static Path getNonSegmentedPath(Point<float> start, Point<float> end, bool useStraightConnections);
+
+    // Manual path/bounds management (previously provided by DrawablePath/DrawableComponent)
+    void setPath(Path const& newPath);
+    Path const& getPath() const { return path; }
 
     bool isSegmented() const;
     void setSegmented(bool segmented);
@@ -79,6 +82,11 @@ public:
     bool intersects(Rectangle<float> toCheck, int accuracy = 4) const;
     int getClosestLineIdx(Point<float> const& position, PathPlan const& plan) const;
 
+    // Corner editing, positions are in canvas coordinates
+    int getNumCorners() const;
+    void addCorner(Point<float> const& position);
+    void removeCorner(int cornerIdx);
+
     void setPointer(t_outconnect* ptr);
     t_outconnect* getPointer() const;
 
@@ -90,13 +98,9 @@ public:
     void componentMovedOrResized(Component& component, bool wasMoved, bool wasResized) override;
 
     // Pathfinding
-    int findLatticePaths(PathPlan& bestPath, PathPlan& pathStack, Point<float> start, Point<float> end, Point<float> increment);
-
     void findPath();
 
     void applyBestPath();
-
-    bool straightLineIntersectsObject(Line<float> toCheck, SmallArray<Object*>& objects) const;
 
     void receiveMessage(t_symbol* symbol, SmallArray<pd::Atom> const& atoms) override;
 
@@ -107,12 +111,25 @@ public:
     StringArray getMessageFormated() const;
 
 private:
-    enum Timer { StopAnimation,
-        Animation };
+    enum SegmentDirection { ZeroLength,
+        Horizontal,
+        Vertical };
 
-    void timerCallback(int ID) override;
+    SegmentDirection getSegmentDirection(int idx) const;
+    void sanitisePlan();
 
-    void animate();
+    PathPlan findRoute(Point<float> start, Point<float> end, SmallArray<Rectangle<float>> const& obstacles) const;
+    static PathPlan findSimpleRoute(Point<float> start, Point<float> end, SmallArray<Rectangle<float>> const& obstacles);
+
+    // Pathfinding settings, in canvas pixels
+    static constexpr float routeClearance = 10.0f;
+    static constexpr float routePreferredClearance = 20.0f;
+    static constexpr float routeBendPenalty = 40.0f;
+    static constexpr float routeStubLength = 16.0f;
+    static constexpr float routeDetourMargin = 160.0f;
+    static constexpr float routeBlockedPenalty = 10000.0f;
+    static constexpr int routeMaxObstacles = 24;
+    static constexpr int routeMaxGridPoints = 16384;
 
     int getMultiConnectNumber() const;
     int getNumSignalChannels() const;
@@ -122,9 +139,13 @@ private:
 
     void setSelected(bool shouldBeSelected);
 
-    void pathChanged() override;
+    // Recomputes the component bounds to enclose the current path, expanded by the
+    // stroke thickness. Used for hit detection and drawing the reconnect handles.
+    void updateBounds();
 
     float getPathWidth() const;
+
+    Path path;
 
     SmallArray<SafePointer<Connection>> reconnecting;
     Rectangle<float> startReconnectHandle, endReconnectHandle;
@@ -134,11 +155,7 @@ private:
     Value locked;
     Value presentationMode;
 
-    NVGcolor handleColour;
-    NVGcolor shadowColour;
-    NVGcolor outlineColour;
-
-    NVGcolor textColour;
+    NVGcolor handleColour, shadowColour, outlineColour;
 
     RectangleList<int> clipRegion;
 
@@ -164,6 +181,16 @@ private:
     float offset = 0.0f;
     float pathLength = 0.0f;
 
+    VBlankAnimatorUpdater updater { this };
+    Animator activityStateAnimator = ValueAnimatorBuilder { }
+                                         .withDurationMs(140)
+                                         .withEasing(Easings::createEaseInOut())
+                                         .withValueChangedCallback([this](float v) {
+                                             offset = v;
+                                             repaint();
+                                         })
+                                         .build();
+
     PlugDataLook::ConnectionStyle connectionStyle = PlugDataLook::ConnectionStyleDefault;
     bool selectedFlag : 1 = false;
     bool wasSelected : 1 = false;
@@ -177,11 +204,13 @@ private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(Connection)
 };
 
-class ConnectionBeingCreated final : public DrawablePath
+class ConnectionBeingCreated final : public Component
     , public NVGComponent {
-    SafePointer<Iolet> iolet;
+    Iolet::SafePointer<Iolet> iolet;
     Component* cnv;
     Point<float> lastMousePos;
+
+    Path path;
 
 public:
     ConnectionBeingCreated(Iolet* target, Component* canvas)
@@ -189,9 +218,8 @@ public:
         , iolet(target)
         , cnv(canvas)
     {
-        setStrokeThickness(5.0f);
-
         // Only listen for mouse-events on canvas and the original iolet
+        setPaintingIsUnclipped(true);
         setInterceptsMouseClicks(false, true);
         cnv->addMouseListener(this, true);
         iolet->addMouseListener(this, false);
@@ -200,22 +228,35 @@ public:
         cnv->repaint();
 
         setAlwaysOnTop(true);
-        setAccessible(false); // TODO: implement accessibility. We disable default, since it makes stuff slow on macOS
+        setAccessible(false);
     }
 
     ~ConnectionBeingCreated() override
     {
         cnv->removeMouseListener(this);
-        if (iolet)
+        if (iolet) {
             iolet->removeMouseListener(this);
+            iolet->setTargeted(false);
+        }
     }
 
-    void pathChanged() override
+    // Manual path/bounds management (previously provided by DrawablePath/DrawableComponent)
+    void setPath(Path const& newPath)
     {
-        strokePath.clear();
-        strokePath = path;
-        setBoundsToEnclose(getDrawableBounds().expanded(3));
-        repaint();
+        path = newPath;
+        updateBounds();
+    }
+
+    Path const& getPath() const { return path; }
+
+    // Resizes the component to enclose the path, expanded by the stroke thickness
+    void updateBounds()
+    {
+        if (path.isEmpty()) {
+            setBounds({});
+            return;
+        }
+        setBounds(path.getBounds().expanded(3.0f).getSmallestIntegerContainer());
     }
 
     void mouseDrag(MouseEvent const& e) override
@@ -241,12 +282,12 @@ public:
         if (!iolet)
             return;
 
-        auto const ioletPoint = cnv->getLocalPoint(reinterpret_cast<Component*>(iolet->object), iolet->getBounds().toFloat().getCentre());
-        auto const& startPoint = iolet->isInlet ? cursorPoint : ioletPoint;
-        auto const& endPoint = iolet->isInlet ? ioletPoint : cursorPoint;
+        auto const ioletPoint = cnv->getLocalPoint(reinterpret_cast<Component*>(iolet->getObject()), iolet->getBounds().toFloat().getCentre());
+        auto const& startPoint = iolet->isInlet() ? cursorPoint : ioletPoint;
+        auto const& endPoint = iolet->isInlet() ? ioletPoint : cursorPoint;
 
         lastMousePos = cursorPoint;
-        auto const connectionPath = Connection::getNonSegmentedPath(startPoint.toFloat(), endPoint.toFloat());
+        auto const connectionPath = Connection::getNonSegmentedPath(startPoint.toFloat(), endPoint.toFloat(), getPlugDataLook(*cnv).getUseStraightConnections());
         setPath(connectionPath);
 
         repaint();
@@ -257,16 +298,18 @@ public:
 
     void render(NVGcontext* nvg) override
     {
-        auto const shadowColour = findColour(PlugDataColour::canvasBackgroundColourId).contrasting(0.06f).withAlpha(0.24f);
+        auto const& colours = getThemeColours(*this);
+
+        auto const shadowColour = colours.canvasBackgroundColour.contrasting(0.06f).withAlpha(0.24f);
 
         NVGScopedState scopedState(nvg);
         setJUCEPath(nvg, getPath());
 
-        auto const connectionStyle = PlugDataLook::getConnectionStyle();
+        auto const connectionStyle = getPlugDataLook(*this).getConnectionStyle();
         float cableThickness;
         switch (connectionStyle) {
         case PlugDataLook::ConnectionStyleVanilla:
-            cableThickness = iolet->isSignal ? 4.5f : 2.5f;
+            cableThickness = iolet->isSignal() ? 4.5f : 2.5f;
             break;
         case PlugDataLook::ConnectionStyleThin:
             cableThickness = 3.0f;
@@ -276,27 +319,27 @@ public:
             break;
         }
 
-        nvgStrokeWidth(nvg, cableThickness);
+        nanovg::nvgStrokeWidth(nvg, cableThickness);
 
-        if (iolet && iolet->isSignal && connectionStyle != PlugDataLook::ConnectionStyleVanilla) {
-            auto const lineColour = cnv->findColour(PlugDataColour::signalColourId).brighter(0.6f);
-            auto dashColor = convertColour(shadowColour);
+        if (iolet && iolet->isSignal() && connectionStyle != PlugDataLook::ConnectionStyleVanilla) {
+            auto const lineColour = colours.signalColour.brighter(0.6f);
+            auto dashColor = nvgColour(shadowColour);
             dashColor.a = 255;
             dashColor.r *= 0.4f;
             dashColor.g *= 0.4f;
             dashColor.b *= 0.4f;
-            nvgStrokePaint(nvg, nvgDoubleStroke(nvg, convertColour(lineColour), convertColour(shadowColour), dashColor, 2.5f, false, false, 0.0f));
-            nvgStroke(nvg);
+            nanovg::nvgStrokePaint(nvg, nanovg::nvgDoubleStroke(nvg, nvgColour(lineColour), nvgColour(shadowColour), dashColor, 2.5f, false, false, 0.0f));
+            nanovg::nvgStroke(nvg);
         } else {
-            auto const lineColour = cnv->findColour(PlugDataColour::dataColourId).brighter(0.6f);
-            nvgStrokePaint(nvg, nvgDoubleStroke(nvg, convertColour(lineColour), convertColour(shadowColour), convertColour(Colours::transparentBlack), 0.0f, false, false, 0.0f));
-            nvgStroke(nvg);
+            auto const lineColour = colours.dataColour.brighter(0.6f);
+            nanovg::nvgStrokePaint(nvg, nanovg::nvgDoubleStroke(nvg, nvgColour(lineColour), nvgColour(shadowColour), nvgColour(Colours::transparentBlack), 0.0f, false, false, 0.0f));
+            nanovg::nvgStroke(nvg);
         }
 
-        nvgBeginPath(nvg);
-        nvgFillColor(nvg, nvgRGBAf(0.6f, 0.6f, 0.6f, 0.7f));
-        nvgCircle(nvg, lastMousePos.x, lastMousePos.y, 3.5f);
-        nvgFill(nvg);
+        nanovg::nvgBeginPath(nvg);
+        nanovg::nvgFillColor(nvg, nanovg::nvgRGBAf(0.6f, 0.6f, 0.6f, 0.7f));
+        nanovg::nvgCircle(nvg, lastMousePos.x, lastMousePos.y, 3.5f);
+        nanovg::nvgFill(nvg);
     }
 
     void toNextIolet()
@@ -305,13 +348,11 @@ public:
             return;
 
         iolet->removeMouseListener(this);
-        iolet->isTargeted = false;
-        iolet->repaint();
+        iolet->setTargeted(false);
 
         iolet = iolet->getNextIolet();
         iolet->addMouseListener(this, false);
-        iolet->isTargeted = true;
-        iolet->repaint();
+        iolet->setTargeted(true);
 
         updatePosition(cnv->getMouseXYRelative().toFloat());
     }

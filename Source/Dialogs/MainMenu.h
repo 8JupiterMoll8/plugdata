@@ -13,8 +13,6 @@ class MainMenu : public PopupMenu {
 
 public:
     explicit MainMenu(PluginEditor* editor)
-        : settingsTree(SettingsFile::getInstance()->getValueTree())
-        , themeSelector(settingsTree)
     {
         addCustomItem(1, themeSelector, 70, 45, false);
         addSeparator();
@@ -25,29 +23,27 @@ public:
 
         auto const recentlyOpened = new PopupMenu();
 
-        auto recentlyOpenedTree = settingsTree.getChildWithName("RecentlyOpened");
-        if (recentlyOpenedTree.isValid()) {
-            for (int i = 0; i < recentlyOpenedTree.getNumChildren(); i++) {
-                auto path = File(recentlyOpenedTree.getChild(i).getProperty("Path").toString());
-                recentlyOpened->addItem(path.getFileName(), [path, editor]() mutable {
-                    if (path.existsAsFile()) {
-                        editor->getTabComponent().openPatch(URL(path));
-                    } else {
-                        editor->pd->logError("Patch not found");
-                    }
-                });
-            }
+        auto& recentlyOpenedList = SettingsFile::getInstance()->getProperty<VarArray>("recently_opened");
+        for (int i = 0; i < recentlyOpenedList.size(); i++) {
+            auto path = File(recentlyOpenedList[i].getProperty("path", "").toString());
+            recentlyOpened->addItem(path.getFileName(), [path, editor]() mutable {
+                if (path.existsAsFile()) {
+                    editor->getTabComponent().openPatch(URL(path));
+                } else {
+                    editor->pd->logError("Patch not found");
+                }
+            });
+        }
 
-            if ((menuItems[2]->isActive = recentlyOpenedTree.getNumChildren() > 0)) {
-                recentlyOpened->addSeparator();
-                recentlyOpened->addItem("Clear recently opened", [recentlyOpenedTree, editor]() mutable {
-                    recentlyOpenedTree.removeAllChildren(nullptr);
-                    // Make sure to clear the recent items in the current welcome panel
-                    if (editor->welcomePanel)
-                        editor->welcomePanel->triggerAsyncUpdate();
-                    SettingsFile::getInstance()->reloadSettings();
-                });
-            }
+        if ((menuItems[2]->isActive = recentlyOpenedList.size() > 0)) {
+            recentlyOpened->addSeparator();
+            recentlyOpened->addItem("Clear recently opened", [recentlyOpenedList, editor]() mutable {
+                recentlyOpenedList.clear();
+                // Make sure to clear the recent items in the current welcome panel
+                if (editor->welcomePanel)
+                    editor->welcomePanel->triggerAsyncUpdate();
+                SettingsFile::getInstance()->reloadSettings();
+            });
         }
 
         addCustomItem(getMenuItemID(MenuItem::History), std::unique_ptr<IconMenuItem>(menuItems[getMenuItemIndex(MenuItem::History)]), std::unique_ptr<PopupMenu const>(recentlyOpened), "Recently opened");
@@ -58,23 +54,29 @@ public:
 
         auto const plugdataState = new PopupMenu();
         plugdataState->addItem("Import workspace", [editor]() mutable {
-            static auto openChooser = std::make_unique<FileChooser>("Choose file to open", File(SettingsFile::getInstance()->getProperty<String>("last_filechooser_path")), "*.pdproj", SettingsFile::getInstance()->wantsNativeDialog());
+            static auto openChooser = std::make_unique<FileChooser>("Choose file to open", SettingsFile::getInstance()->getLastBrowserPathForId("WorkspacePath"), "*.pdproj", SettingsFile::getInstance()->wantsNativeDialog());
 
             openChooser->launchAsync(FileBrowserComponent::openMode | FileBrowserComponent::canSelectFiles, [editor](FileChooser const& f) {
-                MemoryBlock block;
-                f.getResult().loadFileAsData(block);
-                editor->processor.setStateInformation(block.getData(), block.getSize());
+                auto file = f.getResult();
+                if (file != File { }) {
+                    MemoryBlock block;
+                    file.loadFileAsData(block);
+                    editor->processor.setStateInformation(block.getData(), block.getSize());
+                    SettingsFile::getInstance()->setLastBrowserPathForId("WorkspacePath", file.getParentDirectory());
+                }
             });
         });
+
         plugdataState->addItem("Export workspace", [editor]() mutable {
-            static auto saveChooser = std::make_unique<FileChooser>("Choose save location", File(SettingsFile::getInstance()->getProperty<String>("last_filechooser_path")), "*.pdproj", SettingsFile::getInstance()->wantsNativeDialog());
+            static auto saveChooser = std::make_unique<FileChooser>("Choose save location", SettingsFile::getInstance()->getLastBrowserPathForId("WorkspacePath"), "*.pdproj", SettingsFile::getInstance()->wantsNativeDialog());
 
             saveChooser->launchAsync(FileBrowserComponent::saveMode | FileBrowserComponent::canSelectFiles, [editor](FileChooser const& f) {
                 auto const file = f.getResult().withFileExtension(".pdproj");
-                if (file.getParentDirectory().exists()) {
+                if (file != File { } && file.getParentDirectory().exists()) {
                     MemoryBlock destData;
                     editor->processor.getStateInformation(destData);
                     file.replaceWithData(destData.getData(), destData.getSize());
+                    SettingsFile::getInstance()->setLastBrowserPathForId("WorkspacePath", file.getParentDirectory());
                 }
             });
         });
@@ -83,10 +85,15 @@ public:
 
         addSeparator();
 
-#if !JUCE_IOS
-        addCustomItem(getMenuItemID(MenuItem::CompiledMode), std::unique_ptr<IconMenuItem>(menuItems[getMenuItemIndex(MenuItem::CompiledMode)]), nullptr, "Compiled mode");
-        addCustomItem(getMenuItemID(MenuItem::Compile), std::unique_ptr<IconMenuItem>(menuItems[getMenuItemIndex(MenuItem::Compile)]), nullptr, "Compile...");
-#endif
+        bool const hvccModeEnabled = SettingsFile::getInstance()->getProperty<bool>("hvcc_mode");
+        auto const compileMenu = new PopupMenu();
+        compileMenu->addItem("Compiled mode", true, hvccModeEnabled, [](){
+            auto currentlyEnabled = SettingsFile::getInstance()->getProperty<bool>("hvcc_mode");
+            SettingsFile::getInstance()->setProperty("hvcc_mode", !currentlyEnabled);
+        });
+        compileMenu->addCommandItem(&editor->commandManager, CommandIDs::Compile);
+
+        addCustomItem(getMenuItemID(MenuItem::Compile), std::unique_ptr<IconMenuItem>(menuItems[getMenuItemIndex(MenuItem::Compile)]), std::unique_ptr<PopupMenu const>(compileMenu), "Compiler");
 
         addSeparator();
 
@@ -98,13 +105,10 @@ public:
         addCustomItem(getMenuItemID(MenuItem::About), std::unique_ptr<IconMenuItem>(menuItems[getMenuItemIndex(MenuItem::About)]), nullptr, "About...");
 
         // Toggles hvcc compatibility mode
-        bool const hvccModeEnabled = settingsTree.hasProperty("hvcc_mode") && static_cast<bool>(settingsTree.getProperty("hvcc_mode"));
         bool const hasCanvas = editor->getCurrentCanvas() != nullptr;
 
         menuItems[getMenuItemIndex(MenuItem::Save)]->isActive = hasCanvas;
         menuItems[getMenuItemIndex(MenuItem::SaveAs)]->isActive = hasCanvas;
-
-        menuItems[getMenuItemIndex(MenuItem::CompiledMode)]->isTicked = hvccModeEnabled;
     }
 
     class IconMenuItem final : public PopupMenu::CustomComponent {
@@ -139,9 +143,8 @@ public:
 
             auto const colour = findColour(PopupMenu::textColourId).withMultipliedAlpha(isActive ? 1.0f : 0.5f);
             if (isItemHighlighted() && isActive) {
-                g.setColour(findColour(PlugDataColour::popupMenuActiveBackgroundColourId));
-
-                g.fillRoundedRectangle(r.toFloat().reduced(0, 1), Corners::defaultCornerRadius);
+                g.setColour(getThemeColours(*this).popupMenuActiveBackgroundColour);
+                g.fillRoundedRectangle(r.toFloat(), Corners::defaultCornerRadius);
             }
 
             g.setColour(colour);
@@ -170,7 +173,7 @@ public:
 
             int const fontHeight = std::min(17.0f, maxFontHeight);
             if (hasSubMenu) {
-                auto const arrowH = 0.6f * Font(fontHeight).getAscent();
+                auto const arrowH = 0.6f * Font(FontOptions(fontHeight)).getAscent();
 
                 auto const x = static_cast<float>(r.removeFromRight(static_cast<int>(arrowH) + 2).getX());
                 auto const halfH = static_cast<float>(r.getCentreY());
@@ -192,13 +195,11 @@ public:
         , public AsyncUpdater {
 
         Value theme;
-        ValueTree settingsTree;
 
     public:
-        explicit ThemeSelector(ValueTree tree)
-            : settingsTree(std::move(tree))
+        explicit ThemeSelector()
         {
-            theme.referTo(settingsTree.getPropertyAsValue("theme", nullptr));
+            theme.referTo(SettingsFile::getInstance()->getPropertyAsValue("theme"));
         }
 
         void paint(Graphics& g) override
@@ -209,9 +210,8 @@ public:
             firstBounds = firstBounds.withSizeKeepingCentre(30, 30);
             secondBounds = secondBounds.withSizeKeepingCentre(30, 30);
 
-            auto const themesTree = settingsTree.getChildWithName("ColourThemes");
-            auto const firstThemeTree = themesTree.getChildWithProperty("theme", PlugDataLook::selectedThemes[0]);
-            auto const secondThemeTree = themesTree.getChildWithProperty("theme", PlugDataLook::selectedThemes[1]);
+            auto const firstThemeTree = SettingsFile::getInstance()->getTheme(PlugDataLook::selectedThemes[0]);
+            auto const secondThemeTree = SettingsFile::getInstance()->getTheme(PlugDataLook::selectedThemes[1]);
 
             g.setColour(PlugDataLook::getThemeColour(firstThemeTree, PlugDataColour::canvasBackgroundColourId));
             g.fillEllipse(firstBounds.toFloat());
@@ -228,7 +228,7 @@ public:
             auto const tick = getLookAndFeel().getTickShape(0.6f);
             auto tickBounds = Rectangle<int>();
 
-            if (theme.toString() == firstThemeTree.getProperty("theme").toString()) {
+            if (theme.toString() == firstThemeTree->getProperty("name").toString()) {
                 auto const textColour = PlugDataLook::getThemeColour(firstThemeTree, PlugDataColour::canvasBackgroundColourId).contrasting(0.8f);
                 g.setColour(textColour);
                 tickBounds = firstBounds;
@@ -272,7 +272,6 @@ public:
         Save,
         SaveAs,
         State,
-        CompiledMode,
         Compile,
         FindExternals,
         Discover,
@@ -293,25 +292,22 @@ public:
         return item - 1;
     }
 
-    StackArray<IconMenuItem*, 12> menuItems = {
+    StackArray<IconMenuItem*, 11> menuItems = {
         new IconMenuItem(Icons::New, "New patch", false, false),
         new IconMenuItem(Icons::Open, "Open patch...", false, false),
         new IconMenuItem(Icons::History, "Recently opened", true, false),
 
-        new IconMenuItem(Icons::SavePatch, "Save patch", false, false),
+        new IconMenuItem(Icons::Save, "Save patch", false, false),
         new IconMenuItem(Icons::SaveAs, "Save patch as...", false, false),
 
         new IconMenuItem(Icons::ExportState, "Workspace", true, false),
 
-        new IconMenuItem("", "Compiled mode", false, true),
-        new IconMenuItem(Icons::DevTools, "Compile...", false, false),
+        new IconMenuItem(Icons::DevTools, "Compiler", true, false),
 
         new IconMenuItem(Icons::Externals, "Find externals...", false, false),
         new IconMenuItem(Icons::Sparkle, "Discover...", false, false),
         new IconMenuItem(Icons::Settings, "Settings...", false, false),
         new IconMenuItem(Icons::Info, "About...", false, false),
     };
-
-    ValueTree settingsTree;
     ThemeSelector themeSelector;
 };

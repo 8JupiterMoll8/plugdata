@@ -6,15 +6,20 @@
 
 #define JUCE_GUI_BASICS_INCLUDE_XHEADERS 1
 #include <juce_gui_basics/juce_gui_basics.h>
+#include <juce_audio_processors/juce_audio_processors.h>
 
 #include "OSUtils.h"
 #include "Config.h"
+
+#if JUCE_LINUX || JUCE_BSD
+#    include <juce_gui_basics/native/juce_WaylandWindowState_linux.h>
+#endif
 
 #if !defined(__APPLE__)
 #    undef JUCE_GUI_BASICS_INCLUDE_XHEADERS
 #    include <raw_keyboard_input/raw_keyboard_input.cpp>
 #else
-#include <sys/xattr.h>
+#    include <sys/xattr.h>
 #endif
 
 #if (defined(__cpp_lib_filesystem) || __has_include(<filesystem>)) && (!defined(__APPLE__) || __ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__ >= 101500)
@@ -44,67 +49,95 @@ namespace fs = ghc::filesystem;
 
 bool OSUtils::createJunction(std::string from, std::string to)
 {
-
-    typedef struct {
-        DWORD ReparseTag;
-        DWORD ReparseDataLength;
-        WORD Reserved;
-        WORD ReparseTargetLength;
-        WORD ReparseTargetMaximumLength;
-        WORD Reserved1;
-        WCHAR ReparseTarget[1];
-    } REPARSE_MOUNTPOINT_DATA_BUFFER, *PREPARSE_MOUNTPOINT_DATA_BUFFER;
-
-    auto szJunction = (LPCTSTR)from.c_str();
-    auto szPath = (LPCTSTR)to.c_str();
-
-    BYTE buf[sizeof(REPARSE_MOUNTPOINT_DATA_BUFFER) + MAX_PATH * sizeof(WCHAR)];
-    REPARSE_MOUNTPOINT_DATA_BUFFER& ReparseBuffer = (REPARSE_MOUNTPOINT_DATA_BUFFER&)buf;
-    char szTarget[MAX_PATH] = "\\??\\";
-
-    strcat(szTarget, szPath);
-    strcat(szTarget, "\\");
-
-    if (!::CreateDirectory(szJunction, nullptr))
+    auto const linkPath = std::wstring(juce::String::fromUTF8(from.c_str(), static_cast<int>(from.size())).toWideCharPointer());
+    auto const targetPath = std::wstring(juce::String::fromUTF8(to.c_str(), static_cast<int>(to.size())).toWideCharPointer());
+    if (linkPath.empty() || targetPath.empty())
         return false;
 
-    // Obtain SE_RESTORE_NAME privilege (required for opening a directory)
-    HANDLE hToken = nullptr;
-    TOKEN_PRIVILEGES tp;
-    try {
-        if (!::OpenProcessToken(::GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &hToken))
-            throw ::GetLastError();
-        if (!::LookupPrivilegeValue(nullptr, SE_RESTORE_NAME, &tp.Privileges[0].Luid))
-            throw ::GetLastError();
-        tp.PrivilegeCount = 1;
-        tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-        if (!::AdjustTokenPrivileges(hToken, FALSE, &tp, sizeof(TOKEN_PRIVILEGES), nullptr, nullptr))
+    auto const requiredLength = GetFullPathNameW(targetPath.c_str(), 0, nullptr, nullptr);
+    if (requiredLength == 0)
+        return false;
+
+    std::wstring absTarget(requiredLength, L'\0');
+    auto const length = GetFullPathNameW(targetPath.c_str(), requiredLength, absTarget.data(), nullptr);
+    if (length == 0 || length >= requiredLength)
+        return false;
+
+    absTarget.resize(length);
+
+    auto substName = std::wstring();
+    if (absTarget.compare(0, 8, L"\\\\?\\UNC\\") == 0) {
+        substName = L"\\??\\UNC\\" + absTarget.substr(8);
+    } else if (absTarget.compare(0, 4, L"\\\\?\\") == 0) {
+        substName = L"\\??\\" + absTarget.substr(4);
+    } else if (absTarget.compare(0, 2, L"\\\\") == 0) {
+        substName = L"\\??\\UNC\\" + absTarget.substr(2);
+    } else {
+        substName = L"\\??\\" + absTarget;
+    }
+
+    auto const printName = absTarget;
+
+    auto createdDirectory = false;
+    if (!CreateDirectoryW(linkPath.c_str(), nullptr)) {
+        if (GetLastError() != ERROR_ALREADY_EXISTS)
             return false;
-    } catch (DWORD) {
-    } // Ignore errors
-    if (hToken)
-        ::CloseHandle(hToken);
+    } else {
+        createdDirectory = true;
+    }
 
-    HANDLE hDir = ::CreateFile(szJunction, GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-    if (hDir == INVALID_HANDLE_VALUE)
-        return false;
-
-    memset(buf, 0, sizeof(buf));
-    ReparseBuffer.ReparseTag = IO_REPARSE_TAG_MOUNT_POINT;
-    int len = ::MultiByteToWideChar(CP_ACP, 0, szTarget, -1, ReparseBuffer.ReparseTarget, MAX_PATH);
-    ReparseBuffer.ReparseTargetMaximumLength = (len--) * sizeof(WCHAR);
-    ReparseBuffer.ReparseTargetLength = len * sizeof(WCHAR);
-    ReparseBuffer.ReparseDataLength = ReparseBuffer.ReparseTargetLength + 12;
-
-    DWORD dwRet;
-    if (!::DeviceIoControl(hDir, FSCTL_SET_REPARSE_POINT, &ReparseBuffer, ReparseBuffer.ReparseDataLength + REPARSE_MOUNTPOINT_HEADER_SIZE, nullptr, 0, &dwRet, nullptr)) {
-        DWORD dr = ::GetLastError();
-        ::CloseHandle(hDir);
-        ::RemoveDirectory(szJunction);
+    auto* hDir = CreateFileW(linkPath.c_str(), GENERIC_WRITE, 0, nullptr,
+        OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (hDir == INVALID_HANDLE_VALUE) {
+        if (createdDirectory)
+            RemoveDirectoryW(linkPath.c_str());
         return false;
     }
 
-    ::CloseHandle(hDir);
+    auto const substBytes = substName.size() * sizeof(wchar_t);
+    auto const printBytes = printName.size() * sizeof(wchar_t);
+    auto const pathBufferBytes = substBytes + sizeof(wchar_t) + printBytes + sizeof(wchar_t);
+    auto const reparseDataBytes = 8 + pathBufferBytes;
+
+    if (substBytes > 0xffff || printBytes > 0xffff || pathBufferBytes > 0xffff || reparseDataBytes > 0xffff) {
+        CloseHandle(hDir);
+        if (createdDirectory)
+            RemoveDirectoryW(linkPath.c_str());
+        return false;
+    }
+
+    auto const reparseDataLength = static_cast<USHORT>(reparseDataBytes);
+    auto const totalBytes = static_cast<DWORD>(REPARSE_MOUNTPOINT_HEADER_SIZE + reparseDataLength);
+
+    std::vector<BYTE> buf(totalBytes, 0);
+    auto* const buffer = buf.data();
+
+    *reinterpret_cast<ULONG*>(buffer + 0) = IO_REPARSE_TAG_MOUNT_POINT;
+    *reinterpret_cast<USHORT*>(buffer + 4) = reparseDataLength;
+    *reinterpret_cast<USHORT*>(buffer + 6) = 0;
+    *reinterpret_cast<USHORT*>(buffer + 8) = 0;
+    *reinterpret_cast<USHORT*>(buffer + 10) = static_cast<USHORT>(substBytes);
+    *reinterpret_cast<USHORT*>(buffer + 12) = static_cast<USHORT>(substBytes + sizeof(wchar_t));
+    *reinterpret_cast<USHORT*>(buffer + 14) = static_cast<USHORT>(printBytes);
+
+    auto* const pathBuffer = reinterpret_cast<wchar_t*>(buffer + 16);
+    memcpy(pathBuffer, substName.data(), substBytes);
+    pathBuffer[substName.size()] = L'\0';
+    memcpy(pathBuffer + substName.size() + 1, printName.data(), printBytes);
+    pathBuffer[substName.size() + 1 + printName.size()] = L'\0';
+
+    DWORD dwRet = 0;
+    BOOL ok = DeviceIoControl(hDir, FSCTL_SET_REPARSE_POINT,
+        buf.data(), totalBytes,
+        nullptr, 0, &dwRet, nullptr);
+    CloseHandle(hDir);
+
+    if (!ok) {
+        if (createdDirectory)
+            RemoveDirectoryW(linkPath.c_str());
+        return false;
+    }
+
     return true;
 }
 
@@ -120,10 +153,10 @@ bool OSUtils::createHardLink(std::string from, std::string to)
 
 // Function to run a command as admin on Windows
 // It should spawn a dialog, asking for permissions
-bool OSUtils::runAsAdmin(std::string command, std::string parameters, void* hWndPtr)
+bool OSUtils::runAsAdmin(std::string command, std::string parameters, juce::ComponentPeer* peer)
 {
 
-    HWND hWnd = (HWND)hWndPtr;
+    HWND hWnd = (HWND)peer->getNativeHandle();
     auto lpFile = (LPCTSTR)command.c_str();
     auto lpParameters = (LPCTSTR)parameters.c_str();
 
@@ -143,7 +176,7 @@ bool OSUtils::runAsAdmin(std::string command, std::string parameters, void* hWnd
     return (bool)retval;
 }
 
-void OSUtils::useWindowsNativeDecorations(void* windowHandle, bool rounded)
+void OSUtils::useWindowsNativeDecorations(juce::ComponentPeer* peer, bool rounded)
 {
     if (auto hDwmApi = LoadLibrary("dwmapi.dll"); hDwmApi) {
         typedef HRESULT(WINAPI * PFNSETWINDOWATTRIBUTE)(HWND hWnd, DWORD dwAttribute, LPCVOID pvAttribute, DWORD cbAttribute);
@@ -159,7 +192,7 @@ void OSUtils::useWindowsNativeDecorations(void* windowHandle, bool rounded)
 
             // Set corners to rounded
             auto preference = rounded ? DWMWCP_ROUND : DWMWCP_DONOTROUND;
-            pfnSetWindowAttribute((HWND)windowHandle, DWMWA_WINDOW_CORNER_PREFERENCE, &preference, sizeof(preference));
+            pfnSetWindowAttribute((HWND)peer->getNativeHandle(), DWMWA_WINDOW_CORNER_PREFERENCE, &preference, sizeof(preference));
         }
         FreeLibrary(hDwmApi);
     }
@@ -189,15 +222,38 @@ OSUtils::KeyboardLayout OSUtils::getKeyboardLayout()
 // Selects Linux and BSD
 #if defined(__unix__) && !defined(__APPLE__)
 
-void OSUtils::updateX11Constraints(void* handle)
+bool OSUtils::isWaylandWindow(juce::ComponentPeer* peer)
 {
-    if (handle) {
-        juce::XWindowSystem::getInstance()->updateConstraints(reinterpret_cast<::Window>(handle));
+    return juce::isWaylandComponentPeer(peer);
+}
+
+void OSUtils::updateLinuxWindowConstraints(juce::ComponentPeer* peer)
+{
+    if (peer == nullptr)
+        return;
+
+    if (isWaylandWindow(peer))
+    {
+        // Wayland refreshes constraints even when bounds are unchanged.
+        peer->setBounds(peer->getBounds(), peer->isFullScreen());
+        return;
+    }
+
+    auto* x11 = juce::XWindowSystem::getInstance();
+    const auto window = reinterpret_cast<::Window>(peer->getNativeHandle());
+
+    if (window != 0)
+    {
+        const auto physicalBounds = x11->getWindowBounds(window, 0);
+        x11->updateSizeHints(window, *peer, physicalBounds);
     }
 }
 
-bool OSUtils::isX11WindowMaximised(void* handle)
+bool OSUtils::isLinuxWindowMaximised(ComponentPeer* peer)
 {
+    if (isWaylandWindow(peer))
+        return juce::isWaylandWindowMaximised(*peer);
+
     enum window_state_t {
         WINDOW_STATE_NONE = 0,
         WINDOW_STATE_MODAL = (1 << 0),
@@ -241,7 +297,7 @@ bool OSUtils::isX11WindowMaximised(void* handle)
     Atom net_wm_state;
     Atom net_wm_states[WINDOW_STATE_SIZE];
 
-    auto window = (Window)handle;
+    auto window = (Window)peer->getNativeHandle();
 
     if (!display)
         return false;
@@ -277,12 +333,18 @@ bool OSUtils::isX11WindowMaximised(void* handle)
         XFree(states);
     }
 
-    return state & WINDOW_STATE_MAXIMIZED;
+    return (state & WINDOW_STATE_MAXIMIZED) != 0;
 }
 
-void OSUtils::maximiseX11Window(void* handle, bool shouldBeMaximised)
+void OSUtils::maximiseLinuxWindow(ComponentPeer* peer, bool shouldBeMaximised)
 {
-    juce::XWindowSystem::getInstance()->setMaximised((::Window)handle, shouldBeMaximised);
+    // Not peer->setFullScreen(): on Wayland that requests a fullscreen window rather than a maximised one
+    if (isWaylandWindow(peer)) {
+        juce::setWaylandWindowMaximised(*peer, shouldBeMaximised);
+        return;
+    }
+
+    juce::XWindowSystem::getInstance()->setMaximised((::Window)peer->getNativeHandle(), shouldBeMaximised);
 }
 
 OSUtils::KeyboardLayout OSUtils::getKeyboardLayout()
@@ -311,8 +373,7 @@ OSUtils::KeyboardLayout OSUtils::getKeyboardLayout()
 }
 #endif // Linux/BSD
 
-
-bool OSUtils::isDirectoryFast(const juce::String& path)
+bool OSUtils::isDirectoryFast(juce::String const& path)
 {
     std::error_code ec;
 #ifdef _WIN32
@@ -428,6 +489,37 @@ SmallArray<juce::File> OSUtils::iterateDirectory(juce::File const& directory, bo
     return files;
 }
 
+bool OSUtils::moveFileTo(juce::File const& target, juce::File const& destination)
+{
+#ifdef _WIN32
+    auto targetPath = std::wstring(target.getFullPathName().toWideCharPointer());
+    auto destinationPath = std::wstring(destination.getFullPathName().toWideCharPointer());
+#else
+    auto targetPath = target.getFullPathName().toStdString();
+    auto destinationPath = destination.getFullPathName().toStdString();
+#endif
+
+    std::error_code ec;
+    fs::rename(targetPath, destinationPath, ec);
+    if (!ec)
+        return true;
+
+    fs::copy(targetPath, destinationPath,
+        fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
+    if (ec)
+        return false;
+
+    fs::remove_all(targetPath, ec);
+    if (ec) {
+        // source couldn't be removed; optionally clean up destination
+        std::error_code ignored;
+        fs::remove_all(destinationPath, ignored);
+        return false;
+    }
+
+    return true;
+}
+
 // needs to be in OSutils because it needs <windows.h>
 unsigned int OSUtils::keycodeToHID(unsigned int scancode)
 {
@@ -495,13 +587,15 @@ void* OSUtils::getDesktopParentPeer(Component* component)
 
     if (auto* peer = component->getPeer())
         return peer->getNativeHandle();
-
-    return nullptr;
-#else
-    return nullptr;
+#elif JUCE_LINUX || JUCE_BSD
+#    if JUCE_WAYLAND
+    if (WaylandWindowSystem::getInstance()->isWaylandAvailable() && dynamic_cast<AudioProcessorEditor*>(component))
+        if (auto* peer = component->getPeer())
+            return WaylandWindowSystem::getInstance()->getWaylandWindowForPeer(peer);
+#    endif
 #endif
+    return nullptr;
 }
-
 
 bool OSUtils::is24HourTimeFormat()
 {
@@ -541,44 +635,43 @@ bool OSUtils::is24HourTimeFormat()
 #endif
 }
 
-bool OSUtils::isFileQuarantined(const juce::File& file)
+bool OSUtils::isFileQuarantined(juce::File const& file)
 {
 #if JUCE_MAC
-    const char* attrName = "com.apple.quarantine";
-    const char* path = file.getFullPathName().toRawUTF8();
+    char const* attrName = "com.apple.quarantine";
+    char const* path = file.getFullPathName().toRawUTF8();
     ssize_t result = getxattr(path, attrName, nullptr, 0, 0, 0);
     return result != -1;
 #elif JUCE_WINDOWS
-    const auto adsPath = file.getFullPathName() + ":Zone.Identifier";
-    HANDLE h = CreateFileW (adsPath.toWideCharPointer(),
-                            GENERIC_READ,
-                            FILE_SHARE_READ,
-                            nullptr,
-                            OPEN_EXISTING,
-                            FILE_ATTRIBUTE_NORMAL,
-                            nullptr);
-    
+    auto const adsPath = file.getFullPathName() + ":Zone.Identifier";
+    HANDLE h = CreateFileW(adsPath.toWideCharPointer(),
+        GENERIC_READ,
+        FILE_SHARE_READ,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+
     if (h == INVALID_HANDLE_VALUE)
         return false;
-    
-    CloseHandle (h);
+
+    CloseHandle(h);
     return true;
 #else
     // Linux / other platforms: no standard mechanism
-    juce::ignoreUnused (file);
+    juce::ignoreUnused(file);
     return false;
 #endif
 }
 
-
-void OSUtils::removeFromQuarantine(const juce::File& file)
+void OSUtils::removeFromQuarantine(juce::File const& file)
 {
 #if JUCE_MAC
-    const char* attrName = "com.apple.quarantine";
-    const char* path = file.getFullPathName().toRawUTF8();
+    char const* attrName = "com.apple.quarantine";
+    char const* path = file.getFullPathName().toRawUTF8();
     removexattr(path, attrName, 0);
 #elif JUCE_WINDOWS
-    const auto adsPath = file.getFullPathName() + ":Zone.Identifier";
+    auto const adsPath = file.getFullPathName() + ":Zone.Identifier";
     DeleteFileW(adsPath.toWideCharPointer());
 #else
     juce::ignoreUnused(file);

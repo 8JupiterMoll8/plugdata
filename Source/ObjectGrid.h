@@ -5,13 +5,13 @@
  */
 
 #pragma once
+#include <juce_animation/juce_animation.h>
 #include "Utility/SettingsFile.h"
 #include "NVGSurface.h"
 
 class Object;
 class Canvas;
-class ObjectGrid final : public SettingsFileListener
-    , public Timer {
+class ObjectGrid final : public SettingsFileListener {
 public:
     int gridSize = 20;
 
@@ -19,6 +19,8 @@ public:
 
     Point<int> performResize(Object* toDrag, Point<int> dragOffset, Rectangle<int> newResizeBounds);
     Point<int> performMove(Object* toDrag, Point<int> dragOffset);
+
+    void positionNewObject(Object* newObject, Point<int> mousePosition);
 
     void clearIndicators(bool fast);
 
@@ -34,7 +36,7 @@ private:
         HorizontalCentre,
     };
 
-    void timerCallback() override;
+    void startLineFadeAnimation(int idx, float ms, float targetAlpha);
 
     void settingsChanged(String const& name, var const& value) override;
 
@@ -44,15 +46,17 @@ private:
 
     static Line<int> getObjectIndicatorLine(Side side, Rectangle<int> b1, Rectangle<int> b2);
 
-    static constexpr int objectTolerance = 6;
-    static constexpr int connectionTolerance = 9;
+    int objectTolerance = 6;
+    int connectionTolerance = 9;
 
     Line<int> lines[2];
-    float lineAlpha[2] = {};
-    float lineTargetAlpha[2] = {};
-    float lineAlphaMultiplier[2] = {};
+    float lineAlpha[2] = { };
+    float lineTargetAlpha[2] = { };
     Canvas* cnv;
 
     int gridType;
     bool gridEnabled;
+
+    VBlankAnimatorUpdater updater;
+    Animator lineAnimators[2] = { ValueAnimatorBuilder { }.build(), ValueAnimatorBuilder { }.build() };
 };

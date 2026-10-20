@@ -30,6 +30,13 @@ public:
         : ObjectBase(obj, parent)
         , input(false)
     {
+
+        input.onEditorShow = [this]() {
+            auto const fg = ::getValue<Colour>(primaryColour);
+            input.setColour(Label::textWhenEditingColourId, fg);
+            input.setColour(TextEditor::outlineColourId, Colours::transparentBlack);
+        };
+
         input.onEditorHide = [this] {
             sendFloatValue(input.getText().getFloatValue());
         };
@@ -65,10 +72,9 @@ public:
             return;
 
         input.setText(input.formatNumber(getValue()), dontSendNotification);
-
         min = getMinimum();
         max = getMaximum();
-        
+
         input.setMinimum(::getValue<float>(min));
         input.setMaximum(::getValue<float>(max));
 
@@ -76,16 +82,11 @@ public:
             interval = object->x_rate;
             ramp = object->x_ramp_ms;
             init = object->x_set_val;
-            primaryColour = "ff" + String::fromUTF8(object->x_fg->s_name + 1);
-            secondaryColour = "ff" + String::fromUTF8(object->x_bg->s_name + 1);
+            primaryColour = colourToVar(Colour::fromString("ff" + String::fromUTF8(object->x_fg->s_name + 1)));
+            secondaryColour = colourToVar(Colour::fromString("ff" + String::fromUTF8(object->x_bg->s_name + 1)));
             mode = object->x_outmode;
             sizeProperty = VarArray { var(object->x_width), var(object->x_height) };
         }
-
-        auto const fg = Colour::fromString(primaryColour.toString());
-        getLookAndFeel().setColour(Label::textColourId, fg);
-        getLookAndFeel().setColour(Label::textWhenEditingColourId, fg);
-        getLookAndFeel().setColour(TextEditor::textColourId, fg);
     }
 
     Rectangle<int> getPdBounds() override
@@ -98,7 +99,7 @@ public:
             return { x, y, w, h };
         }
 
-        return {};
+        return { };
     }
 
     void updateSizeProperty() override
@@ -214,9 +215,9 @@ public:
                 nbx->x_set_val = ::getValue<float>(init);
             }
         } else if (value.refersToSameSourceAs(primaryColour)) {
-            setForegroundColour(primaryColour.toString());
+            setForegroundColour(::getValue<Colour>(primaryColour).toString());
         } else if (value.refersToSameSourceAs(secondaryColour)) {
-            setBackgroundColour(secondaryColour.toString());
+            setBackgroundColour(::getValue<Colour>(secondaryColour).toString());
         }
     }
 
@@ -226,12 +227,6 @@ public:
         if (auto numbox = ptr.get<t_fake_numbox>()) {
             numbox->x_fg = pd->generateSymbol("#" + colour.substring(2));
         }
-
-        auto const col = Colour::fromString(colour);
-        getLookAndFeel().setColour(Label::textColourId, col);
-        getLookAndFeel().setColour(Label::textWhenEditingColourId, col);
-        getLookAndFeel().setColour(TextEditor::textColourId, col);
-
         repaint();
     }
 
@@ -246,17 +241,19 @@ public:
 
     void render(NVGcontext* nvg) override
     {
-        auto const b = getLocalBounds().toFloat();
-        auto const backgroundColour = Colour::fromString(secondaryColour.toString());
-        bool const selected = object->isSelected() && !cnv->isGraph;
-        auto const outlineColour = cnv->editor->getLookAndFeel().findColour(selected ? PlugDataColour::objectSelectedOutlineColourId : PlugDataColour::objectOutlineColourId);
+        auto const& colours = getThemeColours();
 
-        nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), convertColour(backgroundColour), convertColour(outlineColour), Corners::objectCornerRadius);
+        auto const b = getLocalBounds().toFloat();
+        auto const backgroundColour = ::getValue<Colour>(secondaryColour);
+        bool const selected = object->isSelected() && !cnv->isGraph;
+        auto const outlineColour = selected ? colours.objectSelectedOutlineColour : colours.objectOutlineColour;
+
+        nanovg::nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), nvgColour(backgroundColour), nvgColour(outlineColour), getPlugDataLook(*this).getObjectCornerRadius());
 
         {
             NVGScopedState scopedState(nvg);
-            nvgTranslate(nvg, input.getX(), input.getY());
-            input.render(nvg);
+            nanovg::nvgTranslate(nvg, input.getX(), input.getY());
+            input.render(nvg, cnv->editor->getNanoLLGC());
         }
     }
 

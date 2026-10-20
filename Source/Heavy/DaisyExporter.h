@@ -8,7 +8,6 @@
 class DaisyExporter final : public ExporterBase {
 public:
     Value targetBoardValue = SynchronousValue(var(1));
-    Value exportTypeValue = SynchronousValue(var(3));
     Value usbMidiValue = SynchronousValue(var(0));
     Value debugPrintValue = SynchronousValue(var(0));
     Value blocksizeValue = SynchronousValue(48);
@@ -16,22 +15,20 @@ public:
     Value patchSizeValue = SynchronousValue(var(1));
     Value appTypeValue = SynchronousValue(var(0));
 
-    bool dontOpenFileChooser = false;
-
     File customBoardDefinition;
     File customLinker;
 
-    TextButton flashButton = TextButton("Flash");
-    TextButton flashBootloaderButton = TextButton("Bootloader");
     PropertiesPanelProperty* usbMidiProperty;
     PropertiesPanelProperty* appTypeProperty;
 
     DaisyExporter(PluginEditor* editor, ExportingProgressView* exportingView)
         : ExporterBase(editor, exportingView)
     {
+        exportTypeValue = var(3);
+
         PropertiesArray properties;
         properties.add(new PropertiesPanel::ComboComponent("Target board", targetBoardValue, { "Pod", "Petal", "Patch", "Patch.Init()", "Field", "Versio", "Terrarium", "Hothouse", "Simple", "Custom JSON..." }));
-        properties.add(new PropertiesPanel::ComboComponent("Export type", exportTypeValue, { "Source code", "Binary", "Flash", "Flash Bootloader" }));
+        properties.add(new PropertiesPanel::ComboComponent("Export type", exportTypeValue, getExportTypes()));
         usbMidiProperty = new PropertiesPanel::BoolComponent("USB MIDI", usbMidiValue, { "No", "Yes" });
         properties.add(usbMidiProperty);
         properties.add(new PropertiesPanel::BoolComponent("Debug printing", debugPrintValue, { "No", "Yes" }));
@@ -49,19 +46,6 @@ public:
 
         panel.addSection("Daisy", properties);
 
-        exportButton.setVisible(false);
-        addAndMakeVisible(flashButton);
-        addAndMakeVisible(flashBootloaderButton);
-
-        auto const backgroundColour = findColour(PlugDataColour::panelBackgroundColourId);
-        flashButton.setColour(TextButton::buttonColourId, backgroundColour.contrasting(0.05f));
-        flashButton.setColour(TextButton::buttonOnColourId, backgroundColour.contrasting(0.1f));
-        flashButton.setColour(ComboBox::outlineColourId, Colours::transparentBlack);
-
-        flashBootloaderButton.setColour(TextButton::buttonColourId, backgroundColour.contrasting(0.05f));
-        flashBootloaderButton.setColour(TextButton::buttonOnColourId, backgroundColour.contrasting(0.1f));
-        flashBootloaderButton.setColour(ComboBox::outlineColourId, Colours::transparentBlack);
-
         exportTypeValue.addListener(this);
         targetBoardValue.addListener(this);
         usbMidiValue.addListener(this);
@@ -70,94 +54,67 @@ public:
         samplerateValue.addListener(this);
         patchSizeValue.addListener(this);
         appTypeValue.addListener(this);
-
-        flashButton.onClick = [this] {
-            auto const tempFolder = File::getSpecialLocation(File::tempDirectory).getChildFile("Heavy-" + Uuid().toString().substring(10));
-            deleteTempFileLater(tempFolder);
-            startExport(tempFolder);
-        };
-
-        flashBootloaderButton.onClick = [this, exportingView] {
-            addJob([this, exportingView]() mutable {
-                exportingView->monitorProcessOutput(this);
-                exportingView->showState(ExportingProgressView::Flashing);
-
-                auto const bin = toolchainDir.getChildFile("bin");
-                auto const make = bin.getChildFile("make" + exeSuffix);
-                auto const& gccPath = bin.getFullPathName();
-                auto const sourceDir = toolchainDir.getChildFile("lib").getChildFile("libdaisy").getChildFile("core");
-
-                int const result = flashBootloader(bin, sourceDir, make, gccPath);
-
-                exportingView->showState(result ? ExportingProgressView::BootloaderFlashFailure : ExportingProgressView::BootloaderFlashSuccess);
-                exportingView->stopMonitoring();
-
-                MessageManager::callAsync([this] {
-                    repaint();
-                });
-            });
-        };
     }
 
-    ValueTree getState() override
+    StringArray getExportTypes() const override
     {
-        ValueTree stateTree("Daisy");
-        stateTree.setProperty("inputPatchValue", getValue<String>(inputPatchValue), nullptr);
-        stateTree.setProperty("projectNameValue", getValue<String>(projectNameValue), nullptr);
-        stateTree.setProperty("projectCopyrightValue", getValue<String>(projectCopyrightValue), nullptr);
-        stateTree.setProperty("customBoardDefinitionValue", customBoardDefinition.getFullPathName(), nullptr);
-        stateTree.setProperty("targetBoardValue", getValue<int>(targetBoardValue), nullptr);
-        stateTree.setProperty("exportTypeValue", getValue<int>(exportTypeValue), nullptr);
-        stateTree.setProperty("usbMidiValue", getValue<int>(usbMidiValue), nullptr);
-        stateTree.setProperty("debugPrintValue", getValue<int>(debugPrintValue), nullptr);
-        stateTree.setProperty("blocksizeValue", getValue<int>(blocksizeValue), nullptr);
-        stateTree.setProperty("samplerateValue", getValue<int>(samplerateValue), nullptr);
-        stateTree.setProperty("patchSizeValue", getValue<int>(patchSizeValue), nullptr);
-        stateTree.setProperty("appTypeValue", getValue<int>(appTypeValue), nullptr);
-        stateTree.setProperty("customLinkerValue", customLinker.getFullPathName(), nullptr);
-        return stateTree;
+        return { "Source code", "Binary", "Flash", "Flash Bootloader" };
     }
 
-    void setState(ValueTree& stateTree) override
+    ExportAction getExportAction() const override
     {
-        ScopedValueSetter<bool> scopedValueSetter(dontOpenFileChooser, true);
-
-        auto const tree = stateTree.getChildWithName("Daisy");
-        inputPatchValue = tree.getProperty("inputPatchValue");
-        projectNameValue = tree.getProperty("projectNameValue");
-        projectCopyrightValue = tree.getProperty("projectCopyrightValue");
-        customBoardDefinition = File(tree.getProperty("customBoardDefinitionValue").toString());
-        targetBoardValue = tree.getProperty("targetBoardValue");
-        exportTypeValue = tree.getProperty("exportTypeValue");
-        usbMidiValue = tree.getProperty("usbMidiValue");
-        debugPrintValue = tree.getProperty("debugPrintValue");
-        blocksizeValue = tree.getProperty("blocksizeValue");
-        samplerateValue = tree.getProperty("samplerateValue");
-        patchSizeValue = tree.getProperty("patchSizeValue");
-        appTypeValue = tree.getProperty("appTypeValue");
-        customLinker = File(tree.getProperty("customLinkerValue").toString());
+        switch (getExportType()) {
+        case 3:
+            return Flash;
+        case 4:
+            return FlashBootloader;
+        default:
+            return Export;
+        }
     }
 
-    void resized() override
+    void getState(DynamicObject::Ptr globalState) override
     {
-        ExporterBase::resized();
-        flashButton.setBounds(exportButton.getBounds());
-        flashBootloaderButton.setBounds(exportButton.getBounds());
+        auto* state = new DynamicObject();
+        state->setProperty("input_patch_value", getValue<String>(inputPatchValue));
+        state->setProperty("project_name_value", getValue<String>(projectNameValue));
+        state->setProperty("project_copyright_value", getValue<String>(projectCopyrightValue));
+        state->setProperty("export_type_value", getValue<int>(exportTypeValue));
+        state->setProperty("target_board_value", getValue<int>(targetBoardValue));
+        state->setProperty("custom_board_definition_value", customBoardDefinition.getFullPathName());
+        state->setProperty("usb_midi_value", getValue<int>(usbMidiValue));
+        state->setProperty("debug_print_value", getValue<int>(debugPrintValue));
+        state->setProperty("blocksize_value", getValue<int>(blocksizeValue));
+        state->setProperty("samplerate_value", getValue<int>(samplerateValue));
+        state->setProperty("patch_size_value", getValue<int>(patchSizeValue));
+        state->setProperty("app_type_value", getValue<int>(appTypeValue));
+        state->setProperty("custom_linker_value", customLinker.getFullPathName());
+        globalState->setProperty("daisy", state);
+    }
+
+    void setState(DynamicObject::Ptr globalState) override
+    {
+        auto const state = globalState->getProperty("daisy").getDynamicObject();
+        if (!state)
+            return;
+        inputPatchValue = state->getProperty("input_patch_value");
+        projectNameValue = state->getProperty("project_name_value");
+        projectCopyrightValue = state->getProperty("project_copyright_value");
+        exportTypeValue = state->getProperty("export_type_value");
+        targetBoardValue = state->getProperty("target_board_value");
+        customBoardDefinition = File(state->getProperty("custom_board_definition_value"));
+        usbMidiValue = state->getProperty("usb_midi_value");
+        debugPrintValue = state->getProperty("debug_print_value");
+        blocksizeValue = state->getProperty("blocksize_value");
+        samplerateValue = state->getProperty("samplerate_value");
+        patchSizeValue = state->getProperty("patch_size_value");
+        appTypeValue = state->getProperty("app_type_value");
+        customLinker = File(state->getProperty("custom_linker_value"));
     }
 
     void valueChanged(Value& v) override
     {
         ExporterBase::valueChanged(v);
-
-        flashButton.setEnabled(validPatchSelected);
-
-        bool const flash = getValue<int>(exportTypeValue) == 3;
-        exportButton.setVisible(!flash);
-        flashButton.setVisible(flash);
-
-        bool const flashBootloader = getValue<int>(exportTypeValue) == 4;
-        exportButton.setVisible(!flashBootloader);
-        flashBootloaderButton.setVisible(flashBootloader);
 
         bool const debugPrint = getValue<int>(debugPrintValue);
         usbMidiProperty->setEnabled(!debugPrint);
@@ -178,7 +135,7 @@ public:
             int const idx = getValue<int>(targetBoardValue);
 
             // Custom board option
-            if (idx == 10 && !dontOpenFileChooser) {
+            if (idx == 10 && !blockDialog) {
                 Dialogs::showOpenDialog([this](URL const& url) {
                     auto const result = url.getLocalFile();
                     if (result.existsAsFile()) {
@@ -195,7 +152,7 @@ public:
             int const idx = getValue<int>(patchSizeValue);
 
             // Custom linker option
-            if (idx == 6 && !dontOpenFileChooser) {
+            if (idx == 6 && !blockDialog) {
                 Dialogs::showOpenDialog([this](URL const& url) {
                     auto const result = url.getLocalFile();
                     if (result.existsAsFile()) {
@@ -211,6 +168,7 @@ public:
 
     int flashBootloader(auto bin, auto sourceDir, auto make, auto gccPath)
     {
+        exportingView->reportStatus("Flashing bootloader");
         exportingView->logToConsole("Flashing bootloader...\n");
 
         String bootloaderScript = "export PATH=\"" + pathToString(bin) + ":$PATH\"\n"
@@ -230,9 +188,17 @@ public:
 
     bool performExport(String const& pdPatch, String const& outdir, String const& name, String const& copyright, StringArray const& searchPaths) override
     {
+        auto const bin = toolchainDir.getChildFile("bin");
+        auto const make = bin.getChildFile("make" + exeSuffix);
+
+        if (getExportAction() == FlashBootloader) {
+            auto const coreDir = toolchainDir.getChildFile("lib").getChildFile("libdaisy").getChildFile("core");
+            return flashBootloader(bin, coreDir, make, bin.getFullPathName());
+        }
+
         auto target = getValue<int>(targetBoardValue) - 1;
-        bool compile = getValue<int>(exportTypeValue) - 1;
-        bool flash = getValue<int>(exportTypeValue) == 3;
+        bool compile = getExportType() - 1;
+        bool flash = getExportType() == 3;
         bool usbMidi = getValue<int>(usbMidiValue);
         bool print = getValue<int>(debugPrintValue);
         auto blocksize = getValue<int>(blocksizeValue);
@@ -334,10 +300,11 @@ public:
 
         auto const command = args.joinIntoString(" ");
         startShellScript(command);
-        
+
         waitForProcessToFinish(-1);
         exportingView->flushConsole();
 
+        exportingView->reportStatus("Compiling");
         exportingView->logToConsole("Compiling for " + board + "...\n");
 
         if (shouldQuit)
@@ -353,10 +320,7 @@ public:
         metaJsonFile.copyFileTo(outputFile.getChildFile("meta.json"));
 
         if (compile) {
-            auto bin = toolchainDir.getChildFile("bin");
             auto libDaisy = toolchainDir.getChildFile("lib").getChildFile("libdaisy");
-            auto make = bin.getChildFile("make" + exeSuffix);
-            auto compiler = bin.getChildFile("arm-none-eabi-gcc" + exeSuffix);
 
             libDaisy.copyDirectoryTo(outputFile.getChildFile("libdaisy"));
 
@@ -374,8 +338,8 @@ public:
             // Bit hacky, but the only way to get colour coding on daisy builds for Windows
 #if JUCE_WINDOWS
             sourceDir.getChildFile("Makefile").appendText("\nCFLAGS += -fdiagnostics-color=always");
-#endif      
-            
+#endif
+
             auto buildScript = pathToString(make)
                 + " -j4 -f "
                 + pathToString(sourceDir.getChildFile("Makefile")).quoted()
@@ -393,6 +357,10 @@ public:
 
             // Restore original working directory
             workingDir.setAsCurrentWorkingDirectory();
+
+            // A cancelled build doesn't get flashed
+            if (shouldQuit)
+                return true;
 
             // Delay to get correct exit code
             Time::waitForMillisecondCounter(Time::getMillisecondCounter() + 300);
@@ -430,6 +398,7 @@ public:
                     }
                 }
 
+                exportingView->reportStatus("Flashing");
                 exportingView->logToConsole("Flashing...\n");
 
                 String flashScript = "export PATH=\"" + pathToString(bin) + ":$PATH\"\n"
@@ -469,16 +438,15 @@ public:
                     "error resetting after download"
                 };
                 auto flashExitCode = exportingView->hasConsoleMessage(errorMessages);
-                
-                if(!flashExitCode && exportingView->hasConsoleMessage({"Error 74"})) {
+
+                if (!flashExitCode && exportingView->hasConsoleMessage({ "Error 74" })) {
                     exportingView->logToConsole("\x1b[1;36mnote:\x1b[0m Error 74 is not fatal and may be ignored\n");
                 }
-                
 
                 return heavyExitCode || flashExitCode || bootloaderExitCode;
             }
             auto binLocation = outputFile.getChildFile(name + ".bin");
-            sourceDir.getChildFile("build").getChildFile("HeavyDaisy_" + name + ".bin").moveFileTo(binLocation);
+            OSUtils::moveFileTo(sourceDir.getChildFile("build").getChildFile("HeavyDaisy_" + name + ".bin"), binLocation);
 
             outputFile.getChildFile("daisy").deleteRecursively();
             outputFile.getChildFile("libdaisy").deleteRecursively();

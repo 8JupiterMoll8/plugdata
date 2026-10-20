@@ -16,7 +16,6 @@ public:
         : editor(editor)
     {
         auto* settingsFile = SettingsFile::getInstance();
-        auto settingsTree = settingsFile->getValueTree();
 
         PropertiesArray interfaceProperties;
         PropertiesArray otherProperties;
@@ -31,11 +30,7 @@ public:
             windowProperties.add(new PropertiesPanel::BoolComponent("Use system titlebar", nativeTitlebar, { "No", "Yes" }));
             propertiesPanel.addSection("Window", windowProperties);
         } else {
-            if (!settingsTree.hasProperty("NativeDialog")) {
-                settingsTree.setProperty("NativeDialog", true, nullptr);
-            }
-
-            nativeDialogValue.referTo(settingsTree.getPropertyAsValue("NativeDialog", nullptr));
+            nativeDialogValue.referTo(settingsFile->getPropertyAsValue("native_window"));
             otherProperties.add(new PropertiesPanel::BoolComponent("Use system file dialogs", nativeDialogValue, StringArray { "No", "Yes" }));
         }
 
@@ -45,10 +40,6 @@ public:
             interfaceProperties.add(new PropertiesPanel::BoolComponent("Open patches in new window", openPatchesInWindow, { "No", "Yes" }));
         }
 #endif
-
-        showPalettesValue.referTo(settingsFile->getPropertyAsValue("show_palettes"));
-        showPalettesValue.addListener(this);
-        interfaceProperties.add(new PropertiesPanel::BoolComponent("Show palette bar", showPalettesValue, { "No", "Yes" }));
 
         commandClickSwitchesModeValue.referTo(settingsFile->getPropertyAsValue("cmd_click_switches_mode"));
         commandClickSwitchesModeValue.addListener(this);
@@ -122,9 +113,11 @@ public:
             ComboBox comboBox;
         };
 
+#if !JUCE_IOS // iOS has different default scale values (smaller for iPhone, bigger for iPad), which breaks if the user touches it
         scaleValue = settingsFile->getProperty<float>("global_scale");
         scaleValue.addListener(this);
         interfaceProperties.add(new ScaleComponent("Global scale factor", scaleValue));
+#endif
 
         defaultZoom = settingsFile->getProperty<float>("default_zoom");
         defaultZoom.addListener(this);
@@ -134,18 +127,73 @@ public:
         centreResized.addListener(this);
         interfaceProperties.add(new PropertiesPanel::BoolComponent("Centre canvas when resized", centreResized, { "No", "Yes" }));
 
-        centreSidepanelButtons = settingsFile->getPropertyAsValue("centre_sidepanel_buttons");
-        interfaceProperties.add(new PropertiesPanel::BoolComponent("Sidepanel controls position", centreSidepanelButtons, { "Top", "Centre" }));
-
         showMinimap = settingsFile->getPropertyAsValue("show_minimap");
         interfaceProperties.add(new PropertiesPanel::ComboComponent("Show minimap", showMinimap, { "Never", "When outside of patch", "Always" }));
+
+#if !JUCE_IOS
+        touchMode = settingsFile->getPropertyAsValue("touch_mode");
+        interfaceProperties.add(new PropertiesPanel::BoolComponent("Enable touch mode", touchMode, { "No", "Yes" }));
+#endif
 
         patchDownwardsOnly = settingsFile->getPropertyAsValue("patch_downwards_only");
         otherProperties.add(new PropertiesPanel::BoolComponent("Patch downwards only", patchDownwardsOnly, { "No", "Yes" }));
 
+        class McpStatusComponent final : public PropertiesPanelProperty // MCP-CARRIED(mcp-settings-panel)
+            , public Timer {
+        public:
+            McpStatusComponent(String const& name, PluginProcessor* proc)
+                : PropertiesPanelProperty(name)
+                , processor(proc)
+            {
+                statusLabel.setJustificationType(Justification::centredRight);
+                statusLabel.setFont(statusLabel.getFont().withHeight(14.5f));
+                addAndMakeVisible(statusLabel);
+                startTimer(500);
+                timerCallback();
+            }
+
+            void timerCallback() override
+            {
+                auto const status = processor ? processor->getMcp()->getMcpBridgeStatus() : String("unavailable");
+                auto const colour = status.startsWith("connected") ? Colours::green
+                                    : status == "waiting for server" ? Colours::orange
+                                                                     : Colours::red;
+                statusLabel.setText(status, dontSendNotification);
+                statusLabel.setColour(Label::textColourId, colour);
+            }
+
+            PropertiesPanelProperty* createCopy() override
+            {
+                return new McpStatusComponent(getName(), processor);
+            }
+
+            void resized() override
+            {
+                statusLabel.setBounds(getLocalBounds().removeFromRight(getWidth() / (2 - hideLabel)));
+            }
+
+            PluginProcessor* processor;
+            Label statusLabel;
+        };
+
+        // MCP bridge (native C++ in-process bridge)
+        PropertiesArray mcpProperties;
+        mcpBridgeEnabled.referTo(settingsFile->getPropertyAsValue("mcp_bridge_enabled"));
+        mcpBridgeEnabled.addListener(this);
+        mcpProperties.add(new PropertiesPanel::BoolComponent("Enable MCP bridge", mcpBridgeEnabled, { "Off", "On" }));
+
+        mcpListenPort.referTo(settingsFile->getPropertyAsValue("mcp_bridge_listen_port"));
+        mcpProperties.add(new PropertiesPanel::EditableComponent<int>("Listen port", mcpListenPort, true, 1024, 65535));
+
+        mcpSendPort.referTo(settingsFile->getPropertyAsValue("mcp_bridge_send_port"));
+        mcpProperties.add(new PropertiesPanel::EditableComponent<int>("Send port", mcpSendPort, true, 1024, 65535));
+
+        mcpProperties.add(new McpStatusComponent("Status", dynamic_cast<PluginEditor*>(editor)->pd));
+
         propertiesPanel.addSection("Interface", interfaceProperties);
         propertiesPanel.addSection("Autosave", autosaveProperties);
         propertiesPanel.addSection("Other", otherProperties);
+        propertiesPanel.addSection("MCP bridge", mcpProperties); // MCP-CARRIED(mcp-settings-panel)
 
         addAndMakeVisible(propertiesPanel);
     }
@@ -164,6 +212,9 @@ public:
     {
         if (v.refersToSameSourceAs(nativeTitlebar)) {
             // Make sure titlebar buttons are greyed out because a dialog is still showing
+            if (auto* pluginEditor = dynamic_cast<PluginEditor*>(editor))
+                pluginEditor->updateStandaloneWindowControls();
+
             if (auto const* window = dynamic_cast<DocumentWindow*>(getTopLevelComponent())) {
                 if (auto* closeButton = window->getCloseButton())
                     closeButton->setEnabled(false);
@@ -193,6 +244,7 @@ public:
     Value centreResized;
     Value centreSidepanelButtons;
     Value showMinimap;
+    Value touchMode;
 
     Value openPatchesInWindow;
     Value showPalettesValue;
@@ -204,6 +256,10 @@ public:
     Value commandClickSwitchesModeValue;
 
     Value patchDownwardsOnly;
+
+    Value mcpBridgeEnabled; // MCP-CARRIED(mcp-settings-panel)
+    Value mcpListenPort;
+    Value mcpSendPort;
 
     PropertiesPanel propertiesPanel;
 

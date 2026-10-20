@@ -4,6 +4,22 @@ set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
+set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT Embedded)
+
+if(POLICY CMP0141)
+    cmake_policy(SET CMP0141 NEW)
+endif()
+
+if(POLICY CMP0091)
+    cmake_policy(SET CMP0091 NEW)
+endif()
+if(POLICY CMP0175)
+    cmake_policy(SET CMP0175 NEW)
+endif()
+if(POLICY CMP0177)
+    cmake_policy(SET CMP0177 NEW)
+endif()
+
 if(NOT Python3_FOUND)
     message(FATAL_ERROR "Python3 not found - required for build scripts")
 endif()
@@ -18,10 +34,24 @@ option(ENABLE_SFIZZ "Enable sfizz for the [sfz~] object" ON)
 option(ENABLE_FFMPEG "Enable ffmpeg support for ELSE and Gem audio/video objects" ON)
 option(ENABLE_GEM "Enable Gem support" ON)
 option(ENABLE_ASAN "Enable AddressSanitizer" OFF)
+option(ENABLE_TSAN "Enable ThreadSanitizer" OFF)
 option(ENABLE_PERFETTO "Enable Perfetto profiling (advanced)" OFF)
-option(MSBUILD_FORCE_CCACHE "Force MSBuild to use ccache (CI only)" OFF)
 option(MACOS_LEGACY "Enable support for old macOS versions (lowers OSX_DEPLOYMENT TARGET and disables Metal" OFF)
 option(VERBOSE "" OFF)
+
+if(ENABLE_ASAN AND ENABLE_TSAN)
+  message(FATAL_ERROR "ENABLE_ASAN and ENABLE_TSAN are mutually exclusive")
+endif()
+
+if(ENABLE_ASAN)
+  add_compile_options(-fsanitize=address)
+  add_link_options(-fsanitize=address)
+endif()
+
+if(ENABLE_TSAN)
+  add_compile_options(-fsanitize=thread)
+  add_link_options(-fsanitize=thread)
+endif()
 
 if(CMAKE_GENERATOR STREQUAL "Ninja" AND MSVC)
     target_compile_options(pd PRIVATE /EHsc)
@@ -72,13 +102,18 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 set(HARDENED_RUNTIME_ENABLED YES)
-set(HARDENED_RUNTIME_OPTIONS com.apple.security.device.audio-input com.apple.security.device.camera com.apple.security.cs.disable-library-validation)
+set(HARDENED_RUNTIME_OPTIONS com.apple.security.device.audio-input com.apple.security.device.camera com.apple.security.cs.disable-library-validation  com.apple.security.cs.allow-jit com.apple.security.cs.allow-unsigned-executable-memory)
 
 if("${CMAKE_SYSTEM_NAME}" MATCHES "iOS")
     list(APPEND HARDENED_RUNTIME_OPTIONS com.apple.developer.networking.multicast)
 endif()
 
-project(plugdata VERSION 0.9.3 LANGUAGES C CXX)
+project(plugdata VERSION 0.9.4 LANGUAGES C CXX)
+
+# CMake < 3.25 has no built-in LINUX variable; it needs CMAKE_SYSTEM_NAME, so after project()
+if("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
+    set(LINUX TRUE)
+endif()
 
 include(CheckIPOSupported)
 check_ipo_supported(RESULT ipo_supported OUTPUT ipo_error)
@@ -142,20 +177,10 @@ foreach(target ${library_targets})
     endif()
 endforeach()
 
-set(PLUGDATA_VERSION "0.9.3")
+set(PLUGDATA_VERSION "0.9.4")
 set_directory_properties(PROPERTIES JUCE_COMPANY_NAME "plugdata")
 set_directory_properties(PROPERTIES JUCE_COMPANY_COPYRIGHT "plugdata by Timothy Schoen")
 set_directory_properties(PROPERTIES JUCE_COMPANY_WEBSITE "plugdata.org")
-
-if(POLICY CMP0091)
-    cmake_policy(SET CMP0091 NEW)
-endif()
-if(POLICY CMP0175)
-    cmake_policy(SET CMP0175 NEW)
-endif()
-if(POLICY CMP0177)
-    cmake_policy(SET CMP0177 NEW)
-endif()
 
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
@@ -166,7 +191,7 @@ endif()
 
 if (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     add_compile_options(-ffunction-sections -fdata-sections)
-    add_link_options(-Wl,-dead_strip)
+    #add_link_options(-Wl,-dead_strip)
 elseif (CMAKE_CXX_COMPILER_ID MATCHES "GNU")
     add_compile_options(-ffunction-sections -fdata-sections)
     add_link_options(-Wl,--gc-sections)
@@ -175,18 +200,21 @@ elseif (MSVC)
     add_link_options(/OPT:REF /OPT:ICF /INCREMENTAL:NO)
 endif()
 
-if(ENABLE_ASAN)
-  add_compile_options(-fsanitize=address)
-  add_link_options(-fsanitize=address)
-endif()
-
 if(MSVC)
   add_compile_options(/MP /wd4244 /wd4311 /wd4003 /wd4047 /wd4477 /wd4068 /wd4133 /wd4311)
-  add_compile_options("$<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CXX>>:/bigobj>")
+  add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:/bigobj>")
   add_link_options(/IGNORE:4286 /IGNORE:4217)
 else()
   add_compile_options(-Wall -Wstrict-aliasing -Wuninitialized -Wno-conversion -Wno-overloaded-virtual -Wno-sign-compare -Wno-comment -Wno-unknown-pragmas -Wno-unused-result -Wno-attributes)
   add_link_options(-Wno-psabi)
+endif()
+
+message(STATUS "Generating GUI struct definitions")
+set(PLUGDATA_GENERATED_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/Generated)
+execute_process(COMMAND ${Python3_EXECUTABLE} generate_all_guis.py ${PLUGDATA_GENERATED_DIRECTORY}/AllGuis.h WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/Resources/Scripts RESULT_VARIABLE GENERATE_ALLGUIS_RESULT)
+
+if(NOT GENERATE_ALLGUIS_RESULT EQUAL 0)
+    message(FATAL_ERROR "Generating AllGuis.h failed with error code ${GENERATE_ALLGUIS_RESULT}")
 endif()
 
 message(STATUS "Preparing documentation")
@@ -215,24 +243,6 @@ set(PLUGDATA_PLUGINS_LOCATION           "${CMAKE_CURRENT_SOURCE_DIR}/Plugins")
 
 set(SOURCES_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/Source)
 
-file(GLOB plugdata_resources
-    ${CMAKE_CURRENT_SOURCE_DIR}/Resources/Fonts/IconFont.ttf
-    ${CMAKE_CURRENT_SOURCE_DIR}/Resources/Fonts/InterTabular.ttf
-    ${CMAKE_CURRENT_SOURCE_DIR}/Resources/Fonts/InterBold.ttf
-    ${CMAKE_CURRENT_SOURCE_DIR}/Resources/Fonts/InterSemiBold.ttf
-    ${CMAKE_CURRENT_SOURCE_DIR}/Resources/Fonts/InterVariable.ttf
-    ${CMAKE_CURRENT_SOURCE_DIR}/Resources/Fonts/InterRegular.ttf
-    ${CMAKE_CURRENT_SOURCE_DIR}/Resources/Fonts/RobotoMono-Regular.ttf
-    ${CMAKE_CURRENT_SOURCE_DIR}/Resources/Fonts/RobotoMono-Bold.ttf
-    ${CMAKE_CURRENT_SOURCE_DIR}/Resources/Icons/plugdata_large_logo.png
-    ${CMAKE_CURRENT_SOURCE_DIR}/Resources/Icons/plugdata_logo.png
-    # Generated resources
-    ${CMAKE_CURRENT_BINARY_DIR}/Resources/Documentation.bin
-    ${CMAKE_CURRENT_BINARY_DIR}/Resources/InterUnicode_*
-    ${CMAKE_CURRENT_BINARY_DIR}/Resources/Filesystem_*
-    )
-
-
 file(GLOB StandaloneBinarySources
     ${CMAKE_CURRENT_SOURCE_DIR}/Resources/Extra/GeneralUser_GS.sf3
     )
@@ -256,22 +266,22 @@ file(GLOB plugdata_sources
     ${SOURCES_DIRECTORY}/Pd/*.h
     ${SOURCES_DIRECTORY}/Heavy/*.cpp
     ${SOURCES_DIRECTORY}/Heavy/*.h
+    # MCP-HOOK(sources): the fork's seam code (docs/mcp-bridge/SEAM.md)
+    ${SOURCES_DIRECTORY}/Mcp/*.cpp
+    ${SOURCES_DIRECTORY}/Mcp/*.h
     ${SOURCES_DIRECTORY}/Standalone/InternalSynth.h
     ${SOURCES_DIRECTORY}/Standalone/InternalSynth.cpp
     ${SOURCES_DIRECTORY}/Standalone/PlugDataApp.h
     ${SOURCES_DIRECTORY}/Standalone/PlugDataWindow.h
 )
 
-
 # Set up testing
 if(ENABLE_TESTING)
-    list(APPEND plugdata_sources
+    file(GLOB plugdata_testing_sources
     ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Tests.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Tests.h
-    ${CMAKE_CURRENT_SOURCE_DIR}/Tests/HelpfileFuzzTest.h
-    ${CMAKE_CURRENT_SOURCE_DIR}/Tests/ObjectFuzzTest.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/Tests/*.h
     )
-
+    list(APPEND plugdata_sources ${plugdata_testing_sources})
 endif()
 
 if(APPLE)
@@ -299,7 +309,6 @@ endif()
 set(JUCE_COMPILE_DEFINITIONS
     JUCE_DONT_DECLARE_PROJECTINFO=1
     JUCE_ALLOW_STATIC_NULL_VARIABLES=0
-    JUCE_DISPLAY_SPLASH_SCREEN=0
     JUCE_ENABLE_REPAINT_DEBUGGING=0
     JUCE_VST3_CAN_REPLACE_VST2=0
     JUCE_REPORT_APP_USAGE=0
@@ -310,14 +319,23 @@ set(JUCE_COMPILE_DEFINITIONS
     JUCE_USE_COREIMAGE_LOADER=0
     JUCE_SILENCE_XCODE_15_LINKER_WARNING=1
     JUCE_USE_XRENDER=1
+    JUCE_USE_MP3AUDIOFORMAT=1
     JUCE_COREGRAPHICS_RENDER_WITH_MULTIPLE_PAINT_CALLS=0
     JUCE_USE_DIRECTWRITE=0
+    JUCE_JACK=1
+    JUCE_JACK_CLIENT_NAME="plugdata"
 )
 
+# Testing will run every help patch, which leads to some asserts due to standard Pd or ELSE patches outputting non-UTF8 text, invalid MIDI sequences, etc.
+# So for a better testing experience, we just disable assertions
+if(${ENABLE_TESTING})
+    list(APPEND JUCE_COMPILE_DEFINITIONS JUCE_DISABLE_ASSERTIONS=1)
+endif()
+
 if(LINUX)
- list(APPEND JUCE_COMPILE_DEFINITIONS JUCE_ALSA=1 JUCE_JACK=1 JUCE_JACK_CLIENT_NAME="plugdata")
+ list(APPEND JUCE_COMPILE_DEFINITIONS JUCE_ALSA=1)
 elseif(UNIX AND NOT APPLE) # BSD
-  list(APPEND JUCE_COMPILE_DEFINITIONS JUCE_JACK=1 JUCE_JACK_CLIENT_NAME="plugdata")
+  list(APPEND JUCE_COMPILE_DEFINITIONS)
 elseif(MSVC)
   list(APPEND JUCE_COMPILE_DEFINITIONS JUCE_ASIO=1)
 endif()
@@ -360,7 +378,8 @@ target_link_libraries(juce
         juce::juce_dsp
         juce::juce_cryptography
         juce::juce_opengl
-        melatonin_blur
+        juce::juce_osc
+        juce::juce_animation
         )
 else()
 target_link_libraries(juce
@@ -369,37 +388,32 @@ target_link_libraries(juce
         juce::juce_audio_plugin_client
         juce::juce_dsp
         juce::juce_cryptography
-        melatonin_blur
+        juce::juce_osc
+        juce::juce_animation
         )
 endif()
 
 if(NANOVG_METAL_IMPLEMENTATION)
 add_compile_definitions(NANOVG_METAL_IMPLEMENTATION=1)
 elseif(NANOVG_GLES_IMPLEMENTATION)
-add_compile_definitions(NANOVG_GLES3_IMPLEMENTATION=1)
+add_compile_definitions(NANOVG_GLES3_IMPLEMENTATION=1 NEEDS_OPENGL_ES=1)
 else()
 add_compile_definitions(NANOVG_GL3_IMPLEMENTATION=1)
 endif()
 
-file(GLOB BINARY_DATA_FILES ${CMAKE_CURRENT_BINARY_DIR}/BinaryData/*.cpp)
-add_library(BinaryData STATIC ${BINARY_DATA_FILES})
-target_include_directories(BinaryData INTERFACE ${CMAKE_CURRENT_BINARY_DIR}/BinaryData)
-
-if(MSVC)
-  target_include_directories(juce PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Libraries/ASIO/common)
-endif()
+target_include_directories(juce PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Libraries)
 
 set(libs
   juce
-  BinaryData
   nanovg
   webpdecoder
   liblzma
+  luajit
 )
 
 if(UNIX AND NOT APPLE)
     list(APPEND libs curl X11)
-    if(LINUX)
+    if("${CMAKE_SYSTEM_NAME}" MATCHES "Linux")
         list(APPEND libs atomic)
     endif()
 endif()
@@ -413,17 +427,18 @@ endif()
 
 list(APPEND PLUGDATA_COMPILE_DEFINITIONS JUCE_MODAL_LOOPS_PERMITTED=1)
 
+list(APPEND PLUGDATA_INCLUDE_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/Libraries/pd-lua/luas/luajit/src")
 list(APPEND PLUGDATA_INCLUDE_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/Libraries/pd-else/Source/Audio/sfont~/")
 list(APPEND PLUGDATA_INCLUDE_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/Libraries/pure-data/src")
 list(APPEND PLUGDATA_INCLUDE_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/Libraries/JUCE/modules")
 list(APPEND PLUGDATA_INCLUDE_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/Libraries/readerwriterqueue/")
 list(APPEND PLUGDATA_INCLUDE_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/Libraries/concurrentqueue/")
-list(APPEND PLUGDATA_INCLUDE_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/Libraries/BarelyML/")
 if(ENABLE_PERFETTO)
   list(APPEND PLUGDATA_INCLUDE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/_deps/perfetto-src/sdk")
   list(APPEND PLUGDATA_INCLUDE_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/Libraries/melatonin_perfetto")
 endif()
 list(APPEND PLUGDATA_INCLUDE_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/Source/")
+list(APPEND PLUGDATA_INCLUDE_DIRECTORY "${PLUGDATA_GENERATED_DIRECTORY}")
 
 add_library(plugdata_core STATIC ${plugdata_sources})
 target_compile_definitions(plugdata_core PUBLIC ${PLUGDATA_COMPILE_DEFINITIONS})
@@ -608,7 +623,7 @@ juce_add_plugin(plugdata
     COPY_PLUGIN_AFTER_BUILD     FALSE
     PLUGIN_MANUFACTURER_CODE    PlDt
     PLUGIN_CODE                 PdIn
-    FORMATS                     AU AUv3 VST3 LV2 CLAP
+    FORMATS                     AU AUv3 VST3 LV2 CLAP AAX
     LV2URI                      https://github.com/timothyschoen/plugdata
     PRODUCT_NAME                ${INSTRUMENT_NAME}
     BUNDLE_ID                   com.plugdata.plugdata.instrument
@@ -639,7 +654,7 @@ juce_add_plugin(plugdata_fx
     COPY_PLUGIN_AFTER_BUILD     FALSE
     PLUGIN_MANUFACTURER_CODE    PlDt
     PLUGIN_CODE                 PdFx
-    FORMATS                     AU AUv3 VST3 LV2 CLAP
+    FORMATS                     AU AUv3 VST3 LV2 CLAP AAX
     LV2URI                      https://github.com/timothyschoen/plugdata-fx
     PRODUCT_NAME                "plugdata-fx"
     BUNDLE_ID                   com.plugdata.plugdata.fx
@@ -716,6 +731,51 @@ if(APPLE)
 target_compile_definitions(plugdata_midi PUBLIC ${PLUGDATA_COMPILE_DEFINITIONS} PLUGDATA_MIDI=1)
 endif()
 
+function(copy_binarydata target)
+    if(TARGET ${target})
+        if(APPLE AND NOT "${target}" MATCHES "_LV2$")
+            # On macOS, the resources go into a .lproj folder, because codesign seals files in there as optional.
+            # That lets the installer ship the file only once, and restore it into each signed bundle (see package-macOS.sh)
+            if("${CMAKE_SYSTEM_NAME}" MATCHES "iOS")
+                set(RESOURCES_LOCATION "Resources")
+            else()
+                set(RESOURCES_LOCATION "Resources/plugdata.lproj")
+            endif()
+            target_sources(${target} PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/BinaryData/plugdata-resources.bin)
+            set_source_files_properties(
+                ${CMAKE_CURRENT_BINARY_DIR}/BinaryData/plugdata-resources.bin
+                PROPERTIES
+                MACOSX_PACKAGE_LOCATION "${RESOURCES_LOCATION}"
+            )
+        else()
+            add_custom_command(TARGET ${target} PRE_LINK
+                COMMAND ${CMAKE_COMMAND} -E copy
+                    ${CMAKE_CURRENT_BINARY_DIR}/BinaryData/plugdata-resources.bin
+                    "$<TARGET_FILE_DIR:${target}>/plugdata-resources.bin"
+            )
+        endif()
+    endif()
+endfunction()
+
+if("${CMAKE_SYSTEM_NAME}" MATCHES "iOS")
+copy_binarydata(plugdata_standalone_Standalone)
+else()
+copy_binarydata(plugdata_standalone)
+copy_binarydata(plugdata_VST3)
+copy_binarydata(plugdata_fx_VST3)
+copy_binarydata(plugdata_CLAP)
+copy_binarydata(plugdata_fx_CLAP)
+copy_binarydata(plugdata_LV2)
+copy_binarydata(plugdata_fx_LV2)
+copy_binarydata(plugdata_AU)
+copy_binarydata(plugdata_fx_AU)
+copy_binarydata(plugdata_midi_AU)
+copy_binarydata(plugdata_AAX)
+copy_binarydata(plugdata_fx_AAX)
+endif()
+
+target_include_directories(plugdata_core PUBLIC ${CMAKE_CURRENT_BINARY_DIR}/BinaryData)
+
 target_include_directories(plugdata_standalone PUBLIC ${PLUGDATA_INCLUDE_DIRECTORY})
 target_include_directories(plugdata PUBLIC ${PLUGDATA_INCLUDE_DIRECTORY})
 target_include_directories(plugdata_fx PUBLIC ${PLUGDATA_INCLUDE_DIRECTORY})
@@ -752,7 +812,7 @@ if(APPLE)
 endif()
 
 # Organize JUCE-generated plugin format targets
-foreach(format AU AUv3 VST3 LV2 CLAP Standalone All)
+foreach(format AU AUv3 VST3 LV2 CLAP AAX Standalone All)
     if(TARGET plugdata_${format})
         set_target_properties(plugdata_${format} PROPERTIES FOLDER "Plugins/Instrument")
     endif()
@@ -785,21 +845,28 @@ if(LINUX)
     target_link_libraries(plugdata PRIVATE plugdata_core pd-src-multi externals-multi)
     target_link_libraries(plugdata_fx PRIVATE plugdata_core pd-src-multi externals-multi)
 elseif(UNIX AND NOT APPLE) # BSD
-    target_link_libraries(plugdata_standalone PRIVATE plugdata_core pd-src externals lua fluidlite "-Wl,-export-dynamic")
-    target_link_libraries(plugdata PRIVATE plugdata_core pd-src-multi externals-multi lua fluidlite)
-    target_link_libraries(plugdata_fx PRIVATE plugdata_core pd-src-multi externals-multi lua fluidlite)
+    target_link_libraries(plugdata_standalone PRIVATE plugdata_core pd-src externals pdlua fluidlite "-Wl,-export-dynamic")
+    target_link_libraries(plugdata PRIVATE plugdata_core pd-src-multi externals-multi pdlua fluidlite)
+    target_link_libraries(plugdata_fx PRIVATE plugdata_core pd-src-multi externals-multi pdlua fluidlite)
 elseif(APPLE)
   if (CMAKE_CXX_COMPILER_VERSION VERSION_GREATER 15.0)
     set(MACOS_COMPAT_LINKER_FLAGS "-Wl,-ld_classic")
   endif()
 
+  # no_compact_unwind is necessary when TSAN is enabled, because otherwise the number of exception personalities exceeds the maximum number
+  if(ENABLE_TSAN)
+    set(MACOS_LUAJIT_UNWIND_FLAGS "-Wl,-no_compact_unwind")
+  else()
+    set(MACOS_LUAJIT_UNWIND_FLAGS "")
+  endif()
+
   if(NOT "${CMAKE_SYSTEM_NAME}" MATCHES "iOS")
     set(LINK_CARBON "-framework Carbon")
   endif()
-  target_link_libraries(plugdata_standalone PRIVATE plugdata_core pd-src externals ${LINK_CARBON} $<$<NOT:$<CONFIG:Debug>>:${MACOS_COMPAT_LINKER_FLAGS}>)
-  target_link_libraries(plugdata_midi PRIVATE plugdata_core pd-src-multi externals-multi ${LINK_CARBON} $<$<NOT:$<CONFIG:Debug>>:${MACOS_COMPAT_LINKER_FLAGS}>)
-  target_link_libraries(plugdata PRIVATE plugdata_core pd-src-multi externals-multi ${LINK_CARBON} $<$<NOT:$<CONFIG:Debug>>:${MACOS_COMPAT_LINKER_FLAGS}>)
-  target_link_libraries(plugdata_fx PRIVATE plugdata_core pd-src-multi externals-multi ${LINK_CARBON} $<$<NOT:$<CONFIG:Debug>>:${MACOS_COMPAT_LINKER_FLAGS}>)
+  target_link_libraries(plugdata_standalone PRIVATE plugdata_core pd-src externals ${LINK_CARBON} $<$<NOT:$<CONFIG:Debug>>:${MACOS_COMPAT_LINKER_FLAGS}> ${MACOS_LUAJIT_UNWIND_FLAGS})
+  target_link_libraries(plugdata_midi PRIVATE plugdata_core pd-src-multi externals-multi ${LINK_CARBON} $<$<NOT:$<CONFIG:Debug>>:${MACOS_COMPAT_LINKER_FLAGS}> ${MACOS_LUAJIT_UNWIND_FLAGS})
+  target_link_libraries(plugdata PRIVATE plugdata_core pd-src-multi externals-multi ${LINK_CARBON} $<$<NOT:$<CONFIG:Debug>>:${MACOS_COMPAT_LINKER_FLAGS}> ${MACOS_LUAJIT_UNWIND_FLAGS})
+  target_link_libraries(plugdata_fx PRIVATE plugdata_core pd-src-multi externals-multi ${LINK_CARBON} $<$<NOT:$<CONFIG:Debug>>:${MACOS_COMPAT_LINKER_FLAGS}> ${MACOS_LUAJIT_UNWIND_FLAGS})
 else()
   target_link_libraries(plugdata PRIVATE plugdata_core pd-multi)
   target_link_libraries(plugdata_fx PRIVATE plugdata_core pd-multi)
@@ -812,27 +879,6 @@ if(ENABLE_PERFETTO)
         PUBLIC "/MT$<$<STREQUAL:$<CONFIGURATION>,Debug>:d>"
     )
     set_target_properties(perfetto PROPERTIES CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>$" )
-  endif()
-
-  if(MSBUILD_FORCE_CCACHE)
-    find_program(ccache_exe ccache)
-    if(ccache_exe)
-        file(COPY_FILE
-            ${ccache_exe} ${CMAKE_BINARY_DIR}/cl.exe
-            ONLY_IF_DIFFERENT)
-
-        # By default Visual Studio generators will use /Zi which is not compatible
-        # with ccache, so tell Visual Studio to use /Z7 instead.
-        message(STATUS "Setting MSVC debug information format to 'Embedded'")
-        set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT "$<$<CONFIG:Debug,RelWithDebInfo>:Embedded>")
-
-        set(CMAKE_VS_GLOBALS
-            "CLToolExe=cl.exe"
-            "CLToolPath=${CMAKE_BINARY_DIR}"
-            "UseMultiToolTask=true"
-            "DebugInformationFormat=OldStyle"
-        )
-    endif()
   endif()
 
   target_link_libraries(plugdata PRIVATE Melatonin::Perfetto)
@@ -876,6 +922,8 @@ endif()
 if(APPLE)
   install(DIRECTORY ${PLUGDATA_PLUGINS_LOCATION}/VST3/plugdata.vst3 DESTINATION "/Library/Audio/Plug-ins/VST3")
   install(DIRECTORY ${PLUGDATA_PLUGINS_LOCATION}/VST3/plugdata-fx.vst3 DESTINATION "/Library/Audio/Plug-ins/VST3")
+  install(DIRECTORY ${PLUGDATA_PLUGINS_LOCATION}/AAX/plugdata.aaxplugin DESTINATION "/Library/Application Support/Avid/Audio/Plug-Ins")
+  install(DIRECTORY ${PLUGDATA_PLUGINS_LOCATION}/AAX/plugdata-fx.aaxplugin DESTINATION "/Library/Application Support/Avid/Audio/Plug-Ins")
   install(DIRECTORY ${PLUGDATA_PLUGINS_LOCATION}/LV2/plugdata.lv2 DESTINATION "/Library/Audio/Plug-ins/LV2")
   install(DIRECTORY ${PLUGDATA_PLUGINS_LOCATION}/LV2/plugdata-fx.lv2 DESTINATION "/Library/Audio/Plug-ins/LV2")
   install(DIRECTORY ${PLUGDATA_PLUGINS_LOCATION}/CLAP/plugdata.clap DESTINATION "/Library/Audio/Plug-ins/CLAP")
@@ -887,6 +935,8 @@ if(APPLE)
 elseif(WIN32)
   install(DIRECTORY ${PLUGDATA_PLUGINS_LOCATION}/VST3/plugdata.vst3 DESTINATION "$ENV{PROGRAMFILES}/Common Files/VST3")
   install(DIRECTORY ${PLUGDATA_PLUGINS_LOCATION}/VST3/plugdata-fx.vst3 DESTINATION "$ENV{PROGRAMFILES}/Common Files/VST3")
+  install(DIRECTORY ${PLUGDATA_PLUGINS_LOCATION}/AAX/plugdata.aaxplugin DESTINATION "$ENV{PROGRAMFILES}/Common Files/Avid/Audio/Plug-Ins")
+  install(DIRECTORY ${PLUGDATA_PLUGINS_LOCATION}/AAX/plugdata-fx.aaxplugin DESTINATION "$ENV{PROGRAMFILES}/Common Files/Avid/Audio/Plug-Ins")
   install(DIRECTORY ${PLUGDATA_PLUGINS_LOCATION}/LV2/plugdata.lv2 DESTINATION "$ENV{PROGRAMFILES}/Common Files/LV2")
   install(DIRECTORY ${PLUGDATA_PLUGINS_LOCATION}/LV2/plugdata-fx.lv2 DESTINATION "$ENV{PROGRAMFILES}/Common Files/LV2")
   install(FILES ${PLUGDATA_PLUGINS_LOCATION}/CLAP/plugdata.clap DESTINATION "$ENV{PROGRAMFILES}/Common Files/CLAP")
@@ -920,3 +970,5 @@ endif()
       install(PROGRAMS ${PLUGDATA_PLUGINS_LOCATION}/Standalone/plugdata DESTINATION bin)
     endif()
 endif()
+
+include(${CMAKE_CURRENT_SOURCE_DIR}/Tests/mcp/mcp_bridge_tests.cmake) # MCP-HOOK(tests): handler tests of the MCP bridge, off unless -DMCP_BRIDGE_TESTS=ON

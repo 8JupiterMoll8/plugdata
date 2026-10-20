@@ -21,7 +21,7 @@ public:
 
 template<typename T>
 class MessageVector {
-    static constexpr size_t Capacity = 1 << 20;
+    static constexpr size_t Capacity = 1 << 17;
     static constexpr size_t OverflowBlockSize = 1024;
     AtomicValue<size_t> size = 0;
     // Primary contiguous buffer
@@ -49,13 +49,13 @@ public:
         return size == 0;
     }
 
-    void append(T const&& header, T const* values, int numValues)
+    void append(int noOverflow, T const&& header, T const* values, int numValues)
     {
         if (EXPECT_LIKELY(size + numValues + 1 < Capacity)) {
             std::copy(values, values + numValues, buffer + size);
             buffer[size + numValues] = header;
             size += (numValues + 1);
-        } else {
+        } else if (!noOverflow) {
             auto const spaceLeft = Capacity > size ? std::min<int>(Capacity - size, numValues) : 0;
             int const numOverflow = numValues - spaceLeft;
             for (int i = 0; i < spaceLeft; i++) {
@@ -136,10 +136,10 @@ public:
     MessageDispatcher()
     {
         usedHashes.reserve(128);
-        nullListeners.reserve(128);
+        listenerScratch.reserve(16);
     }
 
-    static void enqueueMessage(void* instance, void* target, t_symbol* symbol, int const argc, t_atom* argv) noexcept
+    static void enqueueMessage(void* instance, int type, void* target, t_symbol* symbol, int const argc, t_atom* argv) noexcept
     {
         auto const* pd = static_cast<pd::Instance*>(instance);
         auto* dispatcher = pd->messageDispatcher.get();
@@ -150,7 +150,7 @@ public:
             Message message;
             message.header = { PointerIntPair<void*, 2, uint8_t>(target, (size & 0b1100) >> 2), PointerIntPair<t_symbol*, 2, uint8_t>(symbol, size & 0b11) };
 
-            backBuffer.append(std::move(message), reinterpret_cast<Message*>(argv), size);
+            backBuffer.append(type, std::move(message), reinterpret_cast<Message*>(argv), size);
         }
     }
 
@@ -171,19 +171,33 @@ public:
 
     void addMessageListener(void* object, pd::MessageListener* messageListener)
     {
-        messageListeners[object].insert(juce::WeakReference(messageListener));
         messageListener->object = object;
+
+        auto& listeners = messageListeners[object];
+        for (auto const& listener : listeners) {
+            if (listener.get() == messageListener)
+                return;
+        }
+
+        listeners.add(juce::WeakReference(messageListener));
     }
 
     void removeMessageListener(void* object, MessageListener* messageListener)
     {
-        auto const objectListenerIterator = messageListeners.find(object);
-        if (objectListenerIterator == messageListeners.end())
+        auto const entry = messageListeners.find(object);
+        if (entry == messageListeners.end())
             return;
 
-        auto& listeners = objectListenerIterator->second;
+        auto& listeners = entry->second;
 
-        listeners.erase(messageListener);
+        listeners.erase(
+            std::ranges::remove_if(listeners,
+                [messageListener](auto const& listener) {
+                    auto const* referent = listener.get();
+                    return referent == nullptr || referent == messageListener;
+                })
+                .begin(),
+            listeners.end());
 
         if (listeners.empty())
             messageListeners.erase(object);
@@ -201,60 +215,94 @@ public:
 
     void dequeueMessages() // Note: make sure correct pd instance is active when calling this
     {
+        if (isDequeueing)
+            return;
+
+        ScopedValueSetter<bool> const dequeueGuard(isDequeueing, true);
+
         auto& frontBuffer = getFrontBuffer();
 
         usedHashes.clear();
-        nullListeners.clear();
 
+        SmallArray<Message> allMessages;
+        SmallArray<pd::Atom> allAtoms;
+
+        // Eliminate duplicate messages
         Message message;
         while (popMessage(frontBuffer, message)) {
+            auto hash = reinterpret_cast<intptr_t>(message.header.targetAndSize.getOpaqueValue()) ^ reinterpret_cast<intptr_t>(message.header.symbolAndSize.getOpaqueValue());
+            auto size = message.header.targetAndSize.getInt() << 2 | message.header.symbolAndSize.getInt();
+            if (EXPECT_UNLIKELY(usedHashes.contains(hash))) {
+                frontBuffer.pop(size);
+                continue;
+            }
+            for (int at = 0; at < size; at++) {
+                allAtoms.emplace_back(&frontBuffer.back().atom);
+                frontBuffer.pop();
+            }
+            usedHashes.insert(hash);
+            allMessages.add(message);
+        }
+
+        int atomPosition = allAtoms.size();
+
+        // Replay messages in original order
+        for (int i = allMessages.size() - 1; i >= 0; i--) {
+            auto& message = allMessages[i];
             auto targetPtr = message.header.targetAndSize.getPointer();
             auto target = messageListeners.find(targetPtr);
             auto [symbol, size] = message.header.symbolAndSize;
             size = message.header.targetAndSize.getInt() << 2 | size;
 
             if (EXPECT_LIKELY(target == messageListeners.end())) {
-                frontBuffer.pop(size);
+                atomPosition -= size;
                 continue;
             }
 
-            auto hash = reinterpret_cast<intptr_t>(message.header.targetAndSize.getOpaqueValue()) ^ reinterpret_cast<intptr_t>(message.header.symbolAndSize.getOpaqueValue());
-            if (EXPECT_UNLIKELY(usedHashes.contains(hash))) {
-                frontBuffer.pop(size);
-                continue;
-            }
-            usedHashes.insert(hash);
+            SmallArray<pd::Atom> atoms = {
+                std::make_reverse_iterator(allAtoms.begin() + atomPosition),
+                std::make_reverse_iterator(allAtoms.begin() + atomPosition - size)
+            };
 
-            SmallArray<pd::Atom> atoms;
-            atoms.resize(size);
-            t_atom atom;
+            // Dispatch from a copy, since we're entering into arbitrary plugdata code here that can possible deallocate things we need
+            listenerScratch.clear();
+            for (auto const& listener : target->second)
+                listenerScratch.add(listener);
 
-            for (int at = size - 1; at >= 0; at--) {
-                atom = frontBuffer.back().atom;
-                frontBuffer.pop();
-                atoms[at] = &atom;
-            }
-
-            for (auto it = target->second.begin(); it < target->second.end(); ++it) {
-                if (auto* listener = it->get())
-                    listener->receiveMessage(symbol, atoms);
+            bool sawDeadListener = false;
+            for (auto const& listener : listenerScratch) {
+                if (auto* referent = listener.get())
+                    referent->receiveMessage(symbol, atoms);
                 else
-                    nullListeners.add({ targetPtr, it });
+                    sawDeadListener = true;
             }
-        }
 
-        nullListeners.erase(
-            std::ranges::remove_if(nullListeners,
-                [&](auto const& entry) {
-                    auto& [target, iterator] = entry;
-                    return messageListeners[target].erase(iterator) != messageListeners[target].end();
-                })
-                .begin(),
-            nullListeners.end());
+            if (EXPECT_UNLIKELY(sawDeadListener))
+                removeDeadListeners(targetPtr);
+
+            atomPosition -= size;
+        }
 
         frontBuffer.clear();
 
         currentBuffer.store((currentBuffer.load() + 1) % 3);
+    }
+
+    void removeDeadListeners(void* targetPtr)
+    {
+        auto const entry = messageListeners.find(targetPtr);
+        if (entry == messageListeners.end())
+            return;
+
+        auto& listeners = entry->second;
+        listeners.erase(
+            std::ranges::remove_if(listeners,
+                [](auto const& listener) { return listener.get() == nullptr; })
+                .begin(),
+            listeners.end());
+
+        if (listeners.empty())
+            messageListeners.erase(targetPtr);
     }
 
     void handleAsyncUpdate() override
@@ -277,9 +325,13 @@ private:
     StackArray<MessageBuffer, 3> buffers;
     AtomicValue<int, Sequential> currentBuffer;
 
-    SmallArray<std::pair<void*, UnorderedSet<juce::WeakReference<pd::MessageListener>>::iterator>, 16> nullListeners;
+    bool isDequeueing = false;
+
+    // Reused across messages; safe because dequeueMessages() is non-reentrant
+    SmallArray<juce::WeakReference<MessageListener>> listenerScratch;
+
     UnorderedSet<intptr_t> usedHashes;
-    UnorderedMap<void*, UnorderedSet<juce::WeakReference<MessageListener>>> messageListeners;
+    UnorderedMap<void*, SmallArray<juce::WeakReference<MessageListener>>> messageListeners;
 };
 
 }

@@ -51,25 +51,15 @@ class PlugDataApp final : public JUCEApplication {
 #if JUCE_IOS
     static inline bool hasOpenFunction = OSUtils::addOpenURLMethodToDelegate();
 #endif
-    Image logo = ImageFileFormat::loadFrom(BinaryData::plugdata_logo_png, BinaryData::plugdata_logo_pngSize);
+
+#if JUCE_LINUX || JUCE_BSD
+    Image logo = BinaryData::loadImage(BinaryData::plugdata_logo_png);
+#endif
 
 public:
     PlugDataApp()
     {
         PluginHostType::jucePlugInClientCurrentWrapperType = AudioProcessor::wrapperType_Standalone;
-
-        PropertiesFile::Options options;
-
-        options.applicationName = "plugdata";
-        options.filenameSuffix = ".settings";
-        options.osxLibrarySubFolder = "Application Support";
-#if JUCE_LINUX || JUCE_BSD
-        options.folderName = "~/.config";
-#else
-        options.folderName = "";
-#endif
-
-        appProperties.setStorageParameters(options);
     }
 
     String const getApplicationName() override
@@ -113,9 +103,20 @@ public:
     {
         LookAndFeel::getDefaultLookAndFeel().setColour(ResizableWindow::backgroundColourId, Colours::transparentBlack);
 
-        pluginHolder = std::make_unique<StandalonePluginHolder>(appProperties.getUserSettings(), false, "");
+        auto* settings = SettingsFile::getInstance()->initialise();
 
-        mainWindow = new PlugDataWindow(pluginHolder->processor->createEditorIfNeeded());
+        auto const displayArea = Desktop::getInstance().getDisplays().getPrimaryDisplay()->userBounds.getSmallestIntegerContainer();
+        auto windowSize = settings->getProperty<VarArray>("window_size");
+        auto bounds = displayArea.withSizeKeepingCentre(static_cast<int>(windowSize[0]), static_cast<int>(windowSize[1])).getIntersection(displayArea);
+
+        pluginHolder = std::make_unique<StandalonePluginHolder>();
+
+        auto* pd = dynamic_cast<PluginProcessor*>(pluginHolder->processor.get());
+        pd->lastUIWidth = bounds.getWidth();
+        pd->lastUIHeight = bounds.getHeight();
+
+        mainWindow = new PlugDataWindow(pluginHolder->processor->createEditorAndMakeActive());
+        mainWindow->setBoundsConstrained(bounds);
 
         mainWindow->setVisible(true);
         parseSystemArguments(arguments);
@@ -123,31 +124,6 @@ public:
 #if JUCE_LINUX || JUCE_BSD
         mainWindow->getPeer()->setIcon(logo);
 #endif
-
-        auto getWindowScreenBounds = [this]() -> juce::Rectangle<int> {
-            auto const width = mainWindow->getWidth();
-            auto const height = mainWindow->getHeight();
-
-            auto const& displays = Desktop::getInstance().getDisplays();
-
-            if (auto const* props = pluginHolder->settings.get()) {
-                constexpr int defaultValue = -100;
-
-                auto const x = props->getIntValue("windowX", defaultValue);
-                auto const y = props->getIntValue("windowY", defaultValue);
-
-                if (x != defaultValue && y != defaultValue) {
-                    auto const screenLimits = displays.getDisplayForRect({ x, y, width, height })->userArea;
-
-                    return { jlimit(screenLimits.getX(), jmax(screenLimits.getX(), screenLimits.getRight() - width), x), jlimit(screenLimits.getY(), jmax(screenLimits.getY(), screenLimits.getBottom() - height), y), width, height };
-                }
-            }
-
-            auto const displayArea = displays.getPrimaryDisplay()->userArea;
-
-            return { displayArea.getCentreX() - width / 2, displayArea.getCentreY() - height / 2, width, height };
-        };
-        mainWindow->setBoundsConstrained(getWindowScreenBounds());
     }
 
     void shutdown() override
@@ -155,7 +131,6 @@ public:
         mainWindow = nullptr;
         pluginHolder->stopPlaying();
         pluginHolder = nullptr;
-        appProperties.saveIfNeeded();
     }
 
     int parseSystemArguments(String const& arguments) const
@@ -229,38 +204,8 @@ public:
     std::unique_ptr<StandalonePluginHolder> pluginHolder;
 
 protected:
-    ApplicationProperties appProperties;
     PlugDataWindow* mainWindow = nullptr;
 };
-
-void PlugDataWindow::closeAllPatches()
-{
-    // Show an ask to save dialog for each patch that is dirty
-    // Because save dialog uses an asynchronous callback, we can't loop over them (so have to chain them)
-    if (auto* editor = dynamic_cast<PluginEditor*>(mainComponent->getEditor())) {
-        auto* processor = ProjectInfo::getStandalonePluginHolder()->processor.get();
-        auto const* mainEditor = dynamic_cast<PluginEditor*>(processor->getActiveEditor());
-        auto& openedEditors = editor->pd->openedEditors;
-
-        if (editor == mainEditor) {
-            processor->editorBeingDeleted(editor);
-        }
-
-        if (openedEditors.size() == 1) {
-            editor->getTabComponent().closeAllTabs(true, nullptr, [this, editor, &openedEditors] {
-                editor->nvgSurface.detachContext();
-                removeFromDesktop();
-                openedEditors.removeObject(editor);
-            });
-        } else {
-            editor->getTabComponent().closeAllTabs(false, nullptr, [this, editor, &openedEditors] {
-                editor->nvgSurface.detachContext();
-                removeFromDesktop();
-                openedEditors.removeObject(editor);
-            });
-        }
-    }
-}
 
 StandalonePluginHolder* StandalonePluginHolder::getInstance()
 {
@@ -271,14 +216,14 @@ StandalonePluginHolder* StandalonePluginHolder::getInstance()
     return nullptr;
 }
 
-void StandalonePluginHolder::setupAudioDevices(bool const enableAudioInput, String const& preferredDefaultDeviceName, AudioDeviceManager::AudioDeviceSetup const* preferredSetupOptions)
+void StandalonePluginHolder::setupAudioDevices()
 {
 #if JUCE_IOS
     deviceManager.addAudioCallback(&maxSizeEnforcer);
 #else
     deviceManager.addAudioCallback(this);
 #endif
-    reloadAudioDeviceState(enableAudioInput, preferredDefaultDeviceName, preferredSetupOptions);
+    reloadAudioDeviceState();
 }
 
 void StandalonePluginHolder::shutDownAudioDevices()

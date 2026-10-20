@@ -5,7 +5,8 @@
  */
 #pragma once
 
-class PictureObject final : public ObjectBase, public AsyncUpdater {
+class PictureObject final : public ObjectBase
+    , public AsyncUpdater {
 
     Value filename = SynchronousValue();
     Value latch = SynchronousValue();
@@ -138,7 +139,7 @@ public:
             break;
         }
     }
-    
+
     bool hideInlet() override
     {
         auto const rSymbol = receiveSymbol.toString();
@@ -156,11 +157,9 @@ public:
         if (!img.isValid() && File(imageFile).existsAsFile()) {
             img = ImageFileFormat::loadFrom(imageFile).convertedToFormat(Image::ARGB);
         }
- 
+
         if (img.isValid()) {
-            imageBuffer = NVGImage(nvg, img.getWidth(), img.getHeight(), [this](Graphics& g) {
-                g.drawImageAt(img, 0, 0);
-            }, NVGImage::MipMap);
+            imageBuffer = NVGImage(nvg, img.getWidth(), img.getHeight(), [this](Graphics& g) { g.drawImageAt(img, 0, 0); }, NVGImage::MipMap);
         }
 
         img = Image(); // Clear image from CPU memory after upload
@@ -170,33 +169,31 @@ public:
 
     void render(NVGcontext* nvg) override
     {
+        auto const& colours = getThemeColours();
+
         handleUpdateNowIfNeeded();
-            
+
         if (imageNeedsReload || !imageBuffer.isValid())
             updateImage(nvg);
 
         auto const b = getLocalBounds().toFloat();
 
         NVGScopedState scopedState(nvg);
-        nvgIntersectScissor(nvg, 0, 0, getWidth(), getHeight());
+        nanovg::nvgIntersectScissor(nvg, 0, 0, getWidth(), getHeight());
 
         if (!imageBuffer.isValid()) {
-            nvgFontSize(nvg, 20);
-            nvgFontFace(nvg, "Inter-Regular");
-            nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-            nvgFillColor(nvg, convertColour(cnv->editor->getLookAndFeel().findColour(PlugDataColour::canvasTextColourId)));
-            nvgText(nvg, b.getCentreX(), b.getCentreY(), "?", nullptr);
+            Fonts::drawText(cnv->editor->getNanoLLGC(), "?", b, Fonts::getDefaultFont().withHeight(20), colours.canvasTextColour, Justification::centred);
         } else {
             NVGScopedState scopedState(nvg);
-            nvgTranslate(nvg, offsetX, offsetY);
+            nanovg::nvgTranslate(nvg, offsetX, offsetY);
             imageBuffer.render(nvg, getLocalBounds());
         }
 
         bool const selected = object->isSelected() && !cnv->isGraph;
-        auto const outlineColour = cnv->editor->getLookAndFeel().findColour(selected ? PlugDataColour::objectSelectedOutlineColourId : objectOutlineColourId);
+        auto const outlineColour = selected ? colours.objectSelectedOutlineColour : colours.objectOutlineColour;
 
         if (getValue<bool>(outline)) {
-            nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), nvgRGBA(0, 0, 0, 0), convertColour(outlineColour), Corners::objectCornerRadius);
+            nanovg::nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), nanovg::nvgRGBA(0, 0, 0, 0), nvgColour(outlineColour), getPlugDataLook(*this).getObjectCornerRadius());
         }
     }
 
@@ -229,15 +226,15 @@ public:
                 pic->x_size = getValue<int>(reportSize);
         } else if (value.refersToSameSourceAs(sendSymbol)) {
             auto symbol = sendSymbol.toString();
-            if(symbol.isEmpty()) symbol = "empty";
-            if (auto pic = ptr.get<t_pd>())
-                pd->sendDirectMessage(pic.get(), "send", { pd->generateSymbol(symbol) });
+            if (symbol.isEmpty())
+                symbol = "empty";
+            sendMessage("send", { pd->generateSymbol(symbol) });
             object->updateIolets();
         } else if (value.refersToSameSourceAs(receiveSymbol)) {
             auto symbol = receiveSymbol.toString();
-            if(symbol.isEmpty()) symbol = "empty";
-            if (auto pic = ptr.get<t_pd>())
-                pd->sendDirectMessage(pic.get(), "receive", { pd->generateSymbol(symbol) });
+            if (symbol.isEmpty())
+                symbol = "empty";
+            sendMessage("receive", { pd->generateSymbol(symbol) });
             object->updateIolets();
         }
     }
@@ -261,14 +258,14 @@ public:
         if (auto pic = ptr.get<t_fake_pic>()) {
             auto* patch = cnv->patch.getRawPointer();
             if (!patch)
-                return {};
+                return { };
 
             int x = 0, y = 0, w = 0, h = 0;
             pd::Interface::getObjectBounds(patch, pic.cast<t_gobj>(), &x, &y, &w, &h);
             return { x, y, w, h };
         }
 
-        return {};
+        return { };
     }
 
     void updateSizeProperty() override

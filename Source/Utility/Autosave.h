@@ -183,7 +183,7 @@ private:
 
 class AutosaveHistoryComponent final : public Component {
     class AutoSaveHistory final : public Component {
-        public:
+    public:
         AutoSaveHistory(PluginEditor* editor, ValueTree autoSaveTree)
         {
             patchPath = autoSaveTree.getProperty("Path").toString();
@@ -191,7 +191,7 @@ class AutosaveHistoryComponent final : public Component {
 
             addAndMakeVisible(openPatch);
 
-            auto const backgroundColour = findColour(PlugDataColour::panelForegroundColourId);
+            auto const backgroundColour = getThemeColours(*this).panelForegroundColour;
             openPatch.setColour(TextButton::buttonColourId, backgroundColour.contrasting(0.05f));
             openPatch.setColour(TextButton::buttonOnColourId, backgroundColour.contrasting(0.1f));
             openPatch.setColour(ComboBox::outlineColourId, Colours::transparentBlack);
@@ -218,25 +218,24 @@ class AutosaveHistoryComponent final : public Component {
 
         void paint(Graphics& g) override
         {
+            auto const& colours = getThemeColours(*this);
+
             auto bounds = getLocalBounds().reduced(16, 3).withTrimmedTop(8);
+            StackShadow::drawShadowForRect(g, bounds.reduced(3), 8, Corners::defaultCornerRadius, 0.4f, 1);
 
-            Path shadowPath;
-            shadowPath.addRoundedRectangle(bounds.reduced(3).toFloat(), Corners::largeCornerRadius);
-            StackShadow::renderDropShadow(hash("autosave"), g, shadowPath, Colour(0, 0, 0).withAlpha(0.4f), 7, { 0, 1 });
-
-            g.setColour(findColour(PlugDataColour::panelForegroundColourId));
+            g.setColour(colours.panelForegroundColour);
             g.fillRoundedRectangle(bounds.toFloat(), Corners::defaultCornerRadius);
 
-            g.setColour(findColour(PlugDataColour::toolbarOutlineColourId));
+            g.setColour(colours.toolbarOutlineColour);
             g.drawRoundedRectangle(bounds.toFloat(), Corners::defaultCornerRadius, 1.0f);
 
-            Fonts::drawIcon(g, Icons::File, bounds.removeFromLeft(32).withTrimmedLeft(10), findColour(PlugDataColour::panelTextColourId), 20);
+            Fonts::drawIcon(g, Icons::File, bounds.removeFromLeft(32).withTrimmedLeft(10), colours.panelTextColour, 20);
 
             auto const patchName = patchPath.fromLastOccurrenceOf("/", false, false);
-            Fonts::drawStyledText(g, patchName, bounds.removeFromTop(24).withTrimmedLeft(14), findColour(PlugDataColour::panelTextColourId), Semibold, 15);
+            Fonts::drawStyledText(g, patchName, bounds.removeFromTop(24).withTrimmedLeft(14), colours.panelTextColour, Semibold, 15);
 
             g.setFont(Fonts::getDefaultFont().withHeight(14.0f));
-            g.setColour(findColour(PlugDataColour::panelTextColourId));
+            g.setColour(colours.panelTextColour);
             g.drawText(patchPath, bounds.removeFromTop(24).withTrimmedLeft(14), Justification::centredLeft);
         }
 
@@ -286,26 +285,28 @@ public:
 private:
     void paint(Graphics& g) override
     {
+        auto const& colours = getThemeColours(*this);
+
         auto bounds = getLocalBounds();
         auto const titlebarBounds = bounds.removeFromTop(40).toFloat();
 
         Path toolbarPath;
         toolbarPath.addRoundedRectangle(titlebarBounds.getX(), titlebarBounds.getY(), titlebarBounds.getWidth(), titlebarBounds.getHeight(), Corners::windowCornerRadius, Corners::windowCornerRadius, true, true, false, false);
 
-        g.setColour(findColour(PlugDataColour::toolbarBackgroundColourId));
+        g.setColour(colours.toolbarBackgroundColour);
         g.fillPath(toolbarPath);
 
         Path backgroundPath;
         backgroundPath.addRoundedRectangle(bounds.getX(), bounds.getY(), bounds.getWidth(), bounds.getHeight(), Corners::windowCornerRadius, Corners::windowCornerRadius, false, false, true, true);
-        g.setColour(findColour(PlugDataColour::panelBackgroundColourId));
+        g.setColour(colours.panelBackgroundColour);
         g.fillPath(backgroundPath);
 
-        Fonts::drawStyledText(g, "Autosave History", titlebarBounds, findColour(PlugDataColour::panelTextColourId), Semibold, 15, Justification::centred);
+        Fonts::drawStyledText(g, "Autosave History", titlebarBounds, colours.panelTextColour, Semibold, 15, Justification::centred);
     }
 
     void paintOverChildren(Graphics& g) override
     {
-        g.setColour(findColour(PlugDataColour::toolbarOutlineColourId));
+        g.setColour(getThemeColours(*this).toolbarOutlineColour);
         g.drawLine(0, 40, getWidth(), 40);
     }
 

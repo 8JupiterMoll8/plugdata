@@ -28,20 +28,6 @@ public:
 #endif
 };
 
-class ToolbarRadioButton final : public TextButton {
-
-public:
-    using TextButton::TextButton;
-
-    void paint(Graphics& g) override;
-
-    // On macOS, we need to make sure that dragging any of these buttons doesn't drag the whole titlebar
-#if JUCE_MAC
-    void mouseEnter(const MouseEvent& e) override;
-    void mouseExit(MouseEvent const& e) override;
-#endif
-};
-
 class SmallIconButton : public TextButton {
     using TextButton::TextButton;
 
@@ -50,6 +36,12 @@ class SmallIconButton : public TextButton {
     void mouseExit(MouseEvent const& e) override;
 
     void paint(Graphics& g) override;
+
+    int iconSize = 12;
+
+public:
+    void setIconFontSize(int newSize);
+
 };
 
 class WidePanelButton final : public TextButton {
@@ -83,4 +75,15 @@ public:
     ReorderButton();
 
     MouseCursor getMouseCursor() override;
+};
+
+struct CalloutMenuButton final : public TextButton {
+    String const icon;
+    String const description;
+    String const keyboardShortcut;
+
+    CalloutMenuButton(String const& iconString, String const& descriptionString, bool const toggleButton, String const& keyboardShortcut = "");
+    void paint(Graphics& g) override;
+
+    int getIdealWidth() const;
 };

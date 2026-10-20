@@ -1,0 +1,19 @@
+# ThreadSanitizer suppressions for the P3.4 S11 sanitizer runs (TSAN_OPTIONS=suppressions=<this file>).
+# Only upstream, JUCE and system-library reports; never MCP code. Each line says why.
+# Launch the app with LD_PRELOAD=<tsan_clockwait_shim.so> (Tests/mcp/tsan_clockwait_shim.c): GCC 11's libtsan does
+# not intercept pthread_cond_clockwait (libstdc++ 11 condition_variable::wait_for), so without the shim every
+# condition-variable handoff shows as "double lock of a mutex" plus data races (1,885 reports in S11's second run,
+# 2 with the shim) and the deadlock detector's per-thread lock list overflows (CHECK n_all_locks_ < 64 aborted
+# the first run).
+
+# moodycamel::ReaderWriterQueue synchronises with std::atomic_thread_fence, which TSan does not model; the
+# queues are used single-producer/single-consumer (audio tick -> bridge timer), the queue's documented contract.
+race:moodycamel::ReaderWriterQueue
+
+# PulseAudio's client library internals (system library, not built by us).
+called_from_lib:libpulsecommon-15.99.so
+called_from_lib:libpulse.so.0
+
+# Upstream plugdata (finding L26): pd::Instance::KeyHandler's SmallArray is filled on the message thread
+# (ModifierKeyBroadcaster timer) and read by sendKeyUpMessages on the audio thread without a lock.
+race:pd::Instance::KeyHandler

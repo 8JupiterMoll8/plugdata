@@ -14,6 +14,7 @@ extern "C" {
 #include <concurrentqueue.h>
 #include <readerwriterqueue.h>
 #include "Patch.h"
+#include "Utility/ModifierKeyListener.h"
 
 class ObjectImplementationManager;
 
@@ -208,6 +209,8 @@ public:
     virtual void showTextEditorDialog(uint64_t ptr, SmallString const& title, std::function<void(String, uint64_t)> save, std::function<void(uint64_t)> close) = 0;
     virtual void clearTextEditor(uint64_t ptr) = 0;
     virtual bool isTextEditorDialogShown(uint64_t ptr) = 0;
+    
+    virtual void onConsoleMessage(String const& message, bool isError) {} // MCP-HOOK(telemetry)
 
     virtual void receiveSysMessage(SmallString const& selector, SmallArray<pd::Atom> const& list) = 0;
 
@@ -221,13 +224,51 @@ public:
     static void registerLuaClass(char const* object);
     static bool isLuaClass(hash32 objectNameHash);
 
-    virtual void updateConsole(int numMessages, bool newWarning) = 0;
+    virtual void updateConsole(SmallString const& message, bool isWarning, int numMessages, bool newWarning) = 0;
 
     virtual void titleChanged() = 0;
 
     void enqueueFunctionAsync(std::function<void()> const& fn);
 
+    struct KeyHandler : public ModifierKeyListener {
+        KeyHandler(Instance* parent)
+            : pd(parent)
+        {
+        }
+
+        static constexpr int shiftKey = -1;
+        static constexpr int commandKey = -2;
+        static constexpr int altKey = -3;
+        static constexpr int ctrlKey = -4;
+
+        void shiftKeyChanged(bool isHeld) override;
+        void commandKeyChanged(bool isHeld) override;
+        void altKeyChanged(bool isHeld) override;
+        void ctrlKeyChanged(bool isHeld) override;
+        void spaceKeyChanged(bool isHeld) override;
+
+        void convertJUCEKeyToPd(int& keynum, t_symbol*& keysym);
+
+        void sendKeyPress(KeyPress const& key);
+        void sendKeyUpMessages();
+
+        Instance* pd;
+        SmallArray<KeyPress> heldKeys;
+    } keyHandler = { this };
+
     void enqueueGuiMessage(Message const& fn);
+
+    // Set by MCPBridge: invoked right after a canvas is written to disk, so the
+    // MCP identity sidecar (<file>.mcpids.json) is written ATOMICALLY with the
+    // .pd — no matter who saved (GUI Ctrl+S, Save-As, or the MCP save_patch).
+    //
+    // Why it must be atomic: the sidecar is index-keyed ({i, id} pairs), so it
+    // is only valid for the exact object order of the file beside it. Written
+    // separately it would drift and map tempIds onto the WRONG objects. Without
+    // this hook a manual save left the sidecar stale, and on reload every
+    // object added since the last MCP save lost its semantic tempId.
+    std::function<void(t_glist*, juce::String const&)> onCanvasSaved; // MCP-HOOK(save)
+    std::function<void(t_gobj*, t_gobj*)> onObjectRetyped;           // MCP-HOOK(retype)
 
     // Enqueue a message to an pd::WeakReference
     // This will first check if the weakreference is valid before triggering the callback
@@ -241,8 +282,8 @@ public:
         });
     }
 
-    void sendDirectMessage(void* object, SmallString const& msg, SmallArray<Atom>&& list);
-    void sendDirectMessage(void* object, SmallArray<pd::Atom>&& list);
+    void sendDirectMessage(void* object, SmallString const& msg, SmallArray<Atom> const&& list);
+    void sendDirectMessage(void* object, SmallArray<pd::Atom> const&& list);
     void sendDirectMessage(void* object, SmallString const& msg);
     void sendDirectMessage(void* object, float msg);
 
@@ -280,6 +321,7 @@ public:
     static bool loadLibrary(String const& library);
 
     void* instance = nullptr;
+    void* mcpReceiver = nullptr; // MCP-HOOK(sysCommand): the "mcp_host" receiver
     void* messageReceiver = nullptr;
     void* parameterReceiver = nullptr;
     void* pluginLatencyReceiver = nullptr;
@@ -306,7 +348,6 @@ private:
 
     std::unique_ptr<FileChooser> openChooser;
     static inline auto luaClasses = UnorderedSet<hash32>(); // Keep track of class names that correspond to pdlua objects
-
 protected:
     struct internal;
 

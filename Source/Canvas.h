@@ -6,13 +6,11 @@
 
 #pragma once
 
-#include <nanovg.h>
+#include "Mcp/CanvasMcpLayer.h" // MCP-HOOK(overlayPaint)
+#include <nanovg_async.h>
 #ifdef NANOVG_GL_IMPLEMENTATION
 #    include <juce_opengl/juce_opengl.h>
 using namespace juce::gl;
-#    undef NANOVG_GL_IMPLEMENTATION
-#    include <nanovg_gl_utils.h>
-#    define NANOVG_GL_IMPLEMENTATION 1
 #endif
 
 #include "ObjectGrid.h"          // move to impl
@@ -45,6 +43,7 @@ class TabComponent;
 class BorderResizer;
 class CanvasSearchHighlight;
 class ObjectsResizer;
+class CanvasViewport;
 
 struct ObjectDragState {
     bool wasDragDuplicated : 1 = false;
@@ -79,6 +78,9 @@ public:
     PluginProcessor* pd;
 
     void mouseDown(MouseEvent const& e) override;
+    void mouseMove(MouseEvent const& e) override; // MCP-HOOK(canvasInput)
+    void mouseExit(MouseEvent const& e) override; // MCP-HOOK(canvasInput)
+
     void mouseDrag(MouseEvent const& e) override;
     void mouseUp(MouseEvent const& e) override;
     bool hitTest(int x, int y) override;
@@ -93,8 +95,8 @@ public:
     void focusGained(FocusChangeType cause) override;
     void focusLost(FocusChangeType cause) override;
 
-    void updateFramebuffers(NVGcontext* nvg) override;
     void performRender(NVGcontext* nvg, Rectangle<int> invalidRegion);
+    void renderResizeHandles(NVGcontext* nvg, NVGcolor colour, Rectangle<float> bounds);
 
     void resized() override;
 
@@ -130,11 +132,13 @@ public:
     void copySelection();
     void removeSelection();
     void removeSelectedConnections();
-    void dragAndDropPaste(String const& patchString, Point<int> mousePos, int patchWidth, int patchHeight, String const& name = String());
+    void dragAndDropPaste(String const& patchString, Point<int> mousePos, int patchWidth, int patchHeight);
     void pasteSelection();
     void duplicateSelection();
 
-    void encapsulateSelection();
+    void encapsulateSelection(String const& subpatchName = "pd"); // MCP-CARRIED(encapsulate-named)
+    // Selection-free variant: encapsulate an explicit object list (no GUI selection).
+    void encapsulateSelection(String const& subpatchName, SmallArray<Object*> const& objectsToEncapsulate);
     void triggerizeSelection();
     void cycleSelection();
     void connectSelection();
@@ -181,7 +185,7 @@ public:
 
     void receiveMessage(t_symbol* symbol, SmallArray<pd::Atom> const& atoms) override;
 
-    void activateCanvasSearchHighlight(Object* obj);
+    void activateCanvasSearchHighlight(Point<float> viewPos, Object* obj);
     void removeCanvasSearchHighlight();
 
     template<typename T>
@@ -196,7 +200,7 @@ public:
         return result;
     }
 
-    std::unique_ptr<Viewport> viewport = nullptr;
+    std::unique_ptr<CanvasViewport> viewport;
 
     bool connectingWithDrag : 1 = false;
     bool connectionCancelled : 1 = false;
@@ -235,7 +239,9 @@ public:
     bool altDown : 1 = false;
     bool shiftDown : 1 = false;
 
-    Rectangle<int> currentRenderArea;
+    // The MCP layer: AI overlays, notes, tools, pill, input hooks (Source/Mcp/CanvasMcpLayer.h).
+    CanvasMcpLayer& getMcpLayer() const { return *mcpLayer; } // MCP-HOOK(overlayPaint)
+    std::unique_ptr<CanvasMcpLayer> mcpLayer;                 // MCP-HOOK(overlayPaint)
 
     Value isGraphChild = SynchronousValue(var(false));
     Value hideNameAndArgs = SynchronousValue(var(false));
@@ -249,8 +255,6 @@ public:
     ObjectGrid objectGrid = ObjectGrid(this);
 
     int lastObjectGridSize = -1;
-
-    NVGImage dotsLargeImage;
 
     Point<int> const canvasOrigin;
 
@@ -272,54 +276,15 @@ public:
     Component objectLayer;
     Component connectionLayer;
 
-    NVGImage resizeHandleImage;
     NVGImage presentationShadowImage;
-
-    NVGcolor canvasBackgroundCol;
-    Colour canvasBackgroundColJuce;
-    NVGcolor canvasMarkingsCol;
-    Colour canvasMarkingsColJuce;
-
-    Colour canvasTextColJuce;
-    NVGcolor presentationBackgroundCol;
-    NVGcolor presentationWindowOutlineCol;
-
-    NVGcolor lassoCol;
-    NVGcolor lassoOutlineCol;
-
-    // objectOutlineColourId
-    NVGcolor objectOutlineCol;
-    NVGcolor outlineCol;
-
-    NVGcolor graphAreaCol;
-
-    NVGcolor commentTextCol;
-
-    // guiObjectInternalOutlineColour
-    Colour guiObjectInternalOutlineColJuce;
-    NVGcolor guiObjectInternalOutlineCol;
-    NVGcolor guiObjectBackgroundCol;
-    Colour guiObjectBackgroundColJuce;
-
-    NVGcolor textObjectBackgroundCol;
-    NVGcolor transparentObjectBackgroundCol;
-
-    // objectSelectedOutlineColourId
-    NVGcolor selectedOutlineCol;
-    NVGcolor indexTextCol;
-    NVGcolor ioletLockedCol;
-
-    NVGcolor baseCol;
-    NVGcolor dataCol;
-    NVGcolor sigCol;
-    NVGcolor gemCol;
-
-    NVGcolor dataColBrighter;
-    NVGcolor sigColBrighter;
-    NVGcolor gemColBrigher;
-    NVGcolor baseColBrigher;
+    NVGImage resizeHandleImage;
+    NVGFramebuffer dotsLargeImage;
 
 private:
+    void updateCanvasDots(NVGcontext* nvg);
+
+    pd::Patch::Ptr getPatchToSave() const;
+
     void changeListenerCallback(ChangeBroadcaster* c) override;
 
     SelectedItemSet<WeakReference<Component>> previousSelectedComponents;

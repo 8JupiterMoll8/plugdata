@@ -1,6 +1,9 @@
 #pragma once
+#include "LookAndFeel.h"
 
 class SearchEditor final : public TextEditor {
+    String lastTooltip;
+
 public:
     SearchEditor()
     {
@@ -17,6 +20,19 @@ public:
     {
         TextEditor::resized();
         clearButton.setBounds(getLocalBounds().removeFromRight(30));
+    }
+
+    void focusGained(FocusChangeType type) override
+    {
+        lastTooltip = getTooltip();
+        setTooltip("");
+        TextEditor::focusGained(type);
+    }
+
+    void focusLost(FocusChangeType type) override
+    {
+        setTooltip(lastTooltip);
+        TextEditor::focusLost(type);
     }
 
     bool keyPressed(KeyPress const& key) override
@@ -40,7 +56,7 @@ public:
         g.fillRoundedRectangle(getLocalBounds().toFloat(), Corners::defaultCornerRadius);
 
         if (hasKeyboardFocus(false)) {
-            g.setColour(findColour(PlugDataColour::toolbarActiveColourId));
+            g.setColour(getThemeColours(*this).toolbarActiveColour);
             g.drawRoundedRectangle(getLocalBounds().toFloat().reduced(1.0f), Corners::defaultCornerRadius, 2.0f);
         }
     }

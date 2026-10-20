@@ -36,10 +36,10 @@ public:
         iemHelper.iemColourChangedCallback = [this] {
             // We use this callback to be informed when the IEM colour has changed.
             // As getBackgroundColour() will lock audio thread!
-            backgroundCol = convertColour(iemHelper.getBackgroundColour());
+            backgroundCol = nvgColour(iemHelper.getBackgroundColour());
 
-            foregroundCol = convertColour(iemHelper.getForegroundColour());
-            flagCol = convertColour(iemHelper.getForegroundColour());
+            foregroundCol = nvgColour(iemHelper.getForegroundColour());
+            flagCol = nvgColour(iemHelper.getForegroundColour());
 
             input.setColour(Label::textColourId, iemHelper.getForegroundColour());
             input.setColour(Label::textWhenEditingColourId, iemHelper.getBackgroundColour().contrasting());
@@ -55,9 +55,9 @@ public:
 
         input.onInteraction = [this](bool const isFocused) {
             if (isFocused)
-                input.setColour(Label::textColourId, convertColour(backgroundCol).contrasting());
+                input.setColour(Label::textColourId, iemHelper.getBackgroundColour().contrasting());
             else
-                input.setColour(Label::textColourId, convertColour(foregroundCol));
+                input.setColour(Label::textColourId, iemHelper.getForegroundColour());
         };
 
         input.setEditableOnClick(false, false, true);
@@ -65,7 +65,7 @@ public:
             stopEdition();
         };
 
-        input.setBorderSize({ 1, 12, 2, 2 });
+        input.setBorderSize({ 1, 12, 1, 0 });
 
         addAndMakeVisible(input);
 
@@ -117,7 +117,7 @@ public:
             max = nbx->x_max;
             value = nbx->x_val;
         }
-        
+
         input.setValue(value, dontSendNotification, false);
         input.setMinimum(getValue<float>(min));
         input.setMaximum(getValue<float>(max));
@@ -125,7 +125,7 @@ public:
         input.setDragMode(getValue<bool>(logMode) ? DraggableNumber::Logarithmic : DraggableNumber::Regular);
 
         iemHelper.update();
-        
+
         auto const fontHeight = getValue<int>(iemHelper.labelHeight);
         input.setFont(Fonts::getTabularNumbersFont().withHeight(fontHeight + 3.0f));
         updateLabel();
@@ -157,7 +157,7 @@ public:
             return { x, y, calcFontWidth(std::max(nbx->x_numwidth, 1)) + 1, h + 1 };
         }
 
-        return {};
+        return { };
     }
 
     int getFontWidth() const
@@ -367,30 +367,32 @@ public:
 
     void render(NVGcontext* nvg) override
     {
+        auto const& colours = getThemeColours();
+
         auto const b = getLocalBounds().toFloat();
 
         bool const selected = object->isSelected() && !cnv->isGraph;
 
-        nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), backgroundCol, selected ? cnv->selectedOutlineCol : cnv->objectOutlineCol, Corners::objectCornerRadius);
+        nanovg::nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), backgroundCol, nvgColour(selected ? colours.objectSelectedOutlineColour : colours.objectOutlineColour), getPlugDataLook(*this).getObjectCornerRadius());
 
         constexpr float indent = 9.0f;
         Rectangle<float> const iconBounds = { (b.getX() + 4.0f), (b.getY() + 4.0f), (indent - 4.0f), (b.getHeight() - 8.0f) };
 
         auto const centreY = iconBounds.getCentreY();
         auto const leftX = iconBounds.getX();
-        nvgBeginPath(nvg);
-        nvgMoveTo(nvg, leftX, centreY + 5.0f);
-        nvgLineTo(nvg, iconBounds.getRight(), centreY);
-        nvgLineTo(nvg, leftX, centreY - 5.0f);
-        nvgClosePath(nvg);
+        nanovg::nvgBeginPath(nvg);
+        nanovg::nvgMoveTo(nvg, leftX, centreY + 5.0f);
+        nanovg::nvgLineTo(nvg, iconBounds.getRight(), centreY);
+        nanovg::nvgLineTo(nvg, leftX, centreY - 5.0f);
+        nanovg::nvgClosePath(nvg);
 
         bool const highlighted = hasKeyboardFocus(true) && getValue<bool>(object->locked);
-        auto const flagCol = highlighted ? cnv->selectedOutlineCol : cnv->guiObjectInternalOutlineCol;
+        auto const flagCol = highlighted ? nvgColour(colours.objectSelectedOutlineColour) : nvgColour(colours.guiObjectInternalOutlineColour);
 
-        nvgFillColor(nvg, flagCol);
-        nvgFill(nvg);
+        nanovg::nvgFillColor(nvg, flagCol);
+        nanovg::nvgFill(nvg);
 
-        input.render(nvg);
+        input.render(nvg, cnv->editor->getNanoLLGC());
     }
 
     std::unique_ptr<ComponentBoundsConstrainer> createConstrainer() override

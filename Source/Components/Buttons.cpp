@@ -7,7 +7,7 @@
 #include "Utility/Config.h"
 #include "Utility/Fonts.h"
 #include "PluginEditor.h"
-
+#include "LookAndFeel.h"
 #include "Buttons.h"
 
 String MainToolbarButton::getTooltip()
@@ -31,20 +31,18 @@ String MainToolbarButton::getTooltip()
 
 void MainToolbarButton::paint(Graphics& g)
 {
+    auto const& colours = getThemeColours(*this);
+
     bool const active = isOver() || isDown() || getToggleState();
 
     auto constexpr cornerSize = Corners::defaultCornerRadius;
-    auto const backgroundColour = active ? findColour(PlugDataColour::toolbarHoverColourId) : Colours::transparentBlack;
-    auto bounds = getLocalBounds().reduced(3, 4).toFloat();
+    auto const backgroundColour = active ? colours.toolbarHoverColour : Colours::transparentBlack;
+    auto bounds = getLocalBounds().reduced(4, 5).toFloat();
 
     g.setColour(backgroundColour);
     g.fillRoundedRectangle(bounds, cornerSize);
 
-    auto const textColour = findColour(PlugDataColour::toolbarTextColourId).withMultipliedAlpha(isEnabled() ? 1.0f : 0.5f);
-
-#if JUCE_MAC
-    bounds = bounds.withTrimmedBottom(2);
-#endif
+    auto const textColour = colours.toolbarTextColour.withMultipliedAlpha(isEnabled() ? 1.0f : 0.5f);
 
     g.setFont(Fonts::getIconFont().withHeight(getHeight() / 2.7));
     g.setColour(textColour);
@@ -56,8 +54,8 @@ void MainToolbarButton::paint(Graphics& g)
 MainToolbarButton::~MainToolbarButton()
 {
     if (auto const* topLevel = getTopLevelComponent()) {
-        if (auto const* peer = topLevel->getPeer()) {
-            OSUtils::setWindowMovable(peer->getNativeHandle(), true);
+        if (auto* peer = topLevel->getPeer()) {
+            OSUtils::setWindowMovable(peer, true);
         }
     }
 }
@@ -65,8 +63,8 @@ MainToolbarButton::~MainToolbarButton()
 void MainToolbarButton::mouseEnter(MouseEvent const& e)
 {
     if (auto const* topLevel = getTopLevelComponent()) {
-        if (auto const* peer = topLevel->getPeer()) {
-            OSUtils::setWindowMovable(peer->getNativeHandle(), false);
+        if (auto* peer = topLevel->getPeer()) {
+            OSUtils::setWindowMovable(peer, false);
         }
     }
     TextButton::mouseEnter(e);
@@ -75,62 +73,8 @@ void MainToolbarButton::mouseEnter(MouseEvent const& e)
 void MainToolbarButton::mouseExit(MouseEvent const& e)
 {
     if (auto const* topLevel = getTopLevelComponent()) {
-        if (auto const* peer = topLevel->getPeer()) {
-            OSUtils::setWindowMovable(peer->getNativeHandle(), true);
-        }
-    }
-    TextButton::mouseExit(e);
-}
-#endif
-
-void ToolbarRadioButton::paint(Graphics& g)
-{
-    bool const mouseOver = isOver();
-    bool const active = mouseOver || isDown() || getToggleState();
-
-    auto const flatOnLeft = isConnectedOnLeft();
-    auto const flatOnRight = isConnectedOnRight();
-    auto const flatOnTop = isConnectedOnTop();
-    auto const flatOnBottom = isConnectedOnBottom();
-
-    auto const backgroundColour = findColour(active ? PlugDataColour::toolbarHoverColourId : PlugDataColour::toolbarBackgroundColourId).contrasting(mouseOver && !getToggleState() ? 0.0f : 0.035f);
-
-    auto bounds = getLocalBounds().toFloat();
-    bounds = bounds.reduced(0.0f, bounds.proportionOfHeight(0.17f));
-
-    g.setColour(backgroundColour);
-    Path p;
-    p.addRoundedRectangle(bounds.getX(), bounds.getY(), bounds.getWidth(), bounds.getHeight(), Corners::defaultCornerRadius, Corners::defaultCornerRadius,
-        !(flatOnLeft || flatOnTop),
-        !(flatOnRight || flatOnTop),
-        !(flatOnLeft || flatOnBottom),
-        !(flatOnRight || flatOnBottom));
-    g.fillPath(p);
-
-    auto const textColour = findColour(PlugDataColour::toolbarTextColourId).withMultipliedAlpha(isEnabled() ? 1.0f : 0.5f);
-
-    g.setFont(Fonts::getIconFont().withHeight(getHeight() / 2.8));
-    g.setColour(textColour);
-    g.drawText(getButtonText(), getLocalBounds(), Justification::centred);
-}
-
-// On macOS, we need to make sure that dragging any of these buttons doesn't drag the whole titlebar
-#if JUCE_MAC
-void ToolbarRadioButton::mouseEnter(const MouseEvent& e)
-{
-    if (auto const* topLevel = getTopLevelComponent()) {
-        if (auto const* peer = topLevel->getPeer()) {
-            OSUtils::setWindowMovable(peer->getNativeHandle(), false);
-        }
-    }
-    TextButton::mouseEnter(e);
-}
-
-void ToolbarRadioButton::mouseExit(MouseEvent const& e)
-{
-    if (auto const* topLevel = getTopLevelComponent()) {
-        if (auto const* peer = topLevel->getPeer()) {
-            OSUtils::setWindowMovable(peer->getNativeHandle(), true);
+        if (auto* peer = topLevel->getPeer()) {
+            OSUtils::setWindowMovable(peer, true);
         }
     }
     TextButton::mouseExit(e);
@@ -155,19 +99,27 @@ void SmallIconButton::mouseExit(MouseEvent const& e)
     repaint();
 }
 
+void SmallIconButton::setIconFontSize(int newSize)
+{
+    iconSize = newSize;
+    repaint();
+}
+
 void SmallIconButton::paint(Graphics& g)
 {
-    auto colour = findColour(PlugDataColour::toolbarTextColourId);
+    auto const& colours = getThemeColours(*this);
+
+    auto colour = colours.toolbarTextColour;
 
     if (!isEnabled()) {
-        colour = Colours::grey;
+        colour = colour.withAlpha(0.35f);
     } else if (getToggleState()) {
-        colour = findColour(PlugDataColour::toolbarActiveColourId);
+        colour = colours.toolbarActiveColour;
     } else if (isMouseOver()) {
-        colour = findColour(PlugDataColour::toolbarTextColourId).brighter(0.8f);
+        colour = colours.toolbarTextColour.brighter(0.8f);
     }
 
-    Fonts::drawIcon(g, getButtonText(), getLocalBounds(), colour, 12);
+    Fonts::drawIcon(g, getButtonText(), getLocalBounds(), colour, iconSize);
 }
 
 WidePanelButton::WidePanelButton(String const& icon, int const iconSize)
@@ -188,6 +140,8 @@ void WidePanelButton::mouseExit(MouseEvent const& e)
 
 void WidePanelButton::paint(Graphics& g)
 {
+    auto const& colours = getThemeColours(*this);
+
     bool const flatOnLeft = isConnectedOnLeft();
     bool const flatOnRight = isConnectedOnRight();
     bool const flatOnTop = isConnectedOnTop();
@@ -204,14 +158,14 @@ void WidePanelButton::paint(Graphics& g)
         !(flatOnLeft || flatOnBottom),
         !(flatOnRight || flatOnBottom));
 
-    g.setColour(findColour(isMouseOver() ? PlugDataColour::panelActiveBackgroundColourId : PlugDataColour::panelForegroundColourId));
+    g.setColour(isMouseOver() ? colours.panelActiveBackgroundColour : colours.panelForegroundColour);
     g.fillPath(outline);
 
-    g.setColour(findColour(PlugDataColour::outlineColourId));
+    g.setColour(colours.toolbarOutlineColour);
     g.strokePath(outline, PathStrokeType(1));
 
-    Fonts::drawText(g, getButtonText(), getLocalBounds().reduced(12, 2), findColour(PlugDataColour::panelTextColourId), 15);
-    Fonts::drawIcon(g, icon, getLocalBounds().reduced(12, 2).removeFromRight(24), findColour(PlugDataColour::panelTextColourId), iconSize);
+    Fonts::drawText(g, getButtonText(), getLocalBounds().reduced(12, 2), colours.panelTextColour, 15);
+    Fonts::drawIcon(g, icon, getLocalBounds().reduced(12, 2).removeFromRight(24), colours.panelTextColour, iconSize);
 }
 
 SettingsToolbarButton::SettingsToolbarButton(String iconToUse, String textToShow)
@@ -224,10 +178,12 @@ SettingsToolbarButton::SettingsToolbarButton(String iconToUse, String textToShow
 
 void SettingsToolbarButton::paint(Graphics& g)
 {
+    auto const& colours = getThemeColours(*this);
+
     auto const b = getLocalBounds().reduced(2.0f, 4.0f);
 
     if (isMouseOver() || getToggleState()) {
-        auto background = findColour(PlugDataColour::toolbarHoverColourId);
+        auto background = colours.toolbarHoverColour;
         if (getToggleState())
             background = background.darker(0.025f);
 
@@ -235,7 +191,7 @@ void SettingsToolbarButton::paint(Graphics& g)
         g.fillRoundedRectangle(b.toFloat(), Corners::defaultCornerRadius);
     }
 
-    auto const textColour = findColour(PlugDataColour::toolbarTextColourId);
+    auto const textColour = colours.toolbarTextColour;
     auto const boldFont = Fonts::getBoldFont().withHeight(13.5f);
     auto const iconFont = Fonts::getIconFont().withHeight(13.5f);
 
@@ -255,4 +211,66 @@ ReorderButton::ReorderButton()
 MouseCursor ReorderButton::getMouseCursor()
 {
     return MouseCursor::DraggingHandCursor;
+}
+
+CalloutMenuButton::CalloutMenuButton(String const& iconString, String const& descriptionString, bool const toggleButton, String const& keyboardShortcutString)
+    : icon(iconString)
+    , description(descriptionString)
+    , keyboardShortcut(keyboardShortcutString)
+{
+    setClickingTogglesState(toggleButton);
+}
+
+void CalloutMenuButton::paint(Graphics& g)
+{
+    auto const& colours = getThemeColours(*this);
+
+    g.setColour(isMouseOver() ? colours.popupMenuActiveBackgroundColour : colours.popupMenuBackgroundColour);
+    g.fillRoundedRectangle(getLocalBounds().toFloat().reduced(2), Corners::defaultCornerRadius);
+
+    auto colour = colours.toolbarTextColour;
+    Fonts::drawText(g, description, getLocalBounds().withTrimmedLeft(32), colour, 14.5);
+
+    if (getToggleState()) {
+        colour = colours.toolbarActiveColour;
+    }
+
+    Fonts::drawIcon(g, icon, getLocalBounds().withTrimmedLeft(8), colour, 14, false);
+
+    auto shortcutBounds = getLocalBounds().removeFromRight(64).withSize(64, 24).translated(-8, 4);
+#if JUCE_MAC
+    for (int i = keyboardShortcut.length() - 1; i >= 0; i--) {
+        auto font = Fonts::getSemiBoldFont().withHeight(10.5f);
+        auto text = keyboardShortcut.substring(i, i + 1);
+        auto width = std::max(Fonts::getStringWidthInt(text, font) + 4, 16);
+        auto b = shortcutBounds.removeFromRight(width).toFloat().reduced(1.0f, 5.0f).translated(1.5f, 0.5f);
+
+        g.setColour(colours.popupMenuBackgroundColour.contrasting(0.08f));
+        g.fillRoundedRectangle(b.toFloat(), 3.0f);
+
+        g.setColour(colours.popupMenuTextColour.withAlpha(isEnabled() ? 0.8f : 0.3f));
+        g.setFont(Fonts::getSemiBoldFont().withHeight(11));
+        g.drawText(text, b, Justification::centred);
+    }
+#elif JUCE_WINDOWS || JUCE_LINUX || JUCE_BSD
+    auto keys = StringArray::fromTokens(keyboardShortcut, "+", "");
+    for (int i = keys.size() - 1; i >= 0; i--) {
+        auto font = Fonts::getSemiBoldFont().withHeight(10.5f);
+        auto width = std::max(Fonts::getStringWidthInt(keys[i].trim(), font) + 8, 15);
+        auto b = shortcutBounds.removeFromRight(width).reduced(1, 5);
+
+        g.setColour(colours.popupMenuTextColour.withAlpha(isEnabled() ? 0.9f : 0.35f));
+        g.fillRoundedRectangle(b.toFloat(), 3.0f);
+
+        g.setColour(colours.popupMenuBackgroundColour);
+
+        g.setFont(font);
+        g.drawText(keys[i], b, Justification::centred);
+    }
+#endif
+}
+
+int CalloutMenuButton::getIdealWidth() const
+{
+    return Fonts::getStringWidth(icon + description, 15.f) + Fonts::getStringWidth(keyboardShortcut, 10.5f); // just an approximation
 }

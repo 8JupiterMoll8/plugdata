@@ -14,7 +14,7 @@
 #include "Components/ObjectDragAndDrop.h"
 #include "Objects/ObjectBase.h"
 
-class AutomationItem final : public ObjectDragAndDrop
+class AutomationItem final : public Component
     , public Value::Listener {
 
     class ParamNameErrorCallout final : public Component {
@@ -35,8 +35,8 @@ class AutomationItem final : public ObjectDragAndDrop
             textLabel.setJustificationType(Justification::centred);
             textLabel2.setJustificationType(Justification::centred);
 
-            auto const bestWidthText = textLabel.getFont().getStringWidth(textLabel.getText());
-            auto const bestWidthErrorNameText = textLabel2.getFont().getStringWidth(textLabel2.getText());
+            auto const bestWidthText = Fonts::getStringWidth(textLabel.getText(), textLabel.getFont());
+            auto const bestWidthErrorNameText = Fonts::getStringWidth(textLabel2.getText(), textLabel2.getFont());
 
             auto const bestWidth = jmax(bestWidthText, bestWidthErrorNameText);
             setSize(bestWidth + 8, 2 * 24);
@@ -110,7 +110,7 @@ class AutomationItem final : public ObjectDragAndDrop
             p.lineTo(0.5f, 0.5f);
             p.lineTo(isOpen ? 1.0f : 0.0f, isOpen ? 0.0f : 1.0f);
 
-            g.setColour(findColour(PlugDataColour::panelTextColourId).withAlpha(mouseOver ? 0.7f : 1.0f));
+            g.setColour(getThemeColours(*this).panelTextColour.withAlpha(mouseOver ? 0.7f : 1.0f));
             g.strokePath(p, PathStrokeType(1.5f, PathStrokeType::curved, PathStrokeType::rounded), p.getTransformToScaleToFit(area.translated(3, 0).reduced(area.getWidth() / 4, area.getHeight() / 4), true));
         }
     };
@@ -119,11 +119,10 @@ class AutomationItem final : public ObjectDragAndDrop
 
 public:
     AutomationItem(PlugDataParameter* parameter, Component* parentComponent, PluginProcessor* processor)
-        : ObjectDragAndDrop(parentComponent->findParentComponentOfClass<PluginEditor>())
-        , pd(processor)
+        : pd(processor)
+        , param(parameter)
         , rangeProperty("Range", range, false)
         , modeProperty("Mode", mode, { "Float", "Integer", "Logarithmic", "Exponential" })
-        , param(parameter)
     {
         addMouseListener(parentComponent, true);
 
@@ -137,7 +136,7 @@ public:
             onDelete(this);
         };
 
-        nameLabel.setFont(Font(14));
+        nameLabel.setFont(Font(FontOptions(14)));
         nameLabel.setInterceptsMouseClicks(false, false);
 
         deleteButton.setSize(25, 25);
@@ -248,10 +247,6 @@ public:
                 editor->setJustification(Justification::centred);
             }
             lastName = nameLabel.getText(false);
-        };
-
-        nameLabel.onTextChange = [this] {
-            resetDragAndDropImage();
         };
 
         nameLabel.onEditorHide = [this] {
@@ -381,7 +376,10 @@ public:
         addChildComponent(reorderButton);
         addChildComponent(deleteButton);
 
+        setViewportIgnoreDragFlag(true);
+
         update();
+        updater.addAnimator(animator);
     }
 
     void update()
@@ -436,15 +434,13 @@ public:
         return getLocalBounds().toFloat().reduced(4.5f, 3.0f).contains(x, y);
     }
 
-    void mouseDown(MouseEvent const& e) override
+    void mouseDrag(MouseEvent const& e) override
     {
-        if (!e.mods.isLeftButtonDown())
-            return;
-
-        if (&reorderButton == e.originalComponent)
-            setIsReordering(true);
-        else
-            setIsReordering(false);
+        if (e.originalComponent == this && e.getDistanceFromDragStart() > 4) {
+            if (auto* editor = findParentComponentOfClass<PluginEditor>()) {
+                ObjectDragAndDrop::attachToMouse(editor, "#X obj 0 0 param " + param->getTitle().toString() + ";");
+            }
+        }
     }
 
     void mouseUp(MouseEvent const& e) override
@@ -480,16 +476,6 @@ public:
     {
         deleteButton.setVisible(false);
         reorderButton.setVisible(false);
-    }
-
-    String getObjectString() override
-    {
-        return "#X obj 0 0 param " + param->getTitle().toString() + ";";
-    }
-
-    String getPatchStringName() override
-    {
-        return "param object";
     }
 
     void valueChanged(Value& v) override
@@ -551,20 +537,45 @@ public:
 
     void paint(Graphics& g) override
     {
-        slider.setColour(Slider::backgroundColourId, findColour(PlugDataColour::sidebarBackgroundColourId));
-        slider.setColour(Slider::trackColourId, findColour(PlugDataColour::sidebarTextColourId));
+        auto const& colours = getThemeColours(*this);
 
-        nameLabel.setColour(Label::textColourId, findColour(PlugDataColour::sidebarTextColourId));
-        valueLabel.setColour(Label::textColourId, findColour(PlugDataColour::sidebarTextColourId));
+        slider.setColour(Slider::backgroundColourId, colours.sidebarBackgroundColour);
+        slider.setColour(Slider::trackColourId, colours.sidebarTextColour);
 
-        g.setColour(findColour(PlugDataColour::sidebarActiveBackgroundColourId));
+        nameLabel.setColour(Label::textColourId, colours.sidebarTextColour);
+        valueLabel.setColour(Label::textColourId, colours.sidebarTextColour);
+
+        g.setColour(colours.sidebarActiveBackgroundColour);
         g.fillRoundedRectangle(getLocalBounds().toFloat().reduced(6.0f, 3.0f), Corners::defaultCornerRadius);
     }
 
+    void animateToPosition(Rectangle<int> targetBounds)
+    {
+        animationStartBounds = getBounds();
+        animationEndBounds = targetBounds;
+        animator.start();
+    }
+
+    void cancelAnimation(Rectangle<int> targetBounds)
+    {
+        animator.complete();
+        setBounds(targetBounds);
+    }
+
+    Rectangle<int> getTargetBounds()
+    {
+        return animator.isComplete() ? getBounds() : animationEndBounds;
+    }
+
     std::function<void(AutomationItem*)> onDelete = [](AutomationItem*) { };
+    SmallIconButton deleteButton = SmallIconButton(Icons::Clear);
+    ReorderButton reorderButton;
+    PlugDataParameter* param;
+    Slider slider;
+
+private:
     std::unique_ptr<HostProvidedContextMenu> hostContextMenu;
 
-    SmallIconButton deleteButton = SmallIconButton(Icons::Clear);
     ExpandButton settingsButton;
 
     Value range = Value(var(VarArray { var(0.0f), var(127.0f) }));
@@ -576,68 +587,23 @@ public:
     DraggableNumber valueLabel = DraggableNumber(false);
 
     Label nameLabel;
-
     String lastName;
-
-    Slider slider;
-
-    ReorderButton reorderButton;
-
-    PlugDataParameter* param;
-
     std::unique_ptr<SliderParameterAttachment> attachment;
 
+    Rectangle<int> animationStartBounds, animationEndBounds;
+    VBlankAnimatorUpdater updater { this };
+    Animator animator = ValueAnimatorBuilder { }
+                            .withEasing(Easings::createEaseInOut())
+                            .withDurationMs(260)
+                            .withValueChangedCallback([this](float v) {
+                                auto start = std::make_tuple(animationStartBounds.getX(), animationStartBounds.getY(), animationStartBounds.getWidth(), animationStartBounds.getHeight());
+                                auto end = std::make_tuple(animationEndBounds.getX(), animationEndBounds.getY(), animationEndBounds.getWidth(), animationEndBounds.getHeight());
+                                auto const [x, y, w, h] = makeAnimationLimits(start, end).lerp(v);
+                                setBounds(x, y, w, h);
+                            })
+                            .build();
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AutomationItem)
-};
-
-class AlphaAnimator final : public Timer {
-public:
-    AlphaAnimator() = default;
-
-    void fadeIn(Component* component, double const duration)
-    {
-        animate(component, duration, 0.0f, 1.0f);
-    }
-
-    void fadeOut(Component* component, double const duration)
-    {
-        animate(component, duration, 1.0f, 0.0f);
-    }
-
-private:
-    void animate(Component* component, double const duration, float const startAlpha, float const endAlpha)
-    {
-        componentToAnimate = component;
-        animationSteps = static_cast<int>(duration / timerInterval);
-        currentStep = 0;
-        startAlphaValue = startAlpha;
-        endAlphaValue = endAlpha;
-
-        startTimer(timerInterval); // Start the timer
-    }
-
-    void timerCallback() override
-    {
-        ++currentStep;
-
-        if (currentStep >= animationSteps) {
-            componentToAnimate->setAlpha(endAlphaValue);
-            stopTimer();
-        } else {
-            float const alpha = startAlphaValue + (endAlphaValue - startAlphaValue) * static_cast<float>(currentStep) / static_cast<float>(animationSteps);
-            componentToAnimate->setAlpha(alpha);
-        }
-    }
-
-    Component* componentToAnimate = nullptr;
-    int animationSteps = 0;
-    int currentStep = 0;
-    float startAlphaValue = 0.0f;
-    float endAlphaValue = 0.0f;
-
-    int const timerInterval = 16; // 60 FPS timer interval
-
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AlphaAnimator)
 };
 
 class DraggedItemDropShadow final : public Component
@@ -646,6 +612,7 @@ public:
     DraggedItemDropShadow()
     {
         setAlpha(0.0f);
+        updater.addAnimator(animator);
     }
 
     void activate(AutomationItem* item)
@@ -659,15 +626,18 @@ public:
         toFront(false);
         automationItem->addComponentListener(this);
         setBounds(automationItem->getBounds().expanded(8, 4));
-        animator.fadeIn(this, 300);
+
+        animationFadeIn = true;
+        animator.start();
     }
 
     void deActivate()
     {
-        animator.fadeOut(this, 300);
+        animationFadeIn = false;
+        animator.start();
     }
 
-    void componentMovedOrResized(juce::Component& component, bool wasMoved, bool wasResized) override
+    void componentMovedOrResized(Component& component, bool wasMoved, bool wasResized) override
     {
         if (&component == automationItem) {
             setBounds(component.getBounds().expanded(8, 4));
@@ -677,14 +647,22 @@ public:
     void paint(Graphics& g) override
     {
         auto const rect = getLocalBounds().reduced(14, 7);
-        Path shadowPath;
-        shadowPath.addRoundedRectangle(rect, Corners::defaultCornerRadius);
-        StackShadow::renderDropShadow(hash("automation_item"), g, shadowPath, Colours::black.withAlpha(0.3f), 7);
+
+        StackShadow::drawShadowForRect(g, rect, 8, Corners::defaultCornerRadius, 0.3f);
     }
 
 private:
     SafePointer<AutomationItem> automationItem = nullptr;
-    AlphaAnimator animator;
+
+    bool animationFadeIn = false;
+    VBlankAnimatorUpdater updater { this };
+    Animator animator = ValueAnimatorBuilder { }
+                            .withDurationMs(270)
+                            .withEasing(Easings::createEaseInOutCubic())
+                            .withValueChangedCallback([this](float v) {
+                                setAlpha(animationFadeIn ? v : (1.0f - v));
+                            })
+                            .build();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(DraggedItemDropShadow)
 };
@@ -700,13 +678,15 @@ class AutomationComponent final : public Component {
 
         void paint(Graphics& g) override
         {
+            auto const& colours = getThemeColours(*this);
+
             auto const bounds = getLocalBounds().reduced(5, 2);
             auto textBounds = bounds;
             auto const iconBounds = textBounds.removeFromLeft(textBounds.getHeight());
 
-            auto const colour = findColour(PlugDataColour::sidebarTextColourId);
+            auto const colour = colours.sidebarTextColour;
             if (mouseIsOver) {
-                g.setColour(findColour(PlugDataColour::sidebarActiveBackgroundColourId));
+                g.setColour(colours.sidebarActiveBackgroundColour);
                 g.fillRoundedRectangle(bounds.toFloat(), Corners::defaultCornerRadius);
             }
 
@@ -770,7 +750,7 @@ public:
 
     void mouseDown(MouseEvent const& e) override
     {
-        if (!e.mods.isLeftButtonDown())
+        if (!isRealClickEvent(e))
             return;
 
         accumulatedOffsetY = { 0, 0 };
@@ -929,19 +909,16 @@ public:
 
     void resized() override
     {
-        auto& animator = Desktop::getInstance().getAnimator();
-
         int y = 2;
         int const width = getWidth();
         for (int p = 0; p < rows.size(); p++) {
             int const height = rows[p]->getItemHeight();
-            if (rows[p] != draggedItem) {
-                auto bounds = Rectangle<int>(0, y, width, height);
+            auto bounds = Rectangle<int>(0, y, width, height);
+            if (rows[p] != draggedItem && rows[p]->getTargetBounds() != bounds) {
                 if (shouldAnimate) {
-                    animator.animateComponent(rows[p], bounds, 1.0f, 200, false, 3.0f, 0.0f);
+                    rows[p]->animateToPosition(bounds);
                 } else {
-                    animator.cancelAnimation(rows[p], false);
-                    rows[p]->setBounds(bounds);
+                    rows[p]->cancelAnimation(bounds);
                 }
             }
             y += height;
@@ -1004,7 +981,7 @@ public:
 
     void paint(Graphics& g) override
     {
-        g.setColour(findColour(PlugDataColour::sidebarBackgroundColourId));
+        g.setColour(getThemeColours(*this).sidebarBackgroundColour);
         g.fillRect(getLocalBounds());
     }
 

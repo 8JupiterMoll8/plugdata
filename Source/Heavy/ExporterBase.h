@@ -11,13 +11,25 @@
 
 struct ExporterBase : public Component
     , public Value::Listener
-    , public ChildProcess
     , public ThreadPool {
+
+    // What the export button does: write to a folder the user picks, or run straight onto the device
+    enum ExportAction {
+        Export,
+        Flash,
+        FlashBootloader
+    };
+
+    ChildProcess process;
     TextButton exportButton = TextButton("Export");
 
     Value inputPatchValue = SynchronousValue();
     Value projectNameValue;
     Value projectCopyrightValue;
+    Value exportTypeValue = SynchronousValue(var(1));
+
+    // Set for a single run from the quick export menu, leaving the stored setting alone
+    int exportTypeOverride = 0;
 
     bool blockDialog = false;
 
@@ -31,7 +43,7 @@ struct ExporterBase : public Component
 
     static inline File heavyExecutable = toolchainDir.getChildFile("bin").getChildFile("Heavy").getChildFile("Heavy" + exeSuffix);
     static inline SmallArray<File> tempFilesToDelete;
-        
+
     bool validPatchSelected = false;
     bool canvasDirty = false;
     bool isTempFile = false;
@@ -44,12 +56,15 @@ struct ExporterBase : public Component
 
     ExportingProgressView* exportingView;
 
-    bool shouldQuit = false;
+    // Stops the export where it is: set when the exporter goes away, or when the user cancels
+    AtomicValue<bool> shouldQuit = false;
+    AtomicValue<bool> cancelled = false;
+
+    // Keeps a cancel from killing the process while the export thread swaps in the next one
+    CriticalSection processLock;
 
     Label unsavedLabel = Label("", "Warning: patch has unsaved changes");
     PluginEditor* editor;
-    
-
 
     ExporterBase(PluginEditor* pluginEditor, ExportingProgressView* exportView)
         : ThreadPool(1, Thread::osDefaultStackSize, Thread::Priority::highest)
@@ -58,7 +73,7 @@ struct ExporterBase : public Component
     {
         addAndMakeVisible(exportButton);
 
-        auto const backgroundColour = findColour(PlugDataColour::panelBackgroundColourId);
+        auto const backgroundColour = getThemeColours(*this).panelBackgroundColour;
         exportButton.setColour(TextButton::buttonColourId, backgroundColour.contrasting(0.05f));
         exportButton.setColour(TextButton::buttonOnColourId, backgroundColour.contrasting(0.1f));
         exportButton.setColour(ComboBox::outlineColourId, Colours::transparentBlack);
@@ -117,36 +132,120 @@ struct ExporterBase : public Component
             canvasDirty = false;
         }
 
-        exportButton.onClick = [this] {
-            Dialogs::showSaveDialog([this](URL const& url) {
-                auto const result = url.getLocalFile();
-                if (result.getParentDirectory().exists()) {
-                    startExport(result);
-                }
-            },
-                "", "HeavyExport", nullptr, true);
-        };
+        exportButton.onClick = [this] { triggerExport(); };
 
         unsavedLabel.setColour(Label::textColourId, Colours::orange);
         addChildComponent(unsavedLabel);
     }
 
-    // TODO: hides non-virtual destructor from juce::ChildProcess! modify JUCE to make it virtual?
     ~ExporterBase() override
     {
         if (openedPatchFile.existsAsFile() && isTempFile) {
             openedPatchFile.deleteFile();
         }
 
-        shouldQuit = true;
-        if (isRunning())
-            kill();
+        {
+            ScopedLock lock(processLock);
+            shouldQuit = true;
+            if (process.isRunning())
+                process.kill();
+        }
+
         removeAllJobs(true, -1);
     }
 
-    virtual ValueTree getState() = 0;
-    virtual void setState(ValueTree& state) = 0;
-        
+    // The export finishes as soon as the step it's on is killed, and doesn't start another
+    void cancelExport()
+    {
+        ScopedLock lock(processLock);
+        cancelled = true;
+        shouldQuit = true;
+        if (process.isRunning())
+            process.kill();
+    }
+
+    void startProcess(String const& command)
+    {
+        process.start(command);
+    }
+
+    uint32 getExitCode() const
+    {
+        return process.getExitCode();
+    }
+
+    ChildProcess* getProcess()
+    {
+        return &process;
+    }
+
+    bool waitForProcessToFinish(int timeoutMs)
+    {
+        return process.waitForProcessToFinish(timeoutMs);
+    }
+
+    virtual void getState(DynamicObject::Ptr state) = 0;
+    virtual void setState(DynamicObject::Ptr state) = 0;
+
+    // Options of the "Export type" property, empty if the exporter has only one
+    virtual StringArray getExportTypes() const { return { }; }
+
+    // What this run exports as, which isn't always what the settings say
+    int getExportType() const { return exportTypeOverride ? exportTypeOverride : getValue<int>(exportTypeValue); }
+
+    virtual ExportAction getExportAction() const { return Export; }
+
+    // Everything the exporter needs before it can run
+    virtual bool canPerformExport() const { return validPatchSelected; }
+
+    // Hands the chosen patch over to another exporter
+    void copyPatchSelectionTo(ExporterBase& other) const
+    {
+        other.patchFile = patchFile;
+        other.realPatchFile = realPatchFile;
+        other.projectNameValue = projectNameValue.getValue();
+        other.projectCopyrightValue = projectCopyrightValue.getValue();
+
+        other.blockDialog = true;
+        other.inputPatchValue = inputPatchValue.getValue();
+        other.blockDialog = false;
+    }
+
+    String getExportActionName() const
+    {
+        switch (getExportAction()) {
+        case Flash:
+            return "Flash";
+        case FlashBootloader:
+            return "Bootloader";
+        default:
+            return "Export";
+        }
+    }
+
+    // Runs the export: flashing goes into a temp folder, everything else into a folder the user picks.
+    // An exportType other than 0 applies to this run only.
+    void triggerExport(int const exportType = 0)
+    {
+        exportTypeOverride = exportType;
+
+        if (getExportAction() == Export) {
+            Dialogs::showSaveDialog([this](URL const& url) {
+                auto const result = url.getLocalFile();
+                if (result.getParentDirectory().exists()) {
+                    startExport(result);
+                } else {
+                    exportTypeOverride = 0;
+                }
+            },
+                "", "HeavyExport", nullptr, true);
+        } else {
+            auto const tempFolder = File::getSpecialLocation(File::tempDirectory).getChildFile("Heavy-" + Uuid().toString().substring(10));
+            deleteTempFileLater(tempFolder);
+            startExport(tempFolder);
+        }
+    }
+
     String pathToString(File const& file)
     {
 #if JUCE_WINDOWS
@@ -155,7 +254,7 @@ struct ExporterBase : public Component
         return file.getFullPathName();
 #endif
     }
-    
+
     static void deleteTempFileLater(File const& script)
     {
         tempFilesToDelete.add(script);
@@ -173,8 +272,11 @@ struct ExporterBase : public Component
 
     String startShellScriptWithOutput(String const& scriptText)
     {
+        if (shouldQuit)
+            return { };
+
         exportingView->logToConsole("\n\x1b[1;34m> " + scriptText + " \x1b[0m \n\n");
-        
+
         File scriptFile = File::createTempFile(".sh");
         deleteTempFileLater(scriptFile);
 
@@ -197,10 +299,10 @@ struct ExporterBase : public Component
     void startShellScript(String const& scriptText)
     {
         exportingView->logToConsole("\n\x1b[1;92m> " + scriptText + " \x1b[0m \n\n");
-        
+
         File scriptFile = File::createTempFile(".sh");
         deleteTempFileLater(scriptFile);
-        
+
 #if JUCE_WINDOWS
         auto const gccColourFlags = String("export CFLAGS=\"-fdiagnostics-color=always\"\nexport CXXFLAGS=\"-fdiagnostics-color=always\"\n ");
 #else
@@ -209,12 +311,17 @@ struct ExporterBase : public Component
         auto const bash = String("#!/bin/bash\n");
         scriptFile.replaceWithText(bash + gccColourFlags + scriptText, false, false, "\n");
 
+        ScopedLock lock(processLock);
+        if (shouldQuit)
+            return;
+
 #if JUCE_WINDOWS
         auto sh = toolchainDir.getChildFile("bin").getChildFile("sh.exe");
-        start(StringArray { sh.getFullPathName(), "--login", scriptFile.getFullPathName().replaceCharacter('\\', '/') });
+        process.start(StringArray { sh.getFullPathName(), "--login", scriptFile.getFullPathName().replaceCharacter('\\', '/') });
 #else
+        // The pty makes the script a session leader, so killing it hangs up on whatever it started too
         scriptFile.setExecutePermission(true);
-        start(scriptFile.getFullPathName(), ChildProcess::wantStdOut | ChildProcess::wantStdErr | ChildProcess::wantTtyOut);
+        process.start(scriptFile.getFullPathName(), ChildProcess::wantStdOut | ChildProcess::wantStdErr | ChildProcess::wantTtyOut);
 #endif
     }
 
@@ -236,7 +343,7 @@ struct ExporterBase : public Component
         projectTitle = projectTitle.replaceCharacter('-', '_').replaceCharacter(' ', '_');
 
         // Add original file location to search paths
-        auto searchPaths = StringArray {};
+        auto searchPaths = StringArray { };
         if (realPatchFile.existsAsFile() && !realPatchFile.isRoot()) // Make sure file actually exists
         {
             searchPaths.add(pathToString(realPatchFile.getParentDirectory()).quoted());
@@ -254,25 +361,41 @@ struct ExporterBase : public Component
 
         // Make sure we don't add the file location twice
         searchPaths.removeDuplicates(false);
-        addJob([this, patchPath, outPath, projectTitle, projectCopyright, searchPaths]() mutable {
-            exportingView->monitorProcessOutput(this);
-            exportingView->showState(ExportingProgressView::Exporting);
+        auto const action = getExportAction();
+
+        shouldQuit = false;
+        cancelled = false;
+
+        addJob([this, action, patchPath, outPath, projectTitle, projectCopyright, searchPaths]() mutable {
+            exportingView->monitorProcessOutput(getProcess());
+            exportingView->showState(action == Export ? ExportingProgressView::Exporting : ExportingProgressView::Flashing);
+            exportingView->reportStatus("Generating code");
 
             FileSystemWatcher::addGlobalIgnorePath(outPath);
-            
+
             auto const result = performExport(patchPath, outPath, projectTitle, projectCopyright, searchPaths);
 
-            if (shouldQuit)
+            // The exporter is going away, so there's no one left to tell
+            if (shouldQuit && !cancelled)
                 return;
 
-            exportingView->showState(result ? ExportingProgressView::Failure : ExportingProgressView::Success);
+            if (cancelled)
+                exportingView->showState(ExportingProgressView::NotExporting);
+            else if (action == FlashBootloader)
+                exportingView->showState(result ? ExportingProgressView::BootloaderFlashFailure : ExportingProgressView::BootloaderFlashSuccess);
+            else
+                exportingView->showState(result ? ExportingProgressView::Failure : ExportingProgressView::Success);
 
             exportingView->stopMonitoring();
 
-            MessageManager::callAsync([this] {
-                repaint();
+            MessageManager::callAsync([_this = SafePointer(this)] {
+                if (!_this)
+                    return;
+
+                _this->exportTypeOverride = 0;
+                _this->repaint();
             });
-            
+
             FileSystemWatcher::removeGlobalIgnorePath(outPath);
         });
     }
@@ -303,13 +426,22 @@ struct ExporterBase : public Component
             }
         }
 
-        exportButton.setEnabled(validPatchSelected);
+        updateExportButton();
+    }
+
+    // Not safe to call from the constructor: the export action is decided by the derived exporter
+    void updateExportButton()
+    {
+        exportButton.setEnabled(canPerformExport());
+        exportButton.setButtonText(getExportActionName());
     }
 
     void resized() override
     {
+        auto const bottomStrip = exportButton.isVisible() || unsavedLabel.isVisible() ? 50 : 0;
+
         unsavedLabel.setBounds(10, getHeight() - 42, getWidth(), 42);
-        panel.setBounds(0, 0, getWidth(), getHeight() - 50);
+        panel.setBounds(0, 0, getWidth(), getHeight() - bottomStrip);
         exportButton.setBounds(getLocalBounds().removeFromBottom(23).removeFromRight(80).translated(-10, -10));
     }
 

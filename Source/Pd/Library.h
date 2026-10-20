@@ -19,13 +19,37 @@ class Library final : public FileSystemWatcher::Listener
     , public Thread {
 
 public:
+    struct ObjectReferenceTable {
+        struct ReferenceItem {
+            String type;
+            String description;
+        };
+        struct IoletReference {
+            String tooltip;
+            HeapArray<ReferenceItem> messages;
+            bool repeating; // In case the first or last 'n' iolets have the same function (objects like [sel])
+        };
+        using IoletsReference = HeapArray<IoletReference>;
+
+        String title;
+        String description;
+        String body;
+        String origin;
+        HeapArray<String> categories;
+        IoletsReference inlets;
+        IoletsReference outlets;
+        HeapArray<ReferenceItem> arguments;
+        HeapArray<ReferenceItem> methods;
+        HeapArray<ReferenceItem> flags;
+    };
+
     explicit Library(pd::Instance* instance);
 
     ~Library() override;
 
     void run() override;
 
-    void waitForInitialisationToFinish();
+    void ensureDatabaseInitialised() const;
 
     void updateLibrary();
 
@@ -37,14 +61,14 @@ public:
     static File findPatch(String const& patchToFind);
     static File findFile(String const& fileToFind);
 
-    static StackArray<StringArray, 2> parseIoletTooltips(ValueTree const& iolets, String const& name, int numIn, int numOut);
+    static StackArray<StringArray, 2> parseIoletTooltips(ObjectReferenceTable::IoletsReference const& inlets, ObjectReferenceTable::IoletsReference const& outlets, SmallString const& name, int numIn, int numOut);
 
     void filesystemChanged() override;
 
     static File findHelpfile(String const& name);
     static File findHelpfile(t_gobj* obj, File const& parentPatchFile);
 
-    ValueTree getObjectInfo(String const& name);
+    Library::ObjectReferenceTable const& getObjectInfo(SmallString const& name);
 
     static String getObjectOrigin(t_gobj* obj);
 
@@ -71,25 +95,22 @@ public:
         ProjectInfo::appDataDir.getChildFile("Abstractions"),
         ProjectInfo::appDataDir.getChildFile("Externals"),
         ProjectInfo::appDataDir.getChildFile("Extra").getChildFile("else"),
-        ProjectInfo::appDataDir.getChildFile("Extra").getChildFile("Gem"),
         ProjectInfo::appDataDir.getChildFile("Extra") };
 
-    static inline StringArray objectOrigins = { "vanilla", "ELSE", "cyclone", "Gem", "heavylib", "pdlua", "MERDA" };
+    static inline StringArray objectOrigins = { "vanilla", "ELSE", "cyclone", "Gem", "heavylib", "pdlua" };
 
 private:
     StringArray allObjects;
     StringArray gemObjects;
 
-    std::recursive_mutex libraryLock;
-
-    fuzzysearch::Database<ValueTree> searchDatabase;
-
     FileSystemWatcher watcher;
     WaitableEvent initWait;
+    static inline AtomicValue<bool> databaseReady = false;
     pd::Instance* pd;
 
-    UnorderedMap<hash32, ValueTree> documentationIndex;
-    bool isInitialised = false;
+    HeapArray<ObjectReferenceTable> documentation;
+    fuzzysearch::Database<ObjectReferenceTable*> searchDatabase;
+    UnorderedMap<hash32, ObjectReferenceTable*> documentationIndex;
 };
 
 } // namespace pd

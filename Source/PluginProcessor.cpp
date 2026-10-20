@@ -31,9 +31,11 @@
 #include "LookAndFeel.h"
 #include "Object.h"
 #include "Statusbar.h"
+#include "Toolbar.h"
 
 #include "Dialogs/Dialogs.h"
 #include "Components/ConnectionMessageDisplay.h"
+#include "Utility/Recorder.h"
 
 #include "Sidebar/Sidebar.h"
 
@@ -43,9 +45,6 @@ extern "C" {
 #include <pd-cyclone/shared/common/file.h>
 EXTERN char* pd_version;
 }
-
-bool gemWinSetCurrent();
-bool gemWinUnsetCurrent();
 
 AudioProcessor::BusesProperties PluginProcessor::buildBusesProperties()
 {
@@ -90,6 +89,7 @@ PluginProcessor::PluginProcessor()
     : AudioProcessor(buildBusesProperties())
     , internalSynth(std::make_unique<InternalSynth>())
     , hostInfoUpdater(this)
+    , mcp(std::make_unique<McpHost>(*this)) // MCP-HOOK(host)
 {
 #if PERFETTO
     MelatoninPerfetto::get().beginSession();
@@ -105,10 +105,9 @@ PluginProcessor::PluginProcessor()
 
         // Initialise directory structure and settings file, do this only once if we're inside the DAW
         static bool filesystemInitialised = false;
-        if(!filesystemInitialised) {
+        if (!filesystemInitialised) {
             auto succeeded = initialiseFilesystem();
-            if(!succeeded)
-            {
+            if (!succeeded) {
                 logError("Failed to initialise filesystem. Is the disk full?");
             }
             filesystemInitialised = true;
@@ -116,7 +115,7 @@ PluginProcessor::PluginProcessor()
         settingsFile = SettingsFile::getInstance()->initialise();
     }
 
-    statusbarSource = std::make_unique<StatusbarSource>();
+    toolbarSource = std::make_unique<ToolbarSource>();
 
     auto* volumeParameter = new PlugDataParameter(this, "volume", 0.8f, true, 0, 0.0f, 1.0f);
     addParameter(volumeParameter);
@@ -159,7 +158,7 @@ PluginProcessor::PluginProcessor()
     auto themeName = settingsFile->getProperty<String>("theme");
 
     // Make sure theme exists
-    if (!settingsFile->getTheme(themeName).isValid()) {
+    if (!settingsFile->getTheme(themeName)) {
 
         settingsFile->setProperty("theme", PlugDataLook::selectedThemes[0]);
         themeName = PlugDataLook::selectedThemes[0];
@@ -173,13 +172,14 @@ PluginProcessor::PluginProcessor()
     setEnableLimiter(settingsFile->getProperty<int>("protected"));
     setLimiterThreshold(settingsFile->getProperty<int>("limiter_threshold"));
 
-    if(ProjectInfo::isStandalone) {
+    if (ProjectInfo::isStandalone) {
         midiDeviceManager.setInternalSynthPort(settingsFile->getProperty<int>("internal_synth"));
-    }
-    else {
+    } else {
         midiDeviceManager.setInternalSynthPort(0);
     }
     
+    recorder = std::make_unique<Recorder>();
+
     auto currentThemeTree = settingsFile->getCurrentTheme();
 
     // ag: This needs to be done *after* the library data has been unpacked on
@@ -191,8 +191,12 @@ PluginProcessor::PluginProcessor()
 
     objectLibrary = std::make_unique<pd::Library>(this);
 
+    mcp->createBridge(); // MCP-HOOK(host)
+
     setLatencySamples(pd::Instance::getBlockSize());
     settingsFile->startChangeListener();
+
+    midiDeviceManager.loadMidiSettings();
 
     sendMessagesFromQueue();
     startDSP();
@@ -200,6 +204,7 @@ PluginProcessor::PluginProcessor()
 
 PluginProcessor::~PluginProcessor()
 {
+    mcp->shutdown(); // MCP-HOOK(teardown)
     // Deleting the pd instance in ~PdInstance() will also free all the Pd patches
     patches.clear();
 
@@ -231,23 +236,23 @@ void PluginProcessor::syncDirectoryFiles(File const& sourceDir, File const& targ
     }
 
     // Cache frequently used values
-    const bool hasValidLastInitTime = lastInitTime.toMilliseconds() > 0;
-    const String deleteFlag = deleteIfNotExists ? "true" : "false";
+    bool const hasValidLastInitTime = lastInitTime.toMilliseconds() > 0;
+    String const deleteFlag = deleteIfNotExists ? "true" : "false";
 
     // Get all source files once and build a lookup map for efficiency
-    auto sourceFiles = sourceDir.findChildFiles(juce::File::TypesOfFileToFind::findFiles, true);
+    auto sourceFiles = sourceDir.findChildFiles(File::TypesOfFileToFind::findFiles, true);
     std::unordered_set<String> sourceFileSet;
     sourceFileSet.reserve(sourceFiles.size());
 
     // Phase 1: Copy files from source to target (update newer files)
-    for (const auto& sourceFile : sourceFiles) {
-        const auto relativePath = sourceFile.getRelativePathFrom(sourceDir);
+    for (auto const& sourceFile : sourceFiles) {
+        auto const relativePath = sourceFile.getRelativePathFrom(sourceDir);
         sourceFileSet.insert(relativePath.toStdString());
 
-        const auto targetFile = targetDir.getChildFile(relativePath);
+        auto const targetFile = targetDir.getChildFile(relativePath);
 
         // Create directory structure if needed
-        const auto parentDir = targetFile.getParentDirectory();
+        auto const parentDir = targetFile.getParentDirectory();
         if (!parentDir.exists()) {
             parentDir.createDirectory();
         }
@@ -256,8 +261,8 @@ void PluginProcessor::syncDirectoryFiles(File const& sourceDir, File const& targ
         if (!targetFile.exists()) {
             sourceFile.copyFileTo(targetFile);
         } else {
-            const auto sourceModTime = sourceFile.getLastModificationTime();
-            const auto targetModTime = targetFile.getLastModificationTime();
+            auto const sourceModTime = sourceFile.getLastModificationTime();
+            auto const targetModTime = targetFile.getLastModificationTime();
             if (sourceModTime > targetModTime) {
                 sourceFile.copyFileTo(targetFile);
             }
@@ -266,14 +271,14 @@ void PluginProcessor::syncDirectoryFiles(File const& sourceDir, File const& targ
 
     // Phase 2: Delete files in target that don't exist in source (only if deleteIfNotExists is true)
     if (deleteIfNotExists) {
-        auto targetFiles = targetDir.findChildFiles(juce::File::TypesOfFileToFind::findFiles, true);
+        auto targetFiles = targetDir.findChildFiles(File::TypesOfFileToFind::findFiles, true);
 
         // Pre-cache directory modification times to prevent updates during deletion
         HashMap<String, Time> directoryModTimes;
         std::unordered_set<String> uniqueDirPaths;
 
-        for (const auto& targetFile : targetFiles) {
-            const auto parentPath = targetFile.getParentDirectory().getFullPathName();
+        for (auto const& targetFile : targetFiles) {
+            auto const parentPath = targetFile.getParentDirectory().getFullPathName();
             if (uniqueDirPaths.find(parentPath.toStdString()) == uniqueDirPaths.end()) {
                 uniqueDirPaths.insert(parentPath.toStdString());
                 directoryModTimes.set(parentPath, targetFile.getParentDirectory().getLastModificationTime());
@@ -283,8 +288,8 @@ void PluginProcessor::syncDirectoryFiles(File const& sourceDir, File const& targ
         SmallArray<File> directoriesToCleanup;
         std::unordered_set<String> cleanupDirPaths; // Prevent duplicates
 
-        for (const auto& targetFile : targetFiles) {
-            const auto relativePath = targetFile.getRelativePathFrom(targetDir);
+        for (auto const& targetFile : targetFiles) {
+            auto const relativePath = targetFile.getRelativePathFrom(targetDir);
 
             // Check if file exists in source using our pre-built set
             if (sourceFileSet.find(relativePath.toStdString()) == sourceFileSet.end()) {
@@ -292,10 +297,10 @@ void PluginProcessor::syncDirectoryFiles(File const& sourceDir, File const& targ
                 bool shouldDelete = true;
 
                 if (hasValidLastInitTime) {
-                    const auto parentPath = targetFile.getParentDirectory().getFullPathName();
-                    const auto dirModTime = directoryModTimes[parentPath];
-                    const auto fileModTime = targetFile.getLastModificationTime();
-                    
+                    auto const parentPath = targetFile.getParentDirectory().getFullPathName();
+                    auto const dirModTime = directoryModTimes[parentPath];
+                    auto const fileModTime = targetFile.getLastModificationTime();
+
                     // Don't delete if either the directory OR the file was modified after last init
                     // This handles both renamed files (dir mod time) and copied files (file mod time)
                     if (dirModTime > lastInitTime || fileModTime > lastInitTime) {
@@ -303,10 +308,9 @@ void PluginProcessor::syncDirectoryFiles(File const& sourceDir, File const& targ
                     }
                 }
 
-
                 if (shouldDelete) {
-                    const auto parentDir = targetFile.getParentDirectory();
-                    const auto parentPath = parentDir.getFullPathName();
+                    auto const parentDir = targetFile.getParentDirectory();
+                    auto const parentPath = parentDir.getFullPathName();
 
                     targetFile.deleteFile();
 
@@ -320,13 +324,13 @@ void PluginProcessor::syncDirectoryFiles(File const& sourceDir, File const& targ
         }
 
         // Clean up empty directories (process from deepest to shallowest)
-        for (const auto& parentDir : directoriesToCleanup) {
+        for (auto const& parentDir : directoriesToCleanup) {
             auto currentDir = parentDir;
             while (currentDir != targetDir) {
                 // Check if directory is empty (ignoring hidden files)
-                const auto filesInDir = currentDir.findChildFiles(juce::File::TypesOfFileToFind::findFiles, false);
+                auto const filesInDir = currentDir.findChildFiles(File::TypesOfFileToFind::findFiles, false);
                 bool isEmpty = true;
-                for (const auto& file : filesInDir) {
+                for (auto const& file : filesInDir) {
                     if (!file.isHidden()) {
                         isEmpty = false;
                         break;
@@ -334,9 +338,9 @@ void PluginProcessor::syncDirectoryFiles(File const& sourceDir, File const& targ
                 }
 
                 if (isEmpty) {
-                    const auto parentRelativePath = currentDir.getRelativePathFrom(targetDir);
+                    auto const parentRelativePath = currentDir.getRelativePathFrom(targetDir);
                     if (!sourceDir.getChildFile(parentRelativePath).exists()) {
-                        const auto nextParent = currentDir.getParentDirectory();
+                        auto const nextParent = currentDir.getParentDirectory();
                         currentDir.deleteRecursively();
                         currentDir = nextParent;
                     } else {
@@ -359,14 +363,8 @@ bool PluginProcessor::initialiseFilesystem()
     auto const patchesDir = homeDir.getChildFile("Patches");
 
     FileSystemWatcher::addGlobalIgnorePath(homeDir.getChildFile("Toolchain"));
-    
-#if JUCE_IOS
-    // TODO: remove this later. This is for iOS version transition
-    auto oldDir = File::getSpecialLocation(File::SpecialLocationType::userDocumentsDirectory).getChildFile("plugdata");
-    if (oldDir.isDirectory() && oldDir.getChildFile("Abstractions").isDirectory()) {
-        oldDir.deleteRecursively();
-    }
-#elif !JUCE_WINDOWS
+
+#if !JUCE_WINDOWS
     if (!homeDir.exists())
         homeDir.createDirectory();
 #endif
@@ -388,42 +386,27 @@ bool PluginProcessor::initialiseFilesystem()
     // Check if the abstractions directory exists, if not, unzip it from binaryData
     if (!versionDataDir.exists()) {
         extractionCompleted = false;
-        // Binary data shouldn't be too big, then the compiler will run out of memory
-        // To prevent this, we split the binarydata into multiple files, and add them back together here
-        HeapArray<uint8_t> allData;
-        int i = 0;
-        while (true) {
-            int size;
-            auto* resource = BinaryData::getNamedResource((String("Filesystem_") + String(i)).toRawUTF8(), size);
-
-            if (!resource) {
-                break;
-            }
-
-            allData.insert(allData.end(), resource, resource + size);
-            i++;
-        }
+        auto filesystem = BinaryData::getResource(BinaryData::Filesystem);
         
         versionDataDir.getParentDirectory().createDirectory();
         int constexpr maxRetries = 3;
         int retryCount = 0;
 
-        while(!extractionCompleted && retryCount < maxRetries) {
-            auto const tempVersionDataDir = versionDataDir.getParentDirectory().getChildFile("plugdata_version");
-            
+        while (!extractionCompleted && retryCount < maxRetries) {
+            auto tempVersionDataDir = versionDataDir.getSiblingFile("plugdata_version");
             tempVersionDataDir.deleteRecursively();
             
-            if (!versionDataDir.getParentDirectory().createDirectory()) {
+            if (!tempVersionDataDir.getParentDirectory().createDirectory()) {
                 retryCount++;
                 continue;
             }
             
-            if (!Decompress::extractTarXz(allData.data(), allData.size(), tempVersionDataDir.getParentDirectory(), 40 * 1024 * 1024)) {
+            if (!Decompress::extractTarXz((uint8_t*)filesystem.data(), filesystem.size(), tempVersionDataDir.getParentDirectory(), 40 * 1024 * 1024)) {
                 retryCount++;
                 continue;
             }
             
-            extractionCompleted = tempVersionDataDir.moveFileTo(versionDataDir);
+            extractionCompleted = OSUtils::moveFileTo(tempVersionDataDir, versionDataDir);
             if (!extractionCompleted) {
                 retryCount++;
                 Thread::sleep(100);
@@ -450,7 +433,7 @@ bool PluginProcessor::initialiseFilesystem()
     File(versionDataDir.getChildFile("./Documentation/7.stuff/tools/testtone.pd")).copyFileTo(testTonePatch);
     File(versionDataDir.getChildFile("./Documentation/7.stuff/tools/load-meter.pd")).copyFileTo(cpuTestPatch);
     
-    auto createLinkWithRetry = [&extractionCompleted](const File& linkPath, const File& targetPath, int const maxRetries = 3) {
+    auto createLinkWithRetry = [&extractionCompleted](File const& linkPath, File const& targetPath, int const maxRetries = 3) {
         for (int retry = 0; retry < maxRetries; retry++) {
 #if JUCE_WINDOWS
             // Clean up existing link/directory
@@ -458,12 +441,14 @@ bool PluginProcessor::initialiseFilesystem()
                 linkPath.deleteRecursively();
             }
             
-            if(OSUtils::createJunction(linkPath.getFullPathName().replaceCharacters("/", "\\").toStdString(), targetPath.getFullPathName().toStdString())) return;
+            if (OSUtils::createJunction(linkPath.getFullPathName().replaceCharacters("/", "\\").toStdString(), targetPath.getFullPathName().toStdString()))
+                return;
 #else
             if (linkPath.exists()) {
                 linkPath.deleteRecursively();
             }
-            if(targetPath.createSymbolicLink(linkPath, true)) return;
+            if (targetPath.createSymbolicLink(linkPath, true))
+                return;
 #endif
             
             if (retry < maxRetries - 1) {
@@ -484,18 +469,6 @@ bool PluginProcessor::initialiseFilesystem()
     createLinkWithRetry(homeDir.getChildFile("Documentation"), versionDataDir.getChildFile("Documentation"));
     createLinkWithRetry(homeDir.getChildFile("Extra"), versionDataDir.getChildFile("Extra"));
 
-    // TODO: version transition code, remove this later
-    auto oldlocation = File::getSpecialLocation(File::SpecialLocationType::userDocumentsDirectory).getChildFile("plugdata");
-    auto backupLocation = File::getSpecialLocation(File::SpecialLocationType::userDocumentsDirectory).getChildFile("plugdata.old");
-    if (oldlocation.isDirectory() && !backupLocation.isDirectory()) {
-        // don't bother copying this, it's huge!
-        if (oldlocation.getChildFile("Toolchain").isDirectory())
-            oldlocation.getChildFile("Toolchain").deleteRecursively();
-
-        oldlocation.copyDirectoryTo(backupLocation);
-        oldlocation.deleteRecursively();
-    }
-
     auto shortcut = File::getSpecialLocation(File::SpecialLocationType::userDocumentsDirectory).getChildFile("plugdata.LNK");
     ProjectInfo::appDataDir.createShortcut("plugdata", shortcut);
 #elif JUCE_IOS
@@ -504,12 +477,10 @@ bool PluginProcessor::initialiseFilesystem()
     createLinkWithRetry(homeDir.getChildFile("Extra"), versionDataDir.getChildFile("Extra"));
 
     auto docsPatchesDir = File::getSpecialLocation(File::SpecialLocationType::userDocumentsDirectory).getChildFile("Patches");
-    if(patchesDir.isSymbolicLink())
-    {
+    if (patchesDir.isSymbolicLink()) {
         patchesDir.deleteRecursively();
     }
-    if(docsPatchesDir.isSymbolicLink())
-    {
+    if (docsPatchesDir.isSymbolicLink()) {
         docsPatchesDir.deleteRecursively();
     }
     patchesDir.createDirectory();
@@ -526,8 +497,7 @@ bool PluginProcessor::initialiseFilesystem()
             if (timestampString.isNotEmpty()) {
                 lastInitTime = Time(timestampString.getLargeIntValue());
             }
-        }
-        else {
+        } else {
             // If the file doesn't exist, we assume this is the first run
             lastInitTime = Time::getCurrentTime();
             // Create the file to store the current time
@@ -556,7 +526,7 @@ bool PluginProcessor::initialiseFilesystem()
 void PluginProcessor::updateSearchPaths()
 {
     // Reload pd search paths from settings
-    auto const pathTree = settingsFile->getPathsTree();
+    auto const& pathTree = settingsFile->getProperty<VarArray>("paths");
 
     setThis();
 
@@ -567,7 +537,7 @@ void PluginProcessor::updateSearchPaths()
     auto paths = SmallArray<File, 12>(pd::Library::defaultPaths.begin(), pd::Library::defaultPaths.end());
 
     for (auto child : pathTree) {
-        auto path = child.getProperty("Path").toString().replace("\\", "/");
+        auto path = child.toString().replace("\\", "/");
         paths.add_unique(path);
     }
 
@@ -579,25 +549,28 @@ void PluginProcessor::updateSearchPaths()
         libpd_add_to_search_path(path.replace("\\", "/").toRawUTF8());
     }
 
-    auto librariesTree = settingsFile->getLibrariesTree();
+    auto librariesTree = settingsFile->getProperty<VarArray>("libraries");
 
-    for (auto library : librariesTree) {
-        if (!library.hasProperty("Name") || library.getProperty("Name").toString().isEmpty()) {
-            librariesTree.removeChild(library, nullptr);
-        }
+    // Remove empty entries from the back: removing while the range-for walks the array is a use-after-free (L24).
+    for (int i = librariesTree.size() - 1; i >= 0; --i) {
+        if (librariesTree[i].toString().isEmpty())
+            librariesTree.remove(i);
     }
 
     // Load startup libraries that the user defined in settings
     for (auto library : librariesTree) {
-
-        auto const libName = library.getProperty("Name").toString();
-
+        auto const libName = library.toString();
         // Load the library: this must be done after updating paths
         // If the library is already loaded, it will return true
         // This will load the libraries directly instead of on restart, not sure if Pd does that but it's actually nice
         if (!loadLibrary(libName)) {
             logError("Failed to load library: " + libName);
         }
+    }
+
+    if (SettingsFile::getInstance()->getProperty<bool>("enable_gem")) {
+        libpd_add_to_search_path(ProjectInfo::appDataDir.getChildFile("Abstractions").getChildFile("Gem").getFullPathName().toRawUTF8());
+        loadLibrary("Gem");
     }
 
     unlockAudioThread();
@@ -733,6 +706,8 @@ void PluginProcessor::prepareToPlay(double const sampleRate, int const samplesPe
         internalSynth->prepare(sampleRate, samplesPerBlock);
     }
 
+    recorder->prepare(sampleRate, getTotalNumOutputChannels());
+
     audioAdvancement = 0;
     auto const pdBlockSize = static_cast<size_t>(Instance::getBlockSize());
     audioBufferIn.setSize(maxChannels, pdBlockSize);
@@ -762,19 +737,21 @@ void PluginProcessor::prepareToPlay(double const sampleRate, int const samplesPe
 
     cpuLoadMeasurer.reset(sampleRate, samplesPerBlock);
 
-    statusbarSource->setSampleRate(sampleRate);
-    statusbarSource->setBufferSize(samplesPerBlock);
-    statusbarSource->prepareToPlay(getTotalNumOutputChannels());
+    toolbarSource->setSampleRate(sampleRate);
+    toolbarSource->setBufferSize(samplesPerBlock);
+    toolbarSource->prepareToPlay(getTotalNumOutputChannels());
 
     limiter.prepare({ sampleRate, static_cast<uint32>(samplesPerBlock), std::max(1u, static_cast<uint32>(maxChannels)) });
 
     smoothedGain.reset(AudioProcessor::getSampleRate(), 0.02);
     
-    if(!ProjectInfo::isStandalone) {
+    if (!ProjectInfo::isStandalone) {
         backupRunLoopInterval = static_cast<int>(samplesPerBlock / sampleRate * 2000.0);
         backupRunLoopInterval = jmax(24, backupRunLoopInterval);
         backupRunLoop.startTimer(backupRunLoopInterval * 32);
     }
+
+    mcp->prepare(sampleRate, samplesPerBlock); // MCP-HOOK(audio)
 }
 
 bool PluginProcessor::isBusesLayoutSupported(BusesLayout const& layouts) const
@@ -817,12 +794,40 @@ bool PluginProcessor::isBusesLayoutSupported(BusesLayout const& layouts) const
     return ninch <= 32 && noutch <= 32;
 }
 
+void PluginProcessor::settingsChanged(String const& name, var const& value)
+{
+    if (mcp->settingsChanged(name, value)) return; // MCP-HOOK(settings)
+
+    if (settingsFile) {
+        if (name == "theme") {
+            setTheme(value.toString());
+            return;
+        }
+        if (name == "themes") {
+            // The selection's Value notification may still be pending when a theme is edited.
+            setTheme(settingsFile->getProperty<String>("theme"), true);
+            return;
+        }
+        if (name == "default_font") {
+            PlugDataLook::setDefaultFont(value.toString());
+            CachedStringWidth<14>::clearCache();
+            CachedStringWidth<15>::clearCache();
+            for (auto* editor : getEditors())
+                editor->updateDefaultFont();
+            updateAllEditorsLNF();
+            return;
+        }
+    }
+
+    if (!instance) return;
+    if (name == "paths" || name == "libraries" || name == "enable_gem") {
+        updateSearchPaths();
+    }
+}
+
 void PluginProcessor::settingsFileReloaded()
 {
-    auto const newTheme = settingsFile->getProperty<String>("theme");
-    if (PlugDataLook::currentTheme != newTheme) {
-        setTheme(newTheme);
-    }
+    setTheme(settingsFile->getProperty<String>("theme"), true);
 
     updateSearchPaths();
     if (objectLibrary)
@@ -843,6 +848,7 @@ void PluginProcessor::processBlockBypassed(AudioBuffer<float>& buffer, MidiBuffe
 void PluginProcessor::processBlock(AudioBuffer<float>& buffer, MidiBuffer& midiBuffer)
 {
     isProcessingAudio = true;
+    mcp->audioBlockStarted(); // MCP-HOOK(audio)
     
     ScopedNoDenormals noDenormals;
     AudioProcessLoadMeasurer::ScopedTimer cpuTimer(cpuLoadMeasurer, buffer.getNumSamples());
@@ -853,7 +859,7 @@ void PluginProcessor::processBlock(AudioBuffer<float>& buffer, MidiBuffer& midiB
 
     setThis();
     
-    if(!ProjectInfo::isStandalone) {
+    if (!ProjectInfo::isStandalone) {
         backupLoopLock.enter();
         backupRunLoop.stopTimer();
         backupLoopLock.exit();
@@ -926,11 +932,18 @@ void PluginProcessor::processBlock(AudioBuffer<float>& buffer, MidiBuffer& midiB
     midiBufferInternalSynth.clear();
 
     midiInputHistory.addEvents(midiDeviceManager.getInputHistory(), 0, buffer.getNumSamples(), 0);
-    statusbarSource->process(midiInputHistory, midiDeviceManager.getOutputHistory());
+    mcp->midiTick(midiInputHistory, buffer, getSampleRate()); // MCP-HOOK(audio)
+    toolbarSource->process(midiInputHistory, midiDeviceManager.getOutputHistory());
     midiDeviceManager.clearMidiOutputBuffers(blockOut.getNumSamples());
 
-    statusbarSource->setCPUUsage(cpuLoadMeasurer.getLoadAsPercentage());
-    statusbarSource->peakBuffer.write(buffer);
+    toolbarSource->setCPUUsage(cpuLoadMeasurer.getLoadAsPercentage());
+    toolbarSource->peakBuffer.write(buffer);
+
+    // Record before limiter
+    if (recorder->isRecording()) {
+        recorder->write(buffer);
+        toolbarSource->setRecorderTime(recorder->getElapsedSeconds());
+    }
 
     if (enableLimiter && buffer.getNumChannels() > 0) {
         // Take out inf and NaN values
@@ -948,13 +961,18 @@ void PluginProcessor::processBlock(AudioBuffer<float>& buffer, MidiBuffer& midiB
     }
     
     // If we miss 4 audio blocks, start the backup scheduler
-    if(!ProjectInfo::isStandalone) {
+    if (!ProjectInfo::isStandalone) {
         backupLoopLock.enter();
         backupRunLoop.startTimer(backupRunLoopInterval * 4);
         backupLoopLock.exit();
     }
     
+    mcp->audioBlockFinished(buffer); // MCP-HOOK(audio)
+
     isProcessingAudio = false;
+#if ENABLE_TESTING
+    buffer.clear();
+#endif
 }
 
 // only used for standalone, and if blocksize if a multiple of 64
@@ -977,7 +995,7 @@ void PluginProcessor::processConstant(dsp::AudioBlock<float> buffer)
 
         for (int ch = 0; ch < buffer.getNumChannels(); ch++) {
             // Copy the channel data into the vector
-            juce::FloatVectorOperations::copy(
+            FloatVectorOperations::copy(
                 audioVectorIn.data() + ch * pdBlockSize,
                 buffer.getChannelPointer(ch) + audioAdvancement,
                 pdBlockSize);
@@ -985,6 +1003,7 @@ void PluginProcessor::processConstant(dsp::AudioBlock<float> buffer)
         setThis();
 
         sendParameters();
+        keyHandler.sendKeyUpMessages();
         sendMessagesFromQueue();
 
         // Process audio
@@ -993,9 +1012,11 @@ void PluginProcessor::processConstant(dsp::AudioBlock<float> buffer)
         if (connectionListener && plugdata_debugging_enabled())
             connectionListener.load()->updateSignalData();
 
+        mcp->pdBlock(audioVectorIn.data(), audioVectorOut.data(), pdBlockSize, buffer.getNumChannels()); // MCP-HOOK(audio)
+
         for (int ch = 0; ch < buffer.getNumChannels(); ch++) {
             // Use FloatVectorOperations to copy the vector data into the audioBuffer
-            juce::FloatVectorOperations::copy(
+            FloatVectorOperations::copy(
                 buffer.getChannelPointer(ch) + audioAdvancement,
                 audioVectorOut.data() + ch * pdBlockSize,
                 pdBlockSize);
@@ -1005,6 +1026,8 @@ void PluginProcessor::processConstant(dsp::AudioBlock<float> buffer)
     }
 
     audioAdvancement = 0;
+
+    mcp->writeRecorderTap(buffer); // MCP-HOOK(audio)
 }
 
 void PluginProcessor::processVariable(dsp::AudioBlock<float> buffer, MidiBuffer& midiBuffer)
@@ -1037,7 +1060,7 @@ void PluginProcessor::processVariable(dsp::AudioBlock<float> buffer, MidiBuffer&
 
         for (int channel = 0; channel < audioBufferIn.getNumChannels(); channel++) {
             // Copy the channel data into the vector
-            juce::FloatVectorOperations::copy(
+            FloatVectorOperations::copy(
                 audioVectorIn.data() + channel * pdBlockSize,
                 audioBufferIn.getReadPointer(channel),
                 pdBlockSize);
@@ -1046,6 +1069,7 @@ void PluginProcessor::processVariable(dsp::AudioBlock<float> buffer, MidiBuffer&
         setThis();
 
         sendParameters();
+        keyHandler.sendKeyUpMessages();
         sendMessagesFromQueue();
 
         // Process audio
@@ -1054,9 +1078,11 @@ void PluginProcessor::processVariable(dsp::AudioBlock<float> buffer, MidiBuffer&
         if (connectionListener && plugdata_debugging_enabled())
             connectionListener.load()->updateSignalData();
 
+        mcp->pdBlock(audioVectorIn.data(), audioVectorOut.data(), pdBlockSize, numChannels); // MCP-HOOK(audio)
+
         for (int channel = 0; channel < numChannels; channel++) {
             // Use FloatVectorOperations to copy the vector data into the audioBuffer
-            juce::FloatVectorOperations::copy(
+            FloatVectorOperations::copy(
                 audioBufferOut.getWritePointer(channel),
                 audioVectorOut.data() + channel * pdBlockSize,
                 pdBlockSize);
@@ -1068,6 +1094,8 @@ void PluginProcessor::processVariable(dsp::AudioBlock<float> buffer, MidiBuffer&
 
     midiBuffer.clear();
     outputFifo->readAudioAndMidi(buffer, midiBuffer);
+
+    mcp->writeRecorderTap(buffer); // MCP-HOOK(audio)
 }
 
 void PluginProcessor::sendPlayhead()
@@ -1260,8 +1288,7 @@ void PluginProcessor::getStateInformation(MemoryBlock& destData)
         auto content = patch->getCanvasContent();
         auto patchFile = patch->getCurrentFile().getFullPathName();
         
-        if(patchFile.startsWith(patchesDir.getFullPathName()))
-        {
+        if (patchFile.startsWith(patchesDir.getFullPathName())) {
             patchFile = patchFile.replace(patchesDir.getFullPathName(), "${PATCHES_DIR}");
         }
         // Write legacy format
@@ -1294,14 +1321,10 @@ void PluginProcessor::getStateInformation(MemoryBlock& destData)
     xml.setAttribute("TailLength", getValue<float>(tailLength));
     xml.setAttribute("Legacy", false);
 
-    // TODO: make multi-window friendly
-    if (auto const* editor = getActiveEditor()) {
-        xml.setAttribute("Width", editor->getWidth());
-        xml.setAttribute("Height", editor->getHeight());
-    } else {
-        xml.setAttribute("Width", lastUIWidth);
-        xml.setAttribute("Height", lastUIHeight);
-    }
+    // Don't query the editor here: the host can call this from any thread, and
+    // PluginEditor::resized() already keeps these up to date for us
+    xml.setAttribute("Width", lastUIWidth.load());
+    xml.setAttribute("Height", lastUIHeight.load());
 
     xml.addChildElement(patchesTree);
 
@@ -1331,65 +1354,59 @@ void PluginProcessor::getStateInformation(MemoryBlock& destData)
 String PluginProcessor::findLostPatch(String const& patchPath) const
 {
     auto patchesDir = ProjectInfo::appDataDir.getChildFile("Patches");
-    
+
     auto trashLocation = File(patchPath.replace("${PATCHES_DIR}", patchesDir.getChildFile(".trash").getFullPathName()));
-    if(trashLocation.existsAsFile())
-    {
+    if (trashLocation.existsAsFile()) {
         return trashLocation.getFullPathName();
     }
-    
+
     SmallArray<std::pair<File, var>> libraryMetaFiles;
     SmallArray<std::pair<String, File>> candidates;
-    
-    for(auto dir : OSUtils::iterateDirectory(patchesDir, false, false))
-    {
+
+    for (auto dir : OSUtils::iterateDirectory(patchesDir, false, false)) {
         auto meta = dir.getChildFile("meta.json");
-        if(meta.existsAsFile())
-            libraryMetaFiles.add({dir, JSON::fromString(meta.loadFileAsString())});
+        if (meta.existsAsFile())
+            libraryMetaFiles.add({ dir, JSON::fromString(meta.loadFileAsString()) });
     }
-    
+
     auto path = File(patchPath);
     auto dirName = path.getParentDirectory().getFileName();
     auto hashedDirName = dirName.toLowerCase().replace(" ", "-").upToLastOccurrenceOf("-", false, false);
     auto patchName = path.getFileName();
-    
-    for(auto [dir, meta] : libraryMetaFiles)
-    {
-        if(meta["Title"].toString().toLowerCase().replace(" ", "-") == hashedDirName)
-            candidates.add({meta["Version"].toString(), dir.getChildFile(meta["Patch"].toString())});
-        
-        if(meta["Title"].toString() == dirName)
-            candidates.add({meta["Version"].toString(), dir.getChildFile(meta["Patch"].toString())});
+
+    for (auto [dir, meta] : libraryMetaFiles) {
+        if (meta["Title"].toString().toLowerCase().replace(" ", "-") == hashedDirName)
+            candidates.add({ meta["Version"].toString(), dir.getChildFile(meta["Patch"].toString()) });
+
+        if (meta["Title"].toString() == dirName)
+            candidates.add({ meta["Version"].toString(), dir.getChildFile(meta["Patch"].toString()) });
     }
-    
+
     // Last resort, find a patch with a matching name
-    for(auto [dir, meta] : libraryMetaFiles)
-    {
-        if(meta["Patch"].toString() == patchName)
-            candidates.add({meta["Version"].toString(), dir.getChildFile(meta["Patch"].toString()).getFullPathName()});
+    for (auto [dir, meta] : libraryMetaFiles) {
+        if (meta["Patch"].toString() == patchName)
+            candidates.add({ meta["Version"].toString(), dir.getChildFile(meta["Patch"].toString()).getFullPathName() });
     }
-    
-    if(candidates.size()) {
+
+    if (candidates.size()) {
         candidates.sort([](std::pair<String, File> const& versionA, std::pair<String, File> const& versionB) -> bool {
             auto versionTokensA = StringArray::fromTokens(versionA.first, ".", "");
             auto versionTokensB = StringArray::fromTokens(versionB.first, ".", "");
-            
-            for(int i = 0; i < std::max(versionTokensA.size(), versionTokensB.size()); i++)
-            {
+
+            for (int i = 0; i < std::max(versionTokensA.size(), versionTokensB.size()); i++) {
                 int v1 = i < versionTokensA.size() && versionTokensA[i].containsOnly("0123456789") ? versionTokensA[i].getIntValue() : 0;
                 int v2 = i < versionTokensB.size() && versionTokensB[i].containsOnly("0123456789") ? versionTokensB[i].getIntValue() : 0;
-                
-                if(v1 != v2)
+
+                if (v1 != v2)
                     return v1 < v2;
             }
-            
+
             return false;
         });
-        
+
         return candidates[0].second.getFullPathName();
     }
-    
-    
+
     return patchPath.replace("${PATCHES_DIR}", patchesDir.getFullPathName());
 }
 
@@ -1504,19 +1521,16 @@ void PluginProcessor::setStateInformation(void const* data, int const sizeInByte
                 location = location.replaceCharacter('\\', '/');
 #endif
                 
-                if(location.contains("${PATCHES_DIR}")) {
+                if (location.contains("${PATCHES_DIR}")) {
                     auto newLocation = location.replace("${PATCHES_DIR}", patchesDir.getFullPathName());
-                    if(File(newLocation).existsAsFile())
-                    {
+                    if (File(newLocation).existsAsFile()) {
                         location = newLocation;
-                    }
-                    else {
+                    } else {
                         location = findLostPatch(location);
                     }
                 }
-                
+
                 openPatch(content, location, pluginMode, pluginModeScale, splitIndex);
-                
             }
         }
         // Otherwise, load from legacy format
@@ -1540,7 +1554,7 @@ void PluginProcessor::setStateInformation(void const* data, int const sizeInByte
 
         if (xmlState->hasAttribute("Height") && xmlState->hasAttribute("Width")) {
             int windowWidth = xmlState->getIntAttribute("Width", 1000);
-            int windowHeight = xmlState->getIntAttribute("Height", 650);
+            int windowHeight = xmlState->getIntAttribute("Height", 660);
             lastUIWidth = windowWidth;
             lastUIHeight = windowHeight;
             if (auto* editor = dynamic_cast<PluginEditor*>(getActiveEditor())) {
@@ -1564,7 +1578,8 @@ void PluginProcessor::setStateInformation(void const* data, int const sizeInByte
 
     if (auto* editor = dynamic_cast<PluginEditor*>(getActiveEditor())) {
         editor->getTabComponent().triggerAsyncUpdate();
-        editor->sidebar->updateAutomationParameters(); // After loading a state, we need to update all the parameters
+        if (auto* s = editor->getSidebarForPanel(Sidebar::ParamPanel))
+            s->updateAutomationParameters();
     }
 
     // Let host know our parameter layout (likely) changed
@@ -1574,7 +1589,7 @@ void PluginProcessor::setStateInformation(void const* data, int const sizeInByte
 pd::Patch::Ptr PluginProcessor::loadPatch(URL const& patchURL)
 {
     auto patchFile = patchURL.getLocalFile();
-    
+
 #if JUCE_IOS
     // Create input stream to allow scoped file access
     auto inputStream = patchURL.createInputStream(URL::InputStreamOptions(URL::ParameterHandling::inAddress));
@@ -1610,6 +1625,7 @@ pd::Patch::Ptr PluginProcessor::loadPatch(String patchText)
     auto patch = loadPatch(URL(patchFile));
 
     // Set to unknown file when loading temp patch
+    if (patch)
     patch->setCurrentFile(URL("file://"));
 
     return patch;
@@ -1617,94 +1633,117 @@ pd::Patch::Ptr PluginProcessor::loadPatch(String patchText)
 
 void PluginProcessor::setTheme(String themeToUse, bool const force)
 {
-    auto const oldThemeTree = settingsFile->getTheme(PlugDataLook::currentTheme);
+    // Hosts may construct processors off the message thread. Apply the shared look-and-feel
+    // and the editors together; a queued editor-only update can replay an obsolete theme.
+    MessageManagerLock const messageLock;
+    if (!messageLock.lockWasGained())
+        return;
+
     auto themeTree = settingsFile->getTheme(themeToUse);
     // Check if theme name is valid
-    if (!themeTree.isValid()) {
-        themeToUse = PlugDataLook::selectedThemes[0];
+    if (!themeTree) {
+        themeToUse = "light";
         themeTree = settingsFile->getTheme(themeToUse);
+        SettingsFile::getInstance()->setProperty("theme", themeToUse);
+
+        // Nothing we can do if even the default theme is missing
+        if (!themeTree)
+            return;
     }
 
-    if (!force && oldThemeTree.isValid() && themeTree.isEquivalentTo(oldThemeTree))
+    // Only update iolet geometry if we need to. Themes get edited in place, so the old and new tree
+    // can be the same object: compare against the value we last applied instead. Use the same
+    // conversion PlugDataLook does, so we stay in sync with what actually gets drawn
+    bool const ioletSpacingEdge = themeTree->getProperty("iolet_spacing_edge").toString().getIntValue();
+    bool const ioletGeometryChanged = ioletSpacingEdge != appliedIoletSpacingEdge;
+
+    // Unless we're forced, there's nothing to do if this theme is already applied
+    if (!force && themeToUse == currentThemeName && !ioletGeometryChanged)
         return;
 
     lnf->setTheme(themeTree);
 
+    currentThemeName = themeToUse;
+    appliedIoletSpacingEdge = ioletSpacingEdge;
+
+    for (auto* editor : getEditors())
+        editor->setTheme(themeTree);
+
     updateAllEditorsLNF();
 
-    // Only update iolet geometry if we need to
-    // This is based on if the previous or current differ
-    auto const previousIoletGeom = oldThemeTree.getProperty("iolet_spacing_edge");
-    auto const currentIoletGeom = themeTree.getProperty("iolet_spacing_edge");
-    // if both previous and current have iolet property, propertyState = 0;
-    // if one does, propertyState =  1;
-    // if previous and current both don't have iolet spacing property, propertyState = 2
-    int const propertyState = previousIoletGeom.isVoid() + currentIoletGeom.isVoid();
-    if (propertyState == 1 || (propertyState == 0 ? static_cast<int>(previousIoletGeom) != static_cast<int>(currentIoletGeom) : 0)) {
+    if (ioletGeometryChanged)
         PluginEditor::updateIoletGeometryForAllObjects(this);
-    }
-
-    currentThemeName = themeToUse;
 }
 
 void PluginProcessor::runBackupLoop()
 {
-    if(ProjectInfo::isStandalone) return;
+    if (ProjectInfo::isStandalone)
+        return;
     
     // Only run backup timer if GUI is visible
-    if(!getActiveEditor()) return;
+    if (!getActiveEditor())
+        return;
     
     int blocksToProcess = backupRunLoopInterval / std::max(1, static_cast<int>((DEFDACBLKSIZE / AudioProcessor::getSampleRate()) * 1000.0));
-    if(blocksToProcess < 1)
-    {
+    if (blocksToProcess < 1) {
         blocksToProcess = jmax(1, blocksToProcess); // At least 1 block
         backupRunLoopInterval *= 2; // Increase the interval so we get correct timing
     }
     
     {
         ScopedTryLock const scopedTimerLock(backupLoopLock);
-        if(scopedTimerLock.isLocked()) {
-            if(isProcessingAudio)
-            {
+        if (scopedTimerLock.isLocked()) {
+            if (isProcessingAudio) {
                 backupRunLoop.stopTimer();
                 return;
             }
             
             backupRunLoop.startTimer(backupRunLoopInterval);
-        }
-        else {
+        } else {
             return;
         }
     }
     
     setThis();
     ScopedTryLock const scopedAudioLock(backupLoopLock);
-    if(scopedAudioLock.isLocked()) {
+    if (scopedAudioLock.isLocked()) {
+        keyHandler.sendKeyUpMessages();
         sendMessagesFromQueue();
         sendParameters();
-        for(int i = 0; i < blocksToProcess; i++) {
-            if(isProcessingAudio) break;
+        for (int i = 0; i < blocksToProcess; i++) {
+            if (isProcessingAudio)
+                break;
             sys_pollgui();
             sched_tick_nodsp();
         }
     }
 }
 
+bool PluginProcessor::toggleRecording(PluginEditor* editor)
+{
+    recorder->toggleRecording(editor);
+    toolbarSource->setRecorderTime(recorder->isRecording() ? 0.01f : 0.0f);
+    return recorder->isRecording();
+}
+
 void PluginProcessor::updateAllEditorsLNF()
 {
-    for (auto const& editor : getEditors())
-        editor->sendLookAndFeelChange();
+    for (auto* editor : getEditors()) {
+        // Standalone window decorations are above the editor in the component tree.
+        auto* root = ProjectInfo::isStandalone ? editor->getTopLevelComponent() : editor;
+        root->sendLookAndFeelChange();
+    }
 }
 
 void PluginProcessor::receiveNoteOn(int const channel, int const pitch, int const velocity)
 {
-    auto const port = (channel - 1) >> 4;
+    auto const port = channel >> 4;
     auto const deviceChannel = channel - port * 16;
 
     if (velocity == 0) {
-        midiDeviceManager.enqueueMidiOutput(port, MidiMessage::noteOff(deviceChannel, pitch, static_cast<uint8>(0)), audioAdvancement);
+        midiDeviceManager.enqueueMidiOutput(port, MidiMessage::noteOff(deviceChannel + 1, pitch, static_cast<uint8>(0)), audioAdvancement);
     } else {
-        midiDeviceManager.enqueueMidiOutput(port, MidiMessage::noteOn(deviceChannel, pitch, static_cast<uint8>(velocity)), audioAdvancement);
+        midiDeviceManager.enqueueMidiOutput(port, MidiMessage::noteOn(deviceChannel + 1, pitch, static_cast<uint8>(velocity)), audioAdvancement);
     }
 }
 
@@ -1725,7 +1764,7 @@ void PluginProcessor::receiveControlChange(int const channel, int const controll
     auto const port = channel >> 4;
     auto const deviceChannel = channel - port * 16;
 
-    midiDeviceManager.enqueueMidiOutput(port, MidiMessage::controllerEvent(deviceChannel, controller, value), audioAdvancement);
+    midiDeviceManager.enqueueMidiOutput(port, MidiMessage::controllerEvent(deviceChannel + 1, controller, value), audioAdvancement);
 }
 
 void PluginProcessor::receiveProgramChange(int const channel, int const value)
@@ -1733,7 +1772,7 @@ void PluginProcessor::receiveProgramChange(int const channel, int const value)
     auto const port = channel >> 4;
     auto const deviceChannel = channel - port * 16;
 
-    midiDeviceManager.enqueueMidiOutput(port, MidiMessage::programChange(deviceChannel, value), audioAdvancement);
+    midiDeviceManager.enqueueMidiOutput(port, MidiMessage::programChange(deviceChannel + 1, value), audioAdvancement);
 }
 
 void PluginProcessor::receivePitchBend(int const channel, int const value)
@@ -1741,7 +1780,7 @@ void PluginProcessor::receivePitchBend(int const channel, int const value)
     auto const port = channel >> 4;
     auto const deviceChannel = channel - port * 16;
 
-    midiDeviceManager.enqueueMidiOutput(port, MidiMessage::pitchWheel(deviceChannel, value + 8192), audioAdvancement);
+    midiDeviceManager.enqueueMidiOutput(port, MidiMessage::pitchWheel(deviceChannel + 1, value + 8192), audioAdvancement);
 }
 
 void PluginProcessor::receiveAftertouch(int const channel, int const value)
@@ -1749,7 +1788,7 @@ void PluginProcessor::receiveAftertouch(int const channel, int const value)
     auto const port = channel >> 4;
     auto const deviceChannel = channel - port * 16;
 
-    midiDeviceManager.enqueueMidiOutput(port, MidiMessage::channelPressureChange(deviceChannel, value), audioAdvancement);
+    midiDeviceManager.enqueueMidiOutput(port, MidiMessage::channelPressureChange(deviceChannel + 1, value), audioAdvancement);
 }
 
 void PluginProcessor::receivePolyAftertouch(int const channel, int const pitch, int const value)
@@ -1757,12 +1796,30 @@ void PluginProcessor::receivePolyAftertouch(int const channel, int const pitch, 
     auto const port = channel >> 4;
     auto const deviceChannel = channel - port * 16;
 
-    midiDeviceManager.enqueueMidiOutput(port, MidiMessage::aftertouchChange(deviceChannel, pitch, value), audioAdvancement);
+    midiDeviceManager.enqueueMidiOutput(port, MidiMessage::aftertouchChange(deviceChannel + 1, pitch, value), audioAdvancement);
 }
 
 void PluginProcessor::receiveMidiByte(int const channel, int const byte)
 {
     auto const port = channel >> 4;
+
+    auto getMidiMessageLength = [](uint8 statusByte) {
+        // Strip channel nibble for channel messages
+        auto const type = statusByte & 0xF0;
+        switch (type) {
+        case 0xC0: // Program Change
+        case 0xD0: // Channel Pressure
+            return 2;
+        case 0x80: // Note Off
+        case 0x90: // Note On
+        case 0xA0: // Poly Aftertouch
+        case 0xB0: // Control Change
+        case 0xE0: // Pitch Bend
+            return 3;
+        default:
+            return 3; // fallback
+        }
+    };
 
     if (midiByteIsSysex) {
         if (byte == 0xf7) {
@@ -1778,23 +1835,21 @@ void PluginProcessor::receiveMidiByte(int const channel, int const byte)
     } else if (midiByteIndex == 0 && byte == 0xf0) {
         midiByteIsSysex = true;
     } else {
-        // Handle single-byte messages
-        if (midiByteIndex == 0 && byte >= 0xf8 && byte <= 0xff) {
-            midiDeviceManager.enqueueMidiOutput(port, MidiMessage(static_cast<uint8>(byte)), audioAdvancement);
-        }
-        // Handle 3-byte messages
-        else {
             midiByteBuffer[midiByteIndex++] = static_cast<uint8>(byte);
-            if (midiByteIndex >= 3) {
-                midiDeviceManager.enqueueMidiOutput(port, MidiMessage(midiByteBuffer, 3), audioAdvancement);
+
+        // Determine expected length from the status byte (always first byte)
+        auto const expectedLength = getMidiMessageLength(midiByteBuffer[0]);
+
+        if (midiByteIndex >= expectedLength) {
+            midiDeviceManager.enqueueMidiOutput(port, MidiMessage(midiByteBuffer, expectedLength), audioAdvancement);
                 midiByteIndex = 0;
             }
         }
-    }
 }
 
 void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<pd::Atom> const& list)
 {
+    if (mcp->handleSysMessage(selector, list)) return; // MCP-HOOK(sysCommand)
     switch (hash(selector)) {
     case hash("open"): {
         if (list.size() >= 2) {
@@ -1829,17 +1884,30 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
         break;
     }
     case hash("dsp"): {
+        if (list.size() >= 1) {
         bool dsp = list[0].getFloat();
         for (auto* editor : getEditors()) {
-            editor->statusbar->showDSPState(dsp);
+                editor->audioToolbar->showDSPState(dsp);
+            }
         }
         break;
     }
     case hash("limit"): {
+        if (list.size() >= 1) {
         bool limit = list[0].getFloat();
         setEnableLimiter(limit);
         for (auto* editor : getEditors()) {
-            editor->statusbar->showLimiterState(limit);
+                editor->audioToolbar->showLimiterState(limit);
+            }
+        }
+        break;
+    }
+    case hash("oversample"): {
+        if (list.size() >= 1) {
+            setOversampling(std::clamp<int>(list[0].getFloat(), 0, 3));
+            for (auto* editor : getEditors()) {
+                editor->audioToolbar->updateOversampling();
+            }
         }
         break;
     }
@@ -1849,23 +1917,40 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
         {
             if (patches.not_empty()) {
                 float pluginModeFloatArgument = 1.0;
-                if (list.size()) {
+                if (list.size() >= 1) {
                     if (list[0].isFloat()) {
                         pluginModeFloatArgument = list[0].getFloat();
                     } else {
                         auto pluginModeThemeOrPath = list[0].toString();
                         if (pluginModeThemeOrPath.endsWith(".plugdatatheme")) {
-                            auto themeFile = patches[0]->getPatchFile().getParentDirectory().getChildFile(pluginModeThemeOrPath);
+                            File themeFile;
+
+                            if (!editors.empty()) {
+                                if (auto* currentCanvas = editors[0]->getCurrentCanvas())
+                                    themeFile = currentCanvas->patch.getPatchFile().getParentDirectory().getChildFile(pluginModeThemeOrPath);
+                            }
+
+                            if (!themeFile.existsAsFile()) {
+                                for (auto const& patch : patches) {
+                                    auto const candidate = patch->getPatchFile().getParentDirectory().getChildFile(pluginModeThemeOrPath);
+                                    if (candidate.existsAsFile()) {
+                                        themeFile = candidate;
+                                        break;
+                                    }
+                                }
+                            }
+
                             if (themeFile.existsAsFile()) {
-                                auto themeTree = ValueTree::fromXml(themeFile.loadFileAsString());
-                                if (themeTree.isValid()) {
-                                    pluginModeTheme = themeTree;
+                                auto themeJson = JSON::parse(themeFile.loadFileAsString());
+                                if (themeJson.isObject()) {
+                                    pluginModeTheme = themeJson.getDynamicObject();
+                                } else {
+                                    auto themeXml = ValueTree::fromXml(themeFile.loadFileAsString());
+                                    pluginModeTheme = SettingsFile::xmlThemeToJson(themeXml);
                                 }
                             }
                         } else {
-                            auto themesTree = SettingsFile::getInstance()->getValueTree().getChildWithName("ColourThemes");
-                            auto theme = themesTree.getChildWithProperty("theme", pluginModeThemeOrPath);
-                            if (theme.isValid()) {
+                            if (auto theme = SettingsFile::getInstance()->getTheme(pluginModeThemeOrPath)) {
                                 pluginModeTheme = theme;
                             }
                         }
@@ -1875,7 +1960,7 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
                 if (!editors.empty()) {
                     auto* editor = editors[0];
                     if (auto* cnv = editor->getCurrentCanvas()) {
-                        if (pluginModeFloatArgument)
+                        if (pluginModeFloatArgument && !findPatchInPluginMode(0))
                             editor->getTabComponent().openInPluginMode(cnv->patch);
                         else if (editor->isInPluginMode())
                             editor->pluginMode->closePluginMode();
@@ -1902,14 +1987,15 @@ void PluginProcessor::receiveSysMessage(SmallString const& selector, SmallArray<
         }
         break;
     }
-    default: break;
+    default:
+        break;
     }
 }
 
 void PluginProcessor::addTextToTextEditor(uint64_t const ptr, SmallString const& text)
 {
-    MessageManager::callAsync([this, ptr, editorText = text.toString()]{
-        if(textEditorDialogs.contains(ptr)) {
+    MessageManager::callAsync([this, ptr, editorText = text.toString()] {
+        if (textEditorDialogs.contains(ptr)) {
             Dialogs::appendTextToTextEditorDialog(textEditorDialogs[ptr].get(), editorText);
         }
     });
@@ -1917,8 +2003,8 @@ void PluginProcessor::addTextToTextEditor(uint64_t const ptr, SmallString const&
 
 void PluginProcessor::clearTextEditor(uint64_t const ptr)
 {
-    MessageManager::callAsync([this, ptr]{
-        if(textEditorDialogs.contains(ptr)) {
+    MessageManager::callAsync([this, ptr] {
+        if (textEditorDialogs.contains(ptr)) {
             Dialogs::clearTextEditorDialog(textEditorDialogs[ptr].get());
         }
     });
@@ -1938,8 +2024,7 @@ void PluginProcessor::hideTextEditorDialog(uint64_t ptr)
 
 void PluginProcessor::raiseTextEditorDialog(uint64_t const ptr)
 {
-    if(textEditorDialogs.contains(ptr))
-    {
+    if (textEditorDialogs.contains(ptr)) {
         textEditorDialogs[ptr]->toFront(true);
     }
 }
@@ -1984,8 +2069,8 @@ void PluginProcessor::showTextEditorDialog(uint64_t const ptr, SmallString const
             }
         };
 
-        const auto scaleFactor = getActiveEditor() ? Component::getApproximateScaleFactorForComponent(getActiveEditor()) : 1.0f;
-        if(auto* textEditor = Dialogs::showTextEditorDialog("", title.toString(), onClose, onSave, scaleFactor)) {
+        auto const scaleFactor = getActiveEditor() ? Component::getApproximateScaleFactorForComponent(getActiveEditor()) : 1.0f;
+        if (auto* textEditor = Dialogs::showTextEditorDialog("", title.toString(), onClose, onSave, scaleFactor)) {
             textEditorDialogs[ptr].reset(textEditor);
         }
     });
@@ -1998,7 +2083,7 @@ void PluginProcessor::performLatencyCompensationChange(float const value)
         customLatencySamples = value;
 
         for (auto const& editor : getEditors()) {
-            editor->statusbar->setLatencyDisplay(customLatencySamples);
+            editor->audioToolbar->setLatencyDisplay(customLatencySamples);
         }
 
         setLatencySamples(customLatencySamples + Instance::getBlockSize());
@@ -2025,27 +2110,26 @@ void PluginProcessor::handleParameterMessage(SmallArray<pd::Atom> const& atoms)
     if (atoms.size() >= 2) {
         auto const name = atoms[0].toSmallString();
         auto const selector = hash(atoms[1].toSmallString());
-        switch(selector)
-        {
+        switch (selector) {
             case hash("create"): {
                 enableAudioParameter(name);
                 // Set default value with first create argument
                 if (atoms.size() >= 3 && atoms[2].isFloat()) {
-                    if(auto* param = getEnabledParameter(name))
-                    {
+                if (auto* param = getEnabledParameter(name)) {
                         auto defaultValue = atoms[2].getFloat();
                         if (atoms.size() >= 5 && atoms[3].isFloat() && atoms[4].isFloat()) {
                             param->setRange(atoms[3].getFloat(), atoms[4].getFloat());
                             defaultValue = jmap(defaultValue, atoms[3].getFloat(), atoms[4].getFloat(), 0.0f, 1.0f);
-                        }
-                        else if(atoms.size() >= 4) { // Either not float, or not enough args
+                    } else if (atoms.size() >= 4) { // Either not float, or not enough args
                             logWarning("[param]: incomplete args for create message (invalid range)");
                         }
                             
                         param->setDefaultValue(defaultValue);
                         if (ProjectInfo::isStandalone) {
                             for (auto const* editor : getEditors()) {
-                                editor->sidebar->updateAutomationParameterValue(param);
+                            if (auto* s = editor->getSidebarForPanel(Sidebar::ParamPanel)) {
+                                s->updateAutomationParameterValue(param);
+                            }
                             }
                         }
                     }
@@ -2056,17 +2140,17 @@ void PluginProcessor::handleParameterMessage(SmallArray<pd::Atom> const& atoms)
                 disableAudioParameter(name);
                 break;
             }
-            case hash("float"):
-            {
+        case hash("float"): {
                 if (atoms.size() > 2 && atoms[2].isFloat()) {
-                    if(auto* param = getEnabledParameter(name))
-                    {
+                if (auto* param = getEnabledParameter(name)) {
                         float const value = atoms[2].getFloat();
                         param->setUnscaledValueNotifyingHost(value);
 
                         if (ProjectInfo::isStandalone) {
                             for (auto const* editor : getEditors()) {
-                                editor->sidebar->updateAutomationParameterValue(param);
+                            if (auto* s = editor->getSidebarForPanel(Sidebar::ParamPanel)) {
+                                s->updateAutomationParameterValue(param);
+                            }
                             }
                         }
                     }
@@ -2075,8 +2159,7 @@ void PluginProcessor::handleParameterMessage(SmallArray<pd::Atom> const& atoms)
             }
             case hash("range"): {
                 if (atoms.size() > 3 && atoms[2].isFloat() && atoms[3].isFloat()) {
-                    if(auto* param = getEnabledParameter(name))
-                    {
+                if (auto* param = getEnabledParameter(name)) {
                         float const min = atoms[2].getFloat();
                         float max = atoms[3].getFloat();
                         max = std::max(max, min + 0.000001f);
@@ -2087,8 +2170,7 @@ void PluginProcessor::handleParameterMessage(SmallArray<pd::Atom> const& atoms)
             }
             case hash("mode"): {
                 if (atoms.size() > 2 && atoms[2].isFloat()) {
-                    if(auto* param = getEnabledParameter(name))
-                    {
+                if (auto* param = getEnabledParameter(name)) {
                         float const mode = atoms[2].getFloat();
                         param->setMode(static_cast<PlugDataParameter::Mode>(std::clamp<int>(mode, 1, 4)));
                     }
@@ -2104,7 +2186,8 @@ void PluginProcessor::handleParameterMessage(SmallArray<pd::Atom> const& atoms)
                 }
                 break;
             }
-            default: break;
+        default:
+            break;
             }
     }
 }
@@ -2134,7 +2217,8 @@ void PluginProcessor::enableAudioParameter(SmallString const& name)
     updateEnabledParameters();
 
     for (auto const* editor : getEditors()) {
-        editor->sidebar->updateAutomationParameters();
+        if (auto* s = editor->getSidebarForPanel(Sidebar::ParamPanel))
+            s->updateAutomationParameters();
     }
 }
 
@@ -2158,7 +2242,8 @@ void PluginProcessor::disableAudioParameter(SmallString const& name)
     updateEnabledParameters();
 
     for (auto const* editor : getEditors()) {
-        editor->sidebar->updateAutomationParameters();
+        if (auto* s = editor->getSidebarForPanel(Sidebar::ParamPanel))
+            s->updateAutomationParameters();
     }
 }
 
@@ -2202,10 +2287,8 @@ void PluginProcessor::fillDataBuffer(SmallArray<pd::Atom> const& vec)
 
 void PluginProcessor::parseDataBuffer(XmlElement const& xml)
 {
-    // source : void CamomileAudioProcessor::loadInformation(XmlElement const& xml)
-
     bool loaded = false;
-    if (auto const* extra_data = xml.getChildByName(juce::StringRef("ExtraData"))) {
+    if (auto const* extra_data = xml.getChildByName(StringRef("ExtraData"))) {
         int const nlists = extra_data->getNumChildElements();
         SmallArray<pd::Atom> vec;
         for (int i = 0; i < nlists; ++i) {
@@ -2235,10 +2318,10 @@ void PluginProcessor::parseDataBuffer(XmlElement const& xml)
     }
 }
 
-void PluginProcessor::updateConsole(int const numMessages, bool const newWarning)
+void PluginProcessor::updateConsole(SmallString const& message, bool isWarning, int const numMessages, bool const newWarning)
 {
-    for (auto const* editor : getEditors()) {
-        editor->sidebar->updateConsole(numMessages, newWarning);
+    for (auto* editor : getEditors()) {
+        editor->updateConsole(message, isWarning, numMessages, newWarning);
     }
 }
 
@@ -2246,7 +2329,7 @@ SmallArray<PluginEditor*> PluginProcessor::getEditors() const
 {
     SmallArray<PluginEditor*> editors;
     if (ProjectInfo::isStandalone) {
-        editors.reserve(editors.size());
+        editors.reserve(openedEditors.size());
         for (auto* editor : openedEditors) {
             editors.add(editor);
         }
@@ -2294,6 +2377,11 @@ void PluginProcessor::titleChanged()
     for (auto* editor : getEditors()) {
         editor->getTabComponent().repaint();
     }
+}
+
+void PluginProcessor::onConsoleMessage(String const& message, bool isError)
+{
+    mcp->consoleMessage(message, isError); // MCP-HOOK(telemetry)
 }
 
 // This creates new instances of the plugin..

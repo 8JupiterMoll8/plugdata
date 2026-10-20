@@ -6,7 +6,7 @@
 #pragma once
 #include "Utility/MidiDeviceManager.h"
 
-class OpenFileObject final : public TextBase {
+class OpenFileObject final : public TextObjectBase {
 public:
     bool mouseWasOver = false;
 
@@ -16,10 +16,10 @@ public:
     int32 lastColourARGB = 0;
 
     OpenFileObject(pd::WeakReference ptr, Object* object)
-        : TextBase(ptr, object)
+        : TextObjectBase(ptr, object)
     {
     }
-    
+
     bool hideInlet() override
     {
         return true;
@@ -28,11 +28,10 @@ public:
     void showEditor() override
     {
         if (editor == nullptr) {
-            editor.reset(TextObjectHelper::createTextEditor(object, 15));
+            editor.reset(TextObjectHelper::createTextEditor(object, Fonts::getDefaultFont().withHeight(15)));
 
             auto const font = editor->getFont();
-            auto const textWidth = font.getStringWidth(objectText) + 20;
-            editor->setLookAndFeel(&object->getLookAndFeel());
+            auto const textWidth = Fonts::getStringWidth(objectText, font) + 20;
             editor->setBorder(border);
             editor->setBounds(getLocalBounds().withWidth(textWidth));
             editor->getProperties().set("NoBackground", true);
@@ -66,7 +65,7 @@ public:
 
         int fontWidth = 7;
         int charWidth = 0;
-        if (auto obj = ptr.get<void>()) {
+        if (auto obj = ptr.get<t_text>()) {
             charWidth = TextObjectHelper::getWidthInChars(obj.get());
             fontWidth = glist_fontwidth(cnv->patch.getRawPointer());
         }
@@ -94,41 +93,70 @@ public:
 
     void updateTextLayout() override
     {
+        auto const& colours = getThemeColours();
+
         auto const objText = getLinkText();
         auto const mouseIsOver = isMouseOver();
         bool const locked = getValue<bool>(object->locked) || getValue<bool>(object->commandLocked);
-        auto colour = cnv->editor->getLookAndFeel().findColour(PlugDataColour::objectSelectedOutlineColourId);
-        if(locked && mouseIsOver)
+        auto colour = colours.objectSelectedOutlineColour;
+        if (locked && mouseIsOver)
             colour = colour.withRotatedHue(0.5f);
-        
+
         int const textWidth = getTextSize().getWidth() - 11;
-        if (cachedTextRender.prepareLayout(objText, Fonts::getCurrentFont().withHeight(15), colour, textWidth, getValue<int>(sizeProperty), static_cast<PlugDataLook&>(cnv->getLookAndFeel()).getUseSyntaxHighlighting() && isValid)) {
-            repaint();
+
+        // Rebuild only when the inputs change: this is called every frame from render().
+        auto const textHash = hash(objText);
+        if (textHash == layoutTextHash && textWidth == lastTextWidth && static_cast<int32>(colour.getARGB()) == lastColourARGB)
+            return;
+
+        layoutTextHash = textHash;
+        lastTextWidth = textWidth;
+        lastColourARGB = static_cast<int32>(colour.getARGB());
+
+        auto const font = Fonts::getDefaultFont().withHeight(15);
+        bool const highlightObjectSyntax = getPlugDataLook(*this).getUseSyntaxHighlighting() && isValid;
+
+        AttributedString attributedText;
+        if (highlightObjectSyntax) {
+            auto const nameColour = colour.interpolatedWith(colours.dataColour, 0.7f);
+            attributedText = getSyntaxHighlightedString(*this, objText, font, colour, nameColour);
+        } else {
+            attributedText = AttributedString(objText);
+            attributedText.setColour(colour);
+            attributedText.setFont(font);
         }
+        attributedText.setJustification(Justification::centredLeft);
+        attributedText.setWordWrap(AttributedString::byChar);
+        textLayout.createLayout(attributedText, textWidth);
+        repaint();
     }
 
     String getLinkText() const
     {
         auto tokens = StringArray::fromTokens(editor ? editor->getText() : objectText, true);
         tokens.removeRange(0, tokens.indexOf("-h") + 1);
-        if(tokens.size() > 1)
+        if (tokens.size() > 1)
             tokens.removeRange(0, 1);
-        
+
         return tokens.joinIntoString(" ");
     }
-    
+
     void render(NVGcontext* nvg) override
     {
         updateTextLayout();
-        
-        auto const b = getLocalBounds();
-        
-        nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), convertColour(backgroundColour), nvgRGBA(0, 0, 0, 0), Corners::objectCornerRadius);
 
+        auto const b = getLocalBounds();
+
+        nanovg::nvgDrawRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), nvgColour(getThemeColours().textObjectBackgroundColour), nanovg::nvgRGBA(0, 0, 0, 0), getPlugDataLook(*this).getObjectCornerRadius());
+
+        auto& llgc = *cnv->editor->getNanoLLGC();
         if (editor && editor->isVisible()) {
-            imageRenderer.renderJUCEComponent(nvg, *editor, getImageScale());
+            llgc.renderComponent(*editor);
         } else {
-            cachedTextRender.renderText(nvg, border.subtractedFrom(b).toFloat(), getImageScale());
+            Graphics g(llgc);
+            auto const textBounds = border.subtractedFrom(b).toFloat();
+            NVGGraphicsContext::ScopedAnchoredDraw anchor(llgc, textBounds);
+            textLayout.draw(g, textBounds);
         }
     }
 
@@ -190,18 +218,11 @@ public:
         repaint();
     }
 
-    bool hideInGraph() override
-    {
-        return false;
-    }
-
     void mouseDown(MouseEvent const& e) override
     {
         if (!getValue<bool>(object->locked) && !getValue<bool>(object->commandLocked))
             return;
 
-        if (auto openfile = ptr.get<void>()) {
-            pd->sendDirectMessage(openfile.get(), "bang", SmallArray<pd::Atom> {});
-        }
+        sendMessage("bang");
     }
 };
