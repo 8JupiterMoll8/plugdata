@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdint>
 #include <cstdio>
@@ -45,6 +46,7 @@
 #include "Pd/MCPBridge.h"
 #include "Pd/Interface.h" // g_undo.h: the native undo queue (L6 check)
 #include "v2_test_client.h" // P4.1 S2: loopback v2 client
+#include "Pd/MCPBridgeCmdCommon.h" // armedSpectralJson / renderSpectralJson (Plan 5 spectral window)
 
 namespace {
 
@@ -589,6 +591,37 @@ void runSharedUndoCases(Harness& h, PluginProcessor& processor)
 // P3.5 S0: the identity service will detect GUI edits by recomputing a per-canvas stamp (object count plus a hash
 // of the gl_list pointers) under the Pd lock on every version read. Measure one walk on a canvas the size of the
 // DEV.md standard patch (37 objects) and on a large one (500): the plan stops and re-plans above 100 us.
+// Plan 5 P5.1 (AI-lane gauntlet smoke 2026-10-20): a 55 Hz drone read "fundamental 0 Hz" because the spectral
+// window was 1024 samples and the autocorrelation searched lags up to N/2 only (lowest pitch ~94 Hz at 48 kHz).
+// A bass the artist asks for must be measurable: 55 Hz (and 41 Hz, low E) within 3 %.
+void runSpectralPitchCases()
+{
+    std::printf("spectral pitch window\n");
+    double const sr = 48000.0;
+    auto tone = [sr](double hz, int n) {
+        std::vector<float> v(static_cast<size_t>(n));
+        for (int i = 0; i < n; ++i) {
+            double const t = i / sr;
+            // A saw-ish drone: fundamental plus two harmonics.
+            v[static_cast<size_t>(i)] = static_cast<float>(0.5 * std::sin(2 * M_PI * hz * t) + 0.25 * std::sin(4 * M_PI * hz * t)
+                                                          + 0.12 * std::sin(6 * M_PI * hz * t));
+        }
+        return v;
+    };
+    auto fundamentalOf = [](juce::String const& json) {
+        auto v = juce::JSON::parse(json);
+        return v.isObject() ? static_cast<double>(v.getProperty("fundamental", 0.0)) : -1.0;
+    };
+    for (double hz : { 41.2, 55.0, 110.0, 440.0 }) {
+        auto buf = tone(hz, static_cast<int>(sr)); // 1 s, as measure_spectral captures
+        double const armed = fundamentalOf(armedSpectralJson(buf.data(), static_cast<int>(buf.size()), sr));
+        double const render = fundamentalOf(renderSpectralJson(buf.data(), static_cast<int>(buf.size()), sr));
+        std::printf("  %.1f Hz -> armed %.2f, render %.2f\n", hz, armed, render);
+        CHECK(std::abs(armed - hz) <= hz * 0.03);
+        CHECK(std::abs(render - hz) <= hz * 0.03);
+    }
+}
+
 void runStampCostCases(PluginProcessor& processor)
 {
     std::printf("identity stamp walk cost\n");
@@ -1624,6 +1657,7 @@ int main()
             runV2IdempotencyCases(harness);
             runV2OwnershipCases(harness);
             runZeroArgCases(harness);
+            runSpectralPitchCases();
             runV2WithoutUdpCases(*bridge, [&] {
                 bridge->setReplySinkForTests([&replies](juce::OSCMessage const& msg) { replies.push(msg); });
             });

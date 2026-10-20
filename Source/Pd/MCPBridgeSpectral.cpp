@@ -10,7 +10,7 @@
 #include "MCPBridgeCmdCommon.h"
 
 // Spectral analysis over exactly N raw samples (Hann window + FFTW r2c on
-// mono data). Shared by the render path (final 1024 samples), the /meter/spectral
+// mono data). Shared by the render path (final PROBE_RING_SIZE samples), the /meter/spectral
 // probe path, and the Phase-5 armed-capture path. JSON keys match what the
 // server already parses.
 juce::var spectralVarFromSamples(float const* samples, int N, double sampleRate)
@@ -158,10 +158,10 @@ juce::String spectralJsonFromSamples(float const* samples, int N, double sampleR
     return juce::JSON::toString(v, true);
 }
 
-// Spectral analysis over the baked render buffer (final 1024 samples).
+// Spectral analysis over the baked render buffer (final PROBE_RING_SIZE samples).
 juce::String renderSpectralJson(float const* data, int n, double sampleRate)
 {
-    constexpr int N = PROBE_RING_SIZE; // 1024
+    constexpr int N = PROBE_RING_SIZE;
     if (n < N || !data || sampleRate <= 0.0)
         return {};
     return spectralJsonFromSamples(data + (n - N), N, sampleRate);
@@ -172,7 +172,7 @@ juce::String renderSpectralJson(float const* data, int n, double sampleRate)
 // taking the tail. Reports silence/short honestly if there is nothing to read.
 juce::String armedSpectralJson(float const* data, int n, double sampleRate)
 {
-    constexpr int N = PROBE_RING_SIZE; // 1024
+    constexpr int N = PROBE_RING_SIZE;
     if (n < N || !data || sampleRate <= 0.0)
         return {};
 

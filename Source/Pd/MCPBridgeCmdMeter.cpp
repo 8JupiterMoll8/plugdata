@@ -443,7 +443,7 @@ void MCPBridge::meterReadSpectral(const juce::String& meterAction, const juce::O
 {
     if (!processor) return;
     // /meter/read_spectral <correlationId> — close the window and reply the
-    // spectrum of the loudest 1024-sample region captured since arm.
+    // spectrum of the loudest PROBE_RING_SIZE-sample region captured since arm.
     juce::String const correlationId = msg.size() > 0 ? getArgString(msg[0]) : juce::String("0");
     if (!processor) {
         sendReply("/meter/read_spectral/reply/" + correlationId, "{\"error\":\"no processor\"}");

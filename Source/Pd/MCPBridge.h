@@ -138,7 +138,10 @@ struct ProbeResult {
     int blockSize = 0;
 };
 
-static constexpr int PROBE_RING_SIZE = 1024;
+// Spectral/pitch analysis window (probe ring, armed capture, render tail). 4096 samples (~85 ms at 48 kHz): the
+// autocorrelation pitch search reaches lags up to N/2, so 1024 could not see anything below ~94 Hz and every bass
+// read "fundamental 0 Hz" (Plan 5 AI-lane gauntlet, 2026-10-20). Now 40 Hz (the estimator's floor), ~12 Hz/bin.
+static constexpr int PROBE_RING_SIZE = 4096;
 static constexpr int MAX_PROBES = 16;
 
 struct ActiveProbe {
