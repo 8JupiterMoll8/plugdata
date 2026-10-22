@@ -14,6 +14,20 @@ void MCPBridge::pdPing(const juce::String& action, const juce::OSCMessage& msg)
     return;
 }
 
+void MCPBridge::pdLimiter(const juce::String& action, const juce::OSCMessage& msg)
+{
+    // P5.1 sink floor S1: /pd/limiter <corrId> -> /pd/limiter/reply/<corrId> {"enabled":bool}. Read-only: the
+    // AI never switches the limiter. The LIVE state (an AtomicValue, safe off the message thread), not
+    // settings.json: `limit` from a patch does not persist.
+    auto const correlationId = msg.size() > 0 ? getArgString(msg[0]) : juce::String("0");
+    if (!processor) {
+        sendReply("/pd/limiter/error/" + correlationId, juce::String("no processor"));
+        return;
+    }
+    bool const enabled = processor->getEnableLimiter();
+    sendReply("/pd/limiter/reply/" + correlationId, juce::String(enabled ? "{\"enabled\":true}" : "{\"enabled\":false}"));
+}
+
 void MCPBridge::pdClearConsole(const juce::String& action, const juce::OSCMessage& msg)
 {
     if (processor) {

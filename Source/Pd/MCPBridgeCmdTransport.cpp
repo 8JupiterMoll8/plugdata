@@ -368,6 +368,8 @@ std::vector<std::string> MCPBridge::capabilityList() const
         "unknown_verb_reply",
         // P3.5: per-canvas identity_version, snapshot canvasKey/canvasVersion, rename_id error, sidecar v2.
         "identity_v2",
+        // P5.1 sink floor S1: /pd/limiter <corrId> answers whether PlugData's master limiter runs (read-only)
+        "limiter",
     };
     // P4.1 S2: the v2 listener is up (TCP 127.0.0.1, port and token in the discovery file).
     if (v2Server.running())

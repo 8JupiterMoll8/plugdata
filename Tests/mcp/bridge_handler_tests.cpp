@@ -1103,6 +1103,29 @@ void runMidiCaptureCases(PluginProcessor& processor, AudioControl& audio)
     CHECK(!bridge->isMidiCapturing());
 }
 
+// P5.1 sink floor S1: /pd/limiter answers the LIVE limiter state ({"enabled":bool}), read-only; the capability
+// `limiter` is advertised. The state is flipped here directly (the AI never switches it) and restored after.
+void runLimiterCases(Harness& h, PluginProcessor& processor)
+{
+    std::printf("limiter read\n");
+    bool const before = processor.getEnableLimiter();
+    processor.setEnableLimiter(false);
+    auto off = h.call("/pd/limiter", { "lim1" }, "/pd/limiter/reply/lim1");
+    CHECK(off.has_value() && off->str(0) == "{\"enabled\":false}");
+    processor.setEnableLimiter(true);
+    auto on = h.call("/pd/limiter", { "lim2" }, "/pd/limiter/reply/lim2");
+    CHECK(on.has_value() && on->str(0) == "{\"enabled\":true}");
+    CHECK(processor.getEnableLimiter()); // the read changed nothing
+    processor.setEnableLimiter(before);
+
+    auto caps = h.call("/bridge/capabilities", { "lim3" }, "/bridge/capabilities/reply");
+    bool limiterCap = false;
+    if (caps)
+        for (auto const& a : caps->args)
+            limiterCap = limiterCap || a.text == "limiter";
+    CHECK(caps.has_value() && limiterCap);
+}
+
 // Teardown during work (P3.4 S8): start a long offline render and return; main() then destroys the processor
 // while the render job runs. McpHost::shutdown (first thing in ~PluginProcessor) must cancel it before the
 // patches go: the job used to be a detached std::thread holding raw processor and bridge pointers.
@@ -1941,6 +1964,7 @@ int main()
             runAudioStallCases(harness, audioControl);
             runArmedTraceCases(harness);
             runConsoleObjectCases(harness);
+            runLimiterCases(harness, processor);
             runMidiCaptureCases(processor, audioControl);
             runStampCostCases(processor);
             runIdentityValidityCases(processor);
