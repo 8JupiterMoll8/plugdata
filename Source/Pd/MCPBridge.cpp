@@ -3654,21 +3654,8 @@ t_outconnect* MCPBridge::resolveProbeTarget(const juce::String& canvasName, cons
         return nullptr;
     }
 
+    // P5.1 sink floor: an MCP ref is a tempId or nothing (no gl_list index fallback).
     t_gobj* gobj = processor->getMcp()->resolveStableId(canvasName, targetId);
-
-    if (!gobj) {
-        bool isNumber = targetId.isNotEmpty();
-        for (int i = (targetId.startsWith("-") ? 1 : 0); i < targetId.length(); ++i) {
-            if (!juce::CharacterFunctions::isDigit(targetId[i])) {
-                isNumber = false;
-                break;
-            }
-        }
-        if (isNumber) {
-            int idx = targetId.getIntValue();
-            gobj = glistObjectAt(cnv, idx);
-        }
-    }
 
     if (!gobj) {
         errorOut = "Object not found: " + targetId;

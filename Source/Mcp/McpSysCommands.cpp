@@ -10,6 +10,8 @@
 #include "Mcp/McpSysCommon.h"
 #include "Mcp/McpNativeUndo.h"
 
+#include <atomic>
+
 // Empties a canvas's native undo queue. Caller holds the Pd lock. Pd keeps an UNDO_INIT action at the
 // head of every queue (canvas_undo_init at canvas creation, g_canvas.c) and canvas_undo_undo walks back
 // to it; canvas_undo_free drops it too, so it is put back here. Without it the first GUI action after an
@@ -50,7 +52,21 @@ static bool isPatchLimiterOff(SmallString const& selector, SmallArray<pd::Atom> 
 bool McpHost::handleSysMessage(SmallString const& selector, SmallArray<pd::Atom> const& list)
 {
     if (isPatchLimiterOff(selector, list)) {
-        processor.logWarning("limit 0 from a patch ignored: switch the limiter off in the toolbar");
+        // At most one console line a second (a patch may send it from a metro), with how many were ignored since.
+        static std::atomic<juce::uint32> lastWarnMs { 0 };
+        static std::atomic<int> ignoredSince { 0 };
+        auto const now = juce::Time::getMillisecondCounter();
+        auto const last = lastWarnMs.load();
+        if (last != 0 && now - last < 1000) {
+            ++ignoredSince;
+            return true;
+        }
+        lastWarnMs.store(now == 0 ? 1 : now);
+        auto const more = ignoredSince.exchange(0);
+        juce::String line = "limit 0 from a patch ignored: switch the limiter off in the toolbar";
+        if (more > 0)
+            line << " (" << more << " more since the last note)";
+        processor.logWarning(line);
         return true;
     }
 

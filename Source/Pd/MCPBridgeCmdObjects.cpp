@@ -390,20 +390,8 @@ void MCPBridge::pdTypeof(const juce::String& action, const juce::OSCMessage& msg
             return;
         }
 
-        // Resolve by stableId first, fallback to numeric index
+        // P5.1 sink floor: an MCP ref is a tempId or nothing (no gl_list index fallback).
         t_gobj* gobj = processor->getMcp()->resolveStableId(canvasName, targetId);
-        if (!gobj) {
-            bool isNumber = targetId.isNotEmpty();
-            for (int i = (targetId.startsWith("-") ? 1 : 0); i < targetId.length(); ++i) {
-                if (!juce::CharacterFunctions::isDigit(targetId[i])) {
-                    isNumber = false;
-                    break;
-                }
-            }
-            if (isNumber) {
-                gobj = glistObjectAt(cnv, targetId.getIntValue());
-            }
-        }
 
         if (!gobj) {
             sys_unlock();
@@ -478,20 +466,8 @@ void MCPBridge::pdPorts(const juce::String& action, const juce::OSCMessage& msg)
             return;
         }
 
-        // Resolve by stableId first, fallback to numeric index
+        // P5.1 sink floor: an MCP ref is a tempId or nothing (no gl_list index fallback).
         t_gobj* gobj = processor->getMcp()->resolveStableId(canvasName, targetId);
-        if (!gobj) {
-            bool isNumber = targetId.isNotEmpty();
-            for (int i = (targetId.startsWith("-") ? 1 : 0); i < targetId.length(); ++i) {
-                if (!juce::CharacterFunctions::isDigit(targetId[i])) {
-                    isNumber = false;
-                    break;
-                }
-            }
-            if (isNumber) {
-                gobj = glistObjectAt(cnv, targetId.getIntValue());
-            }
-        }
 
         if (!gobj) {
             sys_unlock();

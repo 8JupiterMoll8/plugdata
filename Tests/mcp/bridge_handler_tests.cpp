@@ -1141,6 +1141,7 @@ void runLimiterPatchCases(PluginProcessor& processor)
             return true;
         }, 2000, "test");
     };
+    // A real Pd message to `receiver`; it reaches the processor later, on the message thread (handleAsyncUpdate).
     auto viaPd = [&](char const* receiver, float v) {
         host->pdWait([receiver, v] {
             t_symbol* s = gensym(receiver);
@@ -1148,16 +1149,49 @@ void runLimiterPatchCases(PluginProcessor& processor)
             SETFLOAT(&a, v);
             if (s->s_thing) pd_typedmess(s->s_thing, gensym("limit"), 1, &a);
         }, 2000);
-        sleepMs(300); // the sys message reaches the processor on the message thread (Instance::handleAsyncUpdate)
     };
+    // Bounded polls: the limiter state, and the console lines that say a `limit 0` was refused.
+    auto waitLimiter = [&](bool want, int timeoutMs) {
+        for (int t = 0; t < timeoutMs; t += 20) {
+            if (processor.getEnableLimiter() == want) return true;
+            sleepMs(20);
+        }
+        return processor.getEnableLimiter() == want;
+    };
+    auto refusals = [&] {
+        return host->onMessageThread([&processor] {
+            int n = 0;
+            for (auto const& m : processor.getConsoleMessages())
+                if (std::get<1>(m).contains("limit 0 from a patch ignored")) ++n;
+            return n;
+        }, 2000, "test").value_or(-1);
+    };
+    auto waitRefusal = [&](int beforeCount, int timeoutMs) {
+        for (int t = 0; t < timeoutMs; t += 20) {
+            if (refusals() > beforeCount) return true;
+            sleepMs(20);
+        }
+        return refusals() > beforeCount;
+    };
+
+    // Each Pd route: first a positive control (the route delivers: off -> `limit 1` -> on), then `limit 0` is
+    // seen and refused (a new console line; the warning is at most one a second, so wait that out) and the limiter
+    // stays on.
+    for (char const* receiver : { "pd", "mcp_host" }) {
+        std::printf("  route %s\n", receiver);
+        processor.setEnableLimiter(false);
+        viaPd(receiver, 1.0f);
+        CHECK(waitLimiter(true, 3000)); // the route reaches receiveSysMessage
+        sleepMs(1100);
+        int const seen = refusals();
+        viaPd(receiver, 0.0f);
+        CHECK(waitRefusal(seen, 3000)); // the off message arrived and was refused
+        CHECK(processor.getEnableLimiter());
+    }
 
     processor.setEnableLimiter(true);
     sys(0.0f);
-    CHECK(processor.getEnableLimiter()); // ignored
-    viaPd("pd", 0.0f);
-    CHECK(processor.getEnableLimiter());
-    viaPd("mcp_host", 0.0f);
-    CHECK(processor.getEnableLimiter());
+    CHECK(processor.getEnableLimiter()); // the direct sys path: ignored
     host->onMessageThread([&processor] {
         SmallArray<pd::Atom> list;
         list.add(pd::Atom(gensym("off")));
@@ -1170,9 +1204,6 @@ void runLimiterPatchCases(PluginProcessor& processor)
     CHECK(!processor.getEnableLimiter());
     sys(1.0f);
     CHECK(processor.getEnableLimiter()); // a patch may switch it on
-    processor.setEnableLimiter(false);
-    viaPd("pd", 1.0f);
-    CHECK(processor.getEnableLimiter());
     processor.setEnableLimiter(before);
 }
 
@@ -1200,6 +1231,17 @@ void runIndexRefCases(Harness& h, PluginProcessor& processor)
             || host->resolveStableId("main", "") != nullptr;
     }, 2000);
     CHECK(!resolvedByIndex);
+
+    // The reads too: /pd/typeof and /pd/ports by index answer their error, by tempId their reply.
+    for (char const* verb : { "typeof", "ports" }) {
+        auto const base = juce::String("/pd/") + verb;
+        auto const cIdx = juce::String("ixr_") + verb;
+        auto byIdx = h.call(base.toRawUTF8(), { "main", idx.toRawUTF8(), cIdx.toRawUTF8() }, (base + "/error/" + cIdx).toStdString(), 2000);
+        CHECK(byIdx.has_value());
+        auto const cId = juce::String("ixq_") + verb;
+        auto byId = h.call(base.toRawUTF8(), { "main", "ix_osc", cId.toRawUTF8() }, (base + "/reply/" + cId).toStdString(), 2000);
+        CHECK(byId.has_value());
+    }
 
     int n = 0;
     for (auto const& ref : { idx, "obj_" + idx }) {

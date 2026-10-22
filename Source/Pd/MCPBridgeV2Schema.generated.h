@@ -8,7 +8,7 @@
 
 namespace mcp::v2schema {
 
-inline constexpr char kSchemaHash[] = "74a41c0fdd47f2bf";
+inline constexpr char kSchemaHash[] = "24cff96980d860f2";
 inline constexpr int kProtocol = 2;
 
 enum class VerbClass : std::uint8_t { Read, Mutate, Heavy, Long, Realtime };
@@ -269,7 +269,7 @@ inline constexpr VerbMeta kVerbs[] = {
     { "pd", "identity_version", VerbClass::Read, false, Effect::None, false, false, ReplyMode::Sync, 0, 3000, 0, 84, 2 },
     { "pd", "layout_guard", VerbClass::Mutate, true, Effect::Patch, true, true, ReplyMode::Sync, 4, 10000, 1, 86, 1 },
     { "pd", "library_info", VerbClass::Read, false, Effect::None, false, false, ReplyMode::Sync, 0, 3000, 0, 87, 1 },
-    { "pd", "limiter", VerbClass::Read, false, Effect::None, false, false, ReplyMode::Sync, 0, 3000, 0, 88, 2 },
+    { "pd", "limiter", VerbClass::Read, false, Effect::None, false, false, ReplyMode::Sync, 0, 3000, 1, 88, 2 },
     { "pd", "list_tabs", VerbClass::Read, false, Effect::None, false, false, ReplyMode::Async, 0, 3000, 0, 90, 1 },
     { "pd", "load", VerbClass::Heavy, true, Effect::Patch, true, true, ReplyMode::Sync, kCorrNone, 30000, 0, 91, 1 },
     { "pd", "load_content", VerbClass::Heavy, true, Effect::Patch, true, true, ReplyMode::Sync, 2, 30000, 0, 92, 3 },
