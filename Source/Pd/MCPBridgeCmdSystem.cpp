@@ -16,16 +16,26 @@ void MCPBridge::pdPing(const juce::String& action, const juce::OSCMessage& msg)
 
 void MCPBridge::pdLimiter(const juce::String& action, const juce::OSCMessage& msg)
 {
-    // P5.1 sink floor S1: /pd/limiter <corrId> -> /pd/limiter/reply/<corrId> {"enabled":bool}. Read-only: the
-    // AI never switches the limiter. The LIVE state (an AtomicValue, safe off the message thread), not
-    // settings.json: `limit` from a patch does not persist.
+    // P5.1 sink floor S1: /pd/limiter <corrId> -> /pd/limiter/reply/<corrId> {"enabled":bool,"thresholdDb":n|null}.
+    // Read-only: the AI never switches the limiter. `enabled` is the LIVE state (an AtomicValue, safe off the message
+    // thread), not settings.json: `limit` from a patch does not persist. `thresholdDb` is the toolbar's threshold
+    // (PluginProcessor::setLimiterThreshold: index 0..3 -> -12/-6/0/+3 dB, set together with the "limiter_threshold"
+    // setting, its only writer); the setting is read on the message thread. null when that thread did not answer.
     auto const correlationId = msg.size() > 0 ? getArgString(msg[0]) : juce::String("0");
     if (!processor) {
         sendReply("/pd/limiter/error/" + correlationId, juce::String("no processor"));
         return;
     }
     bool const enabled = processor->getEnableLimiter();
-    sendReply("/pd/limiter/reply/" + correlationId, juce::String(enabled ? "{\"enabled\":true}" : "{\"enabled\":false}"));
+    auto const index = processor->getMcp()->onMessageThread(
+        [] { return SettingsFile::getInstance()->getProperty<int>("limiter_threshold"); }, 1000, "limiter");
+    juce::String threshold = "null";
+    if (index) {
+        static constexpr int kThresholdDb[] = { -12, -6, 0, 3 };
+        threshold = juce::String(kThresholdDb[std::clamp(*index, 0, 3)]);
+    }
+    sendReply("/pd/limiter/reply/" + correlationId,
+        juce::String("{\"enabled\":") + (enabled ? "true" : "false") + ",\"thresholdDb\":" + threshold + "}");
 }
 
 void MCPBridge::pdClearConsole(const juce::String& action, const juce::OSCMessage& msg)

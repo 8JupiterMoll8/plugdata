@@ -18,6 +18,7 @@ The fork's AI bridge (`Source/Pd/MCPBridge*`, the overlay layer, the moodboard) 
 |---|---|
 | audio | `prepare(sampleRate, blockSize)`, `audioBlock(buffer, midiHistory, sampleRate)`, `pdBlock(in, out, blockSize, numChannels)` |
 | Pd-thread command | `handleSysMessage(selector, list) -> bool` |
+| parameter guard | `guardParameterMessage(atoms) -> consumed`, first line of `PluginProcessor::handleParameterMessage` (tag `paramGuard`, P5.1 sink floor): a patch's `__param` message cannot widen the master `volume` range past 0..1 or set it above 1 (refused or clamped); the toolbar, DAW and saved state are not on this path. `handleSysMessage` also refuses a patch's `limit 0` (the limiter goes on from a patch, never off) |
 | teardown | `McpHost::shutdown()` first in `~PluginProcessor` (tag `teardown`, P3.4 S8): the bridge stops before the patches are freed |
 | save | `patchSaved(t_glist*, path)` |
 | retype | `Instance::onObjectRetyped(old, new)` in `Patch::renameObject` (tag `retype`, P3.5 S5): the identity service moves a tempId to the box a GUI retype recreated |

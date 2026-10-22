@@ -2097,6 +2097,7 @@ void PluginProcessor::sendParameterInfoChangeMessage()
 
 void PluginProcessor::handleParameterMessage(SmallArray<pd::Atom> const& atoms)
 {
+    if (mcp && mcp->guardParameterMessage(atoms)) return; // MCP-HOOK(paramGuard)
     auto getEnabledParameter = [this](SmallString const& name) -> PlugDataParameter* {
         for (auto* p : getParameters()) {
             auto* param = dynamic_cast<PlugDataParameter*>(p);

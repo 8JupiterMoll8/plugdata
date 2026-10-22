@@ -11,6 +11,7 @@
 #include "Mcp/McpNativeUndo.h"
 
 #include <atomic>
+#include <cmath>
 
 // Empties a canvas's native undo queue. Caller holds the Pd lock. Pd keeps an UNDO_INIT action at the
 // head of every queue (canvas_undo_init at canvas creation, g_canvas.c) and canvas_undo_undo walks back
@@ -49,24 +50,31 @@ static bool isPatchLimiterOff(SmallString const& selector, SmallArray<pd::Atom> 
     return !(list[0].isFloat() && list[0].getFloat() != 0.0f);
 }
 
+// A console warning a patch may trigger from a metro: at most one line a second, with how many were dropped since.
+struct RateLimitedWarning {
+    std::atomic<juce::uint32> lastMs { 0 };
+    std::atomic<int> droppedSince { 0 };
+
+    void post(PluginProcessor& processor, juce::String line)
+    {
+        auto const now = juce::Time::getMillisecondCounter();
+        auto const last = lastMs.load();
+        if (last != 0 && now - last < 1000) {
+            ++droppedSince;
+            return;
+        }
+        lastMs.store(now == 0 ? 1 : now);
+        if (auto const more = droppedSince.exchange(0); more > 0)
+            line << " (" << more << " more since the last note)";
+        processor.logWarning(line);
+    }
+};
+
 bool McpHost::handleSysMessage(SmallString const& selector, SmallArray<pd::Atom> const& list)
 {
     if (isPatchLimiterOff(selector, list)) {
-        // At most one console line a second (a patch may send it from a metro), with how many were ignored since.
-        static std::atomic<juce::uint32> lastWarnMs { 0 };
-        static std::atomic<int> ignoredSince { 0 };
-        auto const now = juce::Time::getMillisecondCounter();
-        auto const last = lastWarnMs.load();
-        if (last != 0 && now - last < 1000) {
-            ++ignoredSince;
-            return true;
-        }
-        lastWarnMs.store(now == 0 ? 1 : now);
-        auto const more = ignoredSince.exchange(0);
-        juce::String line = "limit 0 from a patch ignored: switch the limiter off in the toolbar";
-        if (more > 0)
-            line << " (" << more << " more since the last note)";
-        processor.logWarning(line);
+        static RateLimitedWarning warning;
+        warning.post(processor, "limit 0 from a patch ignored: switch the limiter off in the toolbar");
         return true;
     }
 
@@ -76,6 +84,62 @@ bool McpHost::handleSysMessage(SmallString const& selector, SmallArray<pd::Atom>
 
     (this->**handler)(selector, mcp::SysList(list));
     return true;
+}
+
+// P5.1 sink floor: the master volume from a patch. `[; __param list volume range 0 1000(` then `... float 1000(`
+// reached PluginProcessor::handleParameterMessage and set the master gain unbounded (gain map above 0.8 is linear
+// 1..2 over the range end, applied after Pd and BEFORE the limiter): ~5000x past every guard. A patch may move the
+// volume inside its default range [0, 1] and narrow that range, never widen it: a `range` or `create` range outside
+// [0, 1] (or non-finite) is refused, a `float` above 1 is clamped to 1, a non-finite one refused. The toolbar slider,
+// the DAW and saved state do not come this way and are unchanged. Returns true when the message is consumed.
+static constexpr float kVolumeRangeMin = 0.0f; // PluginProcessor: PlugDataParameter "volume" 0.8, range 0..1
+static constexpr float kVolumeRangeMax = 1.0f;
+
+static bool volumeRangeAllowed(float const min, float const max)
+{
+    return std::isfinite(min) && std::isfinite(max) && min >= kVolumeRangeMin && min <= max && max <= kVolumeRangeMax;
+}
+
+bool McpHost::guardParameterMessage(SmallArray<pd::Atom> const& atoms)
+{
+    if (atoms.size() < 3 || !atoms[0].isSymbol() || atoms[0].toString() != "volume" || !atoms[1].isSymbol())
+        return false;
+    static RateLimitedWarning warning;
+    auto const selector = atoms[1].toString();
+
+    if (selector == "range" && atoms.size() > 3 && atoms[2].isFloat() && atoms[3].isFloat()) {
+        float const min = atoms[2].getFloat();
+        float const max = std::max(atoms[3].getFloat(), min + 0.000001f); // what the upstream case applies
+        if (volumeRangeAllowed(min, max))
+            return false;
+        warning.post(processor, "master volume range from a patch refused: it stays within 0..1 (use the toolbar)");
+        return true;
+    }
+    if (selector == "create" && atoms.size() >= 5 && atoms[3].isFloat() && atoms[4].isFloat()) {
+        if (volumeRangeAllowed(atoms[3].getFloat(), atoms[4].getFloat()))
+            return false;
+        warning.post(processor, "master volume range from a patch refused: it stays within 0..1 (use the toolbar)");
+        return true;
+    }
+    if (selector == "float" && atoms[2].isFloat()) {
+        float const value = atoms[2].getFloat();
+        if (!std::isfinite(value)) {
+            warning.post(processor, "master volume from a patch refused: not a number");
+            return true;
+        }
+        if (value <= kVolumeRangeMax)
+            return false;
+        SmallArray<pd::Atom> clamped;
+        clamped.add(atoms[0]);
+        clamped.add(atoms[1]);
+        clamped.add(pd::Atom(kVolumeRangeMax));
+        for (int i = 3; i < static_cast<int>(atoms.size()); ++i)
+            clamped.add(atoms[i]);
+        warning.post(processor, "master volume from a patch clamped to its maximum (1)");
+        processor.handleParameterMessage(clamped); // passes this guard now: value == max
+        return true;
+    }
+    return false;
 }
 
 bool McpHost::callSys(SmallString const& selector, mcp::SysList const& list)

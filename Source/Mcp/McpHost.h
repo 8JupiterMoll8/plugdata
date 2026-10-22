@@ -170,6 +170,9 @@ public:
     // The mcp_* Pd system messages (Source/Mcp/McpSysCommands.cpp). Returns false for
     // every other selector, which PluginProcessor::receiveSysMessage then handles.
     bool handleSysMessage(SmallString const& selector, SmallArray<pd::Atom> const& list);
+    // P5.1 sink floor (McpSysCommands.cpp): a patch's `__param` message for the master `volume` that would widen
+    // its range past 0..1 or set it above 1 is refused or clamped. True = consumed (plugdata's handler skips it).
+    bool guardParameterMessage(SmallArray<pd::Atom> const& atoms);
     // P3.4 S7: the bridge's way into an mcp_* command: plain strings and numbers, no Pd symbols made.
     bool callSys(SmallString const& selector, mcp::SysList const& list);
 

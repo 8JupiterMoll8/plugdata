@@ -47,6 +47,7 @@
 #include "Pd/Interface.h" // g_undo.h: the native undo queue (L6 check)
 #include "v2_test_client.h" // P4.1 S2: loopback v2 client
 #include "Pd/MCPBridgeCmdCommon.h" // armedSpectralJson / renderSpectralJson (Plan 5 spectral window)
+#include "Utility/PluginParameter.h" // PlugDataParameter: the master volume guard (P5.1 sink floor)
 
 namespace {
 
@@ -1103,20 +1104,31 @@ void runMidiCaptureCases(PluginProcessor& processor, AudioControl& audio)
     CHECK(!bridge->isMidiCapturing());
 }
 
-// P5.1 sink floor S1: /pd/limiter answers the LIVE limiter state ({"enabled":bool}), read-only; the capability
-// `limiter` is advertised. The state is flipped here directly (the AI never switches it) and restored after.
+// P5.1 sink floor S1: /pd/limiter answers the LIVE limiter state and the toolbar threshold
+// ({"enabled":bool,"thresholdDb":-12|-6|0|3}), read-only; the capability `limiter` is advertised. The state is set
+// here directly (the AI never switches it) and restored after.
 void runLimiterCases(Harness& h, PluginProcessor& processor)
 {
     std::printf("limiter read\n");
+    auto* host = processor.getMcp();
     bool const before = processor.getEnableLimiter();
+    int const thresholdBefore = host->onMessageThread(
+        [] { return SettingsFile::getInstance()->getProperty<int>("limiter_threshold"); }, 2000, "test").value_or(1);
+    auto setThreshold = [&](int index) {
+        host->onMessageThread([&processor, index] { processor.setLimiterThreshold(index); return true; }, 2000, "test");
+    };
+
     processor.setEnableLimiter(false);
+    setThreshold(0);
     auto off = h.call("/pd/limiter", { "lim1" }, "/pd/limiter/reply/lim1");
-    CHECK(off.has_value() && off->str(0) == "{\"enabled\":false}");
+    CHECK(off.has_value() && off->str(0) == "{\"enabled\":false,\"thresholdDb\":-12}");
     processor.setEnableLimiter(true);
+    setThreshold(3);
     auto on = h.call("/pd/limiter", { "lim2" }, "/pd/limiter/reply/lim2");
-    CHECK(on.has_value() && on->str(0) == "{\"enabled\":true}");
+    CHECK(on.has_value() && on->str(0) == "{\"enabled\":true,\"thresholdDb\":3}");
     CHECK(processor.getEnableLimiter()); // the read changed nothing
     processor.setEnableLimiter(before);
+    setThreshold(thresholdBefore);
 
     auto caps = h.call("/bridge/capabilities", { "lim3" }, "/bridge/capabilities/reply");
     bool limiterCap = false;
@@ -1205,6 +1217,86 @@ void runLimiterPatchCases(PluginProcessor& processor)
     sys(1.0f);
     CHECK(processor.getEnableLimiter()); // a patch may switch it on
     processor.setEnableLimiter(before);
+}
+
+// P5.1 sink floor: the master volume from a patch (`__param list volume ...`). Before the guard,
+// `range 0 1000` then `float 1000` set the master gain ~5000x after Pd and before the limiter. Now a widened range is
+// refused and a value above 1 is clamped to 1, both through handleParameterMessage directly and as a real Pd list to
+// the `__param` receiver; a value inside 0..1 and a narrowed range still work (positive controls).
+void runVolumeGuardCases(PluginProcessor& processor)
+{
+    std::printf("master volume from a patch: within 0..1 only\n");
+    auto* host = processor.getMcp();
+    PlugDataParameter* volume = nullptr;
+    for (auto* p : processor.getParameters())
+        if (auto* param = dynamic_cast<PlugDataParameter*>(p); param && param->getTitle().toString() == "volume")
+            volume = param;
+    CHECK(volume != nullptr);
+    if (!volume) return;
+    float const valueBefore = volume->getUnscaledValue();
+    auto rangeEnd = [&] { return volume->getNormalisableRange().end; };
+    auto atomsOf = [](char const* selector, std::initializer_list<float> values) {
+        SmallArray<pd::Atom> list;
+        list.add(pd::Atom(gensym("volume")));
+        list.add(pd::Atom(gensym(selector)));
+        for (float v : values) list.add(pd::Atom(v));
+        return list;
+    };
+    auto direct = [&](char const* selector, std::initializer_list<float> values) {
+        auto const list = atomsOf(selector, values);
+        host->onMessageThread([&processor, &list] { processor.handleParameterMessage(list); return true; }, 2000, "test");
+    };
+    auto viaPd = [&](char const* selector, std::initializer_list<float> values) {
+        std::vector<float> const vals(values);
+        host->pdWait([selector, vals] {
+            t_symbol* s = gensym("__param");
+            std::vector<t_atom> argv(2 + vals.size());
+            SETSYMBOL(&argv[0], gensym("volume"));
+            SETSYMBOL(&argv[1], gensym(selector));
+            for (size_t i = 0; i < vals.size(); ++i) SETFLOAT(&argv[2 + i], vals[i]);
+            if (s->s_thing) pd_list(s->s_thing, &s_list, static_cast<int>(argv.size()), argv.data());
+        }, 2000);
+    };
+    auto waitValue = [&](float want, int timeoutMs) {
+        for (int t = 0; t < timeoutMs; t += 20) {
+            if (std::abs(volume->getUnscaledValue() - want) < 1e-4f) return true;
+            sleepMs(20);
+        }
+        return std::abs(volume->getUnscaledValue() - want) < 1e-4f;
+    };
+
+    // Direct (deterministic: on the message thread, as Instance::handleAsyncUpdate calls it).
+    direct("float", { 0.5f });
+    CHECK(waitValue(0.5f, 100)); // positive control: inside the range
+    direct("range", { 0.0f, 1000.0f });
+    CHECK(rangeEnd() <= 1.0f); // refused
+    direct("create", { 0.8f, 0.0f, 1000.0f });
+    CHECK(rangeEnd() <= 1.0f); // refused
+    direct("float", { 1000.0f });
+    CHECK(waitValue(1.0f, 100)); // clamped to the default maximum
+    // The float guard on its own: even with a range widened some other way (saved state, a DAW), a patch's value
+    // above 1 is clamped to 1 (without the guard it would set 1000 here).
+    volume->setRange(0.0f, 1000.0f);
+    direct("float", { 1000.0f });
+    CHECK(waitValue(1.0f, 100));
+    volume->setRange(0.0f, 1.0f);
+    direct("range", { 0.0f, 0.5f });
+    CHECK(std::abs(rangeEnd() - 0.5f) < 1e-6f); // narrowing is allowed
+    direct("range", { 0.0f, 1.0f });
+    CHECK(std::abs(rangeEnd() - 1.0f) < 1e-6f);
+
+    // The Pd route ([; __param list volume ...( in a patch): positive control first, then the attack.
+    direct("float", { 0.3f });
+    viaPd("float", { 0.6f });
+    CHECK(waitValue(0.6f, 3000)); // the route delivers
+    viaPd("range", { 0.0f, 1000.0f });
+    viaPd("float", { 1000.0f });
+    CHECK(waitValue(1.0f, 3000)); // the float arrived (after the range: FIFO) and was clamped
+    CHECK(rangeEnd() <= 1.0f);    // the range was refused
+    CHECK(volume->getUnscaledValue() <= 1.0f);
+
+    volume->setRange(0.0f, 1.0f);
+    volume->setUnscaledValueNotifyingHost(valueBefore);
 }
 
 // P5.1 sink floor: an MCP ref is a tempId or nothing. A bare index ("12", "obj_12") or an empty ref no longer
@@ -2095,6 +2187,7 @@ int main()
             runConsoleObjectCases(harness);
             runLimiterCases(harness, processor);
             runLimiterPatchCases(processor);
+            runVolumeGuardCases(processor);
             runIndexRefCases(harness, processor);
             runMidiCaptureCases(processor, audioControl);
             runStampCostCases(processor);
