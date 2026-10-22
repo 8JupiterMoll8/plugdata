@@ -370,6 +370,8 @@ std::vector<std::string> MCPBridge::capabilityList() const
         "identity_v2",
         // P5.1 sink floor S1: /pd/limiter <corrId> answers whether PlugData's master limiter runs (read-only)
         "limiter",
+        // P6.2 UF: /pd/undo_peek <canvas> <corrId> reads the undo queue (depth, redo, the newest step names), read-only
+        "undo_peek",
     };
     // P4.1 S2: the v2 listener is up (TCP 127.0.0.1, port and token in the discovery file).
     if (v2Server.running())

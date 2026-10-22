@@ -59,6 +59,7 @@ MCP_VERB(pd, "clear_undo", pdClearUndo)
 MCP_VERB(pd, "clear_selection", pdClearSelection)
 MCP_VERB(pd, "undo", pdUndo)
 MCP_VERB(pd, "redo", pdRedo)
+MCP_VERB(pd, "undo_peek", pdUndoPeek)
 
 // ── pd: objects ──
 MCP_VERB(pd, "obj_set", pdObjSet)

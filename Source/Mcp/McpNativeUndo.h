@@ -14,6 +14,8 @@
 
 #include "Pd/Interface.h"
 
+#include <algorithm>
+#include <array>
 #include <utility>
 #include <vector>
 
@@ -60,6 +62,76 @@ inline bool canRedo(t_canvas* cnv)
 {
     t_undo* u = cnv ? canvas_undo_get(cnv) : nullptr;
     return u && u->u_queue && u->u_last && u->u_last->next;
+}
+
+// P6.2 UF: a read-only look at the queue, for "undo the whole AI turn". `depth` is the number of steps Ctrl+Z (and
+// /pd/undo) can take from the undo position back to the queue head, `redo` the number /pd/redo can take forward; a
+// SEQUENCE_END ... SEQUENCE_START run (nested runs included) is ONE step, exactly as canvas_undo_undo and
+// canvas_undo_redo take it. `top` holds the names of the newest min(depth, maxNames) undo steps, newest first: a
+// sequence is named by its START entry ("AI edit" for every MCP call, plugdata's GUI names "Move", "Paste object/s"
+// ..., vanilla's "motion", "apply" ...). A sequence still open (a GUI drag or an AI call in progress) is not a step
+// yet: its newest inner entry is, under that entry's own name, which is what Ctrl+Z would take now.
+// Pd's names are string literals or symbol names (Patch::startUndoSequence passes a symbol): both live for the
+// whole session, so the pointers stay valid after the lock is released. Walks pointers only: no allocation.
+inline constexpr int kPeekMaxNames = 32;
+
+struct Peek {
+    int depth = 0;
+    int redo = 0;
+    int named = 0;                                // entries of `top` in use
+    std::array<char const*, kPeekMaxNames> top {}; // newest first
+};
+
+inline Peek peek(t_canvas* cnv, int maxNames = kPeekMaxNames)
+{
+    Peek p;
+    int const cap = std::clamp(maxNames, 0, kPeekMaxNames);
+    t_undo* u = cnv ? canvas_undo_get(cnv) : nullptr;
+    if (!u || !u->u_queue || !u->u_last)
+        return p;
+    // Backwards from the undo position to the head (UNDO_INIT), where canvas_undo_undo stops.
+    for (t_undo_action* a = u->u_last; a && a != u->u_queue && a->type != UNDO_INIT; a = a->prev) {
+        char const* name = a->name;
+        if (a->type == UNDO_SEQUENCE_END) {
+            int nesting = 1;
+            t_undo_action* s = a->prev;
+            for (; s && s->type != UNDO_INIT; s = s->prev) {
+                if (s->type == UNDO_SEQUENCE_END)
+                    ++nesting;
+                else if (s->type == UNDO_SEQUENCE_START && --nesting < 1)
+                    break;
+            }
+            if (!s || s->type == UNDO_INIT) { // no START (Pd: "undo sequence missing start"): Pd's walk ends at the head
+                if (p.named < cap) p.top[p.named++] = name ? name : "";
+                ++p.depth;
+                break;
+            }
+            name = s->name;
+            a = s; // the loop's step goes on before the START
+        }
+        if (p.named < cap) p.top[p.named++] = name ? name : "";
+        ++p.depth;
+    }
+    // Forwards from the undo position: the steps canvas_undo_redo can take.
+    for (t_undo_action* a = u->u_last->next; a; a = a->next) {
+        if (a->type == UNDO_SEQUENCE_START) {
+            int nesting = 1;
+            t_undo_action* s = a->next;
+            for (; s; s = s->next) {
+                if (s->type == UNDO_SEQUENCE_START)
+                    ++nesting;
+                else if (s->type == UNDO_SEQUENCE_END && --nesting < 1)
+                    break;
+            }
+            if (!s) { // no END: Pd's redo takes the rest as one step
+                ++p.redo;
+                break;
+            }
+            a = s;
+        }
+        ++p.redo;
+    }
+    return p;
 }
 
 // A closed GOP subpatch draws in its parent (glist_getcanvas walks up): selection there would make rtexts in the

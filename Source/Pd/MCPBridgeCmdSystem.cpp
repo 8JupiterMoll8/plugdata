@@ -7,6 +7,7 @@
 // Bridge commands: system (ping, DSP, clear, undo/redo) (Plan 3 P3.3): handlers moved unchanged out of MCPBridge::handlePdDomain.
 
 #include "MCPBridgeCmdCommon.h"
+#include "Mcp/McpNativeUndo.h"
 
 void MCPBridge::pdPing(const juce::String& action, const juce::OSCMessage& msg)
 {
@@ -199,6 +200,53 @@ void MCPBridge::pdUndo(const juce::String& action, const juce::OSCMessage& msg)
 void MCPBridge::pdRedo(const juce::String& action, const juce::OSCMessage& msg)
 {
     if (msg.size() >= 1 && processor) pdUndoStep(*this, processor, msg, true);
+}
+
+// P6.2 UF: /pd/undo_peek <canvas> <corrId> -> /pd/undo_peek/reply/<corrId> {"depth":D,"redo":R,"top":[names, newest
+// first, at most 32],"canvasKey":"..."}: how many steps Ctrl+Z and /pd/undo can take, how many /pd/redo can, and who
+// made the newest ones ("AI edit" = an MCP call). Read-only. It runs where /pd/undo runs (posted to the message
+// thread after the canvas is resolved the same way), so a peek sent after an undo reply sees that step taken, and
+// the depth and the canvas key are read under one Pd lock (the tab cannot change between the two). An unknown or
+// closed canvas -> /pd/undo_peek/error/<corrId>.
+void MCPBridge::pdUndoPeek(const juce::String& action, const juce::OSCMessage& msg)
+{
+    if (msg.size() < 1 || !processor) return;
+    auto const canvasName = normalizeCanvas(getArgString(msg[0]));
+    auto const correlationId = msg.size() > 1 ? getArgString(msg[1]) : juce::String("0");
+    auto const errorAddr = "/pd/undo_peek/error/" + correlationId;
+    t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
+    if (!cnv) {
+        sendReply(errorAddr, juce::String("Canvas not found: " + canvasName));
+        return;
+    }
+    postMessage([proc = processor, cnv, canvasName, correlationId, errorAddr, b = this]() {
+        mcp::undo::Peek peek;
+        std::string key;
+        bool live = false;
+        {
+            McpHost::PdLockScope lock(*proc);
+            live = mcpCanvasIsLive(cnv); // P3.4 S4: closed since the handler ran
+            if (live) {
+                peek = mcp::undo::peek(cnv, mcp::undo::kPeekMaxNames);
+                proc->getMcp()->registerOpenCanvases(); // the canvas key as /pd/identity_version names it
+                key = proc->getMcp()->identity.keyOf(cnv);
+            }
+        }
+        if (!live) {
+            b->sendReply(errorAddr, juce::String("Canvas closed: " + canvasName));
+            return;
+        }
+        // Built after the lock: the names are Pd literals or symbol names, valid for the session (McpNativeUndo.h).
+        juce::Array<juce::var> top;
+        for (int i = 0; i < peek.named; ++i)
+            top.add(juce::String::fromUTF8(peek.top[static_cast<size_t>(i)]));
+        auto* root = new juce::DynamicObject();
+        root->setProperty("depth", peek.depth);
+        root->setProperty("redo", peek.redo);
+        root->setProperty("top", top);
+        root->setProperty("canvasKey", juce::String(key));
+        b->sendReply("/pd/undo_peek/reply/" + correlationId, juce::JSON::toString(juce::var(root), true));
+    });
 }
 
 // P3.4 S11 (test-only, registered only with PLUGDATA_MCP_AUDIT=1): the next audio block holds the Pd lock and

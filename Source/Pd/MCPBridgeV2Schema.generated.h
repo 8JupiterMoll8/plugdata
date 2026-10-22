@@ -8,7 +8,7 @@
 
 namespace mcp::v2schema {
 
-inline constexpr char kSchemaHash[] = "24cff96980d860f2";
+inline constexpr char kSchemaHash[] = "a15aacda64fb9ade";
 inline constexpr int kProtocol = 2;
 
 enum class VerbClass : std::uint8_t { Read, Mutate, Heavy, Long, Realtime };
@@ -187,6 +187,8 @@ inline constexpr ReplyPattern kReplies[] = {
     { "/pd/ui_open_help/reply/{id}", true, false, false },
     { "/pd/ui_open_reference/reply/{id}", true, false, false },
     { "/pd/undo/reply/{id}", true, false, false },
+    { "/pd/undo_peek/error/{id}", true, false, false },
+    { "/pd/undo_peek/reply/{id}", true, false, false },
     { "/pd/viewport/reply/{id}", true, false, false },
     { "/pd/wire_occlusions/reply/{id}", true, false, false },
     { "/pd/zoom_to_fit/reply/{id}", true, false, false },
@@ -309,23 +311,24 @@ inline constexpr VerbMeta kVerbs[] = {
     { "pd", "ui_open_help", VerbClass::Mutate, true, Effect::Ui, false, true, ReplyMode::Async, 1, 10000, 0, 134, 1 },
     { "pd", "ui_open_reference", VerbClass::Mutate, true, Effect::Ui, false, true, ReplyMode::Async, 1, 10000, 0, 135, 1 },
     { "pd", "undo", VerbClass::Mutate, true, Effect::Patch, true, true, ReplyMode::Async, 1, 10000, 0, 136, 1 },
-    { "pd", "update_dsp", VerbClass::Mutate, true, Effect::Live, true, true, ReplyMode::None, kCorrNone, 10000, 0, 137, 0 },
-    { "pd", "viewport", VerbClass::Read, false, Effect::None, false, false, ReplyMode::Async, 1, 3000, 0, 137, 1 },
-    { "pd", "vis", VerbClass::Mutate, true, Effect::Ui, false, true, ReplyMode::None, kCorrNone, 10000, 0, 138, 0 },
-    { "pd", "wire_occlusions", VerbClass::Read, false, Effect::None, false, false, ReplyMode::Sync, 1, 3000, 1, 138, 1 },
-    { "pd", "zoom_to_fit", VerbClass::Mutate, true, Effect::Ui, false, true, ReplyMode::Async, 1, 10000, 0, 139, 1 },
-    { "seq", "start", VerbClass::Mutate, true, Effect::Live, true, true, ReplyMode::Sync, 1, 10000, 0, 140, 1 },
-    { "seq", "stop", VerbClass::Mutate, true, Effect::Live, true, true, ReplyMode::None, kCorrNone, 10000, 0, 141, 0 },
-    { "telemetry", "delete", VerbClass::Mutate, true, Effect::Patch, true, true, ReplyMode::None, kCorrNone, 10000, 0, 141, 0 },
-    { "telemetry", "delete_on", VerbClass::Mutate, true, Effect::Patch, true, true, ReplyMode::None, kCorrNone, 10000, 0, 141, 0 },
-    { "telemetry", "dsp", VerbClass::Mutate, true, Effect::Live, true, true, ReplyMode::None, kCorrNone, 10000, 0, 141, 0 },
-    { "transport", "pause", VerbClass::Mutate, true, Effect::Live, true, true, ReplyMode::None, kCorrNone, 10000, 0, 141, 0 },
-    { "transport", "set_bpm", VerbClass::Mutate, true, Effect::Live, true, true, ReplyMode::None, kCorrNone, 10000, 0, 141, 0 },
-    { "transport", "set_mode", VerbClass::Mutate, true, Effect::Live, true, true, ReplyMode::None, kCorrNone, 10000, 0, 141, 0 },
-    { "transport", "set_subdivision", VerbClass::Mutate, true, Effect::Live, true, true, ReplyMode::None, kCorrNone, 10000, 0, 141, 0 },
-    { "transport", "start", VerbClass::Mutate, true, Effect::Live, true, true, ReplyMode::None, kCorrNone, 10000, 0, 141, 0 },
-    { "transport", "status", VerbClass::Read, false, Effect::None, false, false, ReplyMode::Sync, 0, 3000, 0, 141, 1 },
-    { "trigger", "", VerbClass::Realtime, true, Effect::Live, true, false, ReplyMode::None, kCorrNone, 0, 0, 142, 0 },
+    { "pd", "undo_peek", VerbClass::Read, false, Effect::None, false, false, ReplyMode::Async, 1, 3000, 1, 137, 2 },
+    { "pd", "update_dsp", VerbClass::Mutate, true, Effect::Live, true, true, ReplyMode::None, kCorrNone, 10000, 0, 139, 0 },
+    { "pd", "viewport", VerbClass::Read, false, Effect::None, false, false, ReplyMode::Async, 1, 3000, 0, 139, 1 },
+    { "pd", "vis", VerbClass::Mutate, true, Effect::Ui, false, true, ReplyMode::None, kCorrNone, 10000, 0, 140, 0 },
+    { "pd", "wire_occlusions", VerbClass::Read, false, Effect::None, false, false, ReplyMode::Sync, 1, 3000, 1, 140, 1 },
+    { "pd", "zoom_to_fit", VerbClass::Mutate, true, Effect::Ui, false, true, ReplyMode::Async, 1, 10000, 0, 141, 1 },
+    { "seq", "start", VerbClass::Mutate, true, Effect::Live, true, true, ReplyMode::Sync, 1, 10000, 0, 142, 1 },
+    { "seq", "stop", VerbClass::Mutate, true, Effect::Live, true, true, ReplyMode::None, kCorrNone, 10000, 0, 143, 0 },
+    { "telemetry", "delete", VerbClass::Mutate, true, Effect::Patch, true, true, ReplyMode::None, kCorrNone, 10000, 0, 143, 0 },
+    { "telemetry", "delete_on", VerbClass::Mutate, true, Effect::Patch, true, true, ReplyMode::None, kCorrNone, 10000, 0, 143, 0 },
+    { "telemetry", "dsp", VerbClass::Mutate, true, Effect::Live, true, true, ReplyMode::None, kCorrNone, 10000, 0, 143, 0 },
+    { "transport", "pause", VerbClass::Mutate, true, Effect::Live, true, true, ReplyMode::None, kCorrNone, 10000, 0, 143, 0 },
+    { "transport", "set_bpm", VerbClass::Mutate, true, Effect::Live, true, true, ReplyMode::None, kCorrNone, 10000, 0, 143, 0 },
+    { "transport", "set_mode", VerbClass::Mutate, true, Effect::Live, true, true, ReplyMode::None, kCorrNone, 10000, 0, 143, 0 },
+    { "transport", "set_subdivision", VerbClass::Mutate, true, Effect::Live, true, true, ReplyMode::None, kCorrNone, 10000, 0, 143, 0 },
+    { "transport", "start", VerbClass::Mutate, true, Effect::Live, true, true, ReplyMode::None, kCorrNone, 10000, 0, 143, 0 },
+    { "transport", "status", VerbClass::Read, false, Effect::None, false, false, ReplyMode::Sync, 0, 3000, 0, 143, 1 },
+    { "trigger", "", VerbClass::Realtime, true, Effect::Live, true, false, ReplyMode::None, kCorrNone, 0, 0, 144, 0 },
 };
 inline constexpr std::size_t kVerbCount = sizeof(kVerbs) / sizeof(kVerbs[0]);
 

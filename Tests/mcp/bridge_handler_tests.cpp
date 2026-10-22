@@ -45,6 +45,7 @@
 #include "Mcp/McpHost.h"
 #include "Pd/MCPBridge.h"
 #include "Pd/Interface.h" // g_undo.h: the native undo queue (L6 check)
+#include "Mcp/McpNativeUndo.h" // P6.2 UF: hand-made undo entries (motion) for /pd/undo_peek
 #include "v2_test_client.h" // P4.1 S2: loopback v2 client
 #include "Pd/MCPBridgeCmdCommon.h" // armedSpectralJson / renderSpectralJson (Plan 5 spectral window)
 #include "Utility/PluginParameter.h" // PlugDataParameter: the master volume guard (P5.1 sink floor)
@@ -627,6 +628,126 @@ void runSharedUndoCases(Harness& h, PluginProcessor& processor)
     CHECK(u.has_value() && u->num(0) == 1);
     CHECK(inText("su_in").empty());
     CHECK(text("su_sub") == "pd su_sub"); // the parent's history is untouched
+}
+
+// P6.2 UF: /pd/undo_peek reads the canvas's undo queue without changing it: depth D (steps Ctrl+Z can take), redo R,
+// the names of the newest steps (a Pd sequence is one step, named by its START; "AI edit" for every MCP call),
+// capped at 32, and the canvas key. A GUI step is made here the way plugdata's Patch::startUndoSequence makes one (a
+// sequence under a symbol name), with a motion entry inside.
+void runUndoPeekCases(Harness& h, PluginProcessor& processor)
+{
+    std::printf("undo_peek: depth, redo, step names\n");
+    auto* host = processor.getMcp();
+    int corr = 0;
+    auto next = [&corr](char const* p) { return juce::String(p) + juce::String(++corr); };
+    struct Peeked {
+        bool ok = false;
+        int depth = -1, redo = -1;
+        std::vector<std::string> top;
+        std::string key;
+    };
+    auto peek = [&](char const* canvas) {
+        Peeked p;
+        auto const c = next("up");
+        auto r = h.call("/pd/undo_peek", { canvas, c }, ("/pd/undo_peek/reply/" + c).toStdString(), 3000);
+        if (!r) return p;
+        auto const json = parseJson(*r);
+        p.ok = json.isObject() && json["depth"].isInt() && json["redo"].isInt() && json["top"].isArray();
+        p.depth = static_cast<int>(json["depth"]);
+        p.redo = static_cast<int>(json["redo"]);
+        if (auto const* top = json["top"].getArray())
+            for (auto const& name : *top)
+                p.top.push_back(name.toString().toStdString());
+        p.key = json["canvasKey"].toString().toStdString();
+        return p;
+    };
+    auto batch = [&](std::initializer_list<A> args, juce::String const& c) {
+        auto r = h.call("/pd/batch_atomic", args, ("/pd/batch_atomic/reply/" + c).toStdString());
+        return r.has_value();
+    };
+    // Hand-made entries on a canvas, under the Pd lock (as a GUI edit registers them).
+    auto onCanvas = [&](char const* name, std::function<void(t_canvas*)> const& job) {
+        return host->pdWait([&] {
+            if (t_canvas* cnv = host->getCanvasBySymbolStrict(name)) job(cnv);
+        }, 2000);
+    };
+
+    // 0. The capability is advertised; an unknown canvas is an error reply, never an empty queue.
+    auto caps = h.call("/bridge/capabilities", { "up_caps" }, "/bridge/capabilities/reply");
+    bool cap = false;
+    if (caps)
+        for (auto const& a : caps->args)
+            cap = cap || a.text == "undo_peek";
+    CHECK(caps.has_value() && cap);
+    auto missing = h.call("/pd/undo_peek", { "pd-up_no_such_canvas", "up_err" }, "/pd/undo_peek/error/up_err", 3000);
+    CHECK(missing.has_value());
+
+    // 1. A fresh subpatch has an empty queue: D 0, R 0, no names.
+    auto const cs = next("ups");
+    CHECK(batch({ "main", cs, 0, 0, 0, 1, 0, "up_sub", 1300, 300, "obj", "pd", 1, "up_sub", 0, 5, 10, 0 }, cs));
+    auto const empty = peek("pd-up_sub");
+    CHECK(empty.ok && empty.depth == 0 && empty.redo == 0 && empty.top.empty());
+
+    // 2. One AI construct plus a layout pass that moved boxes: two steps, both "AI edit". Reading changes nothing.
+    auto const m0 = peek("main");
+    CHECK(m0.ok && !m0.key.empty());
+    auto const cl = next("upl");
+    CHECK(batch({ "main", cl, 0, 0, 0, 2, 0,
+        "up_l1", 1300, 600, "obj", "f", 1, "4",
+        "up_l2", 1300, 600, "obj", "f", 1, "5",
+        0, 5, 10, 0 }, cl));
+    auto const cg = next("upg");
+    auto guard = h.call("/pd/layout_guard", { "main", 20, 10, 0, cg }, ("/pd/layout_guard/reply/" + cg).toStdString());
+    CHECK(guard.has_value() && guard->num(0) > 0);
+    auto const m1 = peek("main");
+    CHECK(m1.ok && m1.depth == m0.depth + 2 && m1.redo == 0);
+    CHECK(m1.top.size() >= 2 && m1.top[0] == "AI edit" && m1.top[1] == "AI edit");
+    CHECK(m1.key == m0.key);
+    auto const m2 = peek("main");
+    CHECK(m2.ok && m2.depth == m1.depth && m2.redo == m1.redo && m2.top == m1.top);
+
+    // 3. In the subpatch: an AI edit, a GUI step named "Move" on top, then a nested sequence that counts once.
+    auto const ci = next("upi");
+    CHECK(batch({ "pd-up_sub", ci, 0, 0, 0, 1, 0, "up_in", 40, 40, "obj", "f", 1, "5", 0, 5, 10, 0 }, ci));
+    auto const s1 = peek("pd-up_sub");
+    CHECK(s1.ok && s1.depth == 1 && s1.top == std::vector<std::string> { "AI edit" });
+    CHECK(onCanvas("pd-up_sub", [](t_canvas* cnv) {
+        canvas_undo_add(cnv, UNDO_SEQUENCE_START, gensym("Move")->s_name, nullptr);
+        mcp::undo::motion(cnv);
+        canvas_undo_add(cnv, UNDO_SEQUENCE_END, gensym("Move")->s_name, nullptr);
+    }));
+    auto const s2 = peek("pd-up_sub");
+    CHECK(s2.ok && s2.depth == 2 && s2.redo == 0 && s2.top == (std::vector<std::string> { "Move", "AI edit" }));
+    CHECK(onCanvas("pd-up_sub", [](t_canvas* cnv) {
+        canvas_undo_add(cnv, UNDO_SEQUENCE_START, gensym("Outer")->s_name, nullptr);
+        canvas_undo_add(cnv, UNDO_SEQUENCE_START, gensym("inner")->s_name, nullptr);
+        mcp::undo::motion(cnv);
+        canvas_undo_add(cnv, UNDO_SEQUENCE_END, gensym("inner")->s_name, nullptr);
+        mcp::undo::motion(cnv);
+        canvas_undo_add(cnv, UNDO_SEQUENCE_END, gensym("Outer")->s_name, nullptr);
+    }));
+    auto const s3 = peek("pd-up_sub");
+    CHECK(s3.ok && s3.depth == 3 && s3.redo == 0 && s3.top == (std::vector<std::string> { "Outer", "Move", "AI edit" }));
+
+    // 4. One undo takes the whole nested sequence: D - 1, R 1, "Move" on top again; a redo puts it back.
+    auto const cu = next("upu");
+    auto u = h.call("/pd/undo", { "pd-up_sub", cu }, ("/pd/undo/reply/" + cu).toStdString());
+    CHECK(u.has_value() && u->num(0) == 1);
+    auto const s4 = peek("pd-up_sub");
+    CHECK(s4.ok && s4.depth == 2 && s4.redo == 1 && !s4.top.empty() && s4.top[0] == "Move");
+    auto const cr = next("upr");
+    auto rd = h.call("/pd/redo", { "pd-up_sub", cr }, ("/pd/redo/reply/" + cr).toStdString());
+    CHECK(rd.has_value() && rd->num(0) == 1);
+    auto const s5 = peek("pd-up_sub");
+    CHECK(s5.ok && s5.depth == 3 && s5.redo == 0 && !s5.top.empty() && s5.top[0] == "Outer");
+
+    // 5. The names are capped at 32, the depth is not: 40 single entries on top.
+    CHECK(onCanvas("pd-up_sub", [](t_canvas* cnv) {
+        for (int i = 0; i < 40; ++i)
+            mcp::undo::motion(cnv);
+    }));
+    auto const s6 = peek("pd-up_sub");
+    CHECK(s6.ok && s6.depth == 43 && s6.redo == 0 && s6.top.size() == 32 && s6.top[0] == "motion" && s6.top[31] == "motion");
 }
 
 // P3.5 S0: the identity service will detect GUI edits by recomputing a per-canvas stamp (object count plus a hash
@@ -1880,7 +2001,7 @@ void runZeroArgCases(Harness& h)
         auto const* e = f ? f->find("error") : nullptr;
         refused += (f && field(*f, "outcome") == "rejected" && e && field(*e, "code") == "bad_frame") ? 1 : 0;
     }
-    CHECK(guarded == 17 && refused == guarded); // 17 since /pd/limiter (minArgs 1, sink floor)
+    CHECK(guarded == 18 && refused == guarded); // 18 since /pd/undo_peek (minArgs 1, P6.2 UF)
 }
 
 // S6.6 (audit A20): the live props of an IEM GUI carry its label, so a control the builder named (`hsl ... morph_s
@@ -2183,6 +2304,7 @@ int main()
             runPdContextCases(processor, audioControl);
             runNativeUndoCases(processor);
             runSharedUndoCases(harness, processor);
+            runUndoPeekCases(harness, processor);
             runAudioStallCases(harness, audioControl);
             runArmedTraceCases(harness);
             runConsoleObjectCases(harness);
