@@ -643,6 +643,7 @@ void runUndoPeekCases(Harness& h, PluginProcessor& processor)
     struct Peeked {
         bool ok = false;
         int depth = -1, redo = -1;
+        bool open = true; // P6.2 U1: a reply without the flag reads as open (the TS side refuses then)
         std::vector<std::string> top;
         std::string key;
     };
@@ -659,6 +660,7 @@ void runUndoPeekCases(Harness& h, PluginProcessor& processor)
             for (auto const& name : *top)
                 p.top.push_back(name.toString().toStdString());
         p.key = json["canvasKey"].toString().toStdString();
+        p.open = !json["open"].isBool() || static_cast<bool>(json["open"]);
         return p;
     };
     auto batch = [&](std::initializer_list<A> args, juce::String const& c) {
@@ -748,6 +750,23 @@ void runUndoPeekCases(Harness& h, PluginProcessor& processor)
     }));
     auto const s6 = peek("pd-up_sub");
     CHECK(s6.ok && s6.depth == 43 && s6.redo == 0 && s6.top.size() == 32 && s6.top[0] == "motion" && s6.top[31] == "motion");
+
+    // 6. P6.2 U1 (UF review LOW): a closed queue says open:false; a sequence still open (a GUI drag or an AI call in
+    //    progress: a START with no END yet) says open:true, because its entries count as several steps now and as one
+    //    once the END lands. After the END: open:false again, and the run is one step.
+    CHECK(s6.ok && !s6.open);
+    CHECK(onCanvas("pd-up_sub", [](t_canvas* cnv) {
+        canvas_undo_add(cnv, UNDO_SEQUENCE_START, gensym("Drag")->s_name, nullptr);
+        mcp::undo::motion(cnv);
+        mcp::undo::motion(cnv);
+    }));
+    auto const s7 = peek("pd-up_sub");
+    CHECK(s7.ok && s7.open);
+    CHECK(onCanvas("pd-up_sub", [](t_canvas* cnv) {
+        canvas_undo_add(cnv, UNDO_SEQUENCE_END, gensym("Drag")->s_name, nullptr);
+    }));
+    auto const s8 = peek("pd-up_sub");
+    CHECK(s8.ok && !s8.open && s8.depth == 44 && !s8.top.empty() && s8.top[0] == "Drag");
 }
 
 // P3.5 S0: the identity service will detect GUI edits by recomputing a per-canvas stamp (object count plus a hash

@@ -203,7 +203,7 @@ void MCPBridge::pdRedo(const juce::String& action, const juce::OSCMessage& msg)
 }
 
 // P6.2 UF: /pd/undo_peek <canvas> <corrId> -> /pd/undo_peek/reply/<corrId> {"depth":D,"redo":R,"top":[names, newest
-// first, at most 32],"canvasKey":"..."}: how many steps Ctrl+Z and /pd/undo can take, how many /pd/redo can, and who
+// first, at most 32],"canvasKey":"...","open":bool (P6.2 U1: a sequence still in progress)}: how many steps Ctrl+Z and /pd/undo can take, how many /pd/redo can, and who
 // made the newest ones ("AI edit" = an MCP call). Read-only. It runs where /pd/undo runs (posted to the message
 // thread after the canvas is resolved the same way), so a peek sent after an undo reply sees that step taken, and
 // the depth and the canvas key are read under one Pd lock (the tab cannot change between the two). An unknown or
@@ -245,6 +245,7 @@ void MCPBridge::pdUndoPeek(const juce::String& action, const juce::OSCMessage& m
         root->setProperty("redo", peek.redo);
         root->setProperty("top", top);
         root->setProperty("canvasKey", juce::String(key));
+        root->setProperty("open", peek.open);
         b->sendReply("/pd/undo_peek/reply/" + correlationId, juce::JSON::toString(juce::var(root), true));
     });
 }

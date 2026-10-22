@@ -70,7 +70,8 @@ inline bool canRedo(t_canvas* cnv)
 // canvas_undo_redo take it. `top` holds the names of the newest min(depth, maxNames) undo steps, newest first: a
 // sequence is named by its START entry ("AI edit" for every MCP call, plugdata's GUI names "Move", "Paste object/s"
 // ..., vanilla's "motion", "apply" ...). A sequence still open (a GUI drag or an AI call in progress) is not a step
-// yet: its newest inner entry is, under that entry's own name, which is what Ctrl+Z would take now.
+// yet: its newest inner entry is, under that entry's own name, which is what Ctrl+Z would take now; `open` says so,
+// since the depth then counts its entries one by one and drops when the END lands.
 // Pd's names are string literals or symbol names (Patch::startUndoSequence passes a symbol): both live for the
 // whole session, so the pointers stay valid after the lock is released. Walks pointers only: no allocation.
 inline constexpr int kPeekMaxNames = 32;
@@ -80,6 +81,7 @@ struct Peek {
     int redo = 0;
     int named = 0;                                // entries of `top` in use
     std::array<char const*, kPeekMaxNames> top {}; // newest first
+    bool open = false; // a sequence is still open (its END not added yet): `depth` shrinks when it closes
 };
 
 inline Peek peek(t_canvas* cnv, int maxNames = kPeekMaxNames)
@@ -92,6 +94,9 @@ inline Peek peek(t_canvas* cnv, int maxNames = kPeekMaxNames)
     // Backwards from the undo position to the head (UNDO_INIT), where canvas_undo_undo stops.
     for (t_undo_action* a = u->u_last; a && a != u->u_queue && a->type != UNDO_INIT; a = a->prev) {
         char const* name = a->name;
+        // A START met outside any END...START run has no END yet: a sequence in progress (P6.2 U1, UF review LOW).
+        if (a->type == UNDO_SEQUENCE_START)
+            p.open = true;
         if (a->type == UNDO_SEQUENCE_END) {
             int nesting = 1;
             t_undo_action* s = a->prev;
