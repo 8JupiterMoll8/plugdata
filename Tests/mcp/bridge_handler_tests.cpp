@@ -1173,8 +1173,9 @@ void runLimiterPatchCases(PluginProcessor& processor)
     auto refusals = [&] {
         return host->onMessageThread([&processor] {
             int n = 0;
+            // The console folds identical consecutive lines into one entry and counts them in the 5th field.
             for (auto const& m : processor.getConsoleMessages())
-                if (std::get<1>(m).contains("limit 0 from a patch ignored")) ++n;
+                if (std::get<1>(m).contains("limit 0 from a patch ignored")) n += std::get<4>(m);
             return n;
         }, 2000, "test").value_or(-1);
     };
@@ -1879,7 +1880,7 @@ void runZeroArgCases(Harness& h)
         auto const* e = f ? f->find("error") : nullptr;
         refused += (f && field(*f, "outcome") == "rejected" && e && field(*e, "code") == "bad_frame") ? 1 : 0;
     }
-    CHECK(guarded == 16 && refused == guarded);
+    CHECK(guarded == 17 && refused == guarded); // 17 since /pd/limiter (minArgs 1, sink floor)
 }
 
 // S6.6 (audit A20): the live props of an IEM GUI carry its label, so a control the builder named (`hsl ... morph_s
