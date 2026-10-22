@@ -1126,6 +1126,93 @@ void runLimiterCases(Harness& h, PluginProcessor& processor)
     CHECK(caps.has_value() && limiterCap);
 }
 
+// P5.1 sink floor: a patch may switch the limiter ON, never OFF. `limit 0` through the sys path (directly, and as a
+// real Pd message to `pd` and to `mcp_host`) leaves it on; `limit 1` from a patch still switches it on.
+void runLimiterPatchCases(PluginProcessor& processor)
+{
+    std::printf("limit from a patch: on yes, off no\n");
+    auto* host = processor.getMcp();
+    bool const before = processor.getEnableLimiter();
+    auto sys = [&](float v) {
+        host->onMessageThread([&processor, v] {
+            SmallArray<pd::Atom> list;
+            list.add(pd::Atom(v));
+            processor.receiveSysMessage(SmallString("limit"), list);
+            return true;
+        }, 2000, "test");
+    };
+    auto viaPd = [&](char const* receiver, float v) {
+        host->pdWait([receiver, v] {
+            t_symbol* s = gensym(receiver);
+            t_atom a;
+            SETFLOAT(&a, v);
+            if (s->s_thing) pd_typedmess(s->s_thing, gensym("limit"), 1, &a);
+        }, 2000);
+        sleepMs(300); // the sys message reaches the processor on the message thread (Instance::handleAsyncUpdate)
+    };
+
+    processor.setEnableLimiter(true);
+    sys(0.0f);
+    CHECK(processor.getEnableLimiter()); // ignored
+    viaPd("pd", 0.0f);
+    CHECK(processor.getEnableLimiter());
+    viaPd("mcp_host", 0.0f);
+    CHECK(processor.getEnableLimiter());
+    host->onMessageThread([&processor] {
+        SmallArray<pd::Atom> list;
+        list.add(pd::Atom(gensym("off")));
+        processor.receiveSysMessage(SmallString("limit"), list);
+        return true;
+    }, 2000, "test");
+    CHECK(processor.getEnableLimiter()); // a symbol is not "on"
+
+    processor.setEnableLimiter(false); // the toolbar's way still switches it off
+    CHECK(!processor.getEnableLimiter());
+    sys(1.0f);
+    CHECK(processor.getEnableLimiter()); // a patch may switch it on
+    processor.setEnableLimiter(false);
+    viaPd("pd", 1.0f);
+    CHECK(processor.getEnableLimiter());
+    processor.setEnableLimiter(before);
+}
+
+// P5.1 sink floor: an MCP ref is a tempId or nothing. A bare index ("12", "obj_12") or an empty ref no longer
+// resolves to the gl_list object at that index (the AI could address a guard it was never named).
+void runIndexRefCases(Harness& h, PluginProcessor& processor)
+{
+    std::printf("no index fallback for MCP refs\n");
+    auto made = h.call("/pd/batch_atomic",
+        { "main", "ix1", 0, 0, 0, 1, 0, "ix_osc", 900, 140, "obj", "osc~", 1, "220", 0, 5, 10, 0 },
+        "/pd/batch_atomic/reply/ix1");
+    CHECK(made.has_value() && made->num(0) == 1);
+    int index = -1;
+    if (made)
+        for (size_t i = 7; i + 1 < made->args.size() && made->str(i).rfind("[", 0) != 0; i += 2)
+            if (made->str(i) == "ix_osc") index = static_cast<int>(made->num(i + 1));
+    CHECK(index >= 0);
+
+    auto* host = processor.getMcp();
+    auto const idx = juce::String(index);
+    bool resolvedByIndex = true;
+    host->pdWait([&] {
+        resolvedByIndex = host->resolveStableId("main", idx) != nullptr
+            || host->resolveStableId("main", "obj_" + idx) != nullptr
+            || host->resolveStableId("main", "") != nullptr;
+    }, 2000);
+    CHECK(!resolvedByIndex);
+
+    int n = 0;
+    for (auto const& ref : { idx, "obj_" + idx }) {
+        auto const c = "ixs" + juce::String(++n);
+        auto r = h.call("/pd/obj_set", { "main", c.toRawUTF8(), ref.toRawUTF8(), 1, "float", 1, 0 }, ("/pd/obj_set/reply/" + c).toStdString());
+        CHECK(r.has_value() && !r->str(0).empty()); // an error text (success is the float 1): nothing set
+    }
+    auto byName = h.call("/pd/obj_set", { "main", "ixs9", "ix_osc", 1, "float", 1, 0 }, "/pd/obj_set/reply/ixs9");
+    CHECK(byName.has_value() && byName->num(0) == 1); // the tempId still works
+
+    h.call("/pd/batch_atomic", { "main", "ixx", 1, 0, 0, 0, 0, "ix_osc", 0, 5, 10, 0 }, "/pd/batch_atomic/reply/ixx");
+}
+
 // Teardown during work (P3.4 S8): start a long offline render and return; main() then destroys the processor
 // while the render job runs. McpHost::shutdown (first thing in ~PluginProcessor) must cancel it before the
 // patches go: the job used to be a detached std::thread holding raw processor and bridge pointers.
@@ -1965,6 +2052,8 @@ int main()
             runArmedTraceCases(harness);
             runConsoleObjectCases(harness);
             runLimiterCases(harness, processor);
+            runLimiterPatchCases(processor);
+            runIndexRefCases(harness, processor);
             runMidiCaptureCases(processor, audioControl);
             runStampCostCases(processor);
             runIdentityValidityCases(processor);

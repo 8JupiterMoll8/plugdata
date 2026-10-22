@@ -544,16 +544,9 @@ t_gobj* McpHost::resolveStableId(const String& canvasName, const String& objectI
         identity.eraseId(canvas, idStr); // moved out of this canvas: forget it here
     }
 
-    // Index-based fallback: "0", "1", "obj_0", "obj_1", etc.
-    if (objectId.startsWith("obj_") || objectId.containsOnly("0123456789")) {
-        int idx = objectId.startsWith("obj_") ? objectId.substring(4).getIntValue() : objectId.getIntValue();
-        if (canvas) {
-            int cur = 0;
-            for (t_gobj* y_obj = canvas->gl_list; y_obj; y_obj = y_obj->g_next, cur++) {
-                if (cur == idx) return y_obj;
-            }
-        }
-    }
+    // P5.1 sink floor: no index fallback. A bare "12" or "obj_12" (or an empty ref, which read as index 0) used to
+    // resolve to the 12th object of gl_list when no tempId matched: the AI could address an object it was never
+    // told the name of (a speaker guard included). An MCP ref is a tempId or nothing; the caller answers the error.
 
     return nullptr;
 }
@@ -780,7 +773,7 @@ bool McpHost::undoStep(t_canvas* cnv, bool redo)
 
 void McpHost::journalId(t_canvas* cnv, std::string const& id, t_gobj* obj)
 {
-    // Only a real binding: a request may name an object by an index fallback ("obj_3", "2"), not an id.
+    // Only a real binding (resolveStableId has no index fallback since P5.1; kept as a guard).
     if (!cnv || !obj || identity.resolve(cnv, id) != obj) return;
     int index = 0;
     for (t_gobj* g = cnv->gl_list; g && g != obj; g = g->g_next) ++index;

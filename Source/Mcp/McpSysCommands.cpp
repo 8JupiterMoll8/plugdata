@@ -36,8 +36,24 @@ McpHost::SysTable const& McpHost::sysTable()
     return table;
 }
 
+// P5.1 sink floor: `limit <v>` reaches PluginProcessor::receiveSysMessage from any patch message to `pd` or
+// `mcp_host` ([s pd], [forward], text/qlist relays, Lua pd.send, a delayed message ...). A patch may switch the
+// master limiter ON, never OFF: everything the upstream case would read as off (0, or a non-float) is ignored
+// here, with one console line. The toolbar (setEnableLimiter) and the settings still switch it both ways.
+static bool isPatchLimiterOff(SmallString const& selector, SmallArray<pd::Atom> const& list)
+{
+    if (selector.toString() != "limit" || list.empty())
+        return false;
+    return !(list[0].isFloat() && list[0].getFloat() != 0.0f);
+}
+
 bool McpHost::handleSysMessage(SmallString const& selector, SmallArray<pd::Atom> const& list)
 {
+    if (isPatchLimiterOff(selector, list)) {
+        processor.logWarning("limit 0 from a patch ignored: switch the limiter off in the toolbar");
+        return true;
+    }
+
     auto const* handler = sysTable().find("sys", selector.toString().toStdString());
     if (handler == nullptr)
         return false;
