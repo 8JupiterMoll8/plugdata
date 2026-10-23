@@ -767,6 +767,24 @@ void runUndoPeekCases(Harness& h, PluginProcessor& processor)
     }));
     auto const s8 = peek("pd-up_sub");
     CHECK(s8.ok && !s8.open && s8.depth == 44 && !s8.top.empty() && s8.top[0] == "Drag");
+
+    // 7. P6.2 review (fork L1): `open` stays true for a START with no END ANYWHERE behind the undo position, also below
+    //    closed steps. Pd keeps no "sequence open" state (t_undo: u_queue, u_last, u_cleanstate, u_doing), so a stale
+    //    START that never got its END and a sequence still open around a closed AI step look the same in the queue:
+    //    narrowing the flag to "before the first closed step" would read the second as closed (a depth that drops
+    //    when its END lands). The server refuses the turn undo and says how to clear it (save and reopen the patch).
+    CHECK(onCanvas("pd-up_sub", [](t_canvas* cnv) {
+        canvas_undo_add(cnv, UNDO_SEQUENCE_START, gensym("Stale")->s_name, nullptr);
+        mcp::undo::motion(cnv);
+        canvas_undo_add(cnv, UNDO_SEQUENCE_START, gensym("AI edit")->s_name, nullptr);
+        mcp::undo::motion(cnv);
+        canvas_undo_add(cnv, UNDO_SEQUENCE_END, gensym("AI edit")->s_name, nullptr);
+    }));
+    auto const s9 = peek("pd-up_sub");
+    CHECK(s9.ok && s9.open && !s9.top.empty() && s9.top[0] == "AI edit");
+    CHECK(onCanvas("pd-up_sub", [](t_canvas* cnv) { mcp::undo::motion(cnv); }));
+    auto const s10 = peek("pd-up_sub");
+    CHECK(s10.ok && s10.open && s10.depth == s9.depth + 1);
 }
 
 // P3.5 S0: the identity service will detect GUI edits by recomputing a per-canvas stamp (object count plus a hash

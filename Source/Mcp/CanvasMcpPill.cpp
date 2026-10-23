@@ -457,7 +457,7 @@ void CanvasMcpLayer::initPaletteItems()
     mcpPaletteItems.push_back({ "add-knobs", "Add Controls", "Action", "Regler fuer Signal-Inlets erzeugen", "🎛️", "[@action:add-knobs]" });
     mcpPaletteItems.push_back({ "undo", "Undo Step", "Action", "Letzte Aenderung sofort rueckgaengig", "↩️", "[@action:undo]" });
     // P6.2 U6: the AI's whole last pill turn (the server refuses when anything else changed the canvas since).
-    mcpPaletteItems.push_back({ "undo-turn", "Undo AI turn", "Action", "Alles vom letzten KI-Zug zurueck", "↩️", "[@action:undo-turn]" });
+    mcpPaletteItems.push_back({ "undo-turn", "Undo AI Turn", "Action", "Alles vom letzten KI-Zug zurueck", "⏪", "[@action:undo-turn]" });
 
     // 🧬 Skills (AI Sounddesign)
     mcpPaletteItems.push_back({ "kick-drum", "Punchy 909 Kick", "Skill", "Pitch-Sweep & [tanh~] Saettigung", "🥁", "[@skill:kick-drum]" });
