@@ -372,6 +372,8 @@ std::vector<std::string> MCPBridge::capabilityList() const
         "limiter",
         // P6.2 UF: /pd/undo_peek <canvas> <corrId> reads the undo queue (depth, redo, the newest step names), read-only
         "undo_peek",
+        // MIDI device awareness: /pd/midi_devices <corrId> lists MIDI inputs/outputs and which PlugData has on, read-only
+        "midi_devices",
     };
     // P4.1 S2: the v2 listener is up (TCP 127.0.0.1, port and token in the discovery file).
     if (v2Server.running())

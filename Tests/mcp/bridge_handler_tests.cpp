@@ -1296,6 +1296,82 @@ void runLimiterCases(Harness& h, PluginProcessor& processor)
     CHECK(caps.has_value() && limiterCap);
 }
 
+// MIDI device awareness: /pd/midi_devices <corrId> answers {"inputs":[{name,identifier,enabled}],"outputs":[...]}:
+// every device JUCE lists (as PlugData's MidiDeviceManager holds them) and whether PlugData's MIDI settings have it on
+// (enabled = it sits in a numbered port; null in the plugin build, where the host routes MIDI). Read-only: the port
+// map is the same after the read. Headless may list zero devices, so the shape and the agreement with the manager
+// are pinned, not a count.
+void runMidiDevicesCases(Harness& h, PluginProcessor& processor)
+{
+    std::printf("midi_devices read\n");
+    auto* host = processor.getMcp();
+    struct Dev {
+        std::string name, id;
+        int port;
+    };
+    auto snapshot = [&] {
+        return host->onMessageThread([&processor] {
+            auto& mdm = processor.getMidiDeviceManager();
+            std::vector<Dev> in, out;
+            for (auto info : mdm.getInputDevices())
+                in.push_back({ info.name.toStdString(), info.identifier.toStdString(), mdm.getMidiDevicePort(true, info) });
+            for (auto info : mdm.getOutputDevices())
+                out.push_back({ info.name.toStdString(), info.identifier.toStdString(), mdm.getMidiDevicePort(false, info) });
+            return std::make_pair(in, out);
+        }, 2000, "test");
+    };
+    auto const before = snapshot();
+    CHECK(before.has_value());
+
+    auto r = h.call("/pd/midi_devices", { "md1" }, "/pd/midi_devices/reply/md1", 3000);
+    CHECK(r.has_value());
+    if (!r || !before)
+        return;
+    auto const json = parseJson(*r);
+    CHECK(json.isObject() && json["inputs"].isArray() && json["outputs"].isArray());
+    auto agrees = [&](juce::var const& list, std::vector<Dev> const& want) {
+        auto const* arr = list.getArray();
+        if (!arr || arr->size() != static_cast<int>(want.size()))
+            return false;
+        for (int i = 0; i < arr->size(); ++i) {
+            auto const& d = (*arr)[i];
+            auto const& w = want[static_cast<size_t>(i)];
+            if (!d.isObject() || !d["name"].isString() || !d["identifier"].isString())
+                return false;
+            if (d["name"].toString().toStdString() != w.name || d["identifier"].toString().toStdString() != w.id)
+                return false;
+            auto const enabled = d["enabled"];
+            if (ProjectInfo::isStandalone) {
+                if (!enabled.isBool() || static_cast<bool>(enabled) != (w.port >= 0))
+                    return false;
+            } else if (!enabled.isVoid()) {
+                return false; // the plugin build cannot say: null
+            }
+        }
+        return true;
+    };
+    CHECK(agrees(json["inputs"], before->first));
+    CHECK(agrees(json["outputs"], before->second));
+    std::printf("  %d inputs, %d outputs listed\n", static_cast<int>(before->first.size()),
+        static_cast<int>(before->second.size()));
+
+    auto const after = snapshot(); // the read changed no port
+    bool same = after.has_value() && after->first.size() == before->first.size()
+        && after->second.size() == before->second.size();
+    for (size_t i = 0; same && i < before->first.size(); ++i)
+        same = after->first[i].port == before->first[i].port;
+    for (size_t i = 0; same && i < before->second.size(); ++i)
+        same = after->second[i].port == before->second[i].port;
+    CHECK(same);
+
+    auto caps = h.call("/bridge/capabilities", { "md2" }, "/bridge/capabilities/reply");
+    bool cap = false;
+    if (caps)
+        for (auto const& a : caps->args)
+            cap = cap || a.text == "midi_devices";
+    CHECK(caps.has_value() && cap);
+}
+
 // P5.1 sink floor: a patch may switch the limiter ON, never OFF. `limit 0` through the sys path (directly, and as a
 // real Pd message to `pd` and to `mcp_host`) leaves it on; `limit 1` from a patch still switches it on.
 void runLimiterPatchCases(PluginProcessor& processor)
@@ -2038,7 +2114,7 @@ void runZeroArgCases(Harness& h)
         auto const* e = f ? f->find("error") : nullptr;
         refused += (f && field(*f, "outcome") == "rejected" && e && field(*e, "code") == "bad_frame") ? 1 : 0;
     }
-    CHECK(guarded == 18 && refused == guarded); // 18 since /pd/undo_peek (minArgs 1, P6.2 UF)
+    CHECK(guarded == 19 && refused == guarded); // 19 since /pd/midi_devices (minArgs 1)
 }
 
 // S6.6 (audit A20): the live props of an IEM GUI carry its label, so a control the builder named (`hsl ... morph_s
@@ -2346,6 +2422,7 @@ int main()
             runArmedTraceCases(harness);
             runConsoleObjectCases(harness);
             runLimiterCases(harness, processor);
+            runMidiDevicesCases(harness, processor);
             runLimiterPatchCases(processor);
             runVolumeGuardCases(processor);
             runIndexRefCases(harness, processor);

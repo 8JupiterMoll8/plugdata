@@ -49,6 +49,7 @@ MCP_SOURCE(chat, PathOrArg0)
 // ── pd: system ──
 MCP_VERB(pd, "ping", pdPing)
 MCP_VERB(pd, "limiter", pdLimiter)
+MCP_VERB(pd, "midi_devices", pdMidiDevices)
 MCP_VERB(pd, "clear_console", pdClearConsole)
 MCP_VERB(pd, "mcp_reload_lua", pdMcpReloadLua)
 MCP_VERB(pd, "dsp", pdDsp)

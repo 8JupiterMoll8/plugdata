@@ -39,6 +39,48 @@ void MCPBridge::pdLimiter(const juce::String& action, const juce::OSCMessage& ms
         juce::String("{\"enabled\":") + (enabled ? "true" : "false") + ",\"thresholdDb\":" + threshold + "}");
 }
 
+void MCPBridge::pdMidiDevices(const juce::String& action, const juce::OSCMessage& msg)
+{
+    // MIDI device awareness: /pd/midi_devices <corrId> -> /pd/midi_devices/reply/<corrId>
+    // {"inputs":[{"name":s,"identifier":s,"enabled":bool|null}],"outputs":[same]}. Every device the system lists, as
+    // PlugData's MidiDeviceManager holds them (its own virtual ports included), and whether PlugData's MIDI settings
+    // have it on: a device is on when it sits in a numbered port (port 0 is the off bucket, getMidiDevicePort -1).
+    // The plugin build cannot say (the host routes MIDI): enabled null. Read-only: the AI never switches a device.
+    // Read on the message thread (the manager's lists live there); the error reply when that thread did not answer.
+    auto const correlationId = msg.size() > 0 ? getArgString(msg[0]) : juce::String("0");
+    auto const errorAddr = "/pd/midi_devices/error/" + correlationId;
+    if (!processor) {
+        sendReply(errorAddr, juce::String("no processor"));
+        return;
+    }
+    auto const json = processor->getMcp()->onMessageThread(
+        [proc = processor] {
+            auto& mdm = proc->getMidiDeviceManager();
+            auto list = [&mdm](bool isInput) {
+                juce::Array<juce::var> out;
+                for (auto info : isInput ? mdm.getInputDevices() : mdm.getOutputDevices()) {
+                    auto* d = new juce::DynamicObject();
+                    d->setProperty("name", info.name);
+                    d->setProperty("identifier", info.identifier);
+                    d->setProperty("enabled",
+                        ProjectInfo::isStandalone ? juce::var(mdm.getMidiDevicePort(isInput, info) >= 0) : juce::var());
+                    out.add(juce::var(d));
+                }
+                return out;
+            };
+            auto* root = new juce::DynamicObject();
+            root->setProperty("inputs", list(true));
+            root->setProperty("outputs", list(false));
+            return juce::JSON::toString(juce::var(root), true);
+        },
+        1000, "midi_devices");
+    if (!json) {
+        sendReply(errorAddr, juce::String("the message thread did not answer"));
+        return;
+    }
+    sendReply("/pd/midi_devices/reply/" + correlationId, *json);
+}
+
 void MCPBridge::pdClearConsole(const juce::String& action, const juce::OSCMessage& msg)
 {
     if (processor) {
