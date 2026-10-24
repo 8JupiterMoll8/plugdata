@@ -1,11 +1,13 @@
-// Unit tests for the output ceiling and its breaker (P9 Part B): JUCE-free, run by scripts/test-bridge-safety.sh
+// Unit tests for the output ceiling and its loudness breaker (P9 Part B, review round 1): JUCE-free, run by scripts/test-bridge-safety.sh
 // at -O0 and again at the Release flags (-O3 -DNDEBUG), so the non-finite test also runs on an optimised build.
 #include "../../Source/Mcp/McpOutputCeiling.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <vector>
 
@@ -78,16 +80,6 @@ void fillSine(Block& b, float amplitude, double freq, int64_t& phase)
     phase += b.samples();
 }
 
-void fillSquare(Block& b, float amplitude, int64_t& phase)
-{
-    for (int i = 0; i < b.samples(); ++i) {
-        float const v = ((phase + i) / 50) % 2 == 0 ? amplitude : -amplitude;
-        for (auto& ch : b.data)
-            ch[static_cast<size_t>(i)] = v;
-    }
-    phase += b.samples();
-}
-
 void run(OutputCeiling& c, Block& b, uint32_t nowMs)
 {
     c.process(b.ptrs.data(), b.channels(), b.samples(), kRate, nowMs);
@@ -99,14 +91,100 @@ void turnOn(OutputCeiling& c)
     c.setEnabled(true);
 }
 
-void hotFor(OutputCeiling& c, int blocks, int64_t& phase, float amplitude = kPlus12Db)
+// ── Signal generators and a block feeder for the breaker tests ──
+using Gen = std::function<float(int64_t)>;
+Gen silence() { return [](int64_t) { return 0.0f; }; }
+Gen square(float a) { return [a](int64_t n) { return (n / 50) % 2 == 0 ? a : -a; }; }
+Gen sine(float a, double f)
 {
-    for (int k = 0; k < blocks; ++k) {
-        Block b(2, kBlock);
-        fillSquare(b, amplitude, phase);
-        run(c, b, 0);
-    }
+    return [a, f](int64_t n) { return a * static_cast<float>(std::sin(2.0 * kPi * f * static_cast<double>(n) / kRate)); };
 }
+Gen tanhSine(float gain, double f)
+{
+    return [gain, f](int64_t n) { return std::tanh(gain * static_cast<float>(std::sin(2.0 * kPi * f * static_cast<double>(n) / kRate))); };
+}
+// Music-like: a 0.7-peak mix of three partials, and an over of `over` every 997 samples.
+Gen music(float peak, float over)
+{
+    return [peak, over](int64_t n) {
+        if (n % 997 == 0) return (n / 997) % 2 == 0 ? over : -over;
+        double const t = static_cast<double>(n) / kRate;
+        double const v = 0.43 * std::sin(2.0 * kPi * 110.0 * t) + 0.36 * std::sin(2.0 * kPi * 277.0 * t)
+            + 0.21 * std::sin(2.0 * kPi * 1250.0 * t);
+        return peak * static_cast<float>(v);
+    };
+}
+// Full-scale pulses: `duty` of every 200 samples at +-a.
+Gen clicks(float a, double duty)
+{
+    return [a, duty](int64_t n) {
+        int64_t const k = n % 200;
+        if (static_cast<double>(k) >= duty * 200.0) return 0.0f;
+        return (n / 200) % 2 == 0 ? a : -a;
+    };
+}
+
+constexpr double kExpectedTripMs = 230.0;     // ~209 ms from silence to -3 dBFS RMS for a full-scale square (tau 300 ms)
+constexpr double kExpectedReleaseMs = 1400.0; // the 1 s hold after the loudness falls under -6 dBFS RMS, + its fall
+
+// Feeds blocks of `block` frames from a generator to channel `hot` (others silent), or to every channel (hot < 0).
+struct Feed {
+    OutputCeiling& ceiling;
+    int channels, block;
+    int64_t pos = 0;
+    float lastPeak = 0.0f;
+    bool lastBitEqual = false;
+    bool everyBlockAtUnity = true; // output == clamp(input) on every block so far
+
+    Feed(OutputCeiling& c, int ch, int b)
+        : ceiling(c)
+        , channels(ch)
+        , block(b)
+    {
+    }
+
+    void oneBlock(Gen const& g, int hot, int frames)
+    {
+        Block b(channels, frames);
+        for (int i = 0; i < frames; ++i) {
+            float const v = g(pos + i);
+            for (int ch = 0; ch < channels; ++ch)
+                b.data[static_cast<size_t>(ch)][static_cast<size_t>(i)] = (hot < 0 || ch == hot) ? v : 0.0f;
+        }
+        Block const before = b;
+        ceiling.process(b.ptrs.data(), b.channels(), b.samples(), kRate, static_cast<uint32_t>(pos * 1000 / static_cast<int64_t>(kRate)));
+        pos += frames;
+        lastPeak = b.peak();
+        lastBitEqual = b.bitEqual(before);
+        for (int ch = 0; ch < channels; ++ch)
+            for (int i = 0; i < frames; ++i) {
+                float const x = before.data[static_cast<size_t>(ch)][static_cast<size_t>(i)];
+                float const want = std::isfinite(x) ? std::fmax(-1.0f, std::fmin(1.0f, x)) : 0.0f;
+                if (b.data[static_cast<size_t>(ch)][static_cast<size_t>(i)] != want) everyBlockAtUnity = false;
+            }
+    }
+    void runSamples(Gen const& g, int hot, int64_t samples)
+    {
+        while (samples > 0) {
+            int const n = static_cast<int>(std::min<int64_t>(samples, block));
+            oneBlock(g, hot, n);
+            samples -= n;
+        }
+    }
+    void run(Gen const& g, int hot, double ms) { runSamples(g, hot, static_cast<int64_t>(ms * kRate / 1000.0)); }
+    // Milliseconds fed until the breaker state equals `engaged` (end of that block), or -1 within `maxMs`.
+    double until(Gen const& g, int hot, double maxMs, bool engaged)
+    {
+        int64_t const start = pos;
+        while (static_cast<double>(pos - start) * 1000.0 / kRate < maxMs) {
+            oneBlock(g, hot, block);
+            if (ceiling.read().breakerEngaged == engaged) return static_cast<double>(pos - start) * 1000.0 / kRate;
+        }
+        return -1.0;
+    }
+    double untilEngaged(Gen const& g, int hot, double maxMs) { return until(g, hot, maxMs, true); }
+    double untilReleased(Gen const& g, int hot, double maxMs) { return until(g, hot, maxMs, false); }
+};
 
 } // namespace
 
@@ -239,119 +317,183 @@ int main()
         }
     }
 
-    // A single over now and then never trips the breaker (and is never attenuated).
+    // ── The breaker (review round 1): sustained LOUDNESS of the breaker's input (after the clamp), per channel. ──
+
+    // The thresholds are what their names say.
+    CHECK(std::fabs(OutputCeiling::kTripMeanSquare - std::pow(10.0, OutputCeiling::kTripRmsDb / 10.0)) < 1e-9);
+    CHECK(std::fabs(OutputCeiling::kReleaseMeanSquare - std::pow(10.0, OutputCeiling::kReleaseRmsDb / 10.0)) < 1e-9);
+    CHECK(OutputCeiling::kReleaseRmsDb < OutputCeiling::kTripRmsDb);
+
+    // Full-scale material that never exceeds +-1.0 (what [clip~ -1 1] or tanh~ make of a +40 dB mistake) trips it,
+    // on 2, 10 and 32 channels with only ONE of them hot, at several block sizes.
     {
-        OutputCeiling c;
-        turnOn(c);
-        for (int k = 0; k < 400; ++k) { // ~4.6 s
-            Block b(2, kBlock);
-            if (k % 3 == 0) b.data[0][100] = 1.5f;
-            b.data[1][200] = 0.25f;
-            run(c, b, static_cast<uint32_t>(k * 12));
-            CHECK(b.data[1][200] == 0.25f);
+        struct Case {
+            char const* name;
+            Gen gen;
+        };
+        Case const cases[] = {
+            { "pre-clipped +-1 square", square(1.0f) },
+            { "0.9999 square", square(0.9999f) },
+            { "tanh(+40 dB sine)", tanhSine(100.0f, 440.0) },
+            { "+12 dB square (clamped)", square(kPlus12Db) },
+        };
+        for (auto const& c : cases)
+            for (int channels : { 2, 10, 32 })
+                for (int block : { 64, 512, 1000 }) {
+                    OutputCeiling ceil;
+                    turnOn(ceil);
+                    Feed f(ceil, channels, block);
+                    int const hot = channels - 1;
+                    double const tripMs = f.untilEngaged(c.gen, hot, 2000.0);
+                    if (!(tripMs >= 0.0 && tripMs <= kExpectedTripMs + 2.0 * block * 1000.0 / kRate))
+                        std::printf("  %s, %d ch, block %d: trip at %.1f ms\n", c.name, channels, block, tripMs);
+                    CHECK(tripMs >= 0.0);
+                    CHECK(tripMs <= kExpectedTripMs + 2.0 * block * 1000.0 / kRate);
+                    CHECK(tripMs >= kExpectedTripMs * 0.8); // sustained: not on the first loud block
+                    // 40 ms later the output sits at the breaker gain, on every channel.
+                    f.run(c.gen, hot, 40.0);
+                    CHECK(f.lastPeak <= OutputCeiling::kBreakerGain + 1e-6f);
+                    CHECK(ceil.read().breakerTrips == 1);
+                }
+    }
+
+    // A burst slightly longer than the trip time trips it wherever it falls against the block grid (sliding measure).
+    for (int block : { 64, 512, 4096 })
+        for (int offset : { 0, 1, 17, 200, 511, 4000 }) {
+            OutputCeiling ceil;
+            turnOn(ceil);
+            Feed f(ceil, 2, block);
+            f.runSamples(silence(), -1, offset);
+            f.runSamples(square(1.0f), 0, static_cast<int64_t>((kExpectedTripMs + 30.0) * kRate / 1000.0));
+            f.run(silence(), -1, 50.0);
+            if (ceil.read().breakerTrips != 1) std::printf("  burst: block %d offset %d not caught\n", block, offset);
+            CHECK(ceil.read().breakerTrips == 1);
         }
-        auto const t = c.read();
+
+    // A +0.2 dB hot sine is clamped; its loudness sits at about -2.85 dBFS RMS, just above the -3 dBFS trip, so the
+    // breaker may engage on a SUSTAINED one, but it lets go about 1 s after the sine calms to a normal level.
+    {
+        OutputCeiling ceil;
+        turnOn(ceil);
+        Feed f(ceil, 2, 512);
+        f.run(sine(1.0233f, 440.0), -1, 3000.0);
+        CHECK(ceil.read().clampedSamples > 0);
+        double const releasedMs = f.untilReleased(sine(0.3f, 440.0), -1, 3000.0);
+        CHECK(releasedMs >= 0.0 && releasedMs <= kExpectedReleaseMs);
+        CHECK(!ceil.read().breakerEngaged);
+        // and once released and ramped up, the calm sine passes bit-identical.
+        f.run(sine(0.3f, 440.0), -1, 400.0);
+        CHECK(f.lastBitEqual);
+    }
+
+    // Hot music-like material (a 0.7 peak mix with a 1.05 over now and then) never trips it and is never turned down.
+    {
+        OutputCeiling ceil;
+        turnOn(ceil);
+        Feed f(ceil, 2, 512);
+        f.run(music(0.7f, 1.05f), -1, 6000.0);
+        auto const t = ceil.read();
         CHECK(t.breakerTrips == 0);
         CHECK(!t.breakerEngaged);
-        CHECK(t.clampedSamples > 100);
+        CHECK(t.clampedSamples > 0); // the overs were clamped
+        CHECK(f.everyBlockAtUnity);  // nothing else changed
     }
 
-    // A sustained hot square trips the breaker within ~150 ms (+ a block); the output then sits 20 dB down.
-    // Silence for ~1 s releases it; after the ~200 ms ramp a quiet signal is bit-identical again.
+    // A full-scale sine with no overs (-3.01 dBFS RMS) stays just under the trip: a test tone at 0 dBFS is not cut.
     {
-        OutputCeiling c;
-        turnOn(c);
-        int64_t phase = 0;
-        int tripBlock = -1;
-        uint32_t now = 0;
-        for (int k = 0; k < 60; ++k, now += 12) {
-            Block b(2, kBlock);
-            fillSquare(b, kPlus12Db, phase);
-            run(c, b, now);
-            CHECK(b.peak() <= 1.0f);
-            if (tripBlock < 0 && c.read().breakerEngaged) tripBlock = k;
-            if (tripBlock >= 0 && k > tripBlock + 4) {
-                CHECK(b.peak() <= OutputCeiling::kBreakerGain + 1e-6f); // ramped fully down after ~20 ms
-            }
-        }
-        double const tripMs = (tripBlock + 1) * kBlock * 1000.0 / kRate;
-        CHECK(tripBlock >= 0);
-        CHECK(tripMs <= OutputCeiling::kBreakerWindowMs + 2.0 * kBlock * 1000.0 / kRate);
-        auto t = c.read();
-        CHECK(t.breakerTrips == 1); // one trip while it stays hot, not one per window
-        CHECK(t.breakerEngaged);
-
-        // Silence: still engaged before the hold time, released after it.
-        int releaseBlock = -1;
-        for (int k = 0; k < 200; ++k, now += 12) {
-            Block b(2, kBlock);
-            run(c, b, now);
-            if (releaseBlock < 0 && !c.read().breakerEngaged) releaseBlock = k;
-        }
-        double const heldMs = (releaseBlock + 1) * kBlock * 1000.0 / kRate;
-        CHECK(releaseBlock >= 0);
-        CHECK(heldMs >= OutputCeiling::kBreakerHoldMs - 1.0);
-        CHECK(heldMs <= OutputCeiling::kBreakerHoldMs + 2.0 * kBlock * 1000.0 / kRate);
-        // The ramp back is over by now (200 blocks ~ 2.3 s): a quiet sine passes untouched.
-        Block q(2, kBlock);
-        int64_t p2 = 0;
-        fillSine(q, 0.5f, 330.0, p2);
-        Block const before = q;
-        run(c, q, now);
-        CHECK(q.bitEqual(before));
-        CHECK(c.read().breakerTrips == 1);
+        OutputCeiling ceil;
+        turnOn(ceil);
+        Feed f(ceil, 2, 512);
+        f.run(sine(1.0f, 440.0), -1, 4000.0);
+        CHECK(ceil.read().breakerTrips == 0);
     }
 
-    // A +40 dB square (the mistake the clamp alone would turn into a full-scale square) ends up 20 dB down.
+    // Residue, pinned: a full-scale pulse train under 50 % duty (here 45 %) stays below the -3 dBFS RMS trip.
     {
-        OutputCeiling c;
-        turnOn(c);
-        int64_t phase = 0;
-        float lastPeak = 1.0f;
-        for (int k = 0; k < 40; ++k) {
-            Block b(2, kBlock);
-            fillSquare(b, 100.0f, phase);
-            run(c, b, static_cast<uint32_t>(k));
-            lastPeak = b.peak();
-        }
-        CHECK(lastPeak <= OutputCeiling::kBreakerGain + 1e-6f);
-        CHECK(c.read().breakerTrips == 1);
+        OutputCeiling ceil;
+        turnOn(ceil);
+        Feed f(ceil, 2, 512);
+        f.run(clicks(1.0f, 0.45), -1, 4000.0);
+        CHECK(ceil.read().breakerTrips == 0);
     }
 
-    // The owner's reset releases the breaker at once (ramping back up), and a later sustained over trips it again.
+    // Held loud: engaged the whole time, one trip (not one per window); the output stays 20 dB down.
+    // Calm (silence): released after the loudness falls under -6 dBFS RMS and stays there 1 s; a release is counted.
     {
-        OutputCeiling c;
-        turnOn(c);
-        int64_t phase = 0;
-        hotFor(c, 30, phase);
-        CHECK(c.read().breakerEngaged);
-        c.requestBreakerReset();
-        Block b(2, kBlock);
-        run(c, b, 0);
-        CHECK(!c.read().breakerEngaged);
-        hotFor(c, 30, phase);
-        CHECK(c.read().breakerEngaged);
-        CHECK(c.read().breakerTrips == 2);
+        OutputCeiling ceil;
+        turnOn(ceil);
+        Feed f(ceil, 2, 512);
+        f.run(square(1.0f), -1, 3000.0);
+        auto t = ceil.read();
+        CHECK(t.breakerEngaged && t.breakerTrips == 1 && t.breakerReleases == 0);
+        CHECK(f.lastPeak <= OutputCeiling::kBreakerGain + 1e-6f);
+        double const releasedMs = f.untilReleased(silence(), -1, 4000.0);
+        CHECK(releasedMs >= OutputCeiling::kBreakerHoldMs);
+        CHECK(releasedMs <= kExpectedReleaseMs + 300.0); // from full scale the loudness takes ~420 ms to fall to -6 dB
+        t = ceil.read();
+        CHECK(!t.breakerEngaged && t.breakerReleases == 1);
+        // The ramp back up is over after ~200 ms: a quiet sine is bit-identical.
+        f.run(sine(0.5f, 330.0), -1, 300.0);
+        CHECK(f.lastBitEqual);
     }
 
-    // Switching the ceiling off resets the breaker; back on starts at full gain.
+    // Released while a moderate signal keeps playing (-10 dBFS sine), not only on silence.
     {
-        OutputCeiling c;
-        turnOn(c);
-        int64_t phase = 0;
-        hotFor(c, 30, phase);
-        CHECK(c.read().breakerEngaged);
-        c.setEnabled(false);
-        Block off(2, kBlock);
-        run(c, off, 0);
-        CHECK(!c.read().breakerEngaged);
-        c.setEnabled(true);
-        Block q(2, kBlock);
-        int64_t p2 = 0;
-        fillSine(q, 0.5f, 330.0, p2);
-        Block const before = q;
-        run(c, q, 0);
-        CHECK(q.bitEqual(before));
+        OutputCeiling ceil;
+        turnOn(ceil);
+        Feed f(ceil, 2, 512);
+        f.run(square(1.0f), 0, 1000.0);
+        CHECK(ceil.read().breakerEngaged);
+        double const releasedMs = f.untilReleased(sine(0.45f, 220.0), -1, 3000.0);
+        CHECK(releasedMs >= 0.0 && releasedMs <= kExpectedReleaseMs + 300.0);
+    }
+
+    // A +40 dB square (the mistake the clamp alone turns into a full-scale square) ends up 20 dB down.
+    {
+        OutputCeiling ceil;
+        turnOn(ceil);
+        Feed f(ceil, 2, 512);
+        f.run(square(100.0f), -1, 600.0);
+        CHECK(f.lastPeak <= OutputCeiling::kBreakerGain + 1e-6f);
+        CHECK(ceil.read().breakerTrips == 1);
+    }
+
+    // The owner's reset releases the breaker at once and clears the loudness; held loud, it trips again later.
+    {
+        OutputCeiling ceil;
+        turnOn(ceil);
+        Feed f(ceil, 2, 512);
+        f.run(square(1.0f), -1, 600.0);
+        CHECK(ceil.read().breakerEngaged);
+        ceil.requestBreakerReset();
+        f.run(square(1.0f), -1, 12.0);
+        CHECK(!ceil.read().breakerEngaged);
+        f.run(square(1.0f), -1, 600.0);
+        CHECK(ceil.read().breakerEngaged);
+        CHECK(ceil.read().breakerTrips == 2);
+    }
+
+    // Switching the ceiling off resets the breaker; back on starts at full gain with a fresh loudness measure.
+    {
+        OutputCeiling ceil;
+        turnOn(ceil);
+        Feed f(ceil, 2, 512);
+        f.run(square(1.0f), -1, 600.0);
+        CHECK(ceil.read().breakerEngaged);
+        ceil.setEnabled(false);
+        f.run(silence(), -1, 12.0);
+        CHECK(!ceil.read().breakerEngaged);
+        ceil.setEnabled(true);
+        f.run(sine(0.5f, 330.0), -1, 12.0);
+        CHECK(f.lastBitEqual);
+    }
+
+    // startedAtMs: set once, at construction (a restart gives a new one).
+    {
+        OutputCeiling a;
+        auto const t = a.read();
+        CHECK(t.startedAtMs > 1600000000000LL); // a wall-clock millisecond time
+        CHECK(a.read().startedAtMs == t.startedAtMs);
     }
 
     // Zero channels or samples: nothing happens.

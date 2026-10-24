@@ -10,20 +10,27 @@
 //
 // What it does, on the FINAL output (McpHost::audioBlockFinished, after master gain and PlugData's limiter):
 //  - the ceiling: every non-finite sample -> 0, every sample clamped to +-1.0 (0 dBFS). No lookahead and no gain
-//    change below 0 dBFS: a signal inside +-1.0 leaves bit-identical. It stops overs; it is NOT hearing protection
-//    on its own (a +40 dB mistake becomes a full-scale square), hence
-//  - the breaker: when more than kBreakerTripFraction of the output samples were over 0 dBFS across a
-//    kBreakerWindowMs window, the output gain ramps down to kBreakerGain (-20 dB) in kBreakerAttackMs; it releases
-//    after kBreakerHoldMs without an over (ramp kBreakerReleaseMs) or when the owner resets it.
+//    change below 0 dBFS: a signal inside +-1.0 leaves bit-identical while the breaker is idle. It stops overs; it is
+//    NOT hearing protection on its own (a +40 dB mistake becomes a full-scale square), hence
+//  - the breaker (review round 1: it judges sustained LOUDNESS, not overs): per output channel, a one-pole mean square
+//    (time constant kLoudnessTauMs) of the breaker's INPUT (after the clamp, before the breaker gain). When the
+//    loudest channel's short-term RMS exceeds kTripRmsDb the output gain ramps down to kBreakerGain (-20 dB) in
+//    kBreakerAttackMs; it releases once every channel has stayed under kReleaseRmsDb for kBreakerHoldMs (ramp
+//    kBreakerReleaseMs), or when the owner resets it. A full-scale square / tanh~ / [clip~ -1 1] blast trips it in
+//    ~210 ms whether or not it exceeds +-1.0; mastered music sits well under -3 dBFS RMS. A pure 0 dBFS sine
+//    (-3.01 dBFS RMS) does not trip; a clamped sine hotter than ~+0.1 dB does, and lets go ~1.2 s after it calms.
 // Runs only in the standalone app (a plugin's host owns the output) and while the owner setting
 // `mcp_bridge_ai_ceiling` is on; whether PlugData's limiter is on or not does not matter (it clips at +-sqrt(2) and
 // its threshold goes up to +3 dB).
 //
-// Threads: process() on the audio thread only (no allocation, no locks: atomics, one smoothed gain, counters);
-// setEnabled / setStandalone / requestBreakerReset / read from any thread. Counters are cumulative since process
-// start (one relaxed fetch_add per block per counter); readers work in deltas.
+// Threads: process() on the audio thread only (no allocation, no locks: atomics, per-channel doubles, one smoothed
+// gain, counters); setEnabled / setStandalone / requestBreakerReset / read from any thread. Counters are cumulative
+// since construction (startedAtMs, wall clock); readers work in deltas. clampBuffer() is the clamp alone, for other
+// device callbacks (MCPBridge::playVoiceTake).
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 
@@ -35,22 +42,46 @@ namespace mcp {
 
 class OutputCeiling {
 public:
-    // The breaker's thresholds (recorded in the P9 step file).
-    static constexpr double kBreakerWindowMs = 150.0;    // the window the over fraction is measured across
-    static constexpr double kBreakerTripFraction = 0.10; // more than this share of samples over 0 dBFS trips it
-    static constexpr float kBreakerGain = 0.1f;          // -20 dB while engaged
-    static constexpr double kBreakerAttackMs = 20.0;     // ramp 1.0 -> kBreakerGain
-    static constexpr double kBreakerHoldMs = 1000.0;     // released after this long without an over
-    static constexpr double kBreakerReleaseMs = 200.0;   // ramp kBreakerGain -> 1.0
+    // The breaker's constants (recorded in the P9 step file, review round 1).
+    static constexpr double kLoudnessTauMs = 300.0; // the one-pole mean square's time constant
+    static constexpr double kTripRmsDb = -3.0;      // the loudest channel's RMS above this trips it
+    static constexpr double kReleaseRmsDb = -6.0;   // every channel under this ...
+    static constexpr double kBreakerHoldMs = 1000.0; // ... for this long releases it
+    static constexpr double kTripMeanSquare = 0.50118723362727224;    // 10^(kTripRmsDb / 10)
+    static constexpr double kReleaseMeanSquare = 0.25118864315095796; // 10^(kReleaseRmsDb / 10)
+    static constexpr float kBreakerGain = 0.1f;        // -20 dB while engaged
+    static constexpr double kBreakerAttackMs = 20.0;   // ramp 1.0 -> kBreakerGain
+    static constexpr double kBreakerReleaseMs = 200.0; // ramp kBreakerGain -> 1.0
+    static constexpr int kMaxChannels = 64; // loudness slots; channels past the last slot share it (the loudest wins)
 
     struct Telemetry {
         uint64_t clampedSamples = 0;   // finite samples that arrived over +-1.0 (clamped; attenuated too while engaged)
         uint64_t nonFiniteSamples = 0; // NaN / inf samples written as 0
         uint64_t clampedBlocks = 0;    // audio blocks with at least one of the two
         uint64_t breakerTrips = 0;
+        uint64_t breakerReleases = 0;
         bool breakerEngaged = false;
         int64_t lastClampMs = -1; // the caller's millisecond clock at the last such block; -1 = never
+        int64_t startedAtMs = 0;  // wall-clock ms when this ceiling (= this PlugData process) started
     };
+
+    OutputCeiling() noexcept
+        : startedAtMs(std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::system_clock::now().time_since_epoch())
+                  .count())
+    {
+    }
+
+    // The clamp alone (no breaker, no counters), for an output path outside processBlock. Any thread.
+    static void clampBuffer(float* const* channels, int const numChannels, int const numSamples) noexcept
+    {
+        uint64_t overs = 0, nonFinite = 0;
+        if (channels == nullptr) return;
+        for (int ch = 0; ch < numChannels; ++ch)
+            if (float* d = channels[ch])
+                for (int i = 0; i < numSamples; ++i)
+                    clampSample(d[i], overs, nonFinite);
+    }
 
     void setStandalone(bool const isStandalone) noexcept { standalone.store(isStandalone, std::memory_order_relaxed); }
     void setEnabled(bool const on) noexcept { enabled.store(on, std::memory_order_relaxed); }
@@ -66,6 +97,8 @@ public:
         t.nonFiniteSamples = nonFiniteSamples.load(std::memory_order_relaxed);
         t.clampedBlocks = clampedBlocks.load(std::memory_order_relaxed);
         t.breakerTrips = breakerTrips.load(std::memory_order_relaxed);
+        t.breakerReleases = breakerReleases.load(std::memory_order_relaxed);
+        t.startedAtMs = startedAtMs;
         t.breakerEngaged = breakerEngaged.load(std::memory_order_relaxed);
         t.lastClampMs = lastClampMs.load(std::memory_order_relaxed);
         return t;
@@ -86,31 +119,50 @@ public:
         if (resetRequested.exchange(false, std::memory_order_relaxed)) resetBreakerState();
 
         double const rate = sampleRate > 0.0 ? sampleRate : 44100.0;
+        if (rate != alphaRate) {
+            alpha = 1.0 - std::exp(-1000.0 / (kLoudnessTauMs * rate));
+            alphaRate = rate;
+        }
         float const target = engaged ? kBreakerGain : 1.0f;
         float const step = static_cast<float>((1.0 - kBreakerGain) * 1000.0
             / ((engaged ? kBreakerAttackMs : kBreakerReleaseMs) * rate));
+        bool const ramping = !(gain == 1.0f && target == 1.0f);
 
+        // Channel by channel: the clamp, the channel's loudness (of the clamped signal, before the breaker gain), then
+        // the breaker gain, whose ramp is the same on every channel (same start, same step).
         uint64_t overs = 0, nonFinite = 0;
-        if (gain == 1.0f && target == 1.0f) {
-            for (int ch = 0; ch < numChannels; ++ch) { // the common case: the clamp alone, gain untouched
-                float* d = channels[ch];
-                if (d == nullptr) continue;
-                for (int i = 0; i < numSamples; ++i)
-                    clampSample(d[i], overs, nonFinite);
-            }
-        } else {
-            for (int i = 0; i < numSamples; ++i) { // frame by frame: one gain per frame on every channel
-                gain = gain > target ? std::fmax(target, gain - step) : std::fmin(target, gain + step);
-                for (int ch = 0; ch < numChannels; ++ch) {
-                    float* d = channels[ch];
-                    if (d == nullptr) continue;
-                    clampSample(d[i], overs, nonFinite);
-                    d[i] *= gain;
+        double loudest = 0.0; // the highest mean square any channel reached in this block
+        double sharedEnd = 0.0;
+        float gainEnd = gain;
+        for (int ch = 0; ch < numChannels; ++ch) {
+            float* d = channels[ch];
+            if (d == nullptr) continue;
+            int const slot = std::min(ch, kMaxChannels - 1);
+            double ms = meanSquare[slot];
+            double peakMs = ms;
+            float g = gain;
+            for (int i = 0; i < numSamples; ++i) {
+                clampSample(d[i], overs, nonFinite);
+                double const x = d[i];
+                ms += alpha * (x * x - ms);
+                peakMs = std::max(peakMs, ms);
+                if (ramping) {
+                    g = g > target ? std::fmax(target, g - step) : std::fmin(target, g + step);
+                    d[i] *= g;
                 }
             }
+            if (ms < 1e-30) ms = 0.0; // no denormals after long silence
+            if (ch < kMaxChannels - 1)
+                meanSquare[slot] = ms;
+            else
+                sharedEnd = std::max(sharedEnd, ms);
+            loudest = std::max(loudest, peakMs);
+            gainEnd = g;
         }
+        if (numChannels >= kMaxChannels) meanSquare[kMaxChannels - 1] = sharedEnd;
+        if (ramping) gain = gainEnd;
 
-        updateBreaker(overs, static_cast<uint64_t>(numSamples), static_cast<uint64_t>(numChannels), rate);
+        updateBreaker(loudest, static_cast<uint64_t>(numSamples), rate);
         if (overs > 0) clampedSamples.fetch_add(overs, std::memory_order_relaxed);
         if (nonFinite > 0) nonFiniteSamples.fetch_add(nonFinite, std::memory_order_relaxed);
         if (overs > 0 || nonFinite > 0) {
@@ -135,30 +187,33 @@ private:
         }
     }
 
-    void updateBreaker(uint64_t const overs, uint64_t const frames, uint64_t const numChannels, double const rate) noexcept
+    void updateBreaker(double const loudest, uint64_t const frames, double const rate) noexcept
     {
-        windowFrames += frames;
-        windowSamples += frames * numChannels;
-        windowOvers += overs;
-        framesSinceOver = overs > 0 ? 0 : framesSinceOver + frames;
-        if (static_cast<double>(windowFrames) >= kBreakerWindowMs * rate / 1000.0) {
-            if (!engaged && static_cast<double>(windowOvers) > kBreakerTripFraction * static_cast<double>(windowSamples)) {
+        if (!engaged) {
+            if (loudest > kTripMeanSquare) {
                 engaged = true;
+                framesCalm = 0;
                 breakerTrips.fetch_add(1, std::memory_order_relaxed);
             }
-            windowFrames = windowSamples = windowOvers = 0;
+            return;
         }
-        if (engaged && static_cast<double>(framesSinceOver) >= kBreakerHoldMs * rate / 1000.0)
+        framesCalm = loudest < kReleaseMeanSquare ? framesCalm + frames : 0;
+        if (static_cast<double>(framesCalm) >= kBreakerHoldMs * rate / 1000.0) {
             engaged = false;
+            breakerReleases.fetch_add(1, std::memory_order_relaxed);
+        }
     }
 
     // Audio thread only. The gain jumps back to 1 only when the ceiling was off (nothing to ramp from); an owner
-    // reset releases the breaker and lets the gain ramp up.
+    // reset releases the breaker (not counted as a release: the owner did it), lets the gain ramp up and starts the
+    // loudness measure afresh.
     void resetBreakerState() noexcept
     {
         if (!wasActive) gain = 1.0f;
         engaged = false;
-        windowFrames = windowSamples = windowOvers = framesSinceOver = 0;
+        framesCalm = 0;
+        for (auto& m : meanSquare)
+            m = 0.0;
         breakerEngaged.store(false, std::memory_order_relaxed);
     }
 
@@ -169,8 +224,10 @@ private:
     std::atomic<uint64_t> nonFiniteSamples { 0 };
     std::atomic<uint64_t> clampedBlocks { 0 };
     std::atomic<uint64_t> breakerTrips { 0 };
+    std::atomic<uint64_t> breakerReleases { 0 };
     std::atomic<bool> breakerEngaged { false };
     std::atomic<int64_t> lastClampMs { -1 };
+    int64_t const startedAtMs;
     static_assert(std::atomic<uint64_t>::is_always_lock_free && std::atomic<int64_t>::is_always_lock_free
             && std::atomic<bool>::is_always_lock_free,
         "the ceiling's counters must be lock-free (audio thread)");
@@ -179,7 +236,9 @@ private:
     bool wasActive = false;
     bool engaged = false;
     float gain = 1.0f;
-    uint64_t windowFrames = 0, windowSamples = 0, windowOvers = 0, framesSinceOver = 0;
+    uint64_t framesCalm = 0;
+    double meanSquare[kMaxChannels] = {};
+    double alpha = 0.0, alphaRate = 0.0;
 };
 
 } // namespace mcp
