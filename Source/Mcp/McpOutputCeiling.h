@@ -19,9 +19,11 @@
 //    kBreakerReleaseMs), or when the owner resets it. What trips it is sustained CLIPPED or SQUARE-LIKE full-scale
 //    sound: a full-scale square / tanh~ / [clip~ -1 1] blast trips it in ~250 ms whether or not it exceeds +-1.0.
 //    Round 2: the trip sits at -2.5 dBFS RMS, so any full-scale waveform whose short-term RMS stays under that (a
-//    0 dBFS sine at any frequency, -3.01 dBFS RMS with its one-pole ripple; a saw, triangle, noise, a pulse train under
-//    ~55 % duty; a loud master at -4 dBFS RMS) is only clamped, never tripped. The loudness starts afresh on an
-//    output channel-count change and on requestLoudnessReset (prepareToPlay).
+//    0 dBFS sine at any audible frequency (>= ~2.5 Hz; sub-audio near-DC material can trip it through the one-pole
+//    ripple); a saw, triangle, noise, a pulse train under ~55 % duty; a loud master at -4 dBFS RMS) is only clamped,
+//    never tripped. The loudness starts afresh only on an output channel-count change (round 3: not on
+//    prepareToPlay, which a patch can repeat with `; pd oversample` to keep the measure from ever reaching the trip);
+//    a sample-rate change only recomputes the one-pole coefficient.
 // Runs only in the standalone app (a plugin's host owns the output) and while the owner setting
 // `mcp_bridge_ai_ceiling` is on; whether PlugData's limiter is on or not does not matter (it clips at +-sqrt(2) and
 // its threshold goes up to +3 dB).
@@ -92,8 +94,6 @@ public:
     bool isStandalone() const noexcept { return standalone.load(std::memory_order_relaxed); }
     bool isActive() const noexcept { return isEnabled() && isStandalone(); }
     void requestBreakerReset() noexcept { resetRequested.store(true, std::memory_order_relaxed); }
-    // Round 2: start the loudness measure afresh (McpHost::prepare calls it on prepareToPlay). Any thread.
-    void requestLoudnessReset() noexcept { loudnessResetRequested.store(true, std::memory_order_relaxed); }
 
     Telemetry read() const noexcept
     {
@@ -122,7 +122,7 @@ public:
         wasActive = true;
         if (channels == nullptr || numChannels <= 0 || numSamples <= 0) return;
         if (resetRequested.exchange(false, std::memory_order_relaxed)) resetBreakerState();
-        if (loudnessResetRequested.exchange(false, std::memory_order_relaxed) || numChannels != lastNumChannels)
+        if (numChannels != lastNumChannels) // a new output layout: what the old channels measured does not carry over
             clearLoudness();
         lastNumChannels = numChannels;
 
@@ -233,7 +233,6 @@ private:
     std::atomic<bool> standalone { false };
     std::atomic<bool> enabled { true };
     std::atomic<bool> resetRequested { false };
-    std::atomic<bool> loudnessResetRequested { false };
     std::atomic<uint64_t> clampedSamples { 0 };
     std::atomic<uint64_t> nonFiniteSamples { 0 };
     std::atomic<uint64_t> clampedBlocks { 0 };

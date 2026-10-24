@@ -6,7 +6,8 @@
  // CONTRACT (P9 Part B): the `audio` hook audioBlockFinished WRITES the final output. It runs after the master
  // gain and PlugData's limiter, and its first step is the output ceiling + breaker (Mcp/McpOutputCeiling.h): in
  // the standalone app, while the owner setting `mcp_bridge_ai_ceiling` is on, every output sample is clamped to
- // +-1.0 (NaN/inf -> 0) and sustained full-scale loudness is cut 20 dB. Everything after it (the armed meters) reads what leaves
+ // +-1.0 (NaN/inf -> 0) and sustained clipped or square-like full-scale sound is cut 20 dB. Everything after it (the
+ // armed meters) reads what leaves
  // the app. What runs BEFORE it and so sees the unclamped signal: the recorder (PluginProcessor, "Record before
  // limiter"), the toolbar meter and writeRecorderTap. MCPBridge::playVoiceTake's own device callback (outside
  // processBlock) gets the clamp alone (Mcp/McpCeilingPlayer.h).
@@ -25,8 +26,9 @@
 void McpHost::prepare(double const sampleRate, int const samplesPerBlock)
 {
     ignoreUnused(samplesPerBlock);
-    // P9 round 2: the output ceiling's loudness measure starts afresh with a new device / rate / layout.
-    session.outputCeiling.requestLoudnessReset();
+    // P9 round 3: NOT a reset of the output ceiling's loudness here: a patch can repeat prepareToPlay
+    // (`; pd oversample 1/0`) and would keep the breaker from tripping or release it under a full-scale square. The
+    // ceiling clears its loudness on an output channel-count change and recomputes its coefficient on a new rate.
     // Armed spectral capture buffer (Phase 5): up to 2s of mono final output.
     {
         int const cap = static_cast<int>(std::ceil(sampleRate * 2.0));

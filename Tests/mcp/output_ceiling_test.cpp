@@ -142,6 +142,7 @@ struct Feed {
     float lastPeak = 0.0f;
     bool lastBitEqual = false;
     bool everyBlockAtUnity = true; // output == clamp(input) on every block so far
+    double rate = kRate;           // the sample rate passed to process()
 
     Feed(OutputCeiling& c, int ch, int b)
         : ceiling(c)
@@ -159,7 +160,7 @@ struct Feed {
                 b.data[static_cast<size_t>(ch)][static_cast<size_t>(i)] = (hot < 0 || ch == hot) ? v : 0.0f;
         }
         Block const before = b;
-        ceiling.process(b.ptrs.data(), b.channels(), b.samples(), kRate, static_cast<uint32_t>(pos * 1000 / static_cast<int64_t>(kRate)));
+        ceiling.process(b.ptrs.data(), b.channels(), b.samples(), rate, static_cast<uint32_t>(pos * 1000 / static_cast<int64_t>(kRate)));
         pos += frames;
         lastPeak = b.peak();
         lastBitEqual = b.bitEqual(before);
@@ -419,8 +420,8 @@ int main()
         CHECK(tripMs >= kExpectedTripMs * 0.8 && tripMs <= kExpectedTripMs + 2.0 * 512 * 1000.0 / kRate);
     }
 
-    // Round 2: the loudness starts afresh on a channel-count change (mono -> stereo) and on an owner-side reset
-    // (prepareToPlay): what was measured before does not shorten the trip after.
+    // Round 2: the loudness starts afresh on a channel-count change (mono -> stereo): what was measured before does
+    // not shorten the trip after.
     {
         OutputCeiling ceil;
         turnOn(ceil);
@@ -431,14 +432,24 @@ int main()
         double const tripMs = stereo.untilEngaged(square(1.0f), 0, 2000.0);
         CHECK(tripMs >= kExpectedTripMs * 0.8);
     }
-    {
+    // Round 3 (MEDIUM): repeated prepares (`; pd oversample 1/0` -> prepareToPlay) no longer reset the loudness; at
+    // this level they are sample-rate changes every ~30, 80 and 235 ms during a full-scale square: it still trips, and
+    // once engaged it is not released while the square plays. (The host side: bridge_handler_tests, McpHost::prepare.)
+    for (double everyMs : { 30.0, 80.0, 235.0 }) {
         OutputCeiling ceil;
         turnOn(ceil);
         Feed f(ceil, 2, 512);
-        f.run(square(1.0f), 0, 200.0);
-        ceil.requestLoudnessReset();
-        double const tripMs = f.untilEngaged(square(1.0f), 0, 2000.0);
-        CHECK(tripMs >= kExpectedTripMs * 0.8);
+        bool engaged = false, releasedWhileHot = false;
+        for (int k = 0; k < 60; ++k) { // 60 x everyMs, at least 1.8 s
+            f.rate = (k % 2 == 0) ? 44100.0 : 48000.0;
+            f.run(square(1.0f), -1, everyMs);
+            bool const now = ceil.read().breakerEngaged;
+            releasedWhileHot = releasedWhileHot || (engaged && !now);
+            engaged = engaged || now;
+        }
+        CHECK(engaged);
+        CHECK(!releasedWhileHot);
+        CHECK(ceil.read().breakerTrips == 1);
     }
 
     // Hot music-like material (a 0.7 peak mix with a 1.05 over now and then) never trips it and is never turned down.

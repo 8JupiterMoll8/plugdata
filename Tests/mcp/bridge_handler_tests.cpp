@@ -1527,6 +1527,25 @@ void runOutputCeilingCases(Harness& h, PluginProcessor& processor, AudioControl&
         CHECK(consoleCount(tripLine) == tripsSaid + 1);
         volume->setUnscaledValueNotifyingHost(0.8f);
     }
+    // Round 3 (MEDIUM): repeated prepares (`; pd oversample 1/0` -> prepareToPlay -> McpHost::prepare) every ~35, ~81
+    // and ~232 ms (3, 7, 20 blocks of 512) during the full-scale chain neither stop the trip nor release the breaker.
+    for (int every : { 3, 7, 20 }) {
+        quiet();
+        auto const t0 = ceiling.read();
+        double const rate = processor.getSampleRate() > 0.0 ? processor.getSampleRate() : 44100.0;
+        bool engaged = false, releasedWhileHot = false;
+        for (int k = 0; k < 120; ++k) { // ~1.4 s
+            if (k % every == 0) host->prepare(rate, 512);
+            render(1, 1);
+            bool const now = ceiling.read().breakerEngaged;
+            releasedWhileHot = releasedWhileHot || (engaged && !now);
+            engaged = engaged || now;
+        }
+        if (!engaged || releasedWhileHot) std::printf("  prepare every %d blocks: engaged %d, released while hot %d\n", every, engaged, releasedWhileHot);
+        CHECK(engaged);
+        CHECK(!releasedWhileHot);
+        CHECK(ceiling.read().breakerTrips == t0.breakerTrips + 1);
+    }
     // Master x2 with a 0.8 signal (1.6 after the gain): clamped.
     h.call("/pd/batch_atomic", { "main", "ceil3", 1, 0, 0, 0, 0, "ceilg", 0, 5, 10, 0 }, "/pd/batch_atomic/reply/ceil3");
     auto again = h.call("/pd/batch_atomic",
