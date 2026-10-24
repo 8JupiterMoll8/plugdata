@@ -16,9 +16,12 @@
 //    (time constant kLoudnessTauMs) of the breaker's INPUT (after the clamp, before the breaker gain). When the
 //    loudest channel's short-term RMS exceeds kTripRmsDb the output gain ramps down to kBreakerGain (-20 dB) in
 //    kBreakerAttackMs; it releases once every channel has stayed under kReleaseRmsDb for kBreakerHoldMs (ramp
-//    kBreakerReleaseMs), or when the owner resets it. A full-scale square / tanh~ / [clip~ -1 1] blast trips it in
-//    ~210 ms whether or not it exceeds +-1.0; mastered music sits well under -3 dBFS RMS. A pure 0 dBFS sine
-//    (-3.01 dBFS RMS) does not trip; a clamped sine hotter than ~+0.1 dB does, and lets go ~1.2 s after it calms.
+//    kBreakerReleaseMs), or when the owner resets it. What trips it is sustained CLIPPED or SQUARE-LIKE full-scale
+//    sound: a full-scale square / tanh~ / [clip~ -1 1] blast trips it in ~250 ms whether or not it exceeds +-1.0.
+//    Round 2: the trip sits at -2.5 dBFS RMS, so any full-scale waveform whose short-term RMS stays under that (a
+//    0 dBFS sine at any frequency, -3.01 dBFS RMS with its one-pole ripple; a saw, triangle, noise, a pulse train under
+//    ~55 % duty; a loud master at -4 dBFS RMS) is only clamped, never tripped. The loudness starts afresh on an
+//    output channel-count change and on requestLoudnessReset (prepareToPlay).
 // Runs only in the standalone app (a plugin's host owns the output) and while the owner setting
 // `mcp_bridge_ai_ceiling` is on; whether PlugData's limiter is on or not does not matter (it clips at +-sqrt(2) and
 // its threshold goes up to +3 dB).
@@ -44,10 +47,10 @@ class OutputCeiling {
 public:
     // The breaker's constants (recorded in the P9 step file, review round 1).
     static constexpr double kLoudnessTauMs = 300.0; // the one-pole mean square's time constant
-    static constexpr double kTripRmsDb = -3.0;      // the loudest channel's RMS above this trips it
+    static constexpr double kTripRmsDb = -2.5;      // the loudest channel's RMS above this trips it (round 2)
     static constexpr double kReleaseRmsDb = -6.0;   // every channel under this ...
     static constexpr double kBreakerHoldMs = 1000.0; // ... for this long releases it
-    static constexpr double kTripMeanSquare = 0.50118723362727224;    // 10^(kTripRmsDb / 10)
+    static constexpr double kTripMeanSquare = 0.56234132519034907;    // 10^(kTripRmsDb / 10)
     static constexpr double kReleaseMeanSquare = 0.25118864315095796; // 10^(kReleaseRmsDb / 10)
     static constexpr float kBreakerGain = 0.1f;        // -20 dB while engaged
     static constexpr double kBreakerAttackMs = 20.0;   // ramp 1.0 -> kBreakerGain
@@ -89,6 +92,8 @@ public:
     bool isStandalone() const noexcept { return standalone.load(std::memory_order_relaxed); }
     bool isActive() const noexcept { return isEnabled() && isStandalone(); }
     void requestBreakerReset() noexcept { resetRequested.store(true, std::memory_order_relaxed); }
+    // Round 2: start the loudness measure afresh (McpHost::prepare calls it on prepareToPlay). Any thread.
+    void requestLoudnessReset() noexcept { loudnessResetRequested.store(true, std::memory_order_relaxed); }
 
     Telemetry read() const noexcept
     {
@@ -117,6 +122,9 @@ public:
         wasActive = true;
         if (channels == nullptr || numChannels <= 0 || numSamples <= 0) return;
         if (resetRequested.exchange(false, std::memory_order_relaxed)) resetBreakerState();
+        if (loudnessResetRequested.exchange(false, std::memory_order_relaxed) || numChannels != lastNumChannels)
+            clearLoudness();
+        lastNumChannels = numChannels;
 
         double const rate = sampleRate > 0.0 ? sampleRate : 44100.0;
         if (rate != alphaRate) {
@@ -204,6 +212,12 @@ private:
         }
     }
 
+    void clearLoudness() noexcept
+    {
+        for (auto& m : meanSquare)
+            m = 0.0;
+    }
+
     // Audio thread only. The gain jumps back to 1 only when the ceiling was off (nothing to ramp from); an owner
     // reset releases the breaker (not counted as a release: the owner did it), lets the gain ramp up and starts the
     // loudness measure afresh.
@@ -212,14 +226,14 @@ private:
         if (!wasActive) gain = 1.0f;
         engaged = false;
         framesCalm = 0;
-        for (auto& m : meanSquare)
-            m = 0.0;
+        clearLoudness();
         breakerEngaged.store(false, std::memory_order_relaxed);
     }
 
     std::atomic<bool> standalone { false };
     std::atomic<bool> enabled { true };
     std::atomic<bool> resetRequested { false };
+    std::atomic<bool> loudnessResetRequested { false };
     std::atomic<uint64_t> clampedSamples { 0 };
     std::atomic<uint64_t> nonFiniteSamples { 0 };
     std::atomic<uint64_t> clampedBlocks { 0 };
@@ -237,6 +251,7 @@ private:
     bool engaged = false;
     float gain = 1.0f;
     uint64_t framesCalm = 0;
+    int lastNumChannels = 0;
     double meanSquare[kMaxChannels] = {};
     double alpha = 0.0, alphaRate = 0.0;
 };

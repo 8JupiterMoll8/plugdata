@@ -114,6 +114,13 @@ Gen music(float peak, float over)
         return peak * static_cast<float>(v);
     };
 }
+Gen saw(float a, double f)
+{
+    return [a, f](int64_t n) {
+        double const ph = std::fmod(f * static_cast<double>(n) / kRate, 1.0);
+        return a * static_cast<float>(2.0 * ph - 1.0);
+    };
+}
 // Full-scale pulses: `duty` of every 200 samples at +-a.
 Gen clicks(float a, double duty)
 {
@@ -124,7 +131,7 @@ Gen clicks(float a, double duty)
     };
 }
 
-constexpr double kExpectedTripMs = 230.0;     // ~209 ms from silence to -3 dBFS RMS for a full-scale square (tau 300 ms)
+constexpr double kExpectedTripMs = 270.0;     // ~248 ms from silence to -2.5 dBFS RMS for a full-scale square (tau 300 ms)
 constexpr double kExpectedReleaseMs = 1400.0; // the 1 s hold after the loudness falls under -6 dBFS RMS, + its fall
 
 // Feeds blocks of `block` frames from a generator to channel `hot` (others silent), or to every channel (hot < 0).
@@ -325,7 +332,8 @@ int main()
     CHECK(OutputCeiling::kReleaseRmsDb < OutputCeiling::kTripRmsDb);
 
     // Full-scale material that never exceeds +-1.0 (what [clip~ -1 1] or tanh~ make of a +40 dB mistake) trips it,
-    // on 2, 10 and 32 channels with only ONE of them hot, at several block sizes.
+    // on 2, 10, 32 and 72 channels with only ONE of them hot (the last; past 64 it shares the last loudness slot), at
+    // several block sizes.
     {
         struct Case {
             char const* name;
@@ -338,7 +346,7 @@ int main()
             { "+12 dB square (clamped)", square(kPlus12Db) },
         };
         for (auto const& c : cases)
-            for (int channels : { 2, 10, 32 })
+            for (int channels : { 2, 10, 32, 72 })
                 for (int block : { 64, 512, 1000 }) {
                     OutputCeiling ceil;
                     turnOn(ceil);
@@ -370,20 +378,67 @@ int main()
             CHECK(ceil.read().breakerTrips == 1);
         }
 
-    // A +0.2 dB hot sine is clamped; its loudness sits at about -2.85 dBFS RMS, just above the -3 dBFS trip, so the
-    // breaker may engage on a SUSTAINED one, but it lets go about 1 s after the sine calms to a normal level.
+    // Round 2 (trip at -2.5 dBFS RMS): a +0.2 dB hot sine (-2.85 dBFS RMS) is clamped, never tripped.
     {
         OutputCeiling ceil;
         turnOn(ceil);
         Feed f(ceil, 2, 512);
-        f.run(sine(1.0233f, 440.0), -1, 3000.0);
+        f.run(sine(1.0233f, 440.0), -1, 4000.0);
         CHECK(ceil.read().clampedSamples > 0);
-        double const releasedMs = f.untilReleased(sine(0.3f, 440.0), -1, 3000.0);
-        CHECK(releasedMs >= 0.0 && releasedMs <= kExpectedReleaseMs);
+        CHECK(ceil.read().breakerTrips == 0);
+    }
+
+    // Round 2: 0 dBFS sines never trip at any frequency (at -3 dBFS the one-pole ripple tripped those under ~110 Hz).
+    for (double hz : { 20.0, 30.0, 50.0, 80.0, 100.0, 440.0, 1000.0 }) {
+        OutputCeiling ceil;
+        turnOn(ceil);
+        Feed f(ceil, 2, 512);
+        f.run(sine(1.0f, hz), -1, 4000.0);
+        if (ceil.read().breakerTrips != 0) std::printf("  0 dBFS sine at %.0f Hz tripped\n", hz);
+        CHECK(ceil.read().breakerTrips == 0);
+    }
+
+    // Round 2: a loud master at -4 to -5 dBFS short-term RMS does not trip: a 0.6 square (-4.4 dBFS RMS) and a dense
+    // mix scaled to about -4.5 dBFS RMS with its peaks clamped.
+    {
+        OutputCeiling ceil;
+        turnOn(ceil);
+        Feed f(ceil, 2, 512);
+        f.run(square(0.6f), -1, 4000.0);
+        f.run(music(1.45f, 1.2f), -1, 4000.0);
+        CHECK(ceil.read().clampedSamples > 0);
+        CHECK(ceil.read().breakerTrips == 0);
+    }
+
+    // Round 2: more than 64 channels: channel 63 and channel 70 of 72 (both in the shared last slot) each trip it.
+    for (int hot : { 63, 70 }) {
+        OutputCeiling ceil;
+        turnOn(ceil);
+        Feed f(ceil, 72, 512);
+        double const tripMs = f.untilEngaged(square(1.0f), hot, 2000.0);
+        CHECK(tripMs >= kExpectedTripMs * 0.8 && tripMs <= kExpectedTripMs + 2.0 * 512 * 1000.0 / kRate);
+    }
+
+    // Round 2: the loudness starts afresh on a channel-count change (mono -> stereo) and on an owner-side reset
+    // (prepareToPlay): what was measured before does not shorten the trip after.
+    {
+        OutputCeiling ceil;
+        turnOn(ceil);
+        Feed mono(ceil, 1, 512);
+        mono.run(square(1.0f), 0, 200.0); // ~49 % of the way to the trip, under it
         CHECK(!ceil.read().breakerEngaged);
-        // and once released and ramped up, the calm sine passes bit-identical.
-        f.run(sine(0.3f, 440.0), -1, 400.0);
-        CHECK(f.lastBitEqual);
+        Feed stereo(ceil, 2, 512);
+        double const tripMs = stereo.untilEngaged(square(1.0f), 0, 2000.0);
+        CHECK(tripMs >= kExpectedTripMs * 0.8);
+    }
+    {
+        OutputCeiling ceil;
+        turnOn(ceil);
+        Feed f(ceil, 2, 512);
+        f.run(square(1.0f), 0, 200.0);
+        ceil.requestLoudnessReset();
+        double const tripMs = f.untilEngaged(square(1.0f), 0, 2000.0);
+        CHECK(tripMs >= kExpectedTripMs * 0.8);
     }
 
     // Hot music-like material (a 0.7 peak mix with a 1.05 over now and then) never trips it and is never turned down.
@@ -399,21 +454,14 @@ int main()
         CHECK(f.everyBlockAtUnity);  // nothing else changed
     }
 
-    // A full-scale sine with no overs (-3.01 dBFS RMS) stays just under the trip: a test tone at 0 dBFS is not cut.
+    // Residue, pinned: full-scale waveforms whose short-term RMS stays under -2.5 dBFS are only clamped: a saw
+    // (-4.8 dBFS RMS) and a pulse train at 54 % duty (-2.7 dBFS RMS).
     {
         OutputCeiling ceil;
         turnOn(ceil);
         Feed f(ceil, 2, 512);
-        f.run(sine(1.0f, 440.0), -1, 4000.0);
-        CHECK(ceil.read().breakerTrips == 0);
-    }
-
-    // Residue, pinned: a full-scale pulse train under 50 % duty (here 45 %) stays below the -3 dBFS RMS trip.
-    {
-        OutputCeiling ceil;
-        turnOn(ceil);
-        Feed f(ceil, 2, 512);
-        f.run(clicks(1.0f, 0.45), -1, 4000.0);
+        f.run(saw(1.0f, 110.0), -1, 4000.0);
+        f.run(clicks(1.0f, 0.54), -1, 4000.0);
         CHECK(ceil.read().breakerTrips == 0);
     }
 
