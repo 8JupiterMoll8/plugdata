@@ -214,6 +214,7 @@ void McpHost::shutdown()
     if (session.mcpShuttingDown.exchange(true))
         return;
     focusTimer.stopTimer();
+    ceilingTimer.stopTimer();
     if (mcpBridge)
         mcpBridge->shutdown();
     std::function<void()> job;
@@ -237,9 +238,14 @@ void McpHost::createBridge()
     auto const mcpEnabled = processor.settingsFile->getProperty<bool>("mcp_bridge_enabled");
     auto const mcpListen = processor.settingsFile->getProperty<int>("mcp_bridge_listen_port");
     auto const mcpSend = processor.settingsFile->getProperty<int>("mcp_bridge_send_port");
-    // P9: the output ceiling's switch, read once here (startup) and mirrored into the session; missing key = on.
+    // P9: the output ceiling's switch, read once here (startup) and mirrored into the session; missing key = on,
+    // only a literal false = off (round 1). Its breaker's trips and releases go to the console from a timer.
     session.outputCeiling.setStandalone(ProjectInfo::isStandalone);
-    session.outputCeiling.setEnabled(processor.settingsFile->getProperty<bool>("mcp_bridge_ai_ceiling"));
+    applyOutputCeilingSettingAtStartup();
+    auto const ceilingNow = session.outputCeiling.read();
+    ceilingTripsSaid = ceilingNow.breakerTrips;
+    ceilingReleasesSaid = ceilingNow.breakerReleases;
+    ceilingTimer.startTimer(250);
     // P3.4 S0: with PLUGDATA_MCP_AUDIT=1, time every Pd-lock hold (no-op otherwise).
     processor.setThis();
     mcp::audit::installLock(&processor.audioLock);
@@ -263,8 +269,38 @@ void McpHost::setOutputCeilingFromGui(bool const on)
 }
 
 // P9: {"active":bool,"setting":"on"|"off","reason"?:..,"clampedSamples":n,"nonFiniteSamples":n,"clampedBlocks":n,
-// "breakerTrips":n,"breakerEngaged":bool,"lastClampMs":n|null}; lastClampMs = ms since the last block the ceiling
+// "breakerTrips":n,"breakerReleases":n,"startedAtMs":n,"breakerEngaged":bool,"lastClampMs":n|null}; startedAtMs = the
+// wall-clock ms this process's ceiling started (the server detects a restart by it); lastClampMs = ms since the last block the ceiling
 // touched. Atomics only: any thread.
+// P9 round 1: only a literal JSON `false` is off. "off", 0, null, a string: on (a malformed value never disarms it).
+bool McpHost::ceilingSettingIsOn(juce::var const& value)
+{
+    return !(value.isBool() && !static_cast<bool>(value));
+}
+
+void McpHost::applyOutputCeilingSettingAtStartup()
+{
+    auto const value = processor.settingsFile->getPropertyAsValue("mcp_bridge_ai_ceiling").getValue();
+    bool const on = ceilingSettingIsOn(value);
+    session.outputCeiling.setEnabled(on);
+    if (!value.isBool())
+        processor.settingsFile->setProperty("mcp_bridge_ai_ceiling", true); // the file and the panel agree with it
+    if (!on && session.outputCeiling.isStandalone()) // set from ProjectInfo::isStandalone in createBridge
+        processor.logError("OUTPUT CEILING IS OFF (Settings > Advanced > MCP bridge): overs, NaN and sustained "
+                           "full-scale sound reach your speakers unless PlugData's limiter catches them");
+}
+
+void McpHost::pollOutputCeiling()
+{
+    auto const t = session.outputCeiling.read();
+    for (int n = 0; ceilingTripsSaid < t.breakerTrips; ++ceilingTripsSaid)
+        if (n++ < 3)
+            processor.logWarning("Output ceiling: sustained full-scale sound, turned down 20 dB");
+    for (int n = 0; ceilingReleasesSaid < t.breakerReleases; ++ceilingReleasesSaid)
+        if (n++ < 3)
+            processor.logMessage("Output ceiling: level back to normal, breaker released");
+}
+
 juce::String McpHost::outputCeilingJson() const
 {
     auto const& ceiling = session.outputCeiling;
@@ -281,6 +317,8 @@ juce::String McpHost::outputCeilingJson() const
          << ",\"nonFiniteSamples\":" << juce::String(static_cast<juce::uint64>(t.nonFiniteSamples))
          << ",\"clampedBlocks\":" << juce::String(static_cast<juce::uint64>(t.clampedBlocks))
          << ",\"breakerTrips\":" << juce::String(static_cast<juce::uint64>(t.breakerTrips))
+         << ",\"breakerReleases\":" << juce::String(static_cast<juce::uint64>(t.breakerReleases))
+         << ",\"startedAtMs\":" << juce::String(static_cast<juce::int64>(t.startedAtMs))
          << ",\"breakerEngaged\":" << (t.breakerEngaged ? "true" : "false") << ",\"lastClampMs\":";
     if (t.lastClampMs < 0)
         json << "null";
@@ -307,12 +345,21 @@ bool McpHost::settingsChanged(String const& name, var const& value)
 void McpHost::mcpSettingsChanged(String const& name, var const& value)
 {
     if (name == "mcp_bridge_ai_ceiling") {
-        // P9 (M1): ON from anywhere; OFF only through setOutputCeilingFromGui (the panel calls it before the setting
-        // changes) or at startup. A settings-file edit while PlugData runs does not switch the ceiling off.
-        if (static_cast<bool>(value))
+        // P9 (M1, round 1): ON from anywhere; OFF only through setOutputCeilingFromGui (the panel switches the host
+        // first; the setting's change arrives after, asynchronously) or at startup. A settings-file edit to false while
+        // PlugData runs is refused AND written back as true, so the file, the panel and the ceiling agree. A malformed
+        // value is on and is written back as true too.
+        if (ceilingSettingIsOn(value)) {
             session.outputCeiling.setEnabled(true);
-        else if (session.outputCeiling.isEnabled())
+            if (!value.isBool())
+                postMessage([this] { processor.settingsFile->setProperty("mcp_bridge_ai_ceiling", true); });
+        } else if (session.outputCeiling.isEnabled()) {
             processor.logMessage("Output ceiling stays on: switch it off in Settings > Advanced > MCP bridge");
+            postMessage([this] {
+                if (session.outputCeiling.isEnabled())
+                    processor.settingsFile->setProperty("mcp_bridge_ai_ceiling", true);
+            });
+        }
         return;
     }
     if (!mcpBridge) return;

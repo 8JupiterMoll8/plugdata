@@ -6,10 +6,10 @@
  // CONTRACT (P9 Part B): the `audio` hook audioBlockFinished WRITES the final output. It runs after the master
  // gain and PlugData's limiter, and its first step is the output ceiling + breaker (Mcp/McpOutputCeiling.h): in
  // the standalone app, while the owner setting `mcp_bridge_ai_ceiling` is on, every output sample is clamped to
- // +-1.0 (NaN/inf -> 0) and sustained overs are cut 20 dB. Everything after it (the armed meters) reads what leaves
+ // +-1.0 (NaN/inf -> 0) and sustained full-scale loudness is cut 20 dB. Everything after it (the armed meters) reads what leaves
  // the app. What runs BEFORE it and so sees the unclamped signal: the recorder (PluginProcessor, "Record before
- // limiter"), the toolbar meter, writeRecorderTap, and MCPBridge::playVoiceTake's own device callback (an
- // artist-initiated mic take, outside processBlock).
+ // limiter"), the toolbar meter and writeRecorderTap. MCPBridge::playVoiceTake's own device callback (outside
+ // processBlock) gets the clamp alone (Mcp/McpCeilingPlayer.h).
  */
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_dsp/juce_dsp.h>
@@ -95,7 +95,7 @@ void McpHost::audioBlockFinished(AudioBuffer<float>& buffer)
     if (session.mcpArmActive.load(std::memory_order_relaxed)) {
         session.mcpArmedTailRuns.fetch_add(1, std::memory_order_relaxed); // #83 diagnostics
         float p = 0.0f;
-        for (int ch = 0; ch < buffer.getNumChannels(); ++ch) {
+        for (int ch = 0; ch < outputs; ++ch) { // round 1 (review L2): what leaves the app, not input-only channels
             auto* d = buffer.getReadPointer(ch);
             for (int i = 0; i < buffer.getNumSamples(); ++i) {
                 float const a = std::abs(d[i]);

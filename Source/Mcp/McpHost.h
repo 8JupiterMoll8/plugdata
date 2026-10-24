@@ -68,6 +68,14 @@ public:
     // P9: the owner's switch for the output ceiling, from the settings panel only (the one way to switch it off
     // while PlugData runs; on also resets the breaker). Message thread.
     void setOutputCeilingFromGui(bool on);
+    // P9 round 1: only a literal JSON `false` switches the ceiling off; anything else (malformed) is on.
+    static bool ceilingSettingIsOn(juce::var const& value);
+    // P9 round 1: read the setting into the ceiling as at startup (createBridge): a malformed value is on and is
+    // written back as true; off posts a loud console line. Message thread.
+    void applyOutputCeilingSettingAtStartup();
+    // P9 round 1: posts each breaker trip and release once to the console (the ceiling timer, every 250 ms).
+    // Message thread; never the audio thread.
+    void pollOutputCeiling();
     // P9: the `ceiling` object of the /pd/limiter reply (JSON). Any thread.
     juce::String outputCeilingJson() const;
     void mcpSettingsChanged(String const& name, var const& value);
@@ -214,6 +222,14 @@ private:
         McpHost& host;
     };
     FocusTimer focusTimer { *this };
+    // P9 round 1: calls pollOutputCeiling every 250 ms on the message thread (started in createBridge).
+    struct CeilingTimer final : juce::Timer {
+        explicit CeilingTimer(McpHost& h) : host(h) {}
+        void timerCallback() override { host.pollOutputCeiling(); }
+        McpHost& host;
+    };
+    CeilingTimer ceilingTimer { *this };
+    uint64_t ceilingTripsSaid = 0, ceilingReleasesSaid = 0; // message thread
 
 public:
     JUCE_DECLARE_WEAK_REFERENCEABLE(McpHost)

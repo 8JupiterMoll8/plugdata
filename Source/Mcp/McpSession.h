@@ -380,6 +380,8 @@ struct McpSession {
     // /meter/read can say "hot, clipped at the ceiling" instead of "audible".
     std::atomic<float> mcpArmPreCeilingPeak { 0.0f };
     std::atomic<uint64_t> mcpArmClampedAtArm { 0 };
+    std::atomic<uint64_t> mcpArmNonFiniteAtArm { 0 }; // round 1: the window's NaN/inf count
+    std::atomic<uint64_t> mcpArmTripsAtArm { 0 };     // round 1: breaker trips in the window
 
     // P9 Part B: the output ceiling and its breaker on the final output (McpHost::audioBlockFinished). Its switch
     // mirrors the owner setting `mcp_bridge_ai_ceiling` (read at bridge creation and in the MCP settings path; never
