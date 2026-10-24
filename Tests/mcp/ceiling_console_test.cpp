@@ -24,7 +24,8 @@ bool has(std::string const& s, char const* part) { return s.find(part) != std::s
 // The N of a summary line ("... breaker tripped N times ..."), 1 for a single line.
 uint64_t countIn(std::string const& line)
 {
-    auto const at = line.find(" times in the last ");
+    auto at = line.find(" times in the last ");
+    if (at == std::string::npos) at = line.find(" time in the last ");
     if (at == std::string::npos) return 1;
     auto start = line.rfind(' ', at - 1);
     return std::strtoull(line.c_str() + start + 1, nullptr, 10);
@@ -117,6 +118,43 @@ int main()
         c.start(5, 5, 0);
         CHECK(c.poll(0, 0, 250).empty());
         CHECK(c.poll(1, 0, 500).size() == 1);
+    }
+
+    // Round 3: a single event that was held back is said later in the summary form, not in the present tense.
+    {
+        CeilingConsole c;
+        c.start(0, 0, 0);
+        CHECK(c.poll(1, 0, 250).size() == 1);           // said at once
+        CHECK(c.poll(2, 0, 3000).empty());              // held back
+        auto l = c.poll(2, 0, 10250);
+        CHECK(l.size() == 1 && l[0] == "Output ceiling: breaker tripped 1 time in the last 10s");
+        // after a quiet spell, a new single event is said at once, in the present tense again
+        l = c.poll(3, 0, 30000);
+        CHECK(l.size() == 1 && l[0] == CeilingConsole::kTripLine);
+        // and the release side the same way
+        CHECK(c.poll(3, 1, 30250).size() == 1);
+        CHECK(c.poll(3, 2, 31000).empty());
+        l = c.poll(3, 2, 40250);
+        CHECK(l.size() == 1 && l[0] == "Output ceiling: breaker released 1 time in the last 10s");
+    }
+
+    // Round 3: a clock that goes back holds nothing back for longer than the gap from the jump; one that jumps forward
+    // posts what is pending; nothing is lost either way.
+    {
+        CeilingConsole c;
+        c.start(0, 0, 100000);
+        CHECK(c.poll(1, 0, 100250).size() == 1);
+        CHECK(c.poll(2, 0, 101000).empty()); // held back
+        // back by ~95 s: the held event is said within 10 s (+ a poll) of the jump, not 95 s later
+        int64_t saidAt = -1;
+        for (int64_t t = 5000; t <= 30000 && saidAt < 0; t += 250)
+            if (!c.poll(2, 0, t).empty()) saidAt = t;
+        CHECK(saidAt >= 5000 && saidAt <= 5000 + CeilingConsole::kMinGapMs + 250);
+        // forward by an hour: a held event is said at the next poll
+        CHECK(c.poll(3, 0, saidAt + 1000).empty());
+        auto l = c.poll(3, 0, saidAt + 3600000);
+        CHECK(l.size() == 1 && has(l[0], "breaker tripped 1 time"));
+        CHECK(c.poll(3, 0, saidAt + 3600250).empty());
     }
 
     std::printf(failures ? "ceiling_console_test: %d FAILED\n" : "ceiling_console_test: OK\n", failures);

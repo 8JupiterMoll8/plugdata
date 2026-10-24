@@ -233,6 +233,12 @@ int McpHost::xrunCount() const
     return -1;
 }
 
+// P9 round 3: the console rate limit runs on a steady clock (not the wall clock, which can jump).
+static int64_t steadyMs()
+{
+    return static_cast<int64_t>(juce::Time::getMillisecondCounterHiRes());
+}
+
 void McpHost::createBridge()
 {
     auto const mcpEnabled = processor.settingsFile->getProperty<bool>("mcp_bridge_enabled");
@@ -243,7 +249,7 @@ void McpHost::createBridge()
     session.outputCeiling.setStandalone(ProjectInfo::isStandalone);
     applyOutputCeilingSettingAtStartup();
     auto const ceilingNow = session.outputCeiling.read();
-    ceilingConsole.start(ceilingNow.breakerTrips, ceilingNow.breakerReleases, juce::Time::currentTimeMillis());
+    ceilingConsole.start(ceilingNow.breakerTrips, ceilingNow.breakerReleases, steadyMs());
     ceilingTimer.startTimer(250);
     // P3.4 S0: with PLUGDATA_MCP_AUDIT=1, time every Pd-lock hold (no-op otherwise).
     processor.setThis();
@@ -292,7 +298,7 @@ void McpHost::applyOutputCeilingSettingAtStartup()
 void McpHost::pollOutputCeiling()
 {
     auto const t = session.outputCeiling.read();
-    for (auto const& line : ceilingConsole.poll(t.breakerTrips, t.breakerReleases, juce::Time::currentTimeMillis())) {
+    for (auto const& line : ceilingConsole.poll(t.breakerTrips, t.breakerReleases, steadyMs())) {
         if (line.find("released") != std::string::npos)
             processor.logMessage(juce::String(line));
         else
