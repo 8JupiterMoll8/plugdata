@@ -18,6 +18,7 @@
 #include <juce_osc/juce_osc.h>
 
 #include "Utility/Config.h"
+#include "Mcp/McpOutputCeiling.h"
 
 extern "C" {
 #include <m_pd.h>
@@ -375,6 +376,15 @@ struct McpSession {
     // between arm and read can NEVER be missed (window opens before the event).
     std::atomic<bool> mcpArmActive { false };
     std::atomic<float> mcpArmPeak { 0.0f };
+    // P9: the same window seen BEFORE the output ceiling (finite samples), and the ceiling's clamp count at arm, so
+    // /meter/read can say "hot, clipped at the ceiling" instead of "audible".
+    std::atomic<float> mcpArmPreCeilingPeak { 0.0f };
+    std::atomic<uint64_t> mcpArmClampedAtArm { 0 };
+
+    // P9 Part B: the output ceiling and its breaker on the final output (McpHost::audioBlockFinished). Its switch
+    // mirrors the owner setting `mcp_bridge_ai_ceiling` (read at bridge creation and in the MCP settings path; never
+    // SettingsFile on the audio thread). Off only from the settings panel or at startup.
+    mcp::OutputCeiling outputCeiling;
 
     // Armed spectral capture (PRD_MEASUREMENT_WINDOWS Phase 5). From arm → read,
     // the FINAL output is appended to a preallocated mono buffer so a one-shot is

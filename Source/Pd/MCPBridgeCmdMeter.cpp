@@ -9,6 +9,8 @@
 #include "MCPBridgeCmdCommon.h"
 #include "MCPBridgeTraceTaps.h"
 
+#include <limits>
+
 
 void MCPBridge::meterStart(const juce::String& meterAction, const juce::OSCMessage& msg)
 {
@@ -302,6 +304,9 @@ void MCPBridge::meterArm(const juce::String& meterAction, const juce::OSCMessage
         processor->getMcp()->session.mcpArmBlocksAtArm.store(processor->getMcp()->session.mcpAudioBlocks.load(std::memory_order_relaxed), std::memory_order_relaxed);
         processor->getMcp()->session.mcpArmedTailRuns.store(0, std::memory_order_relaxed);
         processor->getMcp()->session.mcpArmedTailPeak.store(0.0f, std::memory_order_relaxed);
+        // P9: the window before the output ceiling, and the ceiling's clamp count at arm
+        processor->getMcp()->session.mcpArmPreCeilingPeak.store(0.0f, std::memory_order_relaxed);
+        processor->getMcp()->session.mcpArmClampedAtArm.store(processor->getMcp()->session.outputCeiling.read().clampedSamples, std::memory_order_relaxed);
         processor->getMcp()->session.mcpArmActive.store(true, std::memory_order_release);
     }
     sendRawReply("/meter/arm/reply/" + correlationId);
@@ -338,6 +343,16 @@ void MCPBridge::meterRead(const juce::String& meterAction, const juce::OSCMessag
     rep.addArgument(static_cast<int32>(blocksElapsed));
     rep.addArgument(static_cast<int32>(armedTailRuns));
     rep.addArgument(tailPeak);
+    // P9: the window before the output ceiling (args 5, 6): its peak, and how many samples the ceiling clamped.
+    float preCeilingPeak = 0.0f;
+    uint64_t clamped = 0;
+    if (processor) {
+        preCeilingPeak = processor->getMcp()->session.mcpArmPreCeilingPeak.load(std::memory_order_relaxed);
+        clamped = processor->getMcp()->session.outputCeiling.read().clampedSamples
+            - processor->getMcp()->session.mcpArmClampedAtArm.load(std::memory_order_relaxed);
+    }
+    rep.addArgument(preCeilingPeak);
+    rep.addArgument(static_cast<int32>(std::min<uint64_t>(clamped, static_cast<uint64_t>(std::numeric_limits<int32>::max()))));
     sender.send(rep);
     return;
 }

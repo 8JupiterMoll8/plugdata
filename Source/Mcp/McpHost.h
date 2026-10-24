@@ -65,6 +65,11 @@ public:
     // undo that brings the object back gives it the id again. Pd context (lock held).
     void journalId(t_canvas* cnv, std::string const& id, t_gobj* obj);
     bool settingsChanged(String const& name, var const& value);
+    // P9: the owner's switch for the output ceiling, from the settings panel only (the one way to switch it off
+    // while PlugData runs; on also resets the breaker). Message thread.
+    void setOutputCeilingFromGui(bool on);
+    // P9: the `ceiling` object of the /pd/limiter reply (JSON). Any thread.
+    juce::String outputCeilingJson() const;
     void mcpSettingsChanged(String const& name, var const& value);
     t_canvas* getCanvasBySymbol(const String& canvas_symbol);
     // P3.4 S3: the true root of the focused editor's current canvas, published by the message thread

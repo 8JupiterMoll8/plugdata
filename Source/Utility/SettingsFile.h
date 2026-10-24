@@ -211,6 +211,7 @@ private:
         { "mcp_bridge_enabled", var(true) }, // MCP-CARRIED(mcp-settings)
         { "mcp_bridge_listen_port", var(9000) },
         { "mcp_bridge_send_port", var(19010) },
+        { "mcp_bridge_ai_ceiling", var(true) }, // P9: the output ceiling (Mcp/McpOutputCeiling.h); off only from the panel
     };
 
 public:

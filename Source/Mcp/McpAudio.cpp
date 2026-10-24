@@ -2,6 +2,14 @@
  // The MCP audio hooks (Plan 3 P3.2 S5). PluginProcessor calls each one at the exact place
  // where its block used to be (before/after performDSP, the output copy, gain/limiter);
  // the bodies moved verbatim. Realtime behaviour is unchanged: P3.4 reworks it.
+ //
+ // CONTRACT (P9 Part B): the `audio` hook audioBlockFinished WRITES the final output. It runs after the master
+ // gain and PlugData's limiter, and its first step is the output ceiling + breaker (Mcp/McpOutputCeiling.h): in
+ // the standalone app, while the owner setting `mcp_bridge_ai_ceiling` is on, every output sample is clamped to
+ // +-1.0 (NaN/inf -> 0) and sustained overs are cut 20 dB. Everything after it (the armed meters) reads what leaves
+ // the app. What runs BEFORE it and so sees the unclamped signal: the recorder (PluginProcessor, "Record before
+ // limiter"), the toolbar meter, writeRecorderTap, and MCPBridge::playVoiceTake's own device callback (an
+ // artist-initiated mic take, outside processBlock).
  */
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_dsp/juce_dsp.h>
@@ -62,6 +70,23 @@ void McpHost::midiTick(MidiBuffer& midiInputHistory, AudioBuffer<float>& buffer,
 void McpHost::audioBlockFinished(AudioBuffer<float>& buffer)
 {
     mcp::rt::Scope const rtScope; // P3.4 S6: realtime guard (counts only in a -DMCP_RT_GUARD=ON build)
+
+    // P9 Part B: the output ceiling first, on the output channels only (L3), so every meter below reads exactly what
+    // leaves the app. While a measure window is armed, its peak BEFORE the ceiling is kept too (finite samples).
+    int const outputs = std::min(buffer.getNumChannels(), processor.getTotalNumOutputChannels());
+    if (session.mcpArmActive.load(std::memory_order_relaxed)) {
+        float pre = 0.0f;
+        for (int ch = 0; ch < outputs; ++ch) {
+            auto const* d = buffer.getReadPointer(ch);
+            for (int i = 0; i < buffer.getNumSamples(); ++i)
+                if (std::isfinite(d[i])) pre = std::max(pre, std::abs(d[i]));
+        }
+        float prev = session.mcpArmPreCeilingPeak.load(std::memory_order_relaxed);
+        while (pre > prev && !session.mcpArmPreCeilingPeak.compare_exchange_weak(prev, pre, std::memory_order_relaxed)) {}
+    }
+    session.outputCeiling.process(buffer.getArrayOfWritePointers(), outputs, buffer.getNumSamples(),
+        processor.getSampleRate(), juce::Time::getMillisecondCounter());
+
     // Armed peak-hold (trigger verification): track the loudest sample of the FINAL
     // output (post-gain/limiter) while armed. Placed at the common end of
     // processBlock so it runs for BOTH constant and variable block sizes. The window
