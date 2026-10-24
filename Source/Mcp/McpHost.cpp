@@ -243,8 +243,7 @@ void McpHost::createBridge()
     session.outputCeiling.setStandalone(ProjectInfo::isStandalone);
     applyOutputCeilingSettingAtStartup();
     auto const ceilingNow = session.outputCeiling.read();
-    ceilingTripsSaid = ceilingNow.breakerTrips;
-    ceilingReleasesSaid = ceilingNow.breakerReleases;
+    ceilingConsole.start(ceilingNow.breakerTrips, ceilingNow.breakerReleases, juce::Time::currentTimeMillis());
     ceilingTimer.startTimer(250);
     // P3.4 S0: with PLUGDATA_MCP_AUDIT=1, time every Pd-lock hold (no-op otherwise).
     processor.setThis();
@@ -293,12 +292,12 @@ void McpHost::applyOutputCeilingSettingAtStartup()
 void McpHost::pollOutputCeiling()
 {
     auto const t = session.outputCeiling.read();
-    for (int n = 0; ceilingTripsSaid < t.breakerTrips; ++ceilingTripsSaid)
-        if (n++ < 3)
-            processor.logWarning("Output ceiling: sustained full-scale sound, turned down 20 dB");
-    for (int n = 0; ceilingReleasesSaid < t.breakerReleases; ++ceilingReleasesSaid)
-        if (n++ < 3)
-            processor.logMessage("Output ceiling: level back to normal, breaker released");
+    for (auto const& line : ceilingConsole.poll(t.breakerTrips, t.breakerReleases, juce::Time::currentTimeMillis())) {
+        if (line.find("released") != std::string::npos)
+            processor.logMessage(juce::String(line));
+        else
+            processor.logWarning(juce::String(line));
+    }
 }
 
 juce::String McpHost::outputCeilingJson() const

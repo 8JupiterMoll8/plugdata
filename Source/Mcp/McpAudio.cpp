@@ -25,6 +25,8 @@
 void McpHost::prepare(double const sampleRate, int const samplesPerBlock)
 {
     ignoreUnused(samplesPerBlock);
+    // P9 round 2: the output ceiling's loudness measure starts afresh with a new device / rate / layout.
+    session.outputCeiling.requestLoudnessReset();
     // Armed spectral capture buffer (Phase 5): up to 2s of mono final output.
     {
         int const cap = static_cast<int>(std::ceil(sampleRate * 2.0));

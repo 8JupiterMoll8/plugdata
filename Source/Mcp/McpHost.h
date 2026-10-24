@@ -17,6 +17,7 @@
 #include "Pd/MCPBridgeHandoff.h"
 #include "Pd/MCPBridgeV2Router.h" // P4.1 S3: the request's work token travels with each hop
 #include "Mcp/McpAudit.h"
+#include "Mcp/McpCeilingConsole.h"
 #include <optional>
 #include <type_traits>
 
@@ -73,7 +74,8 @@ public:
     // P9 round 1: read the setting into the ceiling as at startup (createBridge): a malformed value is on and is
     // written back as true; off posts a loud console line. Message thread.
     void applyOutputCeilingSettingAtStartup();
-    // P9 round 1: posts each breaker trip and release once to the console (the ceiling timer, every 250 ms).
+    // P9 round 1: posts each breaker trip and release once to the console (the ceiling timer, every 250 ms); round 2:
+    // at most one line per kind per 10 s, then a summary (Mcp/McpCeilingConsole.h).
     // Message thread; never the audio thread.
     void pollOutputCeiling();
     // P9: the `ceiling` object of the /pd/limiter reply (JSON). Any thread.
@@ -229,7 +231,7 @@ private:
         McpHost& host;
     };
     CeilingTimer ceilingTimer { *this };
-    uint64_t ceilingTripsSaid = 0, ceilingReleasesSaid = 0; // message thread
+    mcp::CeilingConsole ceilingConsole; // round 2: rate-limited trip / release lines; message thread
 
 public:
     JUCE_DECLARE_WEAK_REFERENCEABLE(McpHost)
