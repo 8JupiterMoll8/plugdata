@@ -321,6 +321,7 @@ void MCPBridge::meterArm(const juce::String& meterAction, const juce::OSCMessage
         s.mcpArmFinalCount.store(0, std::memory_order_relaxed);
         s.mcpArmLimiterReductionDbMax.store(0.0f, std::memory_order_relaxed);
         s.mcpArmPdOutPeak.store(0.0f, std::memory_order_relaxed);
+        s.mcpArmEpoch.fetch_add(1, std::memory_order_release); // review L3: the audio thread empties them again
         // Re-arm race (review L3, kept): a block already past its mcpArmActive check when this re-arm zeroes the
         // peaks can still fold up to one block (~1-10 ms) of pre-arm audio into the new window. Arm comes before the
         // trigger, so at worst a read says "audible" from the block just before the arm.

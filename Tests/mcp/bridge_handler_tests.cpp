@@ -1472,6 +1472,18 @@ void runMeterTapCases(Harness& h, PluginProcessor& processor, AudioControl& audi
             CHECK(r->num(16) > 0.95 && r->num(16) < 1.05);    // Pd's own output
         }
     }
+    // Review L3: a re-arm starts from empty sums even when the audio thread stores a sum of the old window after the
+    // arm (simulated: a huge sum written right after the arm); the next block drops it.
+    {
+        auto arm = h.call("/meter/arm", { "tapG" }, "/meter/arm/reply/tapG");
+        int const gen = arm && !arm->args.empty() ? static_cast<int>(arm->num(0)) : 0;
+        host->session.mcpArmFinalSumSq.store(1.0e12);
+        host->session.mcpArmFinalCount.store(1);
+        host->session.mcpArmPreLimiterPeak.store(50.0f);
+        render(10);
+        auto r = h.call("/meter/read", { "tapH", gen }, "/meter/read/reply/tapH", 2000);
+        CHECK(r.has_value() && r->args.size() >= 17 && r->num(12) < 1.0 && r->num(10) < 2.0);
+    }
     // Master volume 0, limiter off: the patch plays (Pd's output ~1.0), nothing passes the master gain.
     processor.setEnableLimiter(false);
     volume->setUnscaledValueNotifyingHost(0.0f);

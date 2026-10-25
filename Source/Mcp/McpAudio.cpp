@@ -48,6 +48,20 @@ void McpHost::audioBlockStarted()
     mcp::rt::Scope const rtScope; // P3.4 S6: realtime guard (counts only in a -DMCP_RT_GUARD=ON build)
     session.mcpAudioBlocks.fetch_add(1, std::memory_order_relaxed); // #83 audio-thread liveness
     session.mcpLastBlockMs.store(juce::Time::getMillisecondCounter(), std::memory_order_relaxed);
+    // Review L3: a new arm epoch: this thread empties the window's accumulators before it adds anything to them.
+    if (uint32_t const epoch = session.mcpArmEpoch.load(std::memory_order_acquire); epoch != session.mcpArmEpochSeen) {
+        session.mcpArmEpochSeen = epoch;
+        session.mcpArmPeak.store(0.0f, std::memory_order_relaxed);
+        session.mcpArmPreCeilingPeak.store(0.0f, std::memory_order_relaxed);
+        session.mcpArmedTailPeak.store(0.0f, std::memory_order_relaxed);
+        session.mcpArmPreLimiterPeak.store(0.0f, std::memory_order_relaxed);
+        session.mcpArmPreLimiterSumSq.store(0.0, std::memory_order_relaxed);
+        session.mcpArmPreLimiterCount.store(0, std::memory_order_relaxed);
+        session.mcpArmFinalSumSq.store(0.0, std::memory_order_relaxed);
+        session.mcpArmFinalCount.store(0, std::memory_order_relaxed);
+        session.mcpArmLimiterReductionDbMax.store(0.0f, std::memory_order_relaxed);
+        session.mcpArmPdOutPeak.store(0.0f, std::memory_order_relaxed);
+    }
     // P3.4 S11 test-only: a forced stall, as a very heavy DSP block would hold the Pd lock (never set otherwise).
     // The value turns -1 once the lock is held (the verb answers then) and -2 when the stall ends.
     if (int const stallMs = session.mcpDebugStallMs.load(std::memory_order_relaxed); stallMs > 0) {

@@ -395,6 +395,13 @@ struct McpSession {
     std::atomic<float> mcpArmLimiterReductionDbMax { 0.0f };
     std::atomic<float> mcpArmPdOutPeak { 0.0f };
     float mcpBlockPreLimiterPeak = -1.0f; // audio thread only: this block's pre-limiter peak (-1 = not taken)
+    // Review L3: every arm bumps the epoch; the audio thread empties the window's accumulators itself at the first
+    // block of a new epoch, so a sum it stored for the old window after the arm's reset cannot leak into the new one.
+    std::atomic<uint32_t> mcpArmEpoch { 0 };
+    uint32_t mcpArmEpochSeen = 0; // audio thread only
+    // Review L4: the audio thread must never take a lock for these.
+    static_assert(std::atomic<double>::is_always_lock_free, "atomic<double> must be lock-free on the audio thread");
+    static_assert(std::atomic<uint64_t>::is_always_lock_free, "atomic<uint64_t> must be lock-free on the audio thread");
 
     // P9 Part B: the output ceiling and its breaker on the final output (McpHost::audioBlockFinished). Its switch
     // mirrors the owner setting `mcp_bridge_ai_ceiling` (read at bridge creation and in the MCP settings path; never
