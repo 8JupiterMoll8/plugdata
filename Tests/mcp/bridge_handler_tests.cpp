@@ -1379,6 +1379,15 @@ void runMeterWindowGenCases(Harness& h, PluginProcessor& processor)
     auto legacy = h.call("/meter/read", { "wg5" }, "/meter/read/reply/wg5", 2000);
     CHECK(legacy.has_value() && legacy->args.size() >= 10);
 
+    // Review L5: a window id past int32 (a float 3e9) is a stale id, never a legacy read that closes the window.
+    {
+        h.call("/meter/arm", { "wg10" }, "/meter/arm/reply/wg10");
+        auto huge = h.call("/meter/read", { "wg11", 3.0e9 }, "/meter/read/error/wg11", 2000);
+        CHECK(huge.has_value());
+        CHECK(session.mcpArmActive.load());
+        h.call("/meter/read", { "wg12" }, "/meter/read/reply/wg12");
+    }
+
     // The spectral window: the same scheme.
     auto s1 = h.call("/meter/arm_spectral", { 100, "wg6" }, "/meter/arm_spectral/reply/wg6");
     auto s2 = h.call("/meter/arm_spectral", { 100, "wg7" }, "/meter/arm_spectral/reply/wg7");

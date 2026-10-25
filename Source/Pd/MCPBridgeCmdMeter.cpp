@@ -340,12 +340,18 @@ int32 MCPBridge::readWindowGen(const juce::OSCMessage& msg, int const index)
     if (msg.size() <= index)
         return -1;
     auto const& a = msg[index];
+    // Review L5: clamped before the cast (a float or text past int32 is an id no window has: refused as stale).
+    constexpr int32 maxId = std::numeric_limits<int32>::max();
     if (a.isInt32())
         return a.getInt32() >= 0 ? a.getInt32() : -1;
-    if (a.isFloat32())
-        return a.getFloat32() >= 0.0f ? static_cast<int32>(a.getFloat32()) : -1;
+    if (a.isFloat32()) {
+        float const f = a.getFloat32();
+        if (!(f >= 0.0f)) return -1;
+        return f >= 2147483520.0f ? maxId : static_cast<int32>(f);
+    }
     auto const text = getArgString(a).trim();
-    return text.isNotEmpty() && text.containsOnly("0123456789") ? text.getIntValue() : -1;
+    if (text.isEmpty() || !text.containsOnly("0123456789")) return -1;
+    return text.length() > 10 ? maxId : static_cast<int32>(std::min<juce::int64>(text.getLargeIntValue(), maxId));
 }
 
 void MCPBridge::meterRead(const juce::String& meterAction, const juce::OSCMessage& msg)
