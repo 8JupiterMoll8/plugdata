@@ -1208,11 +1208,11 @@ void CanvasMcpLayer::paintScreenOverlay(NVGcontext* nvg)
             NVGcolor badgeBg = nanovg::nvgRGBA(56, 189, 248, 30);
             NVGcolor badgeBorder = nanovg::nvgRGBA(56, 189, 248, 110);
 
-            if (upperChapter.contains("DONE") || upperChapter.contains("CONFIRMED") || upperChapter.contains("VOICE")) {
+            if (upperChapter.contains("DONE") || upperChapter.contains("VOICE")) {
                 accentCol = nanovg::nvgRGBA(16, 185, 129, 255);          // Emerald Green
                 badgeBg = nanovg::nvgRGBA(16, 185, 129, 32);
                 badgeBorder = nanovg::nvgRGBA(16, 185, 129, 120);
-            } else if (upperChapter.contains("CONFIRM")) {
+            } else if (upperChapter.contains("WAITING")) {
                 accentCol = nanovg::nvgRGBA(245, 158, 11, 255);          // Amber Gold
                 badgeBg = nanovg::nvgRGBA(245, 158, 11, 40);
                 badgeBorder = nanovg::nvgRGBA(245, 158, 11, 140);
