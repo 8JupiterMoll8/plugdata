@@ -1583,6 +1583,44 @@ void runLoadReportCases(Harness& h, PluginProcessor& processor)
         CHECK(m.has_value() && m->args.size() >= 2 && m->str(1).rfind("error:", 0) == 0);
     }
 
+    // Review H1: refused BEFORE the clear (the canvas keeps its objects): a header followed by garbage, a file cut off
+    // inside a subpatch, a stray restore at depth 0, atoms after the last ';'. A patch with `#N struct` templates
+    // before its canvas loads (L6 review: it was refused). Wires the file lists but the canvas does not get are named
+    // (missingWires) and the reply is not ok.
+    load(good, "pd-p11load", "lr20");
+    CHECK(count() == 3);
+    auto bad = [&](char const* name, char const* text, char const* corr) {
+        auto f = dir.getChildFile(name);
+        f.replaceWithText(text);
+        auto r = load(f, "pd-p11load", corr);
+        bool const refused = r.has_value() && r->num(0) == -1 && r->args.size() >= 2 && r->str(1).rfind("error:", 0) == 0;
+        if (!refused) std::printf("  %s was not refused\n", name);
+        CHECK(refused);
+        CHECK(count() == 3);
+    };
+    bad("hdrgarbage.pd", "#N canvas 0 50 450 300 12;\nhello world;\nfoo 1 2;\n", "lr21");
+    bad("truncated.pd", "#N canvas 0 50 450 300 12;\n#X obj 10 10 f;\n#N canvas 0 0 100 100 inner 0;\n#X obj 1 1 f;\n", "lr22");
+    bad("stray.pd", "#N canvas 0 50 450 300 12;\n#X obj 10 10 f;\n#X restore 10 10 pd x;\n", "lr23");
+    bad("trailing.pd", "#N canvas 0 50 450 300 12;\n#X obj 10 10 f;\n#X obj 10 40 t b", "lr24");
+    {
+        auto f = dir.getChildFile("struct.pd");
+        f.replaceWithText("#N struct p11tpl float x float y;\n#N canvas 0 50 450 300 12;\n#X obj 10 10 f;\n");
+        auto r = load(f, "pd-p11load", "lr25");
+        CHECK(r.has_value() && r->num(0) == 1);
+        CHECK(static_cast<bool>(report(r)["ok"]));
+        CHECK(count() == 1);
+    }
+    {
+        auto f = dir.getChildFile("wires.pd");
+        f.replaceWithText("#N canvas 0 50 450 300 12;\n#X obj 10 10 f;\n#X obj 10 40 f;\n#X connect 0 0 1 0;\n#X connect 0 0 1 5;\n");
+        auto r = load(f, "pd-p11load", "lr26");
+        auto const json = report(r);
+        CHECK(r.has_value() && r->num(0) == 2);
+        CHECK(static_cast<int>(json["fileWires"]) == 2 && static_cast<int>(json["wires"]) == 1 && static_cast<int>(json["missingWires"]) == 1);
+        CHECK(!static_cast<bool>(json["ok"]));
+        CHECK(r.has_value() && r->args.size() >= 2 && r->str(1).rfind("error:", 0) == 0);
+    }
+
     // V11: save_content writes the bytes save_patch writes (one canvas, two files) and answers their hash (arg1, the
     // sidecar's pdHash). V12: save_patch answers arg1 "" (or "ids not saved: ...") and arg2 {rebound, idsSaved}; with
     // no editor showing the canvas nothing is re-pointed (rebound null).

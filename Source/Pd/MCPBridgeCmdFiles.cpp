@@ -13,13 +13,17 @@
 namespace {
 
 // P11.2 V10: a .pd file read and checked BEFORE any canvas is cleared. `error` is set (and the caller clears
-// nothing) when the file is missing, binbuf_read fails, or the first statement is not "#N canvas" (not a Pd patch).
-// A valid empty patch ("#N canvas ...;" only) is a valid body of 0 objects. `fileObjects` counts the boxes the paste
-// creates on the target canvas: statements at depth 0 (obj, msg, floatatom, symbolatom, listbox, text, scalar) and
-// each "#X restore" that closes a depth-1 subpatch or graph.
+// nothing) when the file is missing, binbuf_read fails, or the file is not a whole Pd patch (review H1): no
+// "#N canvas" header (leading "#N struct" template lines are allowed and kept), a subpatch or graph left open at the
+// end (depth != 0), a "#X restore" with no open subpatch, atoms after the last ';', or foreign statements (not
+// #X/#N/#A) with no box at all. A valid empty patch ("#N canvas ...;" only) is a valid body of 0 objects.
+// `fileObjects` counts the boxes the paste creates on the target canvas: statements at depth 0 (obj, msg,
+// floatatom, symbolatom, listbox, text, scalar) and each "#X restore" that closes a depth-1 subpatch or graph;
+// `fileWires` the "#X connect" lines at depth 0.
 struct PatchBody {
     juce::String text;
     int fileObjects = 0;
+    int fileWires = 0;
     juce::String error;
 };
 
@@ -35,24 +39,40 @@ PatchBody readPatchBody(juce::File const& file)
         out.error = "error: file not found: " + file.getFullPathName();
         return out;
     }
+    juce::String const untouched = " (the canvas was not touched)";
     t_binbuf* b = binbuf_new();
     if (binbuf_read(b, file.getFileName().toRawUTF8(), file.getParentDirectory().getFullPathName().toRawUTF8(), 0) != 0) {
         binbuf_free(b);
-        out.error = "error: could not read " + file.getFullPathName() + " (the canvas was not touched)";
+        out.error = "error: could not read " + file.getFullPathName() + untouched;
         return out;
     }
     int const natom = binbuf_getnatom(b);
     t_atom* vec = binbuf_getvec(b);
-    if (natom < 2 || !atomIs(vec[0], "#N") || !atomIs(vec[1], "canvas")) {
+    auto fail = [&](juce::String const& why) {
         binbuf_free(b);
-        out.error = "error: not a Pd patch (no '#N canvas' header): " + file.getFullPathName() + " (the canvas was not touched)";
+        out.error = "error: " + why + ": " + file.getFullPathName() + untouched;
         return out;
+    };
+    // Leading "#N struct" template statements (kept for the paste), then the "#N canvas" header (dropped).
+    int headerAt = 0;
+    std::vector<std::pair<int, int>> keep; // [from, to) atom ranges for the paste body
+    while (headerAt + 1 < natom && atomIs(vec[headerAt], "#N") && atomIs(vec[headerAt + 1], "struct")) {
+        int end = headerAt;
+        while (end < natom && vec[end].a_type != A_SEMI) ++end;
+        if (end >= natom) break;
+        keep.push_back({ headerAt, end + 1 });
+        headerAt = end + 1;
     }
+    if (natom - headerAt < 2 || !atomIs(vec[headerAt], "#N") || !atomIs(vec[headerAt + 1], "canvas"))
+        return fail("not a Pd patch (no '#N canvas' header)");
+    if (vec[natom - 1].a_type != A_SEMI)
+        return fail("not a whole Pd patch (atoms after the last ';')");
     int startIdx = natom;
-    for (int i = 0; i < natom; i++) {
+    for (int i = headerAt; i < natom; i++) {
         if (vec[i].a_type == A_SEMI) { startIdx = i + 1; break; }
     }
     int depth = 0;
+    bool foreign = false;
     for (int i = startIdx; i < natom;) {
         int end = i;
         while (end < natom && vec[end].a_type != A_SEMI) ++end;
@@ -60,29 +80,50 @@ PatchBody readPatchBody(juce::File const& file)
             ++depth;
         } else if (end - i >= 2 && atomIs(vec[i], "#X")) {
             if (atomIs(vec[i + 1], "restore")) {
+                if (depth == 0)
+                    return fail("not a whole Pd patch (a '#X restore' closes no subpatch)");
                 if (--depth == 0) ++out.fileObjects;
-                if (depth < 0) depth = 0;
             } else if (depth == 0) {
-                for (char const* k : { "obj", "msg", "floatatom", "symbolatom", "listbox", "text", "scalar" })
-                    if (atomIs(vec[i + 1], k)) { ++out.fileObjects; break; }
+                if (atomIs(vec[i + 1], "connect")) {
+                    ++out.fileWires;
+                } else {
+                    for (char const* k : { "obj", "msg", "floatatom", "symbolatom", "listbox", "text", "scalar" })
+                        if (atomIs(vec[i + 1], k)) { ++out.fileObjects; break; }
+                }
             }
+        } else if (end > i && !atomIs(vec[i], "#N") && !atomIs(vec[i], "#A") && !atomIs(vec[i], "#X")) {
+            foreign = true;
         }
         i = end + 1;
     }
-    if (startIdx < natom) {
-        t_binbuf* body = binbuf_new();
-        binbuf_add(body, natom - startIdx, vec + startIdx);
-        char* textBuf = nullptr;
-        int textLen = 0;
-        binbuf_gettext(body, &textBuf, &textLen);
-        if (textBuf && textLen > 0) {
-            out.text = juce::String::fromUTF8(textBuf, textLen);
-            freebytes(textBuf, textLen);
-        }
-        binbuf_free(body);
+    if (depth != 0)
+        return fail("not a whole Pd patch (cut off inside a subpatch)");
+    if (foreign && out.fileObjects == 0)
+        return fail("not a Pd patch (no box, only foreign lines)");
+    keep.push_back({ startIdx, natom });
+    t_binbuf* body = binbuf_new();
+    for (auto const& [from, to] : keep)
+        if (to > from) binbuf_add(body, to - from, vec + from);
+    char* textBuf = nullptr;
+    int textLen = 0;
+    binbuf_gettext(body, &textBuf, &textLen);
+    if (textBuf && textLen > 0) {
+        out.text = juce::String::fromUTF8(textBuf, textLen);
+        freebytes(textBuf, textLen);
     }
+    binbuf_free(body);
     binbuf_free(b);
     return out;
+}
+
+// Wires on `c` itself (review H1: compared with the file's "#X connect" lines after the paste).
+int countWires(t_canvas* c)
+{
+    int n = 0;
+    t_linetraverser t;
+    linetraverser_start(&t, c);
+    while (linetraverser_next_nosize(&t)) ++n;
+    return n;
 }
 
 // Pd's red boxes after a paste: text_class objects of type T_OBJECT (a class that could not be created). Top-level
@@ -462,6 +503,7 @@ void MCPBridge::pdLoadPatch(const juce::String& action, const juce::OSCMessage& 
         }
         juce::String const bodyText = patchBody.text;
         int const fileObjects = patchBody.fileObjects;
+        int const fileWires = patchBody.fileWires;
 
         // Sidecar read OUTSIDE sys_lock (small file); P3.5 S7: a truncated or unreadable one is ignored with a note.
         juce::String sidecarNote;
@@ -475,8 +517,9 @@ void MCPBridge::pdLoadPatch(const juce::String& action, const juce::OSCMessage& 
         // the message thread is illegal and was the intermittent load
         // crash. Same callAsync pattern as the native encapsulate handlers.
         postMessage(
-            [proc = processor, canvasName, bodyText, fileObjects, sidecar, sidecarNote, srcFile, reply, failReport]() {
+            [proc = processor, canvasName, bodyText, fileObjects, fileWires, sidecar, sidecarNote, srcFile, reply, failReport]() {
                 int objectCount = 0;
+                int wires = 0;
                 MCPBridge::SidecarStats stats;
                 juce::Array<juce::var> failedCreates;
                 sys_lock();
@@ -517,6 +560,7 @@ void MCPBridge::pdLoadPatch(const juce::String& action, const juce::OSCMessage& 
                     for (t_gobj* g = cnv->gl_list; g; g = g->g_next)
                         objectCount++;
                     collectFailedCreates(cnv, 0, {}, failedCreates, 0); // P11.2 V10: Pd's red boxes
+                    wires = countWires(cnv); // review H1: the wires that were really made
                 }
                 sys_unlock();
 
@@ -538,7 +582,17 @@ void MCPBridge::pdLoadPatch(const juce::String& action, const juce::OSCMessage& 
                 sc->setProperty("renamed", stats.renamed);
                 if (sidecarNote.isNotEmpty()) sc->setProperty("note", sidecarNote);
                 report->setProperty("sidecar", juce::var(sc));
-                reply(static_cast<double>(objectCount), 1.0, report);
+                // Review H1: wires the file lists but the canvas did not get; `ok` = the file is on the canvas whole
+                // (every box made, none a red box, every wire made). Missing wires also turn arg1 into an error.
+                int const missingWires = std::max(0, fileWires - wires);
+                report->setProperty("fileWires", fileWires);
+                report->setProperty("wires", wires);
+                report->setProperty("missingWires", missingWires);
+                report->setProperty("ok", objectCount == fileObjects && failedCreates.isEmpty() && missingWires == 0);
+                juce::var status = 1.0;
+                if (missingWires > 0)
+                    status = "error: " + juce::String(missingWires) + " of " + juce::String(fileWires) + " wires in the file were not made";
+                reply(static_cast<double>(objectCount), status, report);
             });
     }
     return;
