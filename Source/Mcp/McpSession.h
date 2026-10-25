@@ -382,6 +382,19 @@ struct McpSession {
     std::atomic<uint64_t> mcpArmClampedAtArm { 0 };
     std::atomic<uint64_t> mcpArmNonFiniteAtArm { 0 }; // round 1: the window's NaN/inf count
     std::atomic<uint64_t> mcpArmTripsAtArm { 0 };     // round 1: breaker trips in the window
+    // P11 V2 (J3b): the same window at two more taps. PRE-LIMITER = processBlock after PlugData's master gain and
+    // before its limiter (McpHost::midiTick, the existing hook there): peak and mean square. FINAL: the mean square
+    // of what leaves the app (the peak is mcpArmPeak). The limiter's largest gain reduction in the window (dB, per
+    // block: pre-limiter peak over the peak after the limiter). PD OUT: Pd's own output before the master gain
+    // (McpHost::pdBlock). Single writer (the audio thread); read after the window closed.
+    std::atomic<float> mcpArmPreLimiterPeak { 0.0f };
+    std::atomic<double> mcpArmPreLimiterSumSq { 0.0 };
+    std::atomic<uint64_t> mcpArmPreLimiterCount { 0 };
+    std::atomic<double> mcpArmFinalSumSq { 0.0 };
+    std::atomic<uint64_t> mcpArmFinalCount { 0 };
+    std::atomic<float> mcpArmLimiterReductionDbMax { 0.0f };
+    std::atomic<float> mcpArmPdOutPeak { 0.0f };
+    float mcpBlockPreLimiterPeak = -1.0f; // audio thread only: this block's pre-limiter peak (-1 = not taken)
 
     // P9 Part B: the output ceiling and its breaker on the final output (McpHost::audioBlockFinished). Its switch
     // mirrors the owner setting `mcp_bridge_ai_ceiling` (read at bridge creation and in the MCP settings path; never

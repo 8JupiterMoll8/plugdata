@@ -132,6 +132,10 @@ public:
     // an earlier canvas keeps the plain wire key and a later duplicate gets "#2") and drops dead ones. Takes the
     // Pd lock.
     void registerOpenCanvases();
+    // P11 V2: the linear gain PlugData's master volume applies now (its slider mapped as in processBlock: 0.8 is
+    // unity, below it (v / 0.8) ^ 2.5, above it 1 + (v - 0.8) / 0.2). Pinned by runMeterTapCases.
+    float masterGain() const;
+    static float masterGainFromSlider(float slider);
     // P3.5 S3: a canvas's wire key before any "#n" (root: file name; subcanvas: pd-<name>; unnamed: pd-anon).
     static juce::String identityBaseKey(t_canvas* cnv);
     // P3.5 S5 (L9): tombstones for the ids of every instance of abstraction `fileName` (call before a reload),

@@ -1331,6 +1331,116 @@ void runMeterWindowGenCases(Harness& h, PluginProcessor& processor)
     }
 }
 
+// P11 V2 (J3b): one armed window, three named taps. /meter/read args 10-14: the PRE-LIMITER tap (after PlugData's
+// master gain, before its limiter; the existing midiTick hook): peak (10) and RMS (11); the FINAL tap's RMS (12); the
+// master volume as the linear gain PlugData applies (13); the limiter's largest gain reduction in the window, dB (14).
+// Arg 15 is the window id (V1), arg 16 Pd's own output peak before the master gain. The PRE-CEILING tap is arg 5 (P9),
+// the FINAL peak arg 1. Rendered through processBlock with this file's audio thread paused.
+void runMeterTapCases(Harness& h, PluginProcessor& processor, AudioControl& audio)
+{
+    std::printf("meter taps: pre-limiter, pre-ceiling, final (P11 V2)\n");
+    auto* host = processor.getMcp();
+    PlugDataParameter* volume = nullptr;
+    for (auto* p : processor.getParameters())
+        if (auto* param = dynamic_cast<PlugDataParameter*>(p); param && param->getTitle().toString() == "volume")
+            volume = param;
+    CHECK(volume != nullptr);
+    if (!volume) return;
+    float const volumeBefore = volume->getUnscaledValue();
+    bool const limiterBefore = processor.getEnableLimiter();
+    int const thresholdBefore = host->onMessageThread(
+        [] { return SettingsFile::getInstance()->getProperty<int>("limiter_threshold"); }, 2000, "test").value_or(1);
+    auto setThreshold = [&](int index) {
+        host->onMessageThread([&processor, index] { processor.setLimiterThreshold(index); return true; }, 2000, "test");
+    };
+
+    audio.paused = true;
+    sleepMs(60);
+    // [osc~ 440] -> [dac~ 1 2]: a full-scale sine at Pd's output.
+    auto made = h.call("/pd/batch_atomic",
+        { "main", "tap1", 0, 0, 0, 2, 2,
+            "tapo", 900, 40, "obj", "osc~", 1, "440",
+            "tapd", 900, 120, "obj", "dac~", 0,
+            "tapo", 0, "tapd", 0,
+            "tapo", 0, "tapd", 1,
+            0, 5, 10, 0 },
+        "/pd/batch_atomic/reply/tap1");
+    CHECK(made.has_value() && made->num(0) == 2);
+    h.fire("/pd/dsp", { 1 });
+    sleepMs(200);
+    int const outputs = processor.getTotalNumOutputChannels();
+    juce::AudioBuffer<float> buffer(std::max(2, outputs), 512);
+    juce::MidiBuffer midi;
+    auto render = [&](int blocks) {
+        for (int k = 0; k < blocks; ++k) {
+            buffer.clear();
+            midi.clear();
+            processor.processBlock(buffer, midi);
+        }
+    };
+    auto window = [&](char const* armCorr, char const* readCorr, int blocks) -> std::optional<Reply> {
+        auto arm = h.call("/meter/arm", { armCorr }, std::string("/meter/arm/reply/") + armCorr);
+        int const gen = arm && !arm->args.empty() ? static_cast<int>(arm->num(0)) : 0;
+        render(blocks);
+        return h.call("/meter/read", { readCorr, gen }, std::string("/meter/read/reply/") + readCorr, 2000);
+    };
+
+    // Limiter on at -12 dB, unity master: pre-limiter ~1.0, final ~0.2512, about 12 dB of gain reduction.
+    processor.setEnableLimiter(true);
+    setThreshold(0);
+    volume->setUnscaledValueNotifyingHost(0.8f);
+    render(60);
+    {
+        auto r = window("tapA", "tapB", 30);
+        CHECK(r.has_value() && r->args.size() >= 17);
+        if (r && r->args.size() >= 17) {
+            std::printf("  limiter -12: pre %.4f/%.4f rms, final %.4f/%.4f rms, volume %.4f, gr %.2f dB, pd %.4f\n",
+                r->num(10), r->num(11), r->num(1), r->num(12), r->num(13), r->num(14), r->num(16));
+            CHECK(r->num(10) > 0.95 && r->num(10) < 1.05);    // pre-limiter peak
+            CHECK(r->num(11) > 0.65 && r->num(11) < 0.75);    // pre-limiter RMS (sine: 0.707)
+            CHECK(r->num(1) > 0.20 && r->num(1) < 0.32);      // final peak, held by the limiter
+            CHECK(r->num(12) > 0.12 && r->num(12) < 0.25);    // final RMS
+            CHECK(std::abs(r->num(13) - 1.0) < 1e-3);         // master volume: unity
+            CHECK(r->num(14) > 9.0 && r->num(14) < 15.0);     // gain reduction, dB
+            CHECK(r->num(16) > 0.95 && r->num(16) < 1.05);    // Pd's own output
+        }
+    }
+    // Master volume 0, limiter off: the patch plays (Pd's output ~1.0), nothing passes the master gain.
+    processor.setEnableLimiter(false);
+    volume->setUnscaledValueNotifyingHost(0.0f);
+    render(60);
+    {
+        auto r = window("tapC", "tapD", 20);
+        CHECK(r.has_value() && r->args.size() >= 17);
+        if (r && r->args.size() >= 17) {
+            CHECK(r->num(10) < 1e-4);                         // pre-limiter (after the master gain)
+            CHECK(r->num(1) < 1e-4);                          // final
+            CHECK(r->num(13) == 0.0);                         // master volume 0
+            CHECK(r->num(14) == 0.0);                         // limiter off: no reduction
+            CHECK(r->num(16) > 0.95);                         // the patch itself plays
+        }
+    }
+    // Master slider 0.4: the gain PlugData applies, (0.4 / 0.8) ^ 2.5; the pre-limiter tap shows exactly that.
+    volume->setUnscaledValueNotifyingHost(0.4f);
+    render(60);
+    {
+        auto r = window("tapE", "tapF", 20);
+        CHECK(r.has_value() && r->args.size() >= 17);
+        if (r && r->args.size() >= 17) {
+            double const want = std::pow(0.5, 2.5);
+            CHECK(std::abs(r->num(13) - want) < 1e-3);
+            CHECK(std::abs(r->num(10) - r->num(16) * r->num(13)) < 0.02);
+        }
+    }
+
+    volume->setUnscaledValueNotifyingHost(volumeBefore);
+    processor.setEnableLimiter(limiterBefore);
+    setThreshold(thresholdBefore);
+    h.call("/pd/batch_atomic", { "main", "tap2", 2, 0, 0, 0, 0, "tapo", "tapd", 0, 5, 10, 0 }, "/pd/batch_atomic/reply/tap2");
+    render(4);
+    audio.paused = false;
+}
+
 // P5.1 sink floor S1: /pd/limiter answers the LIVE limiter state and the toolbar threshold
 // ({"enabled":bool,"thresholdDb":-12|-6|0|3}), read-only; the capability `limiter` is advertised. The state is set
 // here directly (the AI never switches it) and restored after.
@@ -2930,6 +3040,7 @@ int main()
             runConsoleObjectCases(harness);
             runLimiterCases(harness, processor);
             runMeterWindowGenCases(harness, processor);
+            runMeterTapCases(harness, processor, audioControl);
             runOutputCeilingCases(harness, processor, audioControl);
             runMidiDevicesCases(harness, processor);
             runLimiterPatchCases(processor);

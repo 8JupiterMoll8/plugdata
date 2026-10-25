@@ -312,6 +312,15 @@ void MCPBridge::meterArm(const juce::String& meterAction, const juce::OSCMessage
         processor->getMcp()->session.mcpArmClampedAtArm.store(ceilingAtArm.clampedSamples, std::memory_order_relaxed);
         processor->getMcp()->session.mcpArmNonFiniteAtArm.store(ceilingAtArm.nonFiniteSamples, std::memory_order_relaxed);
         processor->getMcp()->session.mcpArmTripsAtArm.store(ceilingAtArm.breakerTrips, std::memory_order_relaxed);
+        // P11 V2: the pre-limiter, final-RMS, limiter-reduction and Pd-output taps of the new window
+        auto& s = processor->getMcp()->session;
+        s.mcpArmPreLimiterPeak.store(0.0f, std::memory_order_relaxed);
+        s.mcpArmPreLimiterSumSq.store(0.0, std::memory_order_relaxed);
+        s.mcpArmPreLimiterCount.store(0, std::memory_order_relaxed);
+        s.mcpArmFinalSumSq.store(0.0, std::memory_order_relaxed);
+        s.mcpArmFinalCount.store(0, std::memory_order_relaxed);
+        s.mcpArmLimiterReductionDbMax.store(0.0f, std::memory_order_relaxed);
+        s.mcpArmPdOutPeak.store(0.0f, std::memory_order_relaxed);
         // Re-arm race (review L3, kept): a block already past its mcpArmActive check when this re-arm zeroes the
         // peaks can still fold up to one block (~1-10 ms) of pre-arm audio into the new window. Arm comes before the
         // trigger, so at worst a read says "audible" from the block just before the arm.
@@ -399,10 +408,21 @@ void MCPBridge::meterRead(const juce::String& meterAction, const juce::OSCMessag
     rep.addArgument(asInt(nonFinite));
     rep.addArgument(asInt(trips));
     rep.addArgument(static_cast<int32>(engaged ? 1 : 0));
-    // Args 10-14 are the P11 V2 taps (not measured yet: NaN, which a reader takes as absent).
-    for (int i = 10; i < 15; ++i)
-        rep.addArgument(std::numeric_limits<float>::quiet_NaN());
-    rep.addArgument(gen); // P11 V1 arg 15: the window this read closed
+    // P11 V2 (J3b): three named taps of the one window. FINAL = args 0/1 (+ RMS 12), PRE-CEILING = arg 5 (P9),
+    // PRE-LIMITER = args 10/11 (after the master gain, before PlugData's limiter); 13 the master volume as the linear
+    // gain PlugData applies, 14 the limiter's largest gain reduction in the window (dB, 0 when off), 16 Pd's own
+    // output before the master gain.
+    {
+        auto& s = processor->getMcp()->session;
+        auto const rms = [](double sumSq, uint64_t n) { return n > 0 ? static_cast<float>(std::sqrt(sumSq / static_cast<double>(n))) : 0.0f; };
+        rep.addArgument(s.mcpArmPreLimiterPeak.load(std::memory_order_relaxed));
+        rep.addArgument(rms(s.mcpArmPreLimiterSumSq.load(std::memory_order_relaxed), s.mcpArmPreLimiterCount.load(std::memory_order_relaxed)));
+        rep.addArgument(rms(s.mcpArmFinalSumSq.load(std::memory_order_relaxed), s.mcpArmFinalCount.load(std::memory_order_relaxed)));
+        rep.addArgument(processor->getMcp()->masterGain());
+        rep.addArgument(s.mcpArmLimiterReductionDbMax.load(std::memory_order_relaxed));
+        rep.addArgument(gen); // P11 V1 arg 15: the window this read closed
+        rep.addArgument(s.mcpArmPdOutPeak.load(std::memory_order_relaxed));
+    }
     sender.send(rep);
     return;
 }
