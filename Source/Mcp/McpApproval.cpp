@@ -33,11 +33,20 @@ void MCPBridge::pdApprovalShow(const juce::String& action, const juce::OSCMessag
             for (auto const& t : *arr)
                 targets.push_back(t.toString().toStdString());
         auto const ttl = o->hasProperty("ttlMs") ? static_cast<std::int64_t>(static_cast<double>(o->getProperty("ttlMs"))) : 60000;
-        shown = processor->getMcp()->session.approvals.show(
-            o->getProperty("nonce").toString().toStdString(),
-            o->getProperty("canvas").toString().toStdString(),
-            o->getProperty("reason").toString().toStdString(),
-            targets, ttl, approvalNowMs());
+        mcp::ApprovalChip chip;
+        chip.nonce = o->getProperty("nonce").toString().toStdString();
+        chip.canvas = o->getProperty("canvas").toString().toStdString();
+        chip.reason = o->getProperty("reason").toString().toStdString();
+        // P12c review 5: line 1 is the server's fixed words; without a title the chip says only that something waits
+        // (never the reason, which can carry model-chosen text).
+        chip.title = o->hasProperty("title") ? o->getProperty("title").toString().toStdString()
+                                             : std::string("CONFIRM a change \xe2\x80\x94 canvas '") + mcp::approvalCanvasLabel(chip.canvas) + "'";
+        chip.detail = o->hasProperty("title") ? o->getProperty("detail").toString().toStdString() : chip.reason;
+        chip.targets = targets;
+        // The canvas the question is about (the outline is drawn only there). hardware / snapshots are no canvas.
+        if (chip.canvas != "hardware" && chip.canvas != "snapshots")
+            chip.canvasId = reinterpret_cast<std::uintptr_t>(processor->getMcp()->getCanvasBySymbol(normalizeCanvas(juce::String(chip.canvas))));
+        shown = processor->getMcp()->session.approvals.show(std::move(chip), ttl, approvalNowMs());
     }
     if (shown)
         postMessage([proc = processor]() { proc->getMcp()->gui().repaintAll(); });

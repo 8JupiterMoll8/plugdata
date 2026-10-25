@@ -31,6 +31,9 @@ struct ApprovalChip {
     std::string nonce;
     std::string canvas;
     std::string reason;
+    std::string title;  // line 1: the server's fixed words (verb, consequence, canvas); never cut
+    std::string detail; // line 2: model-chosen names (file, snapshot, array); the only line that may be cut
+    std::uintptr_t canvasId = 0; // the t_canvas the question is about (0: none / not open); the outline goes only there
     std::vector<std::string> targets; // the server-built ghost preview: tempIds, or "*" for the whole canvas
     std::int64_t expiresAtMs = 0;
     std::int64_t firstPaintedMs = -1; // -1: not on screen yet
@@ -48,15 +51,24 @@ public:
     bool show(std::string const& nonce, std::string const& canvas, std::string const& reason,
         std::vector<std::string> const& targets, std::int64_t ttlMs, std::int64_t nowMs)
     {
-        if (nonce.empty())
-            return false;
-        std::lock_guard<std::mutex> const l(lock);
-        purgeLocked(nowMs);
         ApprovalChip c;
         c.nonce = nonce;
         c.canvas = canvas;
         c.reason = reason;
+        c.title = reason;
         c.targets = targets;
+        return show(std::move(c), ttlMs, nowMs);
+    }
+
+    // The full chip (title, detail, canvasId set by the caller).
+    bool show(ApprovalChip c, std::int64_t ttlMs, std::int64_t nowMs)
+    {
+        if (c.nonce.empty())
+            return false;
+        auto const nonce = c.nonce;
+        std::lock_guard<std::mutex> const l(lock);
+        purgeLocked(nowMs);
+        c.firstPaintedMs = -1;
         c.expiresAtMs = nowMs + std::clamp<std::int64_t>(ttlMs, kMinTtlMs, kMaxTtlMs);
         c.seq = ++seqCounter;
         auto it = std::find_if(chips.begin(), chips.end(), [&](ApprovalChip const& x) { return x.nonce == nonce; });
@@ -167,6 +179,35 @@ private:
     std::vector<ApprovalChip> chips;
     std::uint64_t seqCounter = 0;
 };
+
+// Line 2 cut to what fits, at a UTF-8 code point, with an ellipsis; `fits(text)` says whether a text fits. Line 1 is
+// never passed through this (it is the server's fixed wording; the bar grows or the font shrinks for it).
+template<typename Fits>
+std::string approvalEllipsize(std::string const& text, Fits fits)
+{
+    if (fits(text))
+        return text;
+    static std::string const ell = "\xe2\x80\xa6";
+    std::string cut = text;
+    while (!cut.empty()) {
+        cut.pop_back();
+        while (!cut.empty() && (static_cast<unsigned char>(cut.back()) & 0xC0) == 0x80)
+            cut.pop_back(); // a continuation byte: keep cutting to the code point start
+        if (!cut.empty() && (static_cast<unsigned char>(cut.back()) & 0x80) != 0 && (static_cast<unsigned char>(cut.back()) & 0xC0) == 0xC0)
+            cut.pop_back(); // a lead byte whose continuation is gone
+        if (fits(cut + ell))
+            return cut + ell;
+    }
+    return ell;
+}
+
+// How line 1 names the chip's canvas: "pd-main" is "main", "pd-x" is "x", a root file stays as it is.
+inline std::string approvalCanvasLabel(std::string const& key)
+{
+    if (key == "pd-main") return "main";
+    if (key.rfind("pd-", 0) == 0) return key.substr(3);
+    return key;
+}
 
 // The visible area of a canvas view in canvas coordinates. CanvasViewport::getViewArea() already IS that (view
 // position and size divided by the zoom): it is used as it is, never divided by the zoom a second time (P12c review:

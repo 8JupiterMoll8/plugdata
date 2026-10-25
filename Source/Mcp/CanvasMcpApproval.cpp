@@ -5,7 +5,7 @@
 */
 
 // P12c: the canvas approval chips of one Canvas. The state is the session's (McpApprovalState.h, set only by the
-// server through /pd/approval_show|clear); this file draws one bar per pending record (reason, ✓ Approve, ✗ Cancel),
+// server through /pd/approval_show|clear); this file draws one bar per pending record (line 1 the server's words, line 2 the names, ✓ Approve, ✗ Cancel),
 // outlines the record's targets (the server-built ghost preview), and turns a click / Enter / Esc into
 // /pd/approval/answer <nonce> yes|no for exactly that record. The whole stack is clamped inside the visible viewport;
 // with no pill or selection to sit under it goes to the viewport centre, never to canvasOrigin (L5).
@@ -28,7 +28,7 @@
 
 namespace {
 constexpr int kBarW = 440;
-constexpr int kBarH = 62;
+constexpr int kBarH = 78;
 constexpr int kBarGap = 6;
 constexpr int kMaxBars = 4; // more pending records show as a count line under the stack
 
@@ -101,15 +101,19 @@ void CanvasMcpLayer::paintApprovalChips(NVGcontext* nvg)
         view = mcp::approvalVisibleArea(a.getX(), a.getY(), a.getWidth(), a.getHeight());
     }
 
-    // Server-built ghost preview: outline every target of every pending record that lives on this canvas.
+    // Server-built ghost preview: outline the targets of the records that are about THIS canvas (P12c review 5: a
+    // record about another tab outlines nothing here; its chip says "(on tab X)").
+    auto const thisCanvas = reinterpret_cast<std::uintptr_t>(canvas.patch.getRawPointer());
     {
         std::set<std::string> targets;
         bool whole = false;
-        for (auto const& c : chips)
+        for (auto const& c : chips) {
+            if (c.canvasId == 0 || c.canvasId != thisCanvas) continue;
             for (auto const& t : c.targets) {
                 if (t == "*") whole = true;
                 else targets.insert(t);
             }
+        }
         juce::Rectangle<int> all;
         bool first = true;
         NVGScopedState scopedGhost(nvg);
@@ -185,8 +189,8 @@ void CanvasMcpLayer::paintApprovalChips(NVGcontext* nvg)
         ApprovalHit hit;
         hit.nonce = juce::String(c.nonce);
         hit.frame = { bx, by, kBarW, kBarH };
-        hit.yes = { bx + 8, by + 26, half, kBarH - 32 };
-        hit.no = { bx + 8 + half + 8, by + 26, half, kBarH - 32 };
+        hit.yes = { bx + 8, by + 42, half, kBarH - 48 };
+        hit.no = { bx + 8 + half + 8, by + 42, half, kBarH - 48 };
         mcpApprovalHits.push_back(hit);
         // Its on-screen time (Enter and clicks wait 400 ms) starts only when the whole bar is inside the view.
         state.markPaintedIfInside(c.nonce, mcp::ApprovalRect { bx, by, kBarW, kBarH }, view, nowMs());
@@ -196,22 +200,41 @@ void CanvasMcpLayer::paintApprovalChips(NVGcontext* nvg)
         nanovg::nvgDrawRoundedRect(nvg, 0, 0, static_cast<float>(kBarW), static_cast<float>(kBarH),
             nanovg::nvgRGBA(28, 16, 16, 250), nanovg::nvgRGBA(255, 90, 70, 225), 10.0f);
         mcpnvg::nvgFontFace(nvg, "Inter");
-        mcpnvg::nvgFontSize(nvg, 12.0f);
         mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
-        nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(255, 220, 210, 240));
-        auto reason = juce::String(c.reason);
-        if (reason.length() > 64) reason = reason.substring(0, 63) + juce::String::fromUTF8("\xe2\x80\xa6");
-        mcpnvg::nvgText(nvg, 10.0f, 14.0f, reason.toRawUTF8(), nullptr);
+        // Line 1: the server's fixed words, never cut: the font shrinks until it fits (P12c review 5).
+        auto title = c.title;
+        if (c.canvasId != 0 && c.canvasId != thisCanvas)
+            title += " (on tab " + mcp::approvalCanvasLabel(c.canvas) + ")";
+        else if (c.canvasId == 0 && c.canvas != "hardware" && c.canvas != "snapshots")
+            title += " (tab not open)";
+        float const textW = static_cast<float>(kBarW - 20);
+        float size = 12.0f;
+        float bounds[4] {};
+        for (; size > 6.0f; size -= 0.5f) {
+            mcpnvg::nvgFontSize(nvg, size);
+            if (mcpnvg::nvgTextBounds(nvg, 0, 0, title.c_str(), nullptr, bounds) <= textW) break;
+        }
+        nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(255, 228, 220, 250));
+        mcpnvg::nvgText(nvg, 10.0f, 13.0f, title.c_str(), nullptr);
+        // Line 2: the model-chosen names; the only line cut (ellipsis).
+        if (!c.detail.empty()) {
+            mcpnvg::nvgFontSize(nvg, 11.0f);
+            auto const line2 = mcp::approvalEllipsize(c.detail, [&](std::string const& t) {
+                return mcpnvg::nvgTextBounds(nvg, 0, 0, t.c_str(), nullptr, bounds) <= textW;
+            });
+            nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(255, 190, 175, 210));
+            mcpnvg::nvgText(nvg, 10.0f, 30.0f, line2.c_str(), nullptr);
+        }
         mcpnvg::nvgFontSize(nvg, 14.0f);
         mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-        nanovg::nvgDrawRoundedRect(nvg, 8, 26, static_cast<float>(half), static_cast<float>(kBarH - 32),
+        nanovg::nvgDrawRoundedRect(nvg, 8, 42, static_cast<float>(half), static_cast<float>(kBarH - 48),
             nanovg::nvgRGBA(40, 170, 90, 235), nanovg::nvgRGBA(90, 225, 140, 255), 6.0f);
         nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(255, 255, 255, 255));
-        mcpnvg::nvgText(nvg, 8 + half * 0.5f, 26 + (kBarH - 32) * 0.5f, juce::String::fromUTF8("\xe2\x9c\x93 Approve").toRawUTF8(), nullptr);
-        nanovg::nvgDrawRoundedRect(nvg, 8 + half + 8, 26, static_cast<float>(half), static_cast<float>(kBarH - 32),
+        mcpnvg::nvgText(nvg, 8 + half * 0.5f, 42 + (kBarH - 48) * 0.5f, juce::String::fromUTF8("\xe2\x9c\x93 Approve").toRawUTF8(), nullptr);
+        nanovg::nvgDrawRoundedRect(nvg, 8 + half + 8, 42, static_cast<float>(half), static_cast<float>(kBarH - 48),
             nanovg::nvgRGBA(40, 44, 52, 235), nanovg::nvgRGBA(90, 98, 112, 255), 6.0f);
         nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(210, 220, 235, 235));
-        mcpnvg::nvgText(nvg, 8 + half + 8 + half * 0.5f, 26 + (kBarH - 32) * 0.5f, juce::String::fromUTF8("\xe2\x9c\x97 Cancel").toRawUTF8(), nullptr);
+        mcpnvg::nvgText(nvg, 8 + half + 8 + half * 0.5f, 42 + (kBarH - 48) * 0.5f, juce::String::fromUTF8("\xe2\x9c\x97 Cancel").toRawUTF8(), nullptr);
     }
     if (more > 0) {
         NVGScopedState scopedMore(nvg);

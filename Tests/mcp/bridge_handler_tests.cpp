@@ -1318,6 +1318,29 @@ void runApprovalCases(Harness& h, PluginProcessor& processor)
     auto no = h.replies.waitFor("/pd/approval/answer", 2000);
     CHECK(no && no->str(1) == "no");
 
+    // Review item 5: line 1 / line 2 as sent; the chip knows its canvas (the outline goes only there).
+    state.clear("n_b");
+    auto t1 = h.call("/pd/approval_show", { "ap8", R"({"nonce":"n_t","canvas":"pd-main","reason":"load 'x.pd'","title":"LOAD a file \u2014 replaces the whole canvas \u2014 canvas 'main'","detail":"file: x.pd","targets":[],"ttlMs":60000})" }, "/pd/approval_show/reply/ap8");
+    CHECK(t1 && t1->num(0) == 1.0);
+    auto t2 = h.call("/pd/approval_show", { "ap9", R"({"nonce":"n_u","canvas":"pd-no_such_tab","reason":"r","title":"CLEAR","detail":"","targets":["*"],"ttlMs":60000})" }, "/pd/approval_show/reply/ap9");
+    CHECK(t2 && t2->num(0) == 1.0);
+    auto t3 = h.call("/pd/approval_show", { "ap10", R"({"nonce":"n_h","canvas":"hardware","reason":"r","targets":[],"ttlMs":60000})" }, "/pd/approval_show/reply/ap10");
+    CHECK(t3 && t3->num(0) == 1.0);
+    auto const mainId = reinterpret_cast<std::uintptr_t>(processor.getMcp()->getCanvasBySymbol("pd-main"));
+    for (auto const& c : state.visible(now())) {
+        if (c.nonce == "n_t") {
+            CHECK(c.detail == "file: x.pd");
+            CHECK(c.title.find("x.pd") == std::string::npos);
+            CHECK(c.canvasId != 0 && c.canvasId == mainId);
+        }
+        if (c.nonce == "n_u") CHECK(c.canvasId == 0);
+        if (c.nonce == "n_h") {
+            CHECK(c.canvasId == 0);
+            CHECK(c.title.find("CONFIRM") == 0 && c.detail == "r"); // no title sent: generic words, the reason on line 2
+        }
+    }
+    for (auto const* n : { "n_t", "n_u", "n_h" }) state.clear(n);
+
     // The capability the server checks before it sends a chip.
     auto caps = h.call("/bridge/capabilities", { "ap7" }, "/bridge/capabilities/reply");
     bool cap = false;

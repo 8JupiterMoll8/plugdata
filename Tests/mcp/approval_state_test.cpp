@@ -177,6 +177,33 @@ int main()
         CHECK(v.size() == 2 && v[0].nonce == "n_a" && v[1].nonce == "n_b");
     }
 
+    // 9. P12c review MEDIUM (item 5): line 2 is cut with an ellipsis at a code point; line 1 is stored as given; the
+    //    chip remembers which canvas it is about.
+    {
+        auto fits = [](std::size_t n) { return [n](std::string const& t) { return t.size() <= n; }; };
+        CHECK(mcp::approvalEllipsize("file: short.pd", fits(40)) == "file: short.pd");
+        auto cut = mcp::approvalEllipsize("file: gentle-tail-for-the-pad-only-adds-reverb.pd", fits(20));
+        CHECK(cut.size() <= 20 && cut.substr(cut.size() - 3) == "\xe2\x80\xa6");
+        auto umlaut = mcp::approvalEllipsize("array: l\xc3\xb6sch-alles-\xc3\xa4\xc3\xa4\xc3\xa4\xc3\xa4", fits(16));
+        CHECK(umlaut.size() <= 16);
+        for (std::size_t i = 0; i + 3 < umlaut.size(); ++i) // no torn code point before the ellipsis
+            if ((static_cast<unsigned char>(umlaut[i]) & 0xE0) == 0xC0) CHECK((static_cast<unsigned char>(umlaut[i + 1]) & 0xC0) == 0x80);
+        CHECK(mcp::approvalCanvasLabel("pd-main") == "main");
+        CHECK(mcp::approvalCanvasLabel("pd-scratch") == "scratch");
+        CHECK(mcp::approvalCanvasLabel("song.pd") == "song.pd");
+
+        ApprovalState s;
+        mcp::ApprovalChip c;
+        c.nonce = "n_t";
+        c.canvas = "pd-scratch";
+        c.title = "CLEAR \xe2\x80\x94 removes every object \xe2\x80\x94 canvas 'scratch'";
+        c.detail = "";
+        c.canvasId = 0x1234;
+        CHECK(s.show(c, 60000, 0));
+        auto v = s.visible(1);
+        CHECK(v.size() == 1 && v[0].title == c.title && v[0].canvasId == 0x1234);
+    }
+
     if (failures == 0)
         std::printf("approval_state_test: OK\n");
     return failures == 0 ? 0 : 1;
