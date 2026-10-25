@@ -1712,6 +1712,8 @@ void runBoundCases(Harness& h, PluginProcessor& processor)
         made.push_back(obj(cnv, { "clone", "p11voice", "4" }));
         made.push_back(obj(cnv, { "p11voice" }));
         for (int i = 0; i < 3; ++i) made.push_back(obj(cnv, { "r", "p11three" }));
+        made.push_back(obj(cnv, { "table", "p11tab" }));
+        made.push_back(obj(cnv, { "delwrite~", "p11dl", "100" }));
         host->identity.bind(cnv, "p11k_main", made[0]);
     }, 3000));
 
@@ -1742,14 +1744,26 @@ void runBoundCases(Harness& h, PluginProcessor& processor)
     CHECK(pdSub && !static_cast<bool>((*pdSub)["bound"]) && static_cast<int>((*pdSub)["count"]) == 0);
     CHECK(pdSub && (*pdSub)["other"].getArray() && (*pdSub)["other"].getArray()->size() == 1
         && (*pdSub)["other"][0]["kind"].toString() == "canvas");
+    // Review M3: each receiver says what kind of name it is.
+    if (k) CHECK((*k)["receivers"][0]["kind"].toString() == "control");
+    if (sig) CHECK((*sig)["receivers"][0]["kind"].toString() == "signal");
+    auto kinds = h.call("/pd/bound", { "bd1k", "p11tab", "p11dl" }, "/pd/bound/reply/bd1k", 3000);
+    auto tab = boundEntry(kinds, "p11tab");
+    auto dl = boundEntry(kinds, "p11dl");
+    CHECK(tab && static_cast<int>((*tab)["count"]) == 1 && (*tab)["receivers"][0]["kind"].toString() == "table");
+    CHECK(dl && static_cast<int>((*dl)["count"]) == 1 && (*dl)["receivers"][0]["kind"].toString() == "delay");
+    // A name nothing binds is answered without a walk.
+    auto unboundOnly = h.call("/pd/bound", { "bd1u", "p11_never_used_name" }, "/pd/bound/reply/bd1u", 3000);
+    CHECK(unboundOnly.has_value() && static_cast<int>(parseJson(*unboundOnly)["walkObjects"]) == 0);
     auto never = boundEntry(r, "p11_never_used_name");
+
     CHECK(never && !static_cast<bool>((*never)["bound"]) && static_cast<int>((*never)["count"]) == 0);
 
     // An armed control probe on a name with no [r]: not bound, the probe is `other`.
     h.call("/meter/arm_control", { "p11kick", "bd2" }, "/meter/arm_control/reply/bd2");
     auto probe = boundEntry(h.call("/pd/bound", { "bd3", "p11kick" }, "/pd/bound/reply/bd3", 3000), "p11kick");
     CHECK(probe && !static_cast<bool>((*probe)["bound"]) && static_cast<int>((*probe)["count"]) == 0);
-    CHECK(probe && (*probe)["other"].getArray() && (*probe)["other"][0]["kind"].toString() == "bridge_probe");
+    CHECK(probe && (*probe)["other"].getArray() && !(*probe)["other"].getArray()->isEmpty() && (*probe)["other"][0]["kind"].toString() == "bridge_probe");
     h.call("/meter/read_control", { "bd4" }, "/meter/read_control/reply/bd4");
 
     // Cost: 2,000 objects, 64 names, under 5 ms for the walk.
@@ -1769,6 +1783,18 @@ void runBoundCases(Harness& h, PluginProcessor& processor)
     std::vector<juce::String> names;
     for (int i = 0; i < 64; ++i) names.push_back("p11k" + juce::String(i));
     for (auto const& n : names) many.push_back(A(n));
+    // Early exit: the walk stops once every binder of the asked names is found (the three [r p11three] come before
+    // the 2,000 boxes).
+    auto early = h.call("/pd/bound", { "bd6", "p11three" }, "/pd/bound/reply/bd6", 3000);
+    CHECK(early.has_value() && static_cast<int>(parseJson(*early)["walkObjects"]) < 2000);
+    // The budget (test hook: PLUGDATA_MCP_BOUND_BUDGET_OBJECTS): a walk that would pass it stops and says truncated;
+    // the binders it did not reach are named as unresolved.
+    ::setenv("PLUGDATA_MCP_BOUND_BUDGET_OBJECTS", "3", 1);
+    auto budget = h.call("/pd/bound", { "bd7", "p11dl" }, "/pd/bound/reply/bd7", 3000);
+    ::unsetenv("PLUGDATA_MCP_BOUND_BUDGET_OBJECTS");
+    CHECK(budget.has_value() && static_cast<bool>(parseJson(*budget)["truncated"]));
+    auto const cut = boundEntry(budget, "p11dl");
+    CHECK(cut && (*cut)["other"].getArray() && !(*cut)["other"].getArray()->isEmpty() && (*cut)["other"][0]["kind"].toString() == "unresolved");
     auto timed = h.callList("/pd/bound", many, "/pd/bound/reply/bd5", 5000);
     CHECK(timed.has_value());
     if (timed) {
