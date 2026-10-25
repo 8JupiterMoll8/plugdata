@@ -21,9 +21,10 @@ namespace {
 // floatatom, symbolatom, listbox, text, scalar) and each "#X restore" that closes a depth-1 subpatch or graph;
 // `fileWires` the "#X connect" lines at depth 0.
 struct PatchBody {
-    juce::String text;
+    std::string text; // review L6: the bytes as the file has them (a symbol that is not UTF-8 is not rewritten)
     int fileObjects = 0;
     int fileWires = 0;
+    int arrayLines = 0; // review L6: "#A" array-content lines (not "#A saved"); the paste does not restore them
     juce::String error;
 };
 
@@ -32,7 +33,7 @@ bool atomIs(t_atom const& a, char const* s)
     return a.a_type == A_SYMBOL && a.a_w.w_symbol && std::strcmp(a.a_w.w_symbol->s_name, s) == 0;
 }
 
-PatchBody readPatchBody(juce::File const& file)
+PatchBody readPatchBody(PluginProcessor& processor, juce::File const& file)
 {
     PatchBody out;
     if (!file.existsAsFile()) {
@@ -40,6 +41,8 @@ PatchBody readPatchBody(juce::File const& file)
         return out;
     }
     juce::String const untouched = " (the canvas was not touched)";
+    // Review L7: binbuf_read makes Pd symbols (gensym): under the Pd lock.
+    McpHost::PdLockScope pdLock(processor);
     t_binbuf* b = binbuf_new();
     if (binbuf_read(b, file.getFileName().toRawUTF8(), file.getParentDirectory().getFullPathName().toRawUTF8(), 0) != 0) {
         binbuf_free(b);
@@ -91,7 +94,10 @@ PatchBody readPatchBody(juce::File const& file)
                         if (atomIs(vec[i + 1], k)) { ++out.fileObjects; break; }
                 }
             }
-        } else if (end > i && !atomIs(vec[i], "#N") && !atomIs(vec[i], "#A") && !atomIs(vec[i], "#X")) {
+        } else if (end > i && atomIs(vec[i], "#A")) {
+            if (!(end - i >= 2 && atomIs(vec[i + 1], "saved")))
+                ++out.arrayLines;
+        } else if (end > i && !atomIs(vec[i], "#N") && !atomIs(vec[i], "#X")) {
             foreign = true;
         }
         i = end + 1;
@@ -108,7 +114,7 @@ PatchBody readPatchBody(juce::File const& file)
     int textLen = 0;
     binbuf_gettext(body, &textBuf, &textLen);
     if (textBuf && textLen > 0) {
-        out.text = juce::String::fromUTF8(textBuf, textLen);
+        out.text.assign(textBuf, static_cast<size_t>(textLen));
         freebytes(textBuf, textLen);
     }
     binbuf_free(body);
@@ -266,7 +272,7 @@ void MCPBridge::pdLoadContent(const juce::String& action, const juce::OSCMessage
             : "/pd/load_content/reply";
 
         // P11.2: read and check the file BEFORE the clear; a missing, unreadable or non-patch file is -1, untouched.
-        auto const patchBody = readPatchBody(juce::File(srcFilePath));
+        auto const patchBody = readPatchBody(*processor, juce::File(srcFilePath));
         if (patchBody.error.isNotEmpty()) {
             sendReply(replyAddr, -1.0f);
             return;
@@ -286,8 +292,8 @@ void MCPBridge::pdLoadContent(const juce::String& action, const juce::OSCMessage
 
             // 2. Paste the checked body (#X obj and #X connect via pasteDirect, sym_X bound to the canvas: the
             //    same path batch_atomic uses).
-            if (patchBody.text.isNotEmpty())
-                pasteDirect(cnv, patchBody.text.toRawUTF8());
+            if (!patchBody.text.empty())
+                pasteDirect(cnv, patchBody.text.c_str());
 
             // 3. Fire loadbang on the ROOT canvas (canvas_loadbang recurses
             // into child subpatches). Previously only direct child subpatches
@@ -504,12 +510,13 @@ void MCPBridge::pdLoadPatch(const juce::String& action, const juce::OSCMessage& 
         // Read and check the file BEFORE anything is cleared: a missing, unreadable or non-patch file leaves the
         // canvas as it is (X#1: a load used to wipe the canvas and answer success).
         juce::File srcFile(srcFilePath);
-        auto const patchBody = readPatchBody(srcFile);
+        auto const patchBody = readPatchBody(*processor, srcFile);
         if (patchBody.error.isNotEmpty()) {
             reply(-1.0, patchBody.error, failReport(patchBody.error, true, 0));
             return;
         }
-        juce::String const bodyText = patchBody.text;
+        std::string const bodyText = patchBody.text;
+        int const arrayLines = patchBody.arrayLines;
         int const fileObjects = patchBody.fileObjects;
         int const fileWires = patchBody.fileWires;
 
@@ -525,7 +532,7 @@ void MCPBridge::pdLoadPatch(const juce::String& action, const juce::OSCMessage& 
         // the message thread is illegal and was the intermittent load
         // crash. Same callAsync pattern as the native encapsulate handlers.
         postMessage(
-            [proc = processor, canvasName, bodyText, fileObjects, fileWires, sidecar, sidecarNote, srcFile, reply, failReport]() {
+            [proc = processor, canvasName, bodyText, fileObjects, fileWires, arrayLines, sidecar, sidecarNote, srcFile, reply, failReport]() {
                 int objectCount = 0;
                 int wires = 0;
                 MCPBridge::SidecarStats stats;
@@ -546,8 +553,8 @@ void MCPBridge::pdLoadPatch(const juce::String& action, const juce::OSCMessage& 
                     mcp::PdOps::clearCanvas(cnv);
 
                     // 2. Paste the prepared body
-                    if (bodyText.isNotEmpty())
-                        pasteDirect(cnv, bodyText.toRawUTF8());
+                    if (!bodyText.empty())
+                        pasteDirect(cnv, bodyText.c_str());
 
                     // 3. Fire loadbang on the ROOT canvas (recurses into
                     // subpatches) — see #81: banging only child subpatches
@@ -596,10 +603,16 @@ void MCPBridge::pdLoadPatch(const juce::String& action, const juce::OSCMessage& 
                 report->setProperty("fileWires", fileWires);
                 report->setProperty("wires", wires);
                 report->setProperty("missingWires", missingWires);
-                report->setProperty("ok", objectCount == fileObjects && failedCreates.isEmpty() && missingWires == 0);
+                // Review L6: array contents ("#A" lines) are dropped by the paste: said, and not ok.
+                report->setProperty("arrayLines", arrayLines);
+                if (arrayLines > 0)
+                    report->setProperty("arraysNote", "array contents not restored (" + juce::String(arrayLines) + " #A lines in the file)");
+                report->setProperty("ok", objectCount == fileObjects && failedCreates.isEmpty() && missingWires == 0 && arrayLines == 0);
                 juce::var status = 1.0;
                 if (missingWires > 0)
                     status = "error: " + juce::String(missingWires) + " of " + juce::String(fileWires) + " wires in the file were not made";
+                else if (arrayLines > 0)
+                    status = "error: array contents not restored (" + juce::String(arrayLines) + " #A lines)";
                 reply(static_cast<double>(objectCount), status, report);
             });
     }

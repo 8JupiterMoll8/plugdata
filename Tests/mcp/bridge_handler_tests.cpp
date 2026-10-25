@@ -1675,6 +1675,38 @@ void runLoadReportCases(Harness& h, PluginProcessor& processor)
         CHECK(!static_cast<bool>(json["ok"]));
         CHECK(r.has_value() && r->args.size() >= 2 && r->str(1).rfind("error:", 0) == 0);
     }
+    {
+        auto f = dir.getChildFile("emptybox.pd");
+        f.replaceWithText("#N canvas 0 50 450 300 12;\n#X obj 10 10;\n#X obj 10 40 f;\n");
+        auto const json = report(load(f, "pd-p11load", "lr27"));
+        CHECK(json["failedCreates"].isArray() && json["failedCreates"].getArray()->isEmpty());
+        CHECK(static_cast<int>(json["created"]) == 2 && static_cast<bool>(json["ok"]));
+    }
+    {
+        auto f = dir.getChildFile("array.pd");
+        f.replaceWithText("#N canvas 0 50 450 300 12;\n#N canvas 0 0 450 300 (subpatch) 0;\n#X array p11arrA 3 float 3;\n"
+                          "#A 0 0.5 0.25 0.125;\n#X coords 0 1 3 -1 200 140 1 0 0;\n#X restore 20 20 graph;\n");
+        auto r = load(f, "pd-p11load", "lr28");
+        auto const json = report(r);
+        CHECK(static_cast<int>(json["arrayLines"]) == 1 && !static_cast<bool>(json["ok"]));
+        CHECK(json["arraysNote"].toString().contains("not restored"));
+    }
+    {
+        auto f = dir.getChildFile("latin1.pd");
+        static char const latin1[] = "#N canvas 0 50 450 300 12;\n#X obj 10 10 r p11\xe9x;\n";
+        f.replaceWithData(latin1, sizeof(latin1) - 1);
+        load(f, "pd-p11load", "lr29");
+        std::string text;
+        host->pdWait([&] {
+            if (sub->gl_list) {
+                char* buf = nullptr;
+                int len = 0;
+                binbuf_gettext(reinterpret_cast<t_text*>(sub->gl_list)->te_binbuf, &buf, &len);
+                if (buf) { text.assign(buf, static_cast<size_t>(len)); freebytes(buf, len); }
+            }
+        }, 3000);
+        CHECK(text == "r p11\xe9x");
+    }
 
     // V11: save_content writes the bytes save_patch writes (one canvas, two files) and answers their hash (arg1, the
     // sidecar's pdHash). V12: save_patch answers arg1 "" (or "ids not saved: ...") and arg2 {rebound, idsSaved}; with
@@ -1811,7 +1843,6 @@ void runBoundCases(Harness& h, PluginProcessor& processor)
     auto unboundOnly = h.call("/pd/bound", { "bd1u", "p11_never_used_name" }, "/pd/bound/reply/bd1u", 3000);
     CHECK(unboundOnly.has_value() && static_cast<int>(parseJson(*unboundOnly)["walkObjects"]) == 0);
     auto never = boundEntry(r, "p11_never_used_name");
-
     CHECK(never && !static_cast<bool>((*never)["bound"]) && static_cast<int>((*never)["count"]) == 0);
 
     // An armed control probe on a name with no [r]: not bound, the probe is `other`.

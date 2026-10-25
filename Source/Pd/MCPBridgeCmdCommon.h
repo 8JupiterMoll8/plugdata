@@ -123,20 +123,26 @@ inline void pasteDirect(t_canvas* cnv, char const* buf)
     // objects inside the abstraction), so loading ANY patch that references a
     // GOP module crashed. Arrays are recreated by their "#X obj table/array"
     // lines, so dropping the stray "#A" rows is safe.
-    juce::String filtered;
+    // Review L6: filtered byte for byte (a juce::String round trip rewrote symbols that are not UTF-8).
+    std::string filtered;
     {
-        juce::StringArray lines;
-        lines.addLines(juce::String(buf));
-        for (auto& ln : lines) {
-            if (ln.trimStart().startsWith("#A ")) continue;
-            filtered += ln;
-            filtered += "\n";
+        std::string const all(buf ? buf : "");
+        size_t pos = 0;
+        while (pos < all.size()) {
+            size_t end = all.find('\n', pos);
+            if (end == std::string::npos) end = all.size();
+            size_t first = pos;
+            while (first < end && (all[first] == ' ' || all[first] == '\t' || all[first] == '\r')) ++first;
+            if (all.compare(first, 3, "#A ") != 0) {
+                filtered.append(all, pos, end - pos);
+                filtered += '\n';
+            }
+            pos = end + 1;
         }
     }
 
-    size_t const len = filtered.getNumBytesAsUTF8();
     t_binbuf* b = binbuf_new();
-    binbuf_text(b, filtered.toRawUTF8(), len);
+    binbuf_text(b, filtered.c_str(), filtered.size());
 
     t_symbol* sym_X = gensym("#X");
     t_symbol* sym_N = gensym("#N");
