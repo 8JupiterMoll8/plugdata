@@ -1625,11 +1625,23 @@ void runLoadReportCases(Harness& h, PluginProcessor& processor)
         CHECK(m.has_value() && m->num(0) == -1);
         CHECK(m.has_value() && m->args.size() >= 2 && m->str(1).rfind("error:", 0) == 0);
     }
+    {
+        // L8: a red box inside clone instances is named (the clone itself is created).
+        juce::File(juce::String::fromUTF8(canvas_getdir(sub)->s_name)).getChildFile("p11redvoice.pd")
+            .replaceWithText("#N canvas 0 50 450 300 12;\n#X obj 10 10 p11_missing_in_clone;\n");
+        auto f = dir.getChildFile("clone.pd");
+        f.replaceWithText("#N canvas 0 50 450 300 12;\n#X obj 10 10 clone p11redvoice 2;\n");
+        auto const json = report(load(f, "pd-p11load", "lr30"));
+        auto const* failed = json["failedCreates"].getArray();
+        CHECK(failed && failed->size() == 2);
+        juce::File(juce::String::fromUTF8(canvas_getdir(sub)->s_name)).getChildFile("p11redvoice.pd").deleteFile();
+    }
 
     // Review H1: refused BEFORE the clear (the canvas keeps its objects): a header followed by garbage, a file cut off
     // inside a subpatch, a stray restore at depth 0, atoms after the last ';'. A patch with `#N struct` templates
     // before its canvas loads (L6 review: it was refused). Wires the file lists but the canvas does not get are named
-    // (missingWires) and the reply is not ok.
+    // (missingWires) and the reply is not ok; so are array contents (#A) the paste does not restore. L8: an empty box
+    // is not a failed create. L6: a symbol that is not UTF-8 keeps its bytes.
     load(good, "pd-p11load", "lr20");
     CHECK(count() == 3);
     auto bad = [&](char const* name, char const* text, char const* corr) {
