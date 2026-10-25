@@ -3124,7 +3124,7 @@ void runZeroArgCases(Harness& h)
         auto const* e = f ? f->find("error") : nullptr;
         refused += (f && field(*f, "outcome") == "rejected" && e && field(*e, "code") == "bad_frame") ? 1 : 0;
     }
-    CHECK(guarded == 19 && refused == guarded); // 19 since /pd/midi_devices (minArgs 1)
+    CHECK(guarded == 21 && refused == guarded); // 19 since /pd/midi_devices (minArgs 1); 21 since /pd/bound, /pd/selection_get (P11)
 }
 
 // S6.6 (audit A20): the live props of an IEM GUI carry its label, so a control the builder named (`hsl ... morph_s
