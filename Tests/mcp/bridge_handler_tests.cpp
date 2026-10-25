@@ -851,6 +851,28 @@ void runSpectralPitchCases()
         return v;
     };
     struct KickCase { double body, start, prerollMs; };
+    // Review L1: a chord or noise has no clear pitch: fundamental 0, pitchMethod says so; the confidence and the voiced
+    // ratio are reported.
+    {
+        int const n = static_cast<int>(ksr);
+        std::vector<float> chord(static_cast<size_t>(n)), noise(static_cast<size_t>(n));
+        uint32_t seed = 777u;
+        for (int i = 0; i < n; ++i) {
+            double const t = i / ksr;
+            chord[static_cast<size_t>(i)] = static_cast<float>(0.2 * (std::sin(2 * M_PI * 220 * t) + std::sin(2 * M_PI * 261.63 * t) + std::sin(2 * M_PI * 329.63 * t)));
+            seed = seed * 1664525u + 1013904223u;
+            noise[static_cast<size_t>(i)] = static_cast<float>((seed >> 8) & 0xFFFF) / 32768.0f - 1.0f;
+        }
+        for (auto* v : { &chord, &noise }) {
+            auto const json = juce::JSON::parse(armedSpectralJson(v->data(), n, ksr));
+            std::printf("  %s -> fundamental %.2f, confidence %.2f, voiced ratio %.2f, %s\n", v == &chord ? "A minor triad" : "noise",
+                static_cast<double>(json["fundamental"]), static_cast<double>(json["pitchConfidence"]),
+                static_cast<double>(json["voicedRatio"]), json["pitchMethod"].toString().toRawUTF8());
+            CHECK(static_cast<double>(json["fundamental"]) == 0.0);
+            CHECK(json["pitchMethod"].toString().contains("no clear pitch"));
+            CHECK(json.hasProperty("pitchConfidence") && json.hasProperty("voicedRatio"));
+        }
+    }
     for (auto const k : { KickCase { 48, 158, 20 }, KickCase { 45, 155, 20 }, KickCase { 48, 300, 20 },
              KickCase { 48, 158, 0 }, KickCase { 48, 158, 200 } }) {
         auto buf = kick(k.body, k.start, k.prerollMs);

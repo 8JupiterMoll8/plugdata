@@ -274,7 +274,7 @@ juce::String armedSpectralJson(float const* data, int n, double sampleRate)
     }
     std::vector<double> welch(N / 2 + 1, 0.0);
     int used = 0;
-    struct Voiced { float hz; double weight; };
+    struct Voiced { float hz; double weight; float confidence; };
     std::vector<Voiced> voiced;
     for (size_t k = 0; k < frames.size(); ++k) {
         if (loudest <= 0.0 || energy[k] < loudest * 0.0025) // 26 dB under the loudest body frame
@@ -286,7 +286,7 @@ juce::String armedSpectralJson(float const* data, int n, double sampleRate)
         float confidence = 0.0f;
         float const hz = estimatePitchYinRange(data + frames[k], N, static_cast<float>(sampleRate), 30.0f, 4000.0f, confidence);
         if (hz > 0.0f)
-            voiced.push_back({ hz, energy[k] });
+            voiced.push_back({ hz, energy[k], confidence });
     }
     if (used > 0) {
         for (auto& b : welch)
@@ -305,10 +305,38 @@ juce::String armedSpectralJson(float const* data, int n, double sampleRate)
             if (acc >= 0.5 * total) { fundamental = x.hz; break; }
         }
     }
-    root->setProperty("fundamental", fundamental);
+    // Review L1: how sure the pitch is. pitchConfidence = the median YIN confidence of the voiced frames, voicedRatio =
+    // voiced / analysed body frames. Noise, a mostly unvoiced body or a chord (below) is "no clear pitch": fundamental 0.
+    float pitchConfidence = 0.0f;
+    if (!voiced.empty()) {
+        std::vector<float> c;
+        for (auto const& x : voiced) c.push_back(x.confidence);
+        std::nth_element(c.begin(), c.begin() + static_cast<long>(c.size() / 2), c.end());
+        pitchConfidence = c[c.size() / 2];
+    }
+    float const voicedRatio = used > 0 ? static_cast<float>(voiced.size()) / static_cast<float>(used) : 0.0f;
+    constexpr float kMinVoicedRatio = 0.5f, kMinPitchConfidence = 0.5f;
+    // A chord is periodic too (YIN finds its common sub-period, e.g. ~37 Hz for A minor) but nothing sounds there:
+    // the lowest strong partial of the Welch spectrum (within 20 dB of the strongest) more than 4.5 times above the
+    // estimate means the "pitch" is a sub-period, not a note (a tone missing its fundamental keeps partial 2 or 3).
+    float lowestPartialHz = 0.0f;
+    if (used > 0) {
+        double maxPow = 0.0;
+        for (size_t k = 1; k < welch.size(); ++k) maxPow = std::max(maxPow, welch[k]);
+        for (size_t k = 2; k + 1 < welch.size(); ++k)
+            if (welch[k] >= 0.01 * maxPow && welch[k] >= welch[k - 1] && welch[k] >= welch[k + 1]) {
+                lowestPartialHz = static_cast<float>(k * sampleRate / N);
+                break;
+            }
+    }
+    bool const subPeriod = fundamental > 0.0f && lowestPartialHz > 4.5f * fundamental;
+    bool const clear = !voiced.empty() && voicedRatio >= kMinVoicedRatio && pitchConfidence >= kMinPitchConfidence && !subPeriod;
+    root->setProperty("fundamental", clear ? fundamental : 0.0f);
     root->setProperty("attackPitchHz", attackPitch);
     root->setProperty("voicedFrames", static_cast<int>(voiced.size()));
     root->setProperty("bodyFrames", used);
-    root->setProperty("pitchMethod", "yin_median_body");
+    root->setProperty("pitchConfidence", pitchConfidence);
+    root->setProperty("voicedRatio", voicedRatio);
+    root->setProperty("pitchMethod", clear ? juce::String("yin_median_body") : juce::String("no clear pitch (yin_median_body)"));
     return juce::JSON::toString(v, true);
 }
