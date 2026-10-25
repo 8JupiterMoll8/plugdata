@@ -72,7 +72,10 @@ std::optional<juce::String> McpHost::selectionGet(juce::String const& canvasName
     auto const& sel = target ? live->inTarget : live->focused;
     t_canvas* canvas = target ? target : sel.canvas;
     juce::Array<juce::var> ids, classes;
-    if (canvas && mcpCanvasIsLive(canvas)) {
+    // Review M1: the canvas came from a GUI read on another thread; it is dereferenced (its key, its objects) only
+    // while it is still an open canvas.
+    bool const live = canvas && mcpCanvasIsLive(canvas);
+    if (live) {
         for (auto* g : sel.objects) {
             if (!onCanvas(canvas, g))
                 continue; // deleted since the GUI read
@@ -84,7 +87,7 @@ std::optional<juce::String> McpHost::selectionGet(juce::String const& canvasName
         }
     }
     auto* root = new juce::DynamicObject();
-    root->setProperty("canvasKey", canvas ? MCPBridge::canonicalCanvasKey(canvas) : juce::String());
+    root->setProperty("canvasKey", live ? MCPBridge::canonicalCanvasKey(canvas) : juce::String());
     root->setProperty("ids", ids);
     root->setProperty("classes", classes);
     root->setProperty("count", ids.size());
