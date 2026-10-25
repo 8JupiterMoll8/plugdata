@@ -9,6 +9,8 @@
 
 #include "MCPBridgeCmdCommon.h"
 
+#include <mutex>
+
 // One Hann-windowed FFTW r2c over N (<= PROBE_RING_SIZE) samples: |X|^2 per bin (0..N/2), unnormalised.
 static std::vector<double> framePower(float const* samples, int N)
 {
@@ -19,10 +21,19 @@ static std::vector<double> framePower(float const* samples, int N)
     }
     int const NBINS = N / 2 + 1;
     std::vector<fftwf_complex> fftOutput(NBINS);
-    fftwf_plan plan = fftwf_plan_dft_r2c_1d(N, windowed.data(),
-        reinterpret_cast<fftwf_complex*>(fftOutput.data()), FFTW_ESTIMATE);
+    // Review L7: FFTW's planner is not thread-safe (the command worker and a render can analyse at once): plan and
+    // destroy under one lock; executing a plan is safe.
+    static std::mutex planLock;
+    fftwf_plan plan;
+    {
+        std::lock_guard<std::mutex> guard(planLock);
+        plan = fftwf_plan_dft_r2c_1d(N, windowed.data(), reinterpret_cast<fftwf_complex*>(fftOutput.data()), FFTW_ESTIMATE);
+    }
     fftwf_execute(plan);
-    fftwf_destroy_plan(plan);
+    {
+        std::lock_guard<std::mutex> guard(planLock);
+        fftwf_destroy_plan(plan);
+    }
     std::vector<double> power(NBINS, 0.0);
     for (int i = 0; i < NBINS; ++i)
         power[i] = (double)(fftOutput[i][0] * fftOutput[i][0] + fftOutput[i][1] * fftOutput[i][1]);
