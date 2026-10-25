@@ -146,6 +146,7 @@ MCP_VERB(pd, "gem_capture", pdGemCapture)
 // ── pd: identity ──
 MCP_VERB(pd, "identity_snapshot", pdIdentitySnapshot)
 MCP_VERB(pd, "identity_version", pdIdentityVersion)
+MCP_VERB(pd, "bound", pdBound)
 MCP_VERB(pd, "clear_ids", pdClearIds)
 MCP_VERB(pd, "register_id", pdRegisterId)
 MCP_VERB(pd, "rename_id", pdRenameId)

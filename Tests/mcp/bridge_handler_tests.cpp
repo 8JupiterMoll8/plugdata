@@ -1622,6 +1622,134 @@ void runLoadReportCases(Harness& h, PluginProcessor& processor)
     dir.deleteRecursively();
 }
 
+// P11.4 V19: /pd/bound <corrId> <name...> asks Pd who listens on each name, over every open root canvas, into
+// subpatches, abstractions and clone instances. Per name: {name, bound, count, receivers:[{canvasKey, path, index,
+// tempId?, class}], other:[{kind}]}; `count` holds objects on a canvas only; a canvas's own pd-<name> binding, the
+// bridge's control probes and other non-canvas binders are `other`. A name nothing ever used is unbound and is not
+// added to Pd's symbol table. Three [r] on one name exercise Pd's bindlist (its layout is read by the bridge: a Pd
+// update that changes it fails here).
+std::optional<juce::var> boundEntry(std::optional<Reply> const& r, std::string const& name)
+{
+    if (!r) return std::nullopt;
+    auto const json = parseJson(*r);
+    if (auto const* names = json["names"].getArray())
+        for (auto const& n : *names)
+            if (n["name"].toString().toStdString() == name)
+                return n;
+    return std::nullopt;
+}
+
+void runBoundCases(Harness& h, PluginProcessor& processor)
+{
+    std::printf("/pd/bound (P11.4 V19)\n");
+    auto* host = processor.getMcp();
+    CHECK(hasCap(h, "bound", "bd0"));
+    t_canvas* sub = nullptr;
+    std::vector<t_gobj*> made;
+    CHECK(host->pdWait([&] {
+        t_canvas* cnv = host->getCanvasBySymbol("main");
+        if (!cnv) return;
+        auto obj = [&](t_canvas* c, std::vector<char const*> words) {
+            std::vector<t_atom> a(words.size() + 2);
+            SETFLOAT(&a[0], 1000);
+            SETFLOAT(&a[1], 700);
+            for (size_t i = 0; i < words.size(); ++i) {
+                char* end = nullptr;
+                double const f = std::strtod(words[i], &end);
+                if (end && *end == 0 && end != words[i]) SETFLOAT(&a[i + 2], f);
+                else SETSYMBOL(&a[i + 2], gensym(words[i]));
+            }
+            pd_typedmess(&c->gl_pd, gensym("obj"), static_cast<int>(a.size()), a.data());
+            return pd::Interface::getNewest(c);
+        };
+        juce::File dir(juce::String::fromUTF8(canvas_getdir(cnv)->s_name));
+        dir.getChildFile("p11voice.pd").replaceWithText("#N canvas 0 50 450 300 12;\n#X obj 10 10 r p11cl;\n");
+        made.push_back(obj(cnv, { "r", "p11k" }));
+        made.push_back(obj(cnv, { "pd", "p11bsub" }));
+        sub = reinterpret_cast<t_canvas*>(made.back());
+        obj(sub, { "r", "p11k" });
+        made.push_back(obj(cnv, { "r~", "p11sig" })); // r~ binds nothing: Pd binds the bus's s~ (and catch~, not throw~)
+        made.push_back(obj(cnv, { "s~", "p11sig" }));
+        made.push_back(obj(cnv, { "catch~", "p11c" }));
+        made.push_back(obj(cnv, { "clone", "p11voice", "4" }));
+        made.push_back(obj(cnv, { "p11voice" }));
+        for (int i = 0; i < 3; ++i) made.push_back(obj(cnv, { "r", "p11three" }));
+        host->identity.bind(cnv, "p11k_main", made[0]);
+    }, 3000));
+
+    auto r = h.call("/pd/bound", { "bd1", "p11k", "p11sig", "p11c", "p11cl", "p11three", "pd-p11bsub", "p11_never_used_name" },
+        "/pd/bound/reply/bd1", 3000);
+    CHECK(r.has_value());
+    auto k = boundEntry(r, "p11k");
+    CHECK(k && static_cast<bool>((*k)["bound"]) && static_cast<int>((*k)["count"]) == 2);
+    if (k) {
+        bool mainId = false, inSub = false;
+        for (auto const& rc : *(*k)["receivers"].getArray()) {
+            mainId = mainId || rc["tempId"].toString() == "p11k_main";
+            inSub = inSub || (rc["canvasKey"].toString() == "pd-p11bsub" && rc["path"].toString().contains("[pd p11bsub]"));
+            CHECK(rc["class"].toString() == "receive");
+        }
+        CHECK(mainId && inSub);
+    }
+    auto sig = boundEntry(r, "p11sig");
+    CHECK(sig && static_cast<int>((*sig)["count"]) == 1); // the s~: a signal bus is bound by its sender
+    CHECK(sig && (*sig)["receivers"][0]["class"].toString().contains("send~"));
+    auto c = boundEntry(r, "p11c");
+    CHECK(c && static_cast<int>((*c)["count"]) == 1);
+    auto cl = boundEntry(r, "p11cl");
+    CHECK(cl && static_cast<int>((*cl)["count"]) == 5); // 4 clone instances + 1 abstraction instance
+    auto three = boundEntry(r, "p11three");
+    CHECK(three && static_cast<int>((*three)["count"]) == 3); // the bindlist
+    auto pdSub = boundEntry(r, "pd-p11bsub");
+    CHECK(pdSub && !static_cast<bool>((*pdSub)["bound"]) && static_cast<int>((*pdSub)["count"]) == 0);
+    CHECK(pdSub && (*pdSub)["other"].getArray() && (*pdSub)["other"].getArray()->size() == 1
+        && (*pdSub)["other"][0]["kind"].toString() == "canvas");
+    auto never = boundEntry(r, "p11_never_used_name");
+    CHECK(never && !static_cast<bool>((*never)["bound"]) && static_cast<int>((*never)["count"]) == 0);
+
+    // An armed control probe on a name with no [r]: not bound, the probe is `other`.
+    h.call("/meter/arm_control", { "p11kick", "bd2" }, "/meter/arm_control/reply/bd2");
+    auto probe = boundEntry(h.call("/pd/bound", { "bd3", "p11kick" }, "/pd/bound/reply/bd3", 3000), "p11kick");
+    CHECK(probe && !static_cast<bool>((*probe)["bound"]) && static_cast<int>((*probe)["count"]) == 0);
+    CHECK(probe && (*probe)["other"].getArray() && (*probe)["other"][0]["kind"].toString() == "bridge_probe");
+    h.call("/meter/read_control", { "bd4" }, "/meter/read_control/reply/bd4");
+
+    // Cost: 2,000 objects, 64 names, under 5 ms for the walk.
+    int before = 0;
+    host->pdWait([&] {
+        t_canvas* cnv = host->getCanvasBySymbol("main");
+        for (t_gobj* g = cnv->gl_list; g; g = g->g_next) ++before;
+        for (int i = 0; i < 2000; ++i) {
+            t_atom a[3];
+            SETFLOAT(a, 10 + (i % 40) * 20);
+            SETFLOAT(a + 1, 900 + (i / 40) * 20);
+            SETSYMBOL(a + 2, gensym("f"));
+            pd_typedmess(&cnv->gl_pd, gensym("obj"), 3, a);
+        }
+    }, 10000);
+    std::vector<A> many { A("bd5") };
+    std::vector<juce::String> names;
+    for (int i = 0; i < 64; ++i) names.push_back("p11k" + juce::String(i));
+    for (auto const& n : names) many.push_back(A(n));
+    auto timed = h.callList("/pd/bound", many, "/pd/bound/reply/bd5", 5000);
+    CHECK(timed.has_value());
+    if (timed) {
+        double const us = static_cast<double>(parseJson(*timed)["walkUs"]);
+        std::printf("  /pd/bound walk over %d objects, 64 names: %.0f us\n", before + 2000, us);
+        CHECK(us >= 0 && us < 5000);
+    }
+    host->pdWait([&] {
+        t_canvas* cnv = host->getCanvasBySymbol("main");
+        std::vector<t_gobj*> extra;
+        int idx = 0;
+        for (t_gobj* g = cnv->gl_list; g; g = g->g_next, ++idx)
+            if (idx >= before) extra.push_back(g);
+        for (auto* g : extra) glist_delete(cnv, g);
+        for (auto* g : made) glist_delete(cnv, g);
+        juce::File(juce::String::fromUTF8(canvas_getdir(cnv)->s_name)).getChildFile("p11voice.pd").deleteFile();
+    }, 10000);
+}
+
 // P5.1 sink floor S1: /pd/limiter answers the LIVE limiter state and the toolbar threshold
 // ({"enabled":bool,"thresholdDb":-12|-6|0|3}), read-only; the capability `limiter` is advertised. The state is set
 // here directly (the AI never switches it) and restored after.
@@ -3232,6 +3360,7 @@ int main()
             runIdentityValidityCases(processor);
             runSidecarCases(processor);
             runLoadReportCases(harness, processor);
+            runBoundCases(harness, processor);
             runV2HandshakeCases(harness, *bridge, [&] {
                 bridge->setReplySinkForTests([&replies](juce::OSCMessage const& msg) { replies.push(msg); });
             });

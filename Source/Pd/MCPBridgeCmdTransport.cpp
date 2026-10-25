@@ -304,6 +304,9 @@ std::vector<std::string> MCPBridge::capabilityList() const
         // P11.2 V10/V12: load_patch checks the file before it clears and answers arg2 {canvasFound, fileObjects,
         // created, failedCreates, sidecar}; save_patch answers arg2 {rebound, idsSaved, tab}; save_content arg1 its hash
         "load_patch_report",
+        // P11.4 V19: /pd/bound <corrId> <name...>: who listens on each name (canvases, subpatches, abstractions,
+        // clone instances), receivers counted, pd-<name> canvases and bridge probes as `other`
+        "bound",
         // PRD Phase 3 §2.5: multi-tab — open in new tab + enumerate tabs
         "open_patch",
         "list_tabs",
