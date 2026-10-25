@@ -307,6 +307,10 @@ std::vector<std::string> MCPBridge::capabilityList() const
         // P11.4 V19: /pd/bound <corrId> <name...>: who listens on each name (canvases, subpatches, abstractions,
         // clone instances), receivers counted, pd-<name> canvases and bridge probes as `other`
         "bound",
+        // P11.5 V24: /pd/list_tabs rows carry `ns` (the tab's receiver token, C++), nsCollided, nsFromSidecar
+        "tab_token",
+        // P11.5 V26: /pd/selection_get <corrId> [canvas]: the live editor selection {canvasKey, ids, classes, count}
+        "selection_get",
         // PRD Phase 3 §2.5: multi-tab — open in new tab + enumerate tabs
         "open_patch",
         "list_tabs",

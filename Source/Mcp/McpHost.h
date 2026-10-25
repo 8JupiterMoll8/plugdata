@@ -18,6 +18,9 @@
 #include "Pd/MCPBridgeV2Router.h" // P4.1 S3: the request's work token travels with each hop
 #include "Mcp/McpAudit.h"
 #include "Mcp/McpCeilingConsole.h"
+#include "Mcp/McpTabTokens.h"
+#include <map>
+#include <mutex>
 #include <optional>
 #include <type_traits>
 
@@ -195,7 +198,27 @@ public:
     // P3.4 S7: the bridge's way into an mcp_* command: plain strings and numbers, no Pd symbols made.
     bool callSys(SmallString const& selector, mcp::SysList const& list);
 
+    // P11.5 V24: the tab tokens (receiver namespaces) of the open tabs, in `tabs` order (McpTabTokens.h). Default =
+    // the TS stem hash; a collision between open tabs gives the later-opened tab the next free token, which is
+    // written into its identity sidecar when one exists (and by every later save). A token a sidecar holds is used.
+    // Message thread (takes the Pd lock briefly for the tabs' age order).
+    struct TabTokenRow {
+        juce::String token;
+        bool collided = false;
+        bool fromSidecar = false;
+    };
+    std::vector<TabTokenRow> assignTabTokens(std::vector<McpGuiHost::TabInfo> const& tabs);
+    // The token of `root` when it is not its default (the sidecar keeps it); "" otherwise. Any thread.
+    juce::String tabTokenToPersist(t_canvas* root);
+    // P11.5 V26 (McpSelection.cpp): /pd/selection_get's JSON; nullopt with `error` set when the canvas is unknown or
+    // the editor did not answer. Any thread but the Pd lock's holder.
+    std::optional<juce::String> selectionGet(juce::String const& canvasName, juce::String& error);
+
 private:
+    std::mutex tabTokenLock;
+    mcp::TabTokens tabTokens;
+    std::map<t_canvas*, juce::String> tabTokenNonDefault;
+public:
     // Selector table (McpSysVerbs.inc): one private member function per row, built at
     // startup like the bridge's verb table.
     using SysHandler = void (McpHost::*)(SmallString const& selector, mcp::SysList const& list);

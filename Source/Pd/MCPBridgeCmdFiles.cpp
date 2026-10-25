@@ -660,8 +660,18 @@ void MCPBridge::pdListTabs(const juce::String& action, const juce::OSCMessage& m
 
     postMessage([p = processor, bridge = this, replyAddr]() {
         juce::Array<juce::var> list;
-        for (auto const& tab : p->getMcp()->gui().listTabs()) {
+        auto const tabs = p->getMcp()->gui().listTabs();
+        auto const tokens = p->getMcp()->assignTabTokens(tabs); // P11.5 V24
+        for (size_t ti = 0; ti < tabs.size(); ++ti) {
+            auto const& tab = tabs[ti];
             auto* o = new juce::DynamicObject();
+            // P11.5 V24: the tab's receiver namespace token ("pNN"), computed here. nsCollided: another open tab
+            // held the default, so this one got the next free token (kept in its identity sidecar).
+            if (ti < tokens.size()) {
+                o->setProperty("ns", tokens[ti].token);
+                o->setProperty("nsCollided", tokens[ti].collided);
+                o->setProperty("nsFromSidecar", tokens[ti].fromSidecar);
+            }
             o->setProperty("title", tab.title);
             o->setProperty("file", tab.file.getFullPathName());
             o->setProperty("focused", tab.focused);

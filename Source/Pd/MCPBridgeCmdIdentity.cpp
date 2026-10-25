@@ -122,6 +122,22 @@ void MCPBridge::pdIdentitySnapshot(const juce::String& action, const juce::OSCMe
     return;
 }
 
+// P11.5 V26: /pd/selection_get <corrId> [canvas] -> /pd/selection_get/reply/<corrId> {canvasKey, ids, classes, count,
+// elsewhere?}; an unknown canvas or no answer from the editor -> /pd/selection_get/error/<corrId> "<reason>". The
+// selection is read in the call (McpHost::selectionGet, Source/Mcp/McpSelection.cpp), never remembered.
+void MCPBridge::pdSelectionGet(const juce::String& action, const juce::OSCMessage& msg)
+{
+    if (!processor || msg.size() < 1)
+        return;
+    auto const correlationId = getArgString(msg[0]);
+    auto const canvas = msg.size() > 1 ? normalizeCanvas(getArgString(msg[1])) : juce::String();
+    juce::String error;
+    if (auto json = processor->getMcp()->selectionGet(canvas, error))
+        sendReply("/pd/selection_get/reply/" + correlationId, *json);
+    else
+        sendReply("/pd/selection_get/error/" + correlationId, error);
+}
+
 void MCPBridge::pdIdentityVersion(const juce::String& action, const juce::OSCMessage& msg)
 {
     // Node.js uses this to decide if a full snapshot fetch is needed (cheap: one walk of the open canvases).
@@ -131,6 +147,7 @@ void MCPBridge::pdIdentityVersion(const juce::String& action, const juce::OSCMes
     if (msg.size() >= 1 && processor) {
         auto correlationId = getArgString(msg[0]);
         uint64_t version = 0;
+        uint64_t content = 0; // P11.5 V23
         juce::String canvasKey;
         {
             McpHost::PdLockScope lock(*processor);
@@ -142,16 +159,20 @@ void MCPBridge::pdIdentityVersion(const juce::String& action, const juce::OSCMes
                     return;
                 }
                 version = processor->getMcp()->identity.canvasVersion(cnv);
+                content = processor->getMcp()->identity.contentVersion(cnv);
                 canvasKey = juce::String(processor->getMcp()->identity.keyOf(cnv));
             } else {
                 version = processor->getMcp()->identity.version();
+                content = processor->getMcp()->identity.contentVersionGlobal();
             }
         }
 
         juce::OSCMessage reply { juce::OSCAddressPattern("/pd/identity_version/reply/" + correlationId) };
         reply.addArgument(static_cast<int32>(static_cast<int>(version & 0x7FFFFFFF)));
-        if (canvasKey.isNotEmpty())
-            reply.addArgument(canvasKey); // P3.5 S9: which canvas the name meant ("main" follows the focus)
+        reply.addArgument(canvasKey); // P3.5 S9: which canvas the name meant ("main" follows the focus); "" = global
+        // P11.5 V23 arg 2: contentVersion (the canvas's, or the global counter): bumped by every wire, move, text
+        // edit, paste or delete, by hand or by the AI, read at the time of this call
+        reply.addArgument(static_cast<int32>(static_cast<int>(content & 0x7FFFFFFF)));
         sender.send(reply);
     }
     return;

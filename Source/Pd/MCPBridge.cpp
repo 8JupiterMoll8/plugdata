@@ -1916,6 +1916,10 @@ juce::var MCPBridge::buildIdentitySidecar(PluginProcessor* processor, t_canvas* 
         subObj->setProperty(key, juce::var(entry));
     }
     root->setProperty("sub", juce::var(subObj));
+    // P11.5 V24: a tab token that is not the file's default (a collision between open tabs gave it) travels with
+    // the file, so the receivers built with it keep working after a reopen.
+    if (auto const ns = processor->getMcp()->tabTokenToPersist(cnv); ns.isNotEmpty())
+        root->setProperty("ns", ns);
     return juce::var(root);
 }
 

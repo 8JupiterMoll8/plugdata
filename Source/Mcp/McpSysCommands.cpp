@@ -478,6 +478,10 @@ void McpHost::sysCensus(SmallString const& selector, mcp::SysList const& list)
 
             auto* rootObj = new DynamicObject();
             rootObj->setProperty("canvas", canvas_symbol);
+            // P11.5 V23: the content version this census was taken at (as /pd/identity_version arg 2), and the
+            // canvas's identity version beside it
+            rootObj->setProperty("contentVersion", static_cast<int>(identity.contentVersion(canvas) & 0x7FFFFFFF));
+            rootObj->setProperty("identityVersion", static_cast<int>(identity.canvasVersion(canvas) & 0x7FFFFFFF));
 
             // Build reverse map of gobj* -> tempId
             std::unordered_map<t_gobj*, String> ptrToId;

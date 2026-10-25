@@ -1750,6 +1750,90 @@ void runBoundCases(Harness& h, PluginProcessor& processor)
     }, 10000);
 }
 
+// P11.5 V23: contentVersion. The read-time stamp (McpHost::registerOpenCanvases) also hashes the wires, each object's
+// x/y and its text atoms, folded up into the parent canvases. /pd/identity_version answers it as arg 2 (arg 1 is the
+// canvas key, "" for the global counter) and the census header carries it. Edits made behind the bridge's back (as a
+// hand edit is) bump it; a wire, a move or a text edit leaves identity_version alone.
+void runContentVersionCases(Harness& h, PluginProcessor& processor)
+{
+    std::printf("contentVersion (P11.5 V23)\n");
+    auto* host = processor.getMcp();
+    auto versions = [&](char const* corr) -> std::pair<double, double> {
+        auto r = h.call("/pd/identity_version", { corr, "main" }, std::string("/pd/identity_version/reply/") + corr, 2000);
+        if (!r || r->args.size() < 3) return { -1, -1 };
+        return { r->num(0), r->num(2) };
+    };
+    t_gobj *a = nullptr, *b = nullptr, *msg = nullptr;
+    host->pdWait([&] {
+        t_canvas* cnv = host->getCanvasBySymbol("main");
+        auto obj = [&](char const* sel, char const* cls, int y) {
+            t_atom at[3];
+            SETFLOAT(at, 1200);
+            SETFLOAT(at + 1, y);
+            SETSYMBOL(at + 2, gensym(cls));
+            pd_typedmess(&cnv->gl_pd, gensym(sel), 3, at);
+            return pd::Interface::getNewest(cnv);
+        };
+        a = obj("obj", "f", 40);
+        b = obj("obj", "f", 80);
+        msg = obj("msg", "hello", 120);
+    }, 3000);
+    auto const v0 = versions("cv0");
+    CHECK(v0.second >= 0);
+    auto edit = [&](char const* what, std::function<void(t_canvas*)> const& fn, bool identityStays, char const* corr) {
+        auto const before = versions((std::string(corr) + "a").c_str());
+        host->pdWait([&] { fn(host->getCanvasBySymbol("main")); }, 3000);
+        auto const after = versions((std::string(corr) + "b").c_str());
+        if (after.second == before.second) std::printf("  %s: contentVersion did not change\n", what);
+        CHECK(after.second >= 0 && after.second != before.second);
+        if (identityStays) CHECK(after.first == before.first);
+    };
+    edit("hand wire", [&](t_canvas* c) { obj_connect(pd_checkobject(&a->g_pd), 0, pd_checkobject(&b->g_pd), 0); (void)c; }, true, "cv1");
+    edit("move", [&](t_canvas*) { reinterpret_cast<t_text*>(b)->te_xpix += 15; }, true, "cv2");
+    edit("text edit", [&](t_canvas*) { binbuf_text(reinterpret_cast<t_text*>(msg)->te_binbuf, "world", 5); }, true, "cv3");
+    edit("paste", [&](t_canvas* c) {
+        t_atom at[4];
+        SETFLOAT(at, 1200);
+        SETFLOAT(at + 1, 160);
+        SETSYMBOL(at + 2, gensym("r"));
+        SETSYMBOL(at + 3, gensym("kick_t3"));
+        pd_typedmess(&c->gl_pd, gensym("obj"), 4, at);
+    }, false, "cv4");
+    edit("delete", [&](t_canvas* c) { glist_delete(c, pd::Interface::getNewest(c)); }, false, "cv5");
+    // No edit: no change.
+    auto const s1 = versions("cv6");
+    auto const s2 = versions("cv7");
+    CHECK(s1.second == s2.second);
+    // The census header carries the same number.
+    auto census = h.call("/pd/census", { "main", "cv8" }, "/pd/census/reply/cv8");
+    CHECK(census.has_value() && parseJson(*census).hasProperty("contentVersion"));
+    if (census) CHECK(static_cast<double>(parseJson(*census)["contentVersion"]) == s2.second);
+    host->pdWait([&] {
+        t_canvas* c = host->getCanvasBySymbol("main");
+        for (auto* g : { a, b, msg }) glist_delete(c, g);
+    }, 3000);
+}
+
+// P11.5 V26: /pd/selection_get <corrId> [canvas] answers the live editor selection {canvasKey, ids, classes, count}
+// (empty = nothing selected). Headless there is no editor, so nothing is selected; an unknown canvas is an error.
+void runSelectionGetCases(Harness& h)
+{
+    std::printf("/pd/selection_get (P11.5 V26)\n");
+    CHECK(hasCap(h, "selection_get", "sg0"));
+    auto any = h.call("/pd/selection_get", { "sg1" }, "/pd/selection_get/reply/sg1", 2000);
+    CHECK(any.has_value());
+    if (any) {
+        auto const json = parseJson(*any);
+        CHECK(static_cast<int>(json["count"]) == 0 && json["ids"].isArray() && json["ids"].getArray()->isEmpty());
+        CHECK(json["classes"].isArray());
+    }
+    auto onMain = h.call("/pd/selection_get", { "sg2", "main" }, "/pd/selection_get/reply/sg2", 2000);
+    CHECK(onMain.has_value() && parseJson(*onMain)["canvasKey"].toString().isNotEmpty());
+    CHECK(onMain.has_value() && static_cast<int>(parseJson(*onMain)["count"]) == 0);
+    auto bad = h.call("/pd/selection_get", { "sg3", "pd-p11_no_such_canvas" }, "/pd/selection_get/error/sg3", 2000);
+    CHECK(bad.has_value());
+}
+
 // P5.1 sink floor S1: /pd/limiter answers the LIVE limiter state and the toolbar threshold
 // ({"enabled":bool,"thresholdDb":-12|-6|0|3}), read-only; the capability `limiter` is advertised. The state is set
 // here directly (the AI never switches it) and restored after.
@@ -3361,6 +3445,8 @@ int main()
             runSidecarCases(processor);
             runLoadReportCases(harness, processor);
             runBoundCases(harness, processor);
+            runContentVersionCases(harness, processor);
+            runSelectionGetCases(harness);
             runV2HandshakeCases(harness, *bridge, [&] {
                 bridge->setReplySinkForTests([&replies](juce::OSCMessage const& msg) { replies.push(msg); });
             });

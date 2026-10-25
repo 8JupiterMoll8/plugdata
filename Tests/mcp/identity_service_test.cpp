@@ -413,6 +413,17 @@ int main()
         CHECK(!core.observeStamp(&x, 111));
         CHECK(core.observeStamp(&x, 222));
         CHECK(core.canvasVersion(&x) == 3 && core.version() == 4);
+        // P11.5 V23: the content stamp (wires, x/y, text atoms) has its own per-canvas counter and a global one; it
+        // never bumps the identity version. The first observation is the baseline.
+        auto const idBefore = core.version();
+        CHECK(core.contentVersion(&x) == 0);
+        CHECK(!core.observeContent(&x, 7));
+        CHECK(!core.observeContent(&x, 7));
+        CHECK(core.observeContent(&x, 8));
+        CHECK(core.contentVersion(&x) == 1 && core.contentVersionGlobal() == 1);
+        CHECK(core.observeContent(&y, 5) == false && core.observeContent(&y, 6));
+        CHECK(core.contentVersion(&y) == 1 && core.contentVersionGlobal() == 2);
+        CHECK(core.version() == idBefore && core.canvasVersion(&x) == 3);
         // prune bumps the canvas whose entry went
         o1.generation++;
         core.prune();
