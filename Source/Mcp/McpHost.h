@@ -199,13 +199,16 @@ public:
     bool callSys(SmallString const& selector, mcp::SysList const& list);
 
     // P11.5 V24: the tab tokens (receiver namespaces) of the open tabs, in `tabs` order (McpTabTokens.h). Default =
-    // the TS stem hash; a collision between open tabs gives the later-opened tab the next free token, which is
-    // written into its identity sidecar when one exists (and by every later save). A token a sidecar holds is used.
+    // the TS stem hash; a collision between open tabs gives the later-opened tab the next free token, which the tab's
+    // next save writes into its identity sidecar (review M4: listing tabs never writes a file). A token a sidecar
+    // holds is used unless an older open tab holds it (then the row says overridden).
     // Message thread (takes the Pd lock briefly for the tabs' age order).
     struct TabTokenRow {
         juce::String token;
         bool collided = false;
         bool fromSidecar = false;
+        bool overridden = false;    // review M4: the sidecar's token was taken by an older open tab
+        juce::String persisted;     // ... the sidecar's token
     };
     std::vector<TabTokenRow> assignTabTokens(std::vector<McpGuiHost::TabInfo> const& tabs);
     // The token of `root` when it is not its default (the sidecar keeps it); "" otherwise. Any thread.

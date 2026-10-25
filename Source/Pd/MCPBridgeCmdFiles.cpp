@@ -725,6 +725,10 @@ void MCPBridge::pdListTabs(const juce::String& action, const juce::OSCMessage& m
                 o->setProperty("ns", tokens[ti].token);
                 o->setProperty("nsCollided", tokens[ti].collided);
                 o->setProperty("nsFromSidecar", tokens[ti].fromSidecar);
+                if (tokens[ti].overridden) { // review M4: the sidecar's token was taken by an older open tab
+                    o->setProperty("nsOverridden", true);
+                    o->setProperty("nsPersisted", tokens[ti].persisted);
+                }
             }
             o->setProperty("title", tab.title);
             o->setProperty("file", tab.file.getFullPathName());

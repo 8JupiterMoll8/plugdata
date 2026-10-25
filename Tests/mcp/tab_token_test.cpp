@@ -64,6 +64,9 @@ int main()
         // ... unless another open tab already holds it: then the later tab gets a new one.
         auto both = t.assign({ { &a, "song39.pd", "p49" }, { &d, "other.pd", "p49" } });
         CHECK(both.size() == 2 && both[0].token == "p49" && both[1].token != "p49" && both[1].collided);
+        // Review M4: the row says its persisted token was overridden, and which it was.
+        CHECK(both[1].overridden && both[1].persisted == "p49");
+        CHECK(!both[0].overridden);
         // A malformed persisted token is ignored (the default is used).
         mcp::TabTokens u;
         auto bad = u.assign({ { &c, "drums.pd", "kick" } });

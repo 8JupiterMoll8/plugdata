@@ -11,7 +11,8 @@
 // 32 over the result, "p" + (hash mod 100). Patches saved with `_pNN` receiver names therefore keep their names.
 // Only when two OPEN tabs end up with the same token does the later one (in the order given: oldest first) get the
 // next free "pNN"; that token is remembered while the tab stays open and the caller persists it in the tab's identity
-// sidecar (`ns`), which is passed back here as `persisted` on the next open.
+// sidecar (`ns`) when the tab is saved, which is passed back here as `persisted` on the next open. A persisted token
+// an older open tab already holds is overridden, and the row says so.
 #pragma once
 
 #include <algorithm>
@@ -89,6 +90,8 @@ public:
         std::string token;
         bool collided = false;    // the default (or persisted) token was taken by an older open tab
         bool fromSidecar = false; // the persisted token was used
+        bool overridden = false;  // review M4: the persisted token was taken by an older open tab: not used
+        std::string persisted;    // ... and which it was
     };
 
     // `tabs`: every open tab, oldest first. A tab seen before (same id and key) keeps its token; tabs not in the list
@@ -117,6 +120,11 @@ public:
             row.fromSidecar = usePersisted;
             if (taken.count(want) != 0) {
                 row.collided = true;
+                if (usePersisted) {
+                    row.overridden = true;
+                    row.persisted = t.persisted;
+                    row.fromSidecar = false;
+                }
                 want = nextFree(want, taken);
             }
             row.token = want;

@@ -282,19 +282,10 @@ std::vector<McpHost::TabTokenRow> McpHost::assignTabTokens(std::vector<McpGuiHos
     for (size_t k = 0; k < order.size() && k < assigned.size(); ++k) {
         auto const i = order[k];
         auto const& a = assigned[k];
-        rows[i] = { juce::String(a.token), a.collided, a.fromSidecar };
-        if (a.token == mcp::defaultTabToken(in[k].key))
-            continue;
-        tabTokenNonDefault[tabs[i].patch] = juce::String(a.token);
-        // Persist a new token in the tab's existing sidecar now (a tab without one keeps it at its next save).
-        auto const sidecar = sidecarOf(tabs[i].file);
-        if (tabs[i].file.existsAsFile() && sidecar.existsAsFile()) {
-            auto json = juce::JSON::parse(sidecar.loadFileAsString());
-            if (auto* o = json.getDynamicObject(); o && o->getProperty("ns").toString() != juce::String(a.token)) {
-                o->setProperty("ns", juce::String(a.token));
-                sidecar.replaceWithText(juce::JSON::toString(json, true));
-            }
-        }
+        rows[i] = { juce::String(a.token), a.collided, a.fromSidecar, a.overridden, juce::String(a.persisted) };
+        // Kept for the tab's next save (buildIdentitySidecar); nothing is written here (review M4).
+        if (a.token != mcp::defaultTabToken(in[k].key))
+            tabTokenNonDefault[tabs[i].patch] = juce::String(a.token);
     }
     return rows;
 }
