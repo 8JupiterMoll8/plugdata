@@ -61,7 +61,7 @@ int main()
         s.show("n", "pd-main", "second", {}, 60000, 1000);
         auto v = s.visible(1000);
         CHECK(v.size() == 1 && v[0].reason == "second");
-        CHECK(v[0].firstPaintedMs < 0);
+        CHECK(v[0].onScreenSince() < 0);
     }
 
     // 3. Expiry drops the chip (the server also clears it; this covers a server that went away).
@@ -202,6 +202,40 @@ int main()
         CHECK(s.show(c, 60000, 0));
         auto v = s.visible(1);
         CHECK(v.size() == 1 && v[0].title == c.title && v[0].canvasId == 0x1234);
+    }
+
+    // 10. Round 3 item 3: a chip whose position changes (a chip above it went away) starts its on-screen time again.
+    {
+        ApprovalState s;
+        s.show("n_top", "pd-main", "r", {}, 60000, 0);
+        s.show("n_low", "pd-main", "r", {}, 60000, 0);
+        ApprovalRect const view { 0, 0, 2000, 2000 };
+        s.markPaintedIfInside("n_top", 1, ApprovalRect { 100, 100, 440, 78 }, view, 1000);
+        s.markPaintedIfInside("n_low", 1, ApprovalRect { 100, 184, 440, 78 }, view, 1000);
+        s.clear("n_top");
+        s.markPaintedIfInside("n_low", 1, ApprovalRect { 100, 100, 440, 78 }, view, 1300); // moved up under the cursor
+        CHECK(!s.clickAllowed("n_low", 1500));
+        CHECK(!s.enterTarget(1500).has_value());
+        CHECK(s.clickAllowed("n_low", 1300 + ApprovalState::kEnterMinVisibleMs));
+        // Same place again: the time keeps running.
+        s.markPaintedIfInside("n_low", 1, ApprovalRect { 100, 100, 440, 78 }, view, 1800);
+        CHECK(s.clickAllowed("n_low", 1800));
+    }
+
+    // 11. Round 3 item 6: the timer is per chip, shared across views: fully visible in ANY view counts, and one view
+    //     drawing it outside its area does not reset what another view started.
+    {
+        ApprovalState s;
+        s.show("n", "pd-main", "r", {}, 60000, 0);
+        ApprovalRect const viewA { 0, 0, 1000, 1000 };
+        ApprovalRect const viewB { 5000, 5000, 300, 200 };
+        s.markPaintedIfInside("n", 0xA, ApprovalRect { 100, 100, 440, 78 }, viewA, 1000);
+        s.markPaintedIfInside("n", 0xB, ApprovalRect { 100, 100, 440, 78 }, viewB, 1200); // outside B
+        CHECK(s.enterTarget(1000 + ApprovalState::kEnterMinVisibleMs).value_or("") == "n");
+        CHECK(s.clickAllowed("n", 1000 + ApprovalState::kEnterMinVisibleMs));
+        // A scrolls it away; B never showed it: no longer on screen anywhere.
+        s.markPaintedIfInside("n", 0xA, ApprovalRect { 5000, 5000, 440, 78 }, viewA, 2000);
+        CHECK(!s.clickAllowed("n", 2100));
     }
 
     if (failures == 0)

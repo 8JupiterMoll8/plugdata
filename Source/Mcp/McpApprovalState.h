@@ -15,6 +15,7 @@
 // approvalBarRect: under its anchor or at the centre of the visible viewport, and always clamped inside it (L5).
 
 #include <algorithm>
+#include <map>
 #include <cstdint>
 #include <mutex>
 #include <optional>
@@ -36,8 +37,22 @@ struct ApprovalChip {
     std::uintptr_t canvasId = 0; // the t_canvas the question is about (0: none / not open); the outline goes only there
     std::vector<std::string> targets; // the server-built ghost preview: tempIds, or "*" for the whole canvas
     std::int64_t expiresAtMs = 0;
-    std::int64_t firstPaintedMs = -1; // -1: not on screen yet
     std::uint64_t seq = 0;
+    // Where each canvas view last drew this chip fully on screen, and since when (round 3 items 3 and 6). A view that
+    // draws it outside its area drops only its own entry; a moved bar starts that view's time again.
+    struct Seen {
+        ApprovalRect bar;
+        std::int64_t since = 0;
+    };
+    std::map<std::uintptr_t, Seen> seen;
+    // On screen since (the earliest view that has it fully visible), or -1: on screen nowhere.
+    std::int64_t onScreenSince() const
+    {
+        std::int64_t best = -1;
+        for (auto const& entry : seen)
+            if (best < 0 || entry.second.since < best) best = entry.second.since;
+        return best;
+    }
 };
 
 class ApprovalState {
@@ -68,7 +83,7 @@ public:
         auto const nonce = c.nonce;
         std::lock_guard<std::mutex> const l(lock);
         purgeLocked(nowMs);
-        c.firstPaintedMs = -1;
+        c.seen.clear();
         c.expiresAtMs = nowMs + std::clamp<std::int64_t>(ttlMs, kMinTtlMs, kMaxTtlMs);
         c.seq = ++seqCounter;
         auto it = std::find_if(chips.begin(), chips.end(), [&](ApprovalChip const& x) { return x.nonce == nonce; });
@@ -119,20 +134,31 @@ public:
 
     // A paint drew this chip FULLY inside the visible area: start its on-screen time. A chip drawn off-screen (or cut
     // by the edge) never starts it, so neither Enter nor a click can answer a chip the artist could not see.
-    bool markPaintedIfInside(std::string const& nonce, ApprovalRect const& bar, ApprovalRect const& view, std::int64_t nowMs)
+    bool markPaintedIfInside(std::string const& nonce, std::uintptr_t viewId, ApprovalRect const& bar, ApprovalRect const& view, std::int64_t nowMs)
     {
         bool const inside = view.w > 0 && view.h > 0 && bar.x >= view.x && bar.y >= view.y
             && bar.x + bar.w <= view.x + view.w && bar.y + bar.h <= view.y + view.h;
         std::lock_guard<std::mutex> const l(lock);
         for (auto& c : chips)
             if (c.nonce == nonce) {
-                if (!inside)
-                    c.firstPaintedMs = -1; // left the screen: the on-screen time starts again when it is back
-                else if (c.firstPaintedMs < 0)
-                    c.firstPaintedMs = nowMs;
-                return inside;
+                if (!inside) {
+                    c.seen.erase(viewId); // only this view's entry: another view may still show it
+                    return false;
+                }
+                auto it = c.seen.find(viewId);
+                bool const same = it != c.seen.end() && it->second.bar.x == bar.x && it->second.bar.y == bar.y
+                    && it->second.bar.w == bar.w && it->second.bar.h == bar.h;
+                if (!same)
+                    c.seen[viewId] = { bar, nowMs }; // new here, or moved (a chip above went away): the time starts again
+                return true;
             }
         return false;
+    }
+
+    // One view (tests).
+    bool markPaintedIfInside(std::string const& nonce, ApprovalRect const& bar, ApprovalRect const& view, std::int64_t nowMs)
+    {
+        return markPaintedIfInside(nonce, 0, bar, view, nowMs);
     }
 
     // A click answers a chip only once it has been fully on screen for kEnterMinVisibleMs (a chip that just appeared
@@ -142,8 +168,10 @@ public:
         std::lock_guard<std::mutex> const l(lock);
         purgeLocked(nowMs);
         for (auto const& c : chips)
-            if (c.nonce == nonce)
-                return c.firstPaintedMs >= 0 && nowMs - c.firstPaintedMs >= kEnterMinVisibleMs;
+            if (c.nonce == nonce) {
+                auto const since = c.onScreenSince();
+                return since >= 0 && nowMs - since >= kEnterMinVisibleMs;
+            }
         return false;
     }
 
@@ -155,7 +183,8 @@ public:
         if (chips.size() != 1)
             return std::nullopt;
         auto const& c = chips.front();
-        if (c.firstPaintedMs < 0 || nowMs - c.firstPaintedMs < kEnterMinVisibleMs)
+        auto const since = c.onScreenSince();
+        if (since < 0 || nowMs - since < kEnterMinVisibleMs)
             return std::nullopt;
         return c.nonce;
     }

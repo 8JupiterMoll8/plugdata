@@ -193,7 +193,8 @@ void CanvasMcpLayer::paintApprovalChips(NVGcontext* nvg)
         hit.no = { bx + 8 + half + 8, by + 42, half, kBarH - 48 };
         mcpApprovalHits.push_back(hit);
         // Its on-screen time (Enter and clicks wait 400 ms) starts only when the whole bar is inside the view.
-        state.markPaintedIfInside(c.nonce, mcp::ApprovalRect { bx, by, kBarW, kBarH }, view, nowMs());
+        // Per chip, shared across views: this view's entry only (round 3 items 3, 6); a moved bar starts again.
+        state.markPaintedIfInside(c.nonce, reinterpret_cast<std::uintptr_t>(this), mcp::ApprovalRect { bx, by, kBarW, kBarH }, view, nowMs());
 
         NVGScopedState scopedAppr(nvg);
         nanovg::nvgTranslate(nvg, static_cast<float>(bx), static_cast<float>(by));
