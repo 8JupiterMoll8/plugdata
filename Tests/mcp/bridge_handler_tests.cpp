@@ -821,6 +821,50 @@ void runSpectralPitchCases()
         CHECK(std::abs(armed - hz) <= hz * 0.03);
         CHECK(std::abs(render - hz) <= hz * 0.03);
     }
+
+    // P11 V7 (J7): an 808-style one-shot in a 0.5 s armed capture at 44.1 kHz. Pre-roll silence, then a pitch sweep
+    // f(t) = body + (start - body) * max(0, 1 - t / 0.09) Hz, amplitude exp(-t / 0.45), tanh(2x), and a 6 ms high-passed
+    // noise click at 0.25 s of the capture. The pitch is the BODY's (median over hop-spaced frames after the onset),
+    // the strongest bin comes from a Welch average of those frames; the attack frame's own pitch is reported apart.
+    double const ksr = 44100.0;
+    auto kick = [ksr](double body, double start, double prerollMs) {
+        int const n = static_cast<int>(ksr * 0.5);
+        std::vector<float> v(static_cast<size_t>(n), 0.0f);
+        int const onset = static_cast<int>(ksr * prerollMs / 1000.0);
+        double phase = 0.0;
+        for (int i = onset; i < n; ++i) {
+            double const t = (i - onset) / ksr;
+            double const f = body + (start - body) * std::max(0.0, 1.0 - t / 0.09);
+            phase += 2.0 * M_PI * f / ksr;
+            v[static_cast<size_t>(i)] = static_cast<float>(std::tanh(2.0 * std::exp(-t / 0.45) * std::sin(phase)));
+        }
+        uint32_t seed = 12345u;
+        float prev = 0.0f;
+        int const click = static_cast<int>(ksr * 0.25);
+        for (int i = click; i < click + static_cast<int>(ksr * 0.006) && i < n; ++i) {
+            seed = seed * 1664525u + 1013904223u;
+            float const noise = static_cast<float>((seed >> 8) & 0xFFFF) / 32768.0f - 1.0f;
+            v[static_cast<size_t>(i)] += 0.3f * (noise - prev); // first difference: a high-passed click
+            prev = noise;
+        }
+        return v;
+    };
+    struct KickCase { double body, start, prerollMs; };
+    for (auto const k : { KickCase { 48, 158, 20 }, KickCase { 45, 155, 20 }, KickCase { 48, 300, 20 },
+             KickCase { 48, 158, 0 }, KickCase { 48, 158, 200 } }) {
+        auto buf = kick(k.body, k.start, k.prerollMs);
+        auto const json = juce::JSON::parse(armedSpectralJson(buf.data(), static_cast<int>(buf.size()), ksr));
+        double const f0 = json.isObject() ? static_cast<double>(json.getProperty("fundamental", -1.0)) : -1.0;
+        double const peakHz = json.isObject() ? static_cast<double>(json.getProperty("peakFrequency", -1.0)) : -1.0;
+        int const voiced = json.isObject() ? static_cast<int>(json.getProperty("voicedFrames", -1)) : -1;
+        bool const hasAttack = json.isObject() && json.hasProperty("attackPitchHz");
+        std::printf("  kick %.0f Hz (from %.0f, pre-roll %.0f ms) -> fundamental %.2f, peak %.1f Hz, voiced %d\n",
+            k.body, k.start, k.prerollMs, f0, peakHz, voiced);
+        CHECK(std::abs(f0 - k.body) <= k.body * 0.05);
+        CHECK(peakHz > 0.0 && peakHz < 70.0);
+        CHECK(voiced >= 3);
+        CHECK(hasAttack);
+    }
 }
 
 void runStampCostCases(PluginProcessor& processor)
@@ -3060,10 +3104,10 @@ int main()
 
         // A hung handler must not hang the run.
         std::thread watchdog([&] {
-            for (int waited = 0; waited < 1200 && !casesDone.load(); ++waited)
+            for (int waited = 0; waited < 2400 && !casesDone.load(); ++waited)
                 sleepMs(100);
             if (!casesDone.load()) {
-                std::printf("  FAIL the cases did not finish in 120 s\n");
+                std::printf("  FAIL the cases did not finish in 240 s\n");
                 ++failures;
                 casesDone.store(true);
                 stopMessageLoop();

@@ -324,6 +324,8 @@ juce::String spectralJsonFromSamples(float const* samples, int N, double sampleR
 juce::String renderSpectralJson(float const* data, int n, double sampleRate);
 juce::String armedSpectralJson(float const* data, int n, double sampleRate);
 float estimateFrequency(const float* buf, int n, float sampleRate); // defined near ProbeManager (MCPBridge.cpp)
+// P11 V7: YIN over [minHz, maxHz] (MCPBridgeSpectral.cpp); Hz (0 = unvoiced) and a confidence.
+float estimatePitchYinRange(const float* buf, int n, float sampleRate, float minHz, float maxHz, float& outConfidence);
 
 // ── mcpIoletX — true Pd iolet anchor X ──────────────────────────────────
 // Ports sit at  objX + (objW - IOWIDTH) * index / (count-1) + IOMIDDLE  (see
