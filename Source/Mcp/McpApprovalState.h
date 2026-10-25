@@ -23,6 +23,10 @@
 
 namespace mcp {
 
+struct ApprovalRect {
+    int x = 0, y = 0, w = 0, h = 0;
+};
+
 struct ApprovalChip {
     std::string nonce;
     std::string canvas;
@@ -101,13 +105,34 @@ public:
 
     bool any(std::int64_t nowMs) { return !visible(nowMs).empty(); }
 
-    // A paint drew the chips: start their on-screen time.
-    void markPainted(std::int64_t nowMs)
+    // A paint drew this chip FULLY inside the visible area: start its on-screen time. A chip drawn off-screen (or cut
+    // by the edge) never starts it, so neither Enter nor a click can answer a chip the artist could not see.
+    bool markPaintedIfInside(std::string const& nonce, ApprovalRect const& bar, ApprovalRect const& view, std::int64_t nowMs)
     {
+        bool const inside = view.w > 0 && view.h > 0 && bar.x >= view.x && bar.y >= view.y
+            && bar.x + bar.w <= view.x + view.w && bar.y + bar.h <= view.y + view.h;
         std::lock_guard<std::mutex> const l(lock);
         for (auto& c : chips)
-            if (c.firstPaintedMs < 0)
-                c.firstPaintedMs = nowMs;
+            if (c.nonce == nonce) {
+                if (!inside)
+                    c.firstPaintedMs = -1; // left the screen: the on-screen time starts again when it is back
+                else if (c.firstPaintedMs < 0)
+                    c.firstPaintedMs = nowMs;
+                return inside;
+            }
+        return false;
+    }
+
+    // A click answers a chip only once it has been fully on screen for kEnterMinVisibleMs (a chip that just appeared
+    // under the cursor is not clickable yet).
+    bool clickAllowed(std::string const& nonce, std::int64_t nowMs)
+    {
+        std::lock_guard<std::mutex> const l(lock);
+        purgeLocked(nowMs);
+        for (auto const& c : chips)
+            if (c.nonce == nonce)
+                return c.firstPaintedMs >= 0 && nowMs - c.firstPaintedMs >= kEnterMinVisibleMs;
+        return false;
     }
 
     // Enter answers yes only for exactly one pending record whose chip has been on screen long enough.
@@ -143,9 +168,15 @@ private:
     std::uint64_t seqCounter = 0;
 };
 
-struct ApprovalRect {
-    int x = 0, y = 0, w = 0, h = 0;
-};
+// The visible area of a canvas view in canvas coordinates. CanvasViewport::getViewArea() already IS that (view
+// position and size divided by the zoom): it is used as it is, never divided by the zoom a second time (P12c review:
+// at zoom 0.5 / 1.5 / 2 the double division put the bar thousands of pixels off-screen).
+inline ApprovalRect approvalVisibleArea(float x, float y, float w, float h)
+{
+    auto r = [](float v) { return static_cast<int>(v >= 0 ? v + 0.5f : v - 0.5f); };
+    int const x0 = r(x), y0 = r(y);
+    return { x0, y0, r(x + w) - x0, r(y + h) - y0 };
+}
 
 // Where the chip bar (a stack of `h` pixels) goes, in canvas coordinates: under its anchor (the pill or the
 // selection), flipped above when it would leave the bottom; with no anchor at the centre of the VISIBLE viewport.

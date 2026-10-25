@@ -1297,7 +1297,8 @@ void runApprovalCases(Harness& h, PluginProcessor& processor)
     CHECK(state.visible(now()).size() == 2);
 
     // Enter with two pending approves nothing.
-    state.markPainted(now() - 1000);
+    state.markPaintedIfInside("n_a", mcp::ApprovalRect { 0, 0, 10, 10 }, mcp::ApprovalRect { 0, 0, 100, 100 }, now() - 1000);
+    state.markPaintedIfInside("n_b", mcp::ApprovalRect { 0, 0, 10, 10 }, mcp::ApprovalRect { 0, 0, 100, 100 }, now() - 1000);
     CHECK(!state.enterTarget(now()).has_value());
 
     auto c1 = h.call("/pd/approval_clear", { "ap5", "n_a" }, "/pd/approval_clear/reply/ap5");

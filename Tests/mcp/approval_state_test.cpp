@@ -50,11 +50,14 @@ int main()
         CHECK(s.visible(40).empty());
     }
 
+    ApprovalRect const screen { 0, 0, 2000, 2000 };
+    ApprovalRect const onScreen { 100, 100, 440, 62 };
+
     // 2. Showing the same nonce again replaces it (no duplicate chip) and restarts its on-screen time.
     {
         ApprovalState s;
         s.show("n", "pd-main", "first", {}, 60000, 0);
-        s.markPainted(0);
+        s.markPaintedIfInside("n", onScreen, screen, 0);
         s.show("n", "pd-main", "second", {}, 60000, 1000);
         auto v = s.visible(1000);
         CHECK(v.size() == 1 && v[0].reason == "second");
@@ -78,13 +81,13 @@ int main()
         ApprovalState s;
         s.show("n1", "pd-main", "r1", {}, 60000, 0);
         CHECK(!s.enterTarget(1000).has_value()); // never painted yet
-        s.markPainted(1000);
+        s.markPaintedIfInside("n1", onScreen, screen, 1000);
         CHECK(!s.enterTarget(1000).has_value());
         CHECK(!s.enterTarget(1000 + ApprovalState::kEnterMinVisibleMs - 1).has_value()); // too soon
         auto e = s.enterTarget(1000 + ApprovalState::kEnterMinVisibleMs);
         CHECK(e.has_value() && *e == "n1");
         s.show("n2", "pd-main", "r2", {}, 60000, 1500);
-        s.markPainted(1500);
+        s.markPaintedIfInside("n2", onScreen, screen, 1500);
         CHECK(!s.enterTarget(5000).has_value()); // two pending: Enter approves nothing
         // Esc cancels: every chip on screen.
         auto esc = s.escTargets(5000);
@@ -123,6 +126,55 @@ int main()
         // An empty viewport (not laid out yet) is not a reason to go to the origin's corner: centre of what there is.
         auto empty = mcp::approvalBarRect(std::nullopt, ApprovalRect { 500, 400, 0, 0 }, 440, 62);
         CHECK(empty.x + empty.w / 2 == 500 && empty.y + empty.h / 2 == 400);
+    }
+
+    // 6. P12c review HIGH: the visible area is getViewArea() as it is (already canvas coordinates); at every zoom and
+    //    an odd scroll position the bar lands inside it. (The old code divided by the zoom again: off-screen at 0.5,
+    //    1.5 and 2.)
+    {
+        for (float zoom : { 0.5f, 1.0f, 1.5f, 2.0f })
+            for (float scroll : { 0.0f, 333.3f, 64000.7f, -1234.5f }) {
+                float const W = 1200, H = 800;
+                // CanvasViewport::getViewArea(): { viewPosition / scale, size / scale }
+                auto const view = mcp::approvalVisibleArea(scroll / zoom, (scroll * 0.75f) / zoom, W / zoom, H / zoom);
+                auto const bar = mcp::approvalBarRect(std::nullopt, view, 440, 4 * 62 + 3 * 6 + 22);
+                CHECK(inside(bar, view));
+                auto const anchored = mcp::approvalBarRect(ApprovalRect { view.x - 9000, view.y + 9000, 50, 20 }, view, 440, 62);
+                CHECK(inside(anchored, view));
+            }
+    }
+
+    // 7. P12c review HIGH: a chip drawn off-screen never starts its on-screen time: Enter and a click cannot answer it.
+    {
+        ApprovalState s;
+        s.show("n_x", "pd-main", "clear the entire canvas", { "*" }, 60000, 1000);
+        ApprovalRect const view { 64000, 64000, 1200, 800 };
+        CHECK(!s.markPaintedIfInside("n_x", ApprovalRect { 16000, 16069, 440, 62 }, view, 1000)); // off-screen
+        CHECK(!s.enterTarget(1500).has_value());
+        CHECK(!s.clickAllowed("n_x", 1500));
+        CHECK(!s.markPaintedIfInside("n_x", ApprovalRect { 64000 + 1000, 64100, 440, 62 }, view, 1500)); // cut by the edge
+        CHECK(!s.enterTarget(2500).has_value());
+        CHECK(s.markPaintedIfInside("n_x", ApprovalRect { 64100, 64100, 440, 62 }, view, 3000)); // fully visible now
+        CHECK(!s.enterTarget(3000 + ApprovalState::kEnterMinVisibleMs - 1).has_value());
+        CHECK(s.enterTarget(3000 + ApprovalState::kEnterMinVisibleMs).value_or("") == "n_x");
+        // Scrolled away again: the clock restarts.
+        s.markPaintedIfInside("n_x", ApprovalRect { 0, 0, 440, 62 }, view, 4000);
+        CHECK(!s.enterTarget(4100).has_value());
+    }
+
+    // 8. P12c review MEDIUM: a click needs the same 400 ms on screen as Enter (a chip that pops up under the cursor).
+    {
+        ApprovalState s;
+        s.show("n_a", "pd-main", "r", {}, 60000, 0);
+        CHECK(!s.clickAllowed("n_a", 0));
+        s.markPaintedIfInside("n_a", onScreen, screen, 1000);
+        CHECK(!s.clickAllowed("n_a", 1000 + ApprovalState::kEnterMinVisibleMs - 1));
+        CHECK(s.clickAllowed("n_a", 1000 + ApprovalState::kEnterMinVisibleMs));
+        CHECK(!s.clickAllowed("n_unknown", 5000));
+        // A new chip is appended: the older one keeps its place (no reflow under the cursor).
+        s.show("n_b", "pd-main", "r2", {}, 60000, 2000);
+        auto v = s.visible(2000);
+        CHECK(v.size() == 2 && v[0].nonce == "n_a" && v[1].nonce == "n_b");
     }
 
     if (failures == 0)

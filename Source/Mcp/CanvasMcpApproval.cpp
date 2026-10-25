@@ -56,10 +56,14 @@ void CanvasMcpLayer::answerApproval(juce::String const& nonce, bool yes)
 
 bool CanvasMcpLayer::handleApprovalClick(juce::Point<int> canvasPt)
 {
-    if (mcpApprovalFrame.isEmpty() || !mcpApprovalFrame.contains(canvasPt)) return false;
+    if (!canvas.pd || mcpApprovalFrame.isEmpty() || !mcpApprovalFrame.contains(canvasPt)) return false;
+    auto& state = canvas.pd->getMcp()->session.approvals;
     for (auto const& hit : mcpApprovalHits) {
-        if (hit.yes.contains(canvasPt)) { answerApproval(hit.nonce, true); break; }
-        if (hit.no.contains(canvasPt)) { answerApproval(hit.nonce, false); break; }
+        bool const yes = hit.yes.contains(canvasPt);
+        if (!yes && !hit.no.contains(canvasPt)) continue;
+        // A chip that just appeared (or is not fully on screen) is not clickable yet: same 400 ms as Enter.
+        if (state.clickAllowed(hit.nonce.toStdString(), nowMs())) answerApproval(hit.nonce, yes);
+        break;
     }
     return true; // a click on the stack never falls through to the canvas
 }
@@ -89,13 +93,12 @@ void CanvasMcpLayer::paintApprovalChips(NVGcontext* nvg)
     auto const chips = state.visible(nowMs());
     if (chips.empty()) return;
 
-    // The visible viewport in canvas coordinates (the space objects and the pill are drawn in).
-    float z = std::sqrt(std::abs(canvas.getTransform().getDeterminant()));
-    if (z <= 0.0f) z = 1.0f;
-    juce::Rectangle<int> view = canvas.getLocalBounds();
+    // The visible viewport in canvas coordinates (the space objects and the pill are drawn in). getViewArea() already
+    // is that (view position and size divided by the zoom): used as it is, never divided by the zoom again.
+    mcp::ApprovalRect view = toRect(canvas.getLocalBounds());
     if (canvas.viewport) {
-        auto const a = canvas.viewport->getViewArea().toFloat();
-        view = juce::Rectangle<float>(a.getX() / z, a.getY() / z, a.getWidth() / z, a.getHeight() / z).toNearestInt();
+        auto const a = canvas.viewport->getViewArea();
+        view = mcp::approvalVisibleArea(a.getX(), a.getY(), a.getWidth(), a.getHeight());
     }
 
     // Server-built ghost preview: outline every target of every pending record that lives on this canvas.
@@ -166,14 +169,17 @@ void CanvasMcpLayer::paintApprovalChips(NVGcontext* nvg)
 
     int const shown = std::min<int>(static_cast<int>(chips.size()), kMaxBars);
     int const more = static_cast<int>(chips.size()) - shown;
-    int const stackH = shown * kBarH + (shown - 1) * kBarGap + (more > 0 ? 22 : 0);
-    auto const place = mcp::approvalBarRect(anchor, toRect(view), kBarW, stackH);
+    // Placed for the FULL stack, whatever is pending now: a new chip is appended below without moving the ones already
+    // on screen (no reflow under the cursor).
+    int const fullH = kMaxBars * kBarH + (kMaxBars - 1) * kBarGap + 22;
+    auto place = mcp::approvalBarRect(anchor, view, kBarW, fullH);
+    place.h = shown * kBarH + (shown - 1) * kBarGap + (more > 0 ? 22 : 0);
     mcpApprovalFrame = juce::Rectangle<int>(place.x, place.y, place.w, place.h);
 
     int const half = (kBarW - 24) / 2;
     for (int i = 0; i < shown; ++i) {
-        // Newest on top: the question just asked is the one the artist is looking for.
-        auto const& c = chips[chips.size() - 1 - static_cast<std::size_t>(i)];
+        // Oldest first: new questions are appended below, nothing already on screen moves.
+        auto const& c = chips[static_cast<std::size_t>(i)];
         int const bx = place.x;
         int const by = place.y + i * (kBarH + kBarGap);
         ApprovalHit hit;
@@ -182,6 +188,8 @@ void CanvasMcpLayer::paintApprovalChips(NVGcontext* nvg)
         hit.yes = { bx + 8, by + 26, half, kBarH - 32 };
         hit.no = { bx + 8 + half + 8, by + 26, half, kBarH - 32 };
         mcpApprovalHits.push_back(hit);
+        // Its on-screen time (Enter and clicks wait 400 ms) starts only when the whole bar is inside the view.
+        state.markPaintedIfInside(c.nonce, mcp::ApprovalRect { bx, by, kBarW, kBarH }, view, nowMs());
 
         NVGScopedState scopedAppr(nvg);
         nanovg::nvgTranslate(nvg, static_cast<float>(bx), static_cast<float>(by));
@@ -214,5 +222,4 @@ void CanvasMcpLayer::paintApprovalChips(NVGcontext* nvg)
         auto const line = "+" + juce::String(more) + " more waiting";
         mcpnvg::nvgText(nvg, place.x + kBarW * 0.5f, place.y + place.h - 10.0f, line.toRawUTF8(), nullptr);
     }
-    state.markPainted(nowMs()); // starts the on-screen time Enter waits for
 }
