@@ -11,6 +11,7 @@
 #include "PluginProcessor.h"
 #include "Mcp/McpHost.h"
 #include "Pd/MCPBridge.h"
+#include "Mcp/McpGuiFields.h" // review M2: GUI send/receive/range into the content stamp
 #include "Utility/SettingsFile.h"
 #include "Canvas.h"
 #include "PluginEditor.h"
@@ -101,15 +102,38 @@ void McpHost::registerOpenCanvases()
     // edit anywhere below a tab changes that tab's contentVersion (not its identity version).
     bool edited = false;
     auto mix = [](uint64_t h, uint64_t v) { return (h ^ v) * 1099511628211ull; };
+    // Review M2: a GUI's send/receive names and range live outside its text atoms (a hand change in the properties
+    // dialog edits them only); they go into the stamp through the McpGuiFields readers. The value does not (a moved
+    // slider is play, not an edit).
+    static std::unordered_map<std::string, std::string> const guiClasses {
+        { "hsl", "hsl" }, { "vsl", "vsl" }, { "tgl", "tgl" }, { "hradio", "hradio" }, { "vradio", "vradio" },
+        { "nbx", "nbx" }, { "bng", "bng" }, { "vu", "vu" }, { "cnv", "cnv" }, { "knob", "knob" }, { "gatom", "floatatom" }
+    };
+    auto guiStamp = [&](t_object* ob, uint64_t h) {
+        auto const it = guiClasses.find(class_getname(pd_class(&ob->te_g.g_pd)));
+        if (it == guiClasses.end())
+            return h;
+        std::unique_ptr<juce::DynamicObject> props(mcpBuildGuiProps(juce::String(it->second), ob));
+        for (char const* key : { "min", "max", "send", "receive", "log" })
+            if (props->hasProperty(key))
+                h = mix(h, static_cast<uint64_t>(std::hash<std::string> {}(key + std::string("=") + props->getProperty(key).toString().toStdString())));
+        return h;
+    };
     std::function<uint64_t(t_canvas*)> walk = [&](t_canvas* c) -> uint64_t {
         identity.canvasMap(c);
         identity.refreshKey(c); // review M3: renamed behind our back (GUI Save-As, subpatch rename)
         uint64_t stamp = 1469598103934665603ull;
         uint64_t content = 1469598103934665603ull;
         uint64_t count = 0;
+        // Review M2: the graph-on-parent flags and box of this canvas
+        content = mix(content, static_cast<uint64_t>(c->gl_isgraph) | static_cast<uint64_t>(c->gl_hidetext) << 1);
+        content = mix(content, static_cast<uint64_t>(static_cast<uint32_t>(c->gl_pixwidth)) << 32 | static_cast<uint32_t>(c->gl_pixheight));
+        content = mix(content, static_cast<uint64_t>(static_cast<uint32_t>(c->gl_xmargin)) << 32 | static_cast<uint32_t>(c->gl_ymargin));
         for (t_gobj* g = c->gl_list; g; g = g->g_next, ++count) {
             stamp = (stamp ^ reinterpret_cast<uintptr_t>(g)) * 1099511628211ull;
             content = mix(content, reinterpret_cast<uintptr_t>(g));
+            if (t_object* gui = pd_checkobject(&g->g_pd))
+                content = guiStamp(gui, content);
             if (t_object* ob = pd_checkobject(&g->g_pd)) {
                 content = mix(content, static_cast<uint32_t>(ob->te_xpix) | (static_cast<uint64_t>(static_cast<uint32_t>(ob->te_ypix)) << 32));
                 if (ob->te_binbuf) {

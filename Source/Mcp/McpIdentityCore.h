@@ -478,8 +478,9 @@ public:
     }
 
     // P11.5 V23: the content stamp (wires, x/y and text atoms on top of the structure) has its own counters, per canvas
-    // and global; it never bumps the identity version (a wire or a move changes no identity). The first observation
-    // only sets the baseline. True when it bumped.
+    // and global; it never bumps the identity version (a wire or a move changes no identity). True when it bumped.
+    // Review M2: every number a canvas gets, its first observation included, is a fresh value of the global counter,
+    // so a canvas closed and opened again (a new record) never shows a number it had before.
     bool observeContent(Canvas c, uint64_t stamp)
     {
         check("observeContent");
@@ -487,13 +488,13 @@ public:
         if (!r.contentStamped) {
             r.contentStamped = true;
             r.contentStamp = stamp;
+            r.contentVersion = contentGlobal.fetch_add(1, std::memory_order_relaxed) + 1;
             return false;
         }
         if (r.contentStamp == stamp)
             return false;
         r.contentStamp = stamp;
-        ++r.contentVersion;
-        contentGlobal.fetch_add(1, std::memory_order_relaxed);
+        r.contentVersion = contentGlobal.fetch_add(1, std::memory_order_relaxed) + 1;
         return true;
     }
     uint64_t contentVersion(Canvas c)

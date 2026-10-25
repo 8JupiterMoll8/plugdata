@@ -1864,6 +1864,77 @@ void runContentVersionCases(Harness& h, PluginProcessor& processor)
         pd_typedmess(&c->gl_pd, gensym("obj"), 4, at);
     }, false, "cv4");
     edit("delete", [&](t_canvas* c) { glist_delete(c, pd::Interface::getNewest(c)); }, false, "cv5");
+    // Review M2: a hand change of an iemgui's receive name, a disconnect, a retype, an undo and a redo bump it too.
+    t_gobj* slider = nullptr;
+    host->pdWait([&] {
+        t_canvas* c = host->getCanvasBySymbol("main");
+        t_atom at[3];
+        SETFLOAT(at, 1300);
+        SETFLOAT(at + 1, 40);
+        SETSYMBOL(at + 2, gensym("hsl"));
+        pd_typedmess(&c->gl_pd, gensym("obj"), 3, at);
+        slider = pd::Interface::getNewest(c);
+        host->identity.bind(c, "cvB", b);
+    }, 3000);
+    edit("iemgui receive", [&](t_canvas*) {
+        t_atom r;
+        SETSYMBOL(&r, gensym("p11cv_rcv"));
+        pd_typedmess(&slider->g_pd, gensym("receive"), 1, &r);
+    }, true, "cv10");
+    edit("disconnect", [&](t_canvas*) { obj_disconnect(pd_checkobject(&a->g_pd), 0, pd_checkobject(&b->g_pd), 0); }, true, "cv11");
+    {
+        auto const before = versions("cv12a");
+        auto mv = h.call("/pd/move_batch_id", { "main", "cv12m", "cvB", 1260, 95 }, "/pd/mcp_move_batch_id/reply/cv12m");
+        CHECK(mv.has_value());
+        sleepMs(300);
+        auto const moved = versions("cv12b");
+        h.call("/pd/undo", { "main", "cv12u" }, "/pd/undo/reply/cv12u");
+        sleepMs(600);
+        auto const undone = versions("cv12c");
+        h.call("/pd/redo", { "main", "cv12r" }, "/pd/redo/reply/cv12r");
+        sleepMs(600);
+        auto const redone = versions("cv12d");
+        CHECK(moved.second != before.second);
+        CHECK(undone.second != moved.second);
+        CHECK(redone.second != undone.second);
+    }
+    edit("retype", [&](t_canvas* c) {
+        char text[] = "f 7";
+        text_setto(reinterpret_cast<t_text*>(b), c, text, 3);
+        b = nullptr;
+        for (t_gobj* g = c->gl_list; g; g = g->g_next) // the retyped box (text_setto recreates it)
+            if (auto* t = pd_checkobject(&g->g_pd); t && t->te_xpix >= 1200 && t->te_binbuf && binbuf_getnatom(t->te_binbuf) == 2)
+                b = g;
+    }, false, "cv13");
+    // A canvas closed and opened again never gets a version it had before.
+    {
+        auto subVersion = [&](char const* corr) {
+            auto r = h.call("/pd/identity_version", { corr, "pd-p11cvsub" }, std::string("/pd/identity_version/reply/") + corr, 2000);
+            return r && r->args.size() >= 3 ? r->num(2) : -1.0;
+        };
+        auto makeSub = [&] {
+            host->pdWait([&] {
+                t_canvas* c = host->getCanvasBySymbol("main");
+                t_atom at[4];
+                SETFLOAT(at, 1400);
+                SETFLOAT(at + 1, 40);
+                SETSYMBOL(at + 2, gensym("pd"));
+                SETSYMBOL(at + 3, gensym("p11cvsub"));
+                pd_typedmess(&c->gl_pd, gensym("obj"), 4, at);
+            }, 3000);
+        };
+        auto dropSub = [&] {
+            host->pdWait([&] { t_canvas* c = host->getCanvasBySymbol("main"); glist_delete(c, pd::Interface::getNewest(c)); }, 3000);
+        };
+        makeSub();
+        double const first = subVersion("cv14");
+        dropSub();
+        makeSub();
+        double const second = subVersion("cv15");
+        dropSub();
+        std::printf("  reopened canvas: version %.0f then %.0f\n", first, second);
+        CHECK(first >= 0 && second >= 0 && second != first);
+    }
     // No edit: no change.
     auto const s1 = versions("cv6");
     auto const s2 = versions("cv7");
@@ -1874,7 +1945,7 @@ void runContentVersionCases(Harness& h, PluginProcessor& processor)
     if (census) CHECK(static_cast<double>(parseJson(*census)["contentVersion"]) == s2.second);
     host->pdWait([&] {
         t_canvas* c = host->getCanvasBySymbol("main");
-        for (auto* g : { a, b, msg }) glist_delete(c, g);
+        for (auto* g : { a, b, msg, slider }) if (g) glist_delete(c, g);
     }, 3000);
 }
 
