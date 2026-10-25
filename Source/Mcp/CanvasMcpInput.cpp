@@ -381,17 +381,9 @@ std::optional<bool> CanvasMcpLayer::keyPressedEarly(KeyPress const& key)
     if (mcpSelectionPill && mcpSelectionPill->hasKeyboardFocus(true))
         return false;
 
-    // Tier-2 approval: Enter approves the pending destructive op, Esc cancels.
-    if (isApprovalRequested()) {
-        if (key == juce::KeyPress::returnKey) {
-            sendApproval(true);
-            return true;
-        }
-        if (key == juce::KeyPress::escapeKey) {
-            sendApproval(false);
-            return true;
-        }
-    }
+    // P12c approval: Enter approves only the single chip that has been on screen long enough; Esc cancels.
+    if (auto handled = handleApprovalKey(key))
+        return *handled;
 
     return std::nullopt;
 }

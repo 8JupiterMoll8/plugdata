@@ -1267,6 +1267,66 @@ void runMidiCaptureCases(PluginProcessor& processor, AudioControl& audio)
 // P5.1 sink floor S1: /pd/limiter answers the LIVE limiter state and the toolbar threshold
 // ({"enabled":bool,"thresholdDb":-12|-6|0|3}), read-only; the capability `limiter` is advertised. The state is set
 // here directly (the AI never switches it) and restored after.
+// P12c: the canvas approval chips are the bridge's own state, set only by /pd/approval_show and /pd/approval_clear;
+// a HUD chapter saying "APPROVE?" shows none (H5); the artist's answer is the event /pd/approval/answer <nonce> yes|no.
+void runApprovalCases(Harness& h, PluginProcessor& processor)
+{
+    std::printf("approval chips (P12c)\n");
+    auto& state = processor.getMcp()->session.approvals;
+    auto const now = [] { return static_cast<std::int64_t>(juce::Time::currentTimeMillis()); };
+    for (auto const& n : state.escTargets(now())) state.clear(n);
+
+    // H5: the HUD cannot draw approval chips any more.
+    auto hud = h.call("/pd/ai_hud", { "main", "ap0", R"({"active":true,"chapter":"APPROVE?","receipt":"delete everything"})" }, "/pd/ai_hud/reply/ap0");
+    CHECK(hud.has_value());
+    CHECK(!state.any(now()));
+    h.call("/pd/ai_hud", { "main", "ap0b", R"({"active":false})" }, "/pd/ai_hud/reply/ap0b");
+
+    auto a = h.call("/pd/approval_show", { "ap1", R"({"nonce":"n_a","canvas":"pd-main","reason":"load a.pd","targets":["x","y"],"ttlMs":60000})" }, "/pd/approval_show/reply/ap1");
+    CHECK(a && a->num(0) == 1.0);
+    auto b = h.call("/pd/approval_show", { "ap2", R"({"nonce":"n_b","canvas":"pd-main","reason":"load b.pd","targets":[],"ttlMs":60000})" }, "/pd/approval_show/reply/ap2");
+    CHECK(b && b->num(0) == 1.0);
+    auto v = state.visible(now());
+    CHECK(v.size() == 2 && v[0].nonce == "n_a" && v[1].nonce == "n_b");
+    CHECK(v.size() == 2 && v[0].targets.size() == 2 && v[0].reason == "load a.pd");
+
+    auto bad = h.call("/pd/approval_show", { "ap3", R"({"canvas":"pd-main","reason":"no nonce"})" }, "/pd/approval_show/reply/ap3");
+    CHECK(bad && bad->num(0) == 0.0);
+    auto junk = h.call("/pd/approval_show", { "ap4", "not json" }, "/pd/approval_show/reply/ap4");
+    CHECK(junk && junk->num(0) == 0.0);
+    CHECK(state.visible(now()).size() == 2);
+
+    // Enter with two pending approves nothing.
+    state.markPainted(now() - 1000);
+    CHECK(!state.enterTarget(now()).has_value());
+
+    auto c1 = h.call("/pd/approval_clear", { "ap5", "n_a" }, "/pd/approval_clear/reply/ap5");
+    CHECK(c1 && c1->num(0) == 1.0);
+    auto c2 = h.call("/pd/approval_clear", { "ap6", "n_a" }, "/pd/approval_clear/reply/ap6");
+    CHECK(c2 && c2->num(0) == 0.0);
+    CHECK(state.visible(now()).size() == 1);
+    auto e = state.enterTarget(now());
+    CHECK(e.has_value() && *e == "n_b");
+
+    // The answer the canvas sends for exactly one chip.
+    h.replies.clear();
+    h.bridge.sendApprovalAnswer("n_b", true);
+    auto ans = h.replies.waitFor("/pd/approval/answer", 2000);
+    CHECK(ans && ans->str(0) == "n_b" && ans->str(1) == "yes");
+    h.bridge.sendApprovalAnswer("n_b", false);
+    auto no = h.replies.waitFor("/pd/approval/answer", 2000);
+    CHECK(no && no->str(1) == "no");
+
+    // The capability the server checks before it sends a chip.
+    auto caps = h.call("/bridge/capabilities", { "ap7" }, "/bridge/capabilities/reply");
+    bool cap = false;
+    if (caps)
+        for (auto const& arg : caps->args)
+            if (arg.text == "approval_ui") cap = true;
+    CHECK(cap);
+    state.clear("n_b");
+}
+
 void runLimiterCases(Harness& h, PluginProcessor& processor)
 {
     std::printf("limiter read\n");
@@ -2554,7 +2614,7 @@ void runZeroArgCases(Harness& h)
         auto const* e = f ? f->find("error") : nullptr;
         refused += (f && field(*f, "outcome") == "rejected" && e && field(*e, "code") == "bad_frame") ? 1 : 0;
     }
-    CHECK(guarded == 19 && refused == guarded); // 19 since /pd/midi_devices (minArgs 1)
+    CHECK(guarded == 21 && refused == guarded); // 19 since /pd/midi_devices (minArgs 1); 21 with P12c approval_show/clear (minArgs 2)
 }
 
 // S6.6 (audit A20): the live props of an IEM GUI carry its label, so a control the builder named (`hsl ... morph_s
@@ -2864,6 +2924,7 @@ int main()
             runLimiterCases(harness, processor);
             runOutputCeilingCases(harness, processor, audioControl);
             runMidiDevicesCases(harness, processor);
+            runApprovalCases(harness, processor);
             runLimiterPatchCases(processor);
             runVolumeGuardCases(processor);
             runIndexRefCases(harness, processor);

@@ -632,22 +632,4 @@ bool CanvasMcpLayer::handleReferenceImageClick(MouseEvent const& e, Point<int> m
     return false;
 }
 
-// The server signals a pending destructive op via the HUD chapter ("APPROVE?").
-bool CanvasMcpLayer::isApprovalRequested() const
-{
-    if (!canvas.pd) return false;
-    auto const hud = canvas.pd->getMcp()->session.getMcpHud();
-    return hud.active && hud.chapter.containsIgnoreCase("APPROVE");
-}
-
-// Artist clicked [Approve] / [Cancel] (or pressed Enter / Esc). The pill prompt
-// path carries it to the server, which holds the token inert until this yes.
-void CanvasMcpLayer::sendApproval(bool approve)
-{
-    mcpApprovalFrame = {};
-    mcpApprovalYes = {};
-    mcpApprovalNo = {};
-    sendPillPrompt(approve ? "approve" : "deny");
-    canvas.repaint();
-    if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
-}
+// P12c: chips come from the bridge's own approval state (CanvasMcpApproval.cpp), never from HUD text (H5).
