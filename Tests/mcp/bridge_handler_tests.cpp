@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -45,6 +46,7 @@
 #include "Mcp/McpHost.h"
 #include "Pd/MCPBridge.h"
 #include "Pd/Interface.h" // g_undo.h: the native undo queue (L6 check)
+#include "Mcp/McpCeilingPlayer.h" // P9 round 1: the clamp on playVoiceTake's own callback
 #include "Mcp/McpNativeUndo.h" // P6.2 UF: hand-made undo entries (motion) for /pd/undo_peek
 #include "v2_test_client.h" // P4.1 S2: loopback v2 client
 #include "Pd/MCPBridgeCmdCommon.h" // armedSpectralJson / renderSpectralJson (Plan 5 spectral window)
@@ -1279,11 +1281,11 @@ void runLimiterCases(Harness& h, PluginProcessor& processor)
     processor.setEnableLimiter(false);
     setThreshold(0);
     auto off = h.call("/pd/limiter", { "lim1" }, "/pd/limiter/reply/lim1");
-    CHECK(off.has_value() && off->str(0) == "{\"enabled\":false,\"thresholdDb\":-12}");
+    CHECK(off.has_value() && off->str(0).rfind("{\"enabled\":false,\"thresholdDb\":-12,\"ceiling\":{", 0) == 0);
     processor.setEnableLimiter(true);
     setThreshold(3);
     auto on = h.call("/pd/limiter", { "lim2" }, "/pd/limiter/reply/lim2");
-    CHECK(on.has_value() && on->str(0) == "{\"enabled\":true,\"thresholdDb\":3}");
+    CHECK(on.has_value() && on->str(0).rfind("{\"enabled\":true,\"thresholdDb\":3,\"ceiling\":{", 0) == 0);
     CHECK(processor.getEnableLimiter()); // the read changed nothing
     processor.setEnableLimiter(before);
     setThreshold(thresholdBefore);
@@ -1294,6 +1296,444 @@ void runLimiterCases(Harness& h, PluginProcessor& processor)
         for (auto const& a : caps->args)
             limiterCap = limiterCap || a.text == "limiter";
     CHECK(caps.has_value() && limiterCap);
+}
+
+// P9 Part B: the output ceiling and its breaker on the FINAL output (McpHost::audioBlockFinished, the processBlock
+// tail). Hook level on hand-made buffers, then through processBlock with this file's audio thread paused (the test
+// thread renders the blocks): limiter off, limiter on at +3 dB, master x2 with a 0.8 signal, the breaker. Then the
+// /pd/limiter fields and the routes that must NOT switch the ceiling off (a patch message, [s mcp_host], a settings
+// file reload, an AI verb). The unit tests on the DSP itself: Tests/mcp/output_ceiling_test.cpp.
+float bufferPeak(juce::AudioBuffer<float> const& b, int fromCh = 0, int toCh = -1)
+{
+    float p = 0.0f;
+    int const end = toCh < 0 ? b.getNumChannels() : toCh;
+    for (int ch = fromCh; ch < end; ++ch)
+        for (int i = 0; i < b.getNumSamples(); ++i)
+            p = std::max(p, std::abs(b.getSample(ch, i)));
+    return p;
+}
+
+bool bufferFinite(juce::AudioBuffer<float> const& b)
+{
+    for (int ch = 0; ch < b.getNumChannels(); ++ch)
+        for (int i = 0; i < b.getNumSamples(); ++i)
+            if (!std::isfinite(b.getSample(ch, i))) return false;
+    return true;
+}
+
+void fillSine(juce::AudioBuffer<float>& b, float amplitude)
+{
+    for (int ch = 0; ch < b.getNumChannels(); ++ch)
+        for (int i = 0; i < b.getNumSamples(); ++i)
+            b.setSample(ch, i, amplitude * std::sin(2.0f * 3.14159265f * 440.0f * static_cast<float>(i) / 44100.0f));
+}
+
+void runOutputCeilingCases(Harness& h, PluginProcessor& processor, AudioControl& audio)
+{
+    std::printf("output ceiling (P9)\n");
+    auto* host = processor.getMcp();
+    auto& ceiling = host->session.outputCeiling;
+    bool const limiterBefore = processor.getEnableLimiter();
+    int const thresholdBefore = host->onMessageThread(
+        [] { return SettingsFile::getInstance()->getProperty<int>("limiter_threshold"); }, 2000, "test").value_or(1);
+    PlugDataParameter* volume = nullptr;
+    for (auto* p : processor.getParameters())
+        if (auto* param = dynamic_cast<PlugDataParameter*>(p); param && param->getTitle().toString() == "volume")
+            volume = param;
+    CHECK(volume != nullptr);
+    if (!volume) return;
+    float const volumeBefore = volume->getUnscaledValue();
+
+    audio.paused = true; // the test thread renders from here on
+    sleepMs(60);
+    ceiling.setStandalone(true);
+    ceiling.setEnabled(true);
+    int const outputs = processor.getTotalNumOutputChannels();
+    CHECK(outputs >= 1);
+    // The console (identical consecutive lines fold into one entry, counted in the 5th field).
+    auto consoleCount = [&](juce::String const& text) {
+        return host->onMessageThread([&processor, text] {
+            int n = 0;
+            for (auto const& m : processor.getConsoleMessages())
+                if (std::get<1>(m).contains(text)) n += std::get<4>(m);
+            return n;
+        }, 2000, "test").value_or(-1);
+    };
+    // The setting as stored: 1 = true, 0 = false, 2 = anything else.
+    auto storedSetting = [&] {
+        return host->onMessageThread([] {
+            auto const v = SettingsFile::getInstance()->getPropertyAsValue("mcp_bridge_ai_ceiling").getValue();
+            return v.isBool() ? (static_cast<bool>(v) ? 1 : 0) : 2;
+        }, 2000, "test").value_or(-1);
+    };
+    auto waitUntil = [&](std::function<bool()> const& cond, int timeoutMs) {
+        for (int t = 0; t < timeoutMs; t += 20) {
+            if (cond()) return true;
+            sleepMs(20);
+        }
+        return cond();
+    };
+    juce::String const tripLine = "Output ceiling: sustained full-scale sound, turned down 20 dB";
+    juce::String const releaseLine = "Output ceiling: level back to normal, breaker released";
+
+    // Hook level: +12 dBFS with a NaN and an inf in, at most 0 dBFS and finite out; the counters count.
+    {
+        auto const t0 = ceiling.read();
+        juce::AudioBuffer<float> b(outputs, 512);
+        fillSine(b, 3.98f);
+        b.setSample(0, 7, std::numeric_limits<float>::infinity());
+        b.setSample(outputs - 1, 9, std::numeric_limits<float>::quiet_NaN());
+        host->audioBlockFinished(b);
+        CHECK(bufferPeak(b) <= 1.0f);
+        CHECK(bufferFinite(b));
+        auto const t1 = ceiling.read();
+        CHECK(t1.clampedSamples > t0.clampedSamples);
+        CHECK(t1.nonFiniteSamples == t0.nonFiniteSamples + 2);
+        CHECK(t1.clampedBlocks == t0.clampedBlocks + 1);
+    }
+    // Output channels only: a channel past the outputs is left alone.
+    {
+        juce::AudioBuffer<float> b(outputs + 2, 256);
+        fillSine(b, 3.98f);
+        host->audioBlockFinished(b);
+        CHECK(bufferPeak(b, 0, outputs) <= 1.0f);
+        CHECK(bufferPeak(b, outputs) > 3.0f);
+    }
+    // The armed window (review L2): its peak scans the output channels only; it counts the non-finite samples.
+    {
+        h.call("/meter/arm", { "ceilP" }, "/meter/arm/reply/ceilP");
+        juce::AudioBuffer<float> b(outputs + 2, 256);
+        b.clear();
+        for (int ch = outputs; ch < outputs + 2; ++ch)
+            for (int i = 0; i < 256; ++i)
+                b.setSample(ch, i, 0.5f);
+        b.setSample(0, 3, std::numeric_limits<float>::quiet_NaN());
+        host->audioBlockFinished(b);
+        auto r = h.call("/meter/read", { "ceilQ" }, "/meter/read/reply/ceilQ");
+        CHECK(r.has_value() && r->num(1) < 0.01);                    // the input-only channels are not the output
+        CHECK(r.has_value() && r->args.size() >= 10 && r->num(7) == 1); // one NaN in the window
+        CHECK(r.has_value() && r->args.size() >= 10 && r->num(8) == 0); // no breaker trip
+    }
+    // The setting off (the owner's GUI path): bit-identical.
+    {
+        host->setOutputCeilingFromGui(false);
+        juce::AudioBuffer<float> b(outputs, 512);
+        fillSine(b, 3.98f);
+        juce::AudioBuffer<float> before(b);
+        host->audioBlockFinished(b);
+        bool same = true;
+        for (int ch = 0; ch < outputs; ++ch)
+            same = same && std::memcmp(b.getReadPointer(ch), before.getReadPointer(ch), 512 * sizeof(float)) == 0;
+        CHECK(same);
+        auto off = h.call("/pd/limiter", { "ceil0" }, "/pd/limiter/reply/ceil0");
+        auto const offJson = off ? parseJson(*off) : juce::var();
+        CHECK(off.has_value() && !static_cast<bool>(offJson["ceiling"]["active"]));
+        CHECK(offJson["ceiling"]["setting"].toString() == "off");
+        CHECK(offJson["ceiling"]["reason"].toString() == "setting_off");
+        host->setOutputCeilingFromGui(true);
+        CHECK(ceiling.isEnabled());
+    }
+
+    // Through processBlock: [osc~ 440] -> [*~ 4] -> [dac~ 1 2] (+12 dBFS).
+    auto made = h.call("/pd/batch_atomic",
+        { "main", "ceil1", 0, 0, 0, 3, 3,
+            "ceilo", 600, 40, "obj", "osc~", 1, "440",
+            "ceilg", 600, 80, "obj", "*~", 1, "4",
+            "ceild", 600, 120, "obj", "dac~", 0,
+            "ceilo", 0, "ceilg", 0,
+            "ceilg", 0, "ceild", 0,
+            "ceilg", 0, "ceild", 1,
+            0, 5, 10, 0 },
+        "/pd/batch_atomic/reply/ceil1");
+    CHECK(made.has_value() && made->num(0) == 3);
+    h.fire("/pd/dsp", { 1 });
+    sleepMs(200);
+    juce::AudioBuffer<float> buffer(std::max(2, outputs), 512);
+    juce::MidiBuffer midi;
+    // `blocks` processBlock calls on silence in; the peak of the last `tail` of them.
+    auto render = [&](int blocks, int tail) {
+        float peak = 0.0f;
+        for (int k = 0; k < blocks; ++k) {
+            buffer.clear();
+            midi.clear();
+            processor.processBlock(buffer, midi);
+            if (k >= blocks - tail) peak = std::max(peak, bufferPeak(buffer));
+        }
+        return peak;
+    };
+    auto setThreshold = [&](int index) {
+        host->onMessageThread([&processor, index] { processor.setLimiterThreshold(index); return true; }, 2000, "test");
+    };
+    auto quiet = [&] { // off for one block resets the breaker (full gain, a fresh window), then on again
+        ceiling.setEnabled(false);
+        render(1, 1);
+        ceiling.setEnabled(true);
+    };
+
+    // Limiter off: the hot chain leaves at most 0 dBFS (8 blocks ~ 93 ms: under the breaker window).
+    processor.setEnableLimiter(false);
+    volume->setUnscaledValueNotifyingHost(0.8f); // unity
+    render(20, 1);
+    quiet();
+    {
+        auto const t0 = ceiling.read();
+        float const peak = render(8, 6);
+        CHECK(peak <= 1.0f);
+        CHECK(peak > 0.9f); // clamped, not muted
+        CHECK(ceiling.read().clampedSamples > t0.clampedSamples);
+    }
+    // Limiter on at +3 dB (PlugData's limiter lets up to +3 dB through): the ceiling still holds 0 dBFS.
+    processor.setEnableLimiter(true);
+    setThreshold(3);
+    quiet();
+    {
+        float const peak = render(8, 6);
+        CHECK(peak <= 1.0f);
+    }
+    processor.setEnableLimiter(false);
+    // The breaker: the hot chain held for ~460 ms is sustained full-scale loudness: it trips once and the output then
+    // sits 20 dB down. The armed window reports the trip (args 8, 9); the console says it once (message-thread
+    // poller). Calm (volume to 0): released after ~1.4 s, said once too.
+    quiet();
+    {
+        int const tripsSaid = consoleCount(tripLine), releasesSaid = consoleCount(releaseLine);
+        h.call("/meter/arm", { "ceilA" }, "/meter/arm/reply/ceilA");
+        auto const t0 = ceiling.read();
+        float const peak = render(40, 5);
+        auto const t1 = ceiling.read();
+        CHECK(t1.breakerTrips == t0.breakerTrips + 1);
+        CHECK(t1.breakerEngaged);
+        CHECK(peak <= mcp::OutputCeiling::kBreakerGain + 1e-5f);
+        auto r = h.call("/meter/read", { "ceilB" }, "/meter/read/reply/ceilB");
+        CHECK(r.has_value() && r->args.size() >= 10 && r->num(8) == 1); // one trip in the window
+        CHECK(r.has_value() && r->args.size() >= 10 && r->num(9) == 1); // engaged at the read
+        auto lim = h.call("/pd/limiter", { "ceil2" }, "/pd/limiter/reply/ceil2");
+        auto const json = lim ? parseJson(*lim) : juce::var();
+        CHECK(lim.has_value() && static_cast<bool>(json["ceiling"]["breakerEngaged"]));
+        CHECK(static_cast<juce::int64>(json["ceiling"]["breakerTrips"]) >= 1);
+        CHECK(waitUntil([&] { return consoleCount(tripLine) == tripsSaid + 1; }, 2000));
+        sleepMs(600);
+        CHECK(consoleCount(tripLine) == tripsSaid + 1); // once, not once per poll
+
+        volume->setUnscaledValueNotifyingHost(0.0f);
+        float const calm = render(160, 1); // ~1.86 s
+        CHECK(calm < 0.01f);
+        auto const t2 = ceiling.read();
+        CHECK(!t2.breakerEngaged);
+        CHECK(t2.breakerReleases == t1.breakerReleases + 1);
+        CHECK(waitUntil([&] { return consoleCount(releaseLine) == releasesSaid + 1; }, 2000));
+        sleepMs(600);
+        CHECK(consoleCount(releaseLine) == releasesSaid + 1);
+        CHECK(consoleCount(tripLine) == tripsSaid + 1);
+        volume->setUnscaledValueNotifyingHost(0.8f);
+    }
+    // Round 3 (MEDIUM): repeated prepares (`; pd oversample 1/0` -> prepareToPlay -> McpHost::prepare) every ~35, ~81
+    // and ~232 ms (3, 7, 20 blocks of 512) during the full-scale chain neither stop the trip nor release the breaker.
+    for (int every : { 3, 7, 20 }) {
+        quiet();
+        auto const t0 = ceiling.read();
+        double const rate = processor.getSampleRate() > 0.0 ? processor.getSampleRate() : 44100.0;
+        bool engaged = false, releasedWhileHot = false;
+        for (int k = 0; k < 120; ++k) { // ~1.4 s
+            if (k % every == 0) host->prepare(rate, 512);
+            render(1, 1);
+            bool const now = ceiling.read().breakerEngaged;
+            releasedWhileHot = releasedWhileHot || (engaged && !now);
+            engaged = engaged || now;
+        }
+        if (!engaged || releasedWhileHot) std::printf("  prepare every %d blocks: engaged %d, released while hot %d\n", every, engaged, releasedWhileHot);
+        CHECK(engaged);
+        CHECK(!releasedWhileHot);
+        CHECK(ceiling.read().breakerTrips == t0.breakerTrips + 1);
+    }
+    // Master x2 with a 0.8 signal (1.6 after the gain): clamped.
+    h.call("/pd/batch_atomic", { "main", "ceil3", 1, 0, 0, 0, 0, "ceilg", 0, 5, 10, 0 }, "/pd/batch_atomic/reply/ceil3");
+    auto again = h.call("/pd/batch_atomic",
+        { "main", "ceil4", 0, 0, 0, 1, 3,
+            "ceilh", 600, 80, "obj", "*~", 1, "0.8",
+            "ceilo", 0, "ceilh", 0,
+            "ceilh", 0, "ceild", 0,
+            "ceilh", 0, "ceild", 1,
+            0, 5, 10, 0 },
+        "/pd/batch_atomic/reply/ceil4");
+    CHECK(again.has_value() && again->num(0) == 1);
+    sleepMs(100);
+    volume->setUnscaledValueNotifyingHost(1.0f); // x2
+    quiet();
+    {
+        auto const t0 = ceiling.read();
+        float const peak = render(8, 4);
+        CHECK(peak <= 1.0f);
+        CHECK(peak > 0.9f);
+        CHECK(ceiling.read().clampedSamples > t0.clampedSamples);
+    }
+    volume->setUnscaledValueNotifyingHost(volumeBefore);
+
+    // /pd/limiter carries the ceiling.
+    {
+        auto lim = h.call("/pd/limiter", { "ceil5" }, "/pd/limiter/reply/ceil5");
+        CHECK(lim.has_value());
+        auto const json = lim ? parseJson(*lim) : juce::var();
+        auto const c = json["ceiling"];
+        CHECK(c.isObject());
+        CHECK(static_cast<bool>(c["active"]));
+        CHECK(c["setting"].toString() == "on");
+        CHECK(!c.hasProperty("reason"));
+        for (auto const* key : { "clampedSamples", "nonFiniteSamples", "clampedBlocks", "breakerTrips" })
+            CHECK(c[key].isInt() || c[key].isInt64() || c[key].isDouble());
+        CHECK(static_cast<juce::int64>(c["clampedSamples"]) > 0);
+        CHECK(c["breakerReleases"].isInt() || c["breakerReleases"].isInt64() || c["breakerReleases"].isDouble());
+        CHECK(static_cast<double>(c["startedAtMs"]) > 1.6e12); // wall-clock ms of this process's start
+        CHECK(c["breakerEngaged"].isBool());
+        CHECK(!c["lastClampMs"].isVoid() && static_cast<double>(c["lastClampMs"]) >= 0.0);
+    }
+    // The armed measure reports the window's pre-ceiling peak and clamp count.
+    {
+        volume->setUnscaledValueNotifyingHost(1.0f);
+        quiet();
+        render(4, 1); // the gain smoothing settles
+        h.call("/meter/arm", { "ceil6" }, "/meter/arm/reply/ceil6");
+        render(6, 1);
+        auto r = h.call("/meter/read", { "ceil7" }, "/meter/read/reply/ceil7");
+        CHECK(r.has_value() && r->args.size() >= 10);
+        CHECK(r.has_value() && r->num(1) <= 1.0001);   // the peak after the ceiling
+        CHECK(r.has_value() && r->num(5) > 1.2);       // before it: 0.8 x2
+        CHECK(r.has_value() && r->num(6) > 0);         // samples clamped in the window
+        volume->setUnscaledValueNotifyingHost(volumeBefore);
+    }
+    // A plugin: no ceiling, said.
+    {
+        ceiling.setStandalone(false);
+        auto lim = h.call("/pd/limiter", { "ceil8" }, "/pd/limiter/reply/ceil8");
+        auto const json = lim ? parseJson(*lim) : juce::var();
+        CHECK(lim.has_value() && !static_cast<bool>(json["ceiling"]["active"]));
+        CHECK(json["ceiling"]["reason"].toString() == "plugin");
+        CHECK(json["ceiling"]["setting"].toString() == "on");
+        ceiling.setStandalone(true);
+    }
+
+    // Nothing but the owner's GUI switches it off.
+    {
+        // Only a literal JSON `false` is off; anything malformed is on.
+        CHECK(McpHost::ceilingSettingIsOn(juce::var(true)));
+        CHECK(!McpHost::ceilingSettingIsOn(juce::var(false)));
+        CHECK(McpHost::ceilingSettingIsOn(juce::var("off")));
+        CHECK(McpHost::ceilingSettingIsOn(juce::var("false")));
+        CHECK(McpHost::ceilingSettingIsOn(juce::var(0)));
+        CHECK(McpHost::ceilingSettingIsOn(juce::var()));
+        CHECK(McpHost::ceilingSettingIsOn(juce::JSON::parse("{\"a\":null}")["a"]));
+        CHECK(!McpHost::ceilingSettingIsOn(juce::JSON::parse("{\"a\":false}")["a"]));
+
+        // A non-GUI settings change to off: kept on, refused AND written back to true (file, panel, atomic agree).
+        int const refusedSaid = consoleCount("Output ceiling stays on");
+        host->onMessageThread([host] { host->settingsChanged("mcp_bridge_ai_ceiling", juce::var(false)); return true; }, 2000, "test");
+        CHECK(ceiling.isEnabled());
+        CHECK(waitUntil([&] { return consoleCount("Output ceiling stays on") == refusedSaid + 1; }, 2000));
+
+        // The real reload path (review L4): the settings file edited to false while PlugData runs.
+        auto const file = host->onMessageThread([] { return ProjectInfo::appDataDir.getChildFile("settings.json"); }, 2000, "test")
+                              .value_or(juce::File());
+        auto json = juce::JSON::parse(file.loadFileAsString());
+        CHECK(json.isObject());
+        if (auto* o = json.getDynamicObject()) {
+            o->setProperty("mcp_bridge_ai_ceiling", false);
+            CHECK(file.replaceWithText(juce::JSON::toString(json)));
+            host->onMessageThread([] { SettingsFile::getInstance()->reloadSettings(); return true; }, 2000, "test");
+            bool alwaysOn = true;
+            bool const agreed = waitUntil([&] {
+                alwaysOn = alwaysOn && ceiling.isEnabled();
+                auto const onDisk = juce::JSON::parse(file.loadFileAsString());
+                bool const fileOn = !onDisk.hasProperty("mcp_bridge_ai_ceiling") || onDisk["mcp_bridge_ai_ceiling"].isBool() && static_cast<bool>(onDisk["mcp_bridge_ai_ceiling"]);
+                return storedSetting() == 1 && fileOn;
+            }, 4000);
+            CHECK(agreed);
+            CHECK(alwaysOn);
+            CHECK(ceiling.isEnabled());
+        }
+
+        // The owner's panel: off first in the host, then the setting: accepted, nothing written back.
+        host->setOutputCeilingFromGui(false);
+        host->onMessageThread([] { SettingsFile::getInstance()->setProperty("mcp_bridge_ai_ceiling", false); return true; }, 2000, "test");
+        sleepMs(400);
+        CHECK(!ceiling.isEnabled());
+        CHECK(storedSetting() == 0);
+        // Startup with it off: off, and a loud console line.
+        int const loudSaid = consoleCount("OUTPUT CEILING IS OFF");
+        host->onMessageThread([host] { host->applyOutputCeilingSettingAtStartup(); return true; }, 2000, "test");
+        CHECK(!ceiling.isEnabled());
+        CHECK(waitUntil([&] { return consoleCount("OUTPUT CEILING IS OFF") == loudSaid + 1; }, 2000)); // the console is async
+        // Startup with a malformed value ("off"): on, and the setting normalised to true.
+        host->onMessageThread([] { SettingsFile::getInstance()->setProperty("mcp_bridge_ai_ceiling", juce::var("off")); return true; }, 2000, "test");
+        host->onMessageThread([host] { host->applyOutputCeilingSettingAtStartup(); return true; }, 2000, "test");
+        CHECK(ceiling.isEnabled());
+        CHECK(waitUntil([&] { return storedSetting() == 1; }, 2000));
+        sleepMs(300);
+        CHECK(consoleCount("OUTPUT CEILING IS OFF") == loudSaid + 1); // on: no second loud line
+        host->setOutputCeilingFromGui(false);
+        host->onMessageThread([host] { host->settingsChanged("mcp_bridge_ai_ceiling", juce::var(true)); return true; }, 2000, "test");
+        CHECK(ceiling.isEnabled());
+
+        // A patch: `; pd mcp_bridge_ai_ceiling 0` and `[s mcp_host]` (each route proven by a `limit 1` behind it).
+        for (char const* receiver : { "pd", "mcp_host" }) {
+            processor.setEnableLimiter(false);
+            host->pdWait([receiver] {
+                t_symbol* s = gensym(receiver);
+                t_atom a;
+                SETFLOAT(&a, 0.0f);
+                if (s->s_thing) pd_typedmess(s->s_thing, gensym("mcp_bridge_ai_ceiling"), 1, &a);
+                SETFLOAT(&a, 1.0f);
+                if (s->s_thing) pd_typedmess(s->s_thing, gensym("limit"), 1, &a);
+            }, 2000);
+            bool delivered = false;
+            for (int t = 0; t < 3000 && !delivered; t += 20) {
+                delivered = processor.getEnableLimiter();
+                sleepMs(20);
+            }
+            CHECK(delivered);
+            CHECK(ceiling.isEnabled());
+        }
+        // The AI: no verb switches it (an unknown verb), and the limiter read takes no argument that would.
+        auto unknown = h.call("/pd/output_ceiling", { "ceil9", 0 }, "/bridge/unknown_verb");
+        CHECK(unknown.has_value());
+        h.call("/pd/limiter", { "ceil10", 0 }, "/pd/limiter/reply/ceil10");
+        CHECK(ceiling.isEnabled());
+    }
+
+    // MCPBridge::playVoiceTake's own device callback: the same clamp (while the ceiling is active), none when off.
+    {
+        struct HotSource final : juce::AudioSource {
+            void prepareToPlay(int, double) override { }
+            void releaseResources() override { }
+            void getNextAudioBlock(juce::AudioSourceChannelInfo const& info) override
+            {
+                for (int ch = 0; ch < info.buffer->getNumChannels(); ++ch)
+                    for (int i = 0; i < info.numSamples; ++i)
+                        info.buffer->setSample(ch, info.startSample + i, i == 1 ? std::numeric_limits<float>::quiet_NaN() : 4.0f);
+            }
+        };
+        HotSource source;
+        mcp::CeilingSourcePlayer player(ceiling);
+        player.prepareToPlay(44100.0, 256);
+        player.setSource(&source);
+        juce::AudioBuffer<float> out(2, 256);
+        juce::AudioIODeviceCallbackContext const context {};
+        player.audioDeviceIOCallbackWithContext(nullptr, 0, out.getArrayOfWritePointers(), 2, 256, context);
+        CHECK(bufferPeak(out) <= 1.0f && bufferPeak(out) > 0.99f);
+        CHECK(bufferFinite(out));
+        host->setOutputCeilingFromGui(false);
+        player.audioDeviceIOCallbackWithContext(nullptr, 0, out.getArrayOfWritePointers(), 2, 256, context);
+        CHECK(bufferPeak(out) > 3.0f);
+        host->setOutputCeilingFromGui(true);
+        player.setSource(nullptr);
+    }
+
+    h.fire("/pd/dsp", { 0 });
+    h.call("/pd/batch_atomic", { "main", "ceilx", 3, 0, 0, 0, 0, "ceilo", "ceilh", "ceild", 0, 5, 10, 0 }, "/pd/batch_atomic/reply/ceilx");
+    processor.setEnableLimiter(limiterBefore);
+    setThreshold(thresholdBefore);
+    volume->setUnscaledValueNotifyingHost(volumeBefore);
+    ceiling.requestBreakerReset();
+    audio.paused = false;
 }
 
 // MIDI device awareness: /pd/midi_devices <corrId> answers {"inputs":[{name,identifier,enabled}],"outputs":[...]}:
@@ -2422,6 +2862,7 @@ int main()
             runArmedTraceCases(harness);
             runConsoleObjectCases(harness);
             runLimiterCases(harness, processor);
+            runOutputCeilingCases(harness, processor, audioControl);
             runMidiDevicesCases(harness, processor);
             runLimiterPatchCases(processor);
             runVolumeGuardCases(processor);

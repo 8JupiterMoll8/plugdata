@@ -176,6 +176,33 @@ public:
             Label statusLabel;
         };
 
+        // P9: the output ceiling's switch. A click here is the one way to switch it off while PlugData runs: the
+        // toggle tells the host directly (a settings-file edit does not switch it off), then stores the setting.
+        class McpCeilingToggle final : public PropertiesPanel::BoolComponent {
+        public:
+            McpCeilingToggle(String const& name, Value const& value, PluginProcessor* proc)
+                : BoolComponent(name, value, { "Off", "On" })
+                , processor(proc)
+            {
+            }
+
+            void mouseUp(MouseEvent const& e) override
+            {
+                bool const before = getValue<bool>(toggleStateValue);
+                BoolComponent::mouseUp(e);
+                bool const after = getValue<bool>(toggleStateValue);
+                if (processor && after != before)
+                    processor->getMcp()->setOutputCeilingFromGui(after);
+            }
+
+            PropertiesPanelProperty* createCopy() override
+            {
+                return new McpCeilingToggle(getName(), toggleStateValue, processor);
+            }
+
+            PluginProcessor* processor;
+        };
+
         // MCP bridge (native C++ in-process bridge)
         PropertiesArray mcpProperties;
         mcpBridgeEnabled.referTo(settingsFile->getPropertyAsValue("mcp_bridge_enabled"));
@@ -189,6 +216,9 @@ public:
         mcpProperties.add(new PropertiesPanel::EditableComponent<int>("Send port", mcpSendPort, true, 1024, 65535));
 
         mcpProperties.add(new McpStatusComponent("Status", dynamic_cast<PluginEditor*>(editor)->pd));
+
+        mcpAiCeiling.referTo(settingsFile->getPropertyAsValue("mcp_bridge_ai_ceiling"));
+        mcpProperties.add(new McpCeilingToggle("Output ceiling (0 dBFS, breaker)", mcpAiCeiling, dynamic_cast<PluginEditor*>(editor)->pd));
 
         propertiesPanel.addSection("Interface", interfaceProperties);
         propertiesPanel.addSection("Autosave", autosaveProperties);
@@ -260,6 +290,7 @@ public:
     Value mcpBridgeEnabled; // MCP-CARRIED(mcp-settings-panel)
     Value mcpListenPort;
     Value mcpSendPort;
+    Value mcpAiCeiling;
 
     PropertiesPanel propertiesPanel;
 

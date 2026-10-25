@@ -441,6 +441,8 @@ PluginEditor::PluginEditor(PluginProcessor& p)
 
 PluginEditor::~PluginEditor()
 {
+    setCachedComponentImage(nullptr);
+    
     removeModifierKeyListener(&pd->keyHandler);
 
     nvgSurface.detachContext();

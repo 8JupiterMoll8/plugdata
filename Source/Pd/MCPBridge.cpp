@@ -9,6 +9,7 @@
 #include "MCPBridgeTraceTaps.h"
 #include "Mcp/McpRtGuard.h"
 #include "Mcp/McpAudit.h"
+#include "Mcp/McpCeilingPlayer.h" // P9 round 1: playVoiceTake's own callback is clamped
 #include <juce_cryptography/juce_cryptography.h> // SHA-256 of the .pd in the identity sidecar (P3.5 S7)
 #include <map>
 extern "C" {
@@ -2367,7 +2368,11 @@ void MCPBridge::playVoiceTake(const juce::String& takeId, const juce::String& wa
     juce::ScopedLock sl(previewLock);
     previewTransport = std::make_unique<juce::AudioTransportSource>();
     previewTransport->setSource(new juce::AudioFormatReaderSource(reader.release(), true));
-    previewPlayer = std::make_unique<juce::AudioSourcePlayer>();
+    // P9 round 1: the take's own device callback ends with the output ceiling's clamp (Mcp/McpCeilingPlayer.h).
+    if (processor)
+        previewPlayer = std::make_unique<mcp::CeilingSourcePlayer>(processor->getMcp()->session.outputCeiling);
+    else
+        previewPlayer = std::make_unique<juce::AudioSourcePlayer>();
     previewPlayer->setSource(previewTransport.get());
 
     double const sr = dm->getCurrentAudioDevice() ? dm->getCurrentAudioDevice()->getCurrentSampleRate() : 48000.0;

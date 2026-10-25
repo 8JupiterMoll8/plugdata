@@ -17,7 +17,8 @@ void MCPBridge::pdPing(const juce::String& action, const juce::OSCMessage& msg)
 
 void MCPBridge::pdLimiter(const juce::String& action, const juce::OSCMessage& msg)
 {
-    // P5.1 sink floor S1: /pd/limiter <corrId> -> /pd/limiter/reply/<corrId> {"enabled":bool,"thresholdDb":n|null}.
+    // P5.1 sink floor S1: /pd/limiter <corrId> -> /pd/limiter/reply/<corrId> {"enabled":bool,"thresholdDb":n|null,
+    // "ceiling":{...}} (P9: McpHost::outputCeilingJson).
     // Read-only: the AI never switches the limiter. `enabled` is the LIVE state (an AtomicValue, safe off the message
     // thread), not settings.json: `limit` from a patch does not persist. `thresholdDb` is the toolbar's threshold
     // (PluginProcessor::setLimiterThreshold: index 0..3 -> -12/-6/0/+3 dB, set together with the "limiter_threshold"
@@ -35,8 +36,10 @@ void MCPBridge::pdLimiter(const juce::String& action, const juce::OSCMessage& ms
         static constexpr int kThresholdDb[] = { -12, -6, 0, 3 };
         threshold = juce::String(kThresholdDb[std::clamp(*index, 0, 3)]);
     }
+    // P9: plus the output ceiling (atomics: read here, on the command worker).
     sendReply("/pd/limiter/reply/" + correlationId,
-        juce::String("{\"enabled\":") + (enabled ? "true" : "false") + ",\"thresholdDb\":" + threshold + "}");
+        juce::String("{\"enabled\":") + (enabled ? "true" : "false") + ",\"thresholdDb\":" + threshold
+            + ",\"ceiling\":" + processor->getMcp()->outputCeilingJson() + "}");
 }
 
 void MCPBridge::pdMidiDevices(const juce::String& action, const juce::OSCMessage& msg)
