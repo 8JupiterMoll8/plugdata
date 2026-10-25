@@ -301,6 +301,9 @@ std::vector<std::string> MCPBridge::capabilityList() const
         // tempIds travel with the file and are re-registered by the engine.
         "save_patch",
         "load_patch",
+        // P11.2 V10/V12: load_patch checks the file before it clears and answers arg2 {canvasFound, fileObjects,
+        // created, failedCreates, sidecar}; save_patch answers arg2 {rebound, idsSaved, tab}; save_content arg1 its hash
+        "load_patch_report",
         // PRD Phase 3 §2.5: multi-tab — open in new tab + enumerate tabs
         "open_patch",
         "list_tabs",

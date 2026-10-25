@@ -10,6 +10,12 @@
 #include "Mcp/McpSysCommon.h"
 #include "Mcp/McpNativeUndo.h"
 
+extern "C" {
+extern t_class* clone_class; // g_clone.c: P11.2 V15a counts clone instances as container content
+extern int clone_get_n(t_gobj*);
+extern t_glist* clone_get_instance(t_gobj*, int);
+}
+
 #include <atomic>
 #include <cmath>
 
@@ -589,6 +595,33 @@ void McpHost::sysCensus(SmallString const& selector, mcp::SysList const& list)
                     o->setProperty("node_class", abstractName);
                 }
                 o->setProperty("args", argsList);
+                // P11.2 V15a: containers. isCanvas = a subpatch or abstraction (pd_class == canvas_class); a clone is
+                // a container too (isContainer, cloneInstances). childCount = every object inside, all levels down.
+                {
+                    std::function<int(t_canvas*, int)> countInside = [&](t_canvas* c, int depth) {
+                        int n = 0;
+                        if (!c || depth > 64) return 0;
+                        for (t_gobj* g = c->gl_list; g; g = g->g_next) {
+                            ++n;
+                            if (pd_class(&g->g_pd) == canvas_class)
+                                n += countInside(reinterpret_cast<t_canvas*>(g), depth + 1);
+                        }
+                        return n;
+                    };
+                    bool const isCanvas = cl == canvas_class;
+                    int const clones = cl == clone_class ? clone_get_n(y_obj) : 0;
+                    o->setProperty("isCanvas", isCanvas);
+                    o->setProperty("isContainer", isCanvas || clones > 0);
+                    if (isCanvas) {
+                        o->setProperty("childCount", countInside(reinterpret_cast<t_canvas*>(y_obj), 0));
+                    } else if (clones > 0) {
+                        int inside = 0;
+                        for (int ci = 0; ci < clones; ++ci)
+                            inside += 1 + countInside(reinterpret_cast<t_canvas*>(clone_get_instance(y_obj, ci)), 0);
+                        o->setProperty("cloneInstances", clones);
+                        o->setProperty("childCount", inside);
+                    }
+                }
 
                 // ── GUI send/receive for lint (orphan knob detection) ──
                 // Vanilla iemgui + else/knob store snd/rcv outside binbuf; expose them so lint can see them.

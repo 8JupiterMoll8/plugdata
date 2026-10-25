@@ -50,6 +50,7 @@
 #include "Mcp/McpNativeUndo.h" // P6.2 UF: hand-made undo entries (motion) for /pd/undo_peek
 #include "v2_test_client.h" // P4.1 S2: loopback v2 client
 #include "Pd/MCPBridgeCmdCommon.h" // armedSpectralJson / renderSpectralJson (Plan 5 spectral window)
+#include <juce_cryptography/juce_cryptography.h> // juce::SHA256: the save_content hash (P11.2 V11)
 #include "Utility/PluginParameter.h" // PlugDataParameter: the master volume guard (P5.1 sink floor)
 
 namespace {
@@ -1483,6 +1484,142 @@ void runMeterTapCases(Harness& h, PluginProcessor& processor, AudioControl& audi
     h.call("/pd/batch_atomic", { "main", "tap2", 2, 0, 0, 0, 0, "tapo", "tapd", 0, 5, 10, 0 }, "/pd/batch_atomic/reply/tap2");
     render(4);
     audio.paused = false;
+}
+
+// P11.2 V10: /pd/load_patch reads and checks the file BEFORE it clears the canvas. An unreadable file or one that is
+// not a Pd patch is an error and the canvas keeps every object; a valid empty patch is a valid load. Reply: arg0 the
+// object count (-1 on an error, old clients read only this), arg1 1 (undo reset) or "error: ...", arg2 the JSON
+// report {canvasFound, fileObjects, created, failedCreates:[{index,text}], sidecar:{applied,skipped}} (capability
+// `load_patch_report`). Failed creates are Pd's red boxes (text_class, T_OBJECT). Loaded into a subpatch so the main
+// canvas of the other cases stays as it is.
+void runLoadReportCases(Harness& h, PluginProcessor& processor)
+{
+    std::printf("load_patch validates before clearing, report (P11.2 V10)\n");
+    auto* host = processor.getMcp();
+    CHECK(hasCap(h, "load_patch_report", "lr0"));
+    juce::File dir = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("mcp_p11_load");
+    dir.deleteRecursively();
+    dir.createDirectory();
+    auto good = dir.getChildFile("good.pd");
+    good.replaceWithText("#N canvas 0 50 450 300 12;\n#X obj 10 10 f;\n#X obj 10 40 p11_no_such_class_xyz 1 2;\n"
+                         "#X msg 10 70 hello;\n#X connect 0 0 2 0;\n");
+    auto empty = dir.getChildFile("empty.pd");
+    empty.replaceWithText("#N canvas 0 50 450 300 12;\n");
+    auto garbage = dir.getChildFile("garbage.pd");
+    garbage.replaceWithText("this is not a patch ; at all ;\n");
+    auto locked = dir.getChildFile("locked.pd");
+    locked.replaceWithText("#N canvas 0 50 450 300 12;\n#X obj 10 10 f;\n");
+    ::chmod(locked.getFullPathName().toRawUTF8(), 0);
+
+    t_canvas* sub = nullptr;
+    CHECK(host->pdWait([&] {
+        t_canvas* cnv = host->getCanvasBySymbol("main");
+        if (!cnv) return;
+        t_atom a[4];
+        SETFLOAT(a, 900);
+        SETFLOAT(a + 1, 600);
+        SETSYMBOL(a + 2, gensym("pd"));
+        SETSYMBOL(a + 3, gensym("p11load"));
+        pd_typedmess(&cnv->gl_pd, gensym("obj"), 4, a);
+        sub = reinterpret_cast<t_canvas*>(pd::Interface::getNewest(cnv));
+        for (char const* cls : { "f", "t" }) {
+            t_atom b[3];
+            SETFLOAT(b, 10);
+            SETFLOAT(b + 1, 10);
+            SETSYMBOL(b + 2, gensym(cls));
+            pd_typedmess(&sub->gl_pd, gensym("obj"), 3, b);
+        }
+    }, 3000));
+    CHECK(sub != nullptr);
+    if (!sub) return;
+    auto count = [&] {
+        int n = -1;
+        host->pdWait([&] { n = 0; for (t_gobj* g = sub->gl_list; g; g = g->g_next) ++n; }, 3000);
+        return n;
+    };
+    auto load = [&](juce::File const& f, char const* canvas, char const* corr) {
+        return h.call("/pd/load_patch", { canvas, f.getFullPathName(), corr }, std::string("/pd/load_patch/reply/") + corr, 5000);
+    };
+    auto report = [](std::optional<Reply> const& r) {
+        return r && r->args.size() >= 3 ? juce::JSON::parse(juce::String(r->str(2))) : juce::var();
+    };
+    CHECK(count() == 2);
+    for (auto const& [file, corr] : { std::make_pair(garbage, "lr1"), std::make_pair(locked, "lr2") }) {
+        auto r = load(file, "pd-p11load", corr);
+        CHECK(r.has_value() && r->num(0) == -1);
+        CHECK(r.has_value() && r->args.size() >= 2 && r->str(1).rfind("error:", 0) == 0);
+        CHECK(count() == 2); // untouched
+    }
+    {
+        auto r = load(good, "pd-p11load", "lr3");
+        CHECK(r.has_value() && r->num(0) == 3);
+        auto const json = report(r);
+        CHECK(static_cast<bool>(json["canvasFound"]));
+        CHECK(static_cast<int>(json["fileObjects"]) == 3);
+        CHECK(static_cast<int>(json["created"]) == 3);
+        auto const* failed = json["failedCreates"].getArray();
+        CHECK(failed && failed->size() == 1);
+        if (failed && failed->size() == 1) {
+            CHECK(static_cast<int>((*failed)[0]["index"]) == 1);
+            CHECK((*failed)[0]["text"].toString() == "p11_no_such_class_xyz 1 2");
+        }
+        CHECK(json["sidecar"].hasProperty("applied") && json["sidecar"].hasProperty("skipped"));
+        CHECK(count() == 3);
+    }
+    {
+        auto r = load(empty, "pd-p11load", "lr4");
+        CHECK(r.has_value() && r->num(0) == 0);
+        auto const json = report(r);
+        CHECK(static_cast<int>(json["fileObjects"]) == 0 && static_cast<int>(json["created"]) == 0);
+        CHECK(json["failedCreates"].isArray() && json["failedCreates"].getArray()->isEmpty());
+        CHECK(count() == 0);
+    }
+    {
+        auto r = load(good, "pd-p11_no_such_canvas", "lr5");
+        CHECK(r.has_value() && r->num(0) == -1);
+        CHECK(!static_cast<bool>(report(r)["canvasFound"]));
+        auto m = load(dir.getChildFile("missing.pd"), "pd-p11load", "lr6");
+        CHECK(m.has_value() && m->num(0) == -1);
+        CHECK(m.has_value() && m->args.size() >= 2 && m->str(1).rfind("error:", 0) == 0);
+    }
+
+    // V11: save_content writes the bytes save_patch writes (one canvas, two files) and answers their hash (arg1, the
+    // sidecar's pdHash). V12: save_patch answers arg1 "" (or "ids not saved: ...") and arg2 {rebound, idsSaved}; with
+    // no editor showing the canvas nothing is re-pointed (rebound null).
+    load(good, "pd-p11load", "lr7");
+    auto viaContent = dir.getChildFile("content.pd"), viaPatch = dir.getChildFile("patch.pd");
+    auto sc = h.call("/pd/save_content", { "pd-p11load", viaContent.getFullPathName(), "lr8" }, "/pd/save_content/reply/lr8");
+    auto sp = h.call("/pd/save_patch", { "pd-p11load", viaPatch.getFullPathName(), "lr9" }, "/pd/save_patch/reply/lr9");
+    CHECK(sc.has_value() && sp.has_value());
+    CHECK(viaContent.loadFileAsString() == viaPatch.loadFileAsString());
+    CHECK(sc.has_value() && sc->args.size() >= 2 && sc->str(1) == juce::SHA256(viaContent).toHexString().toStdString());
+    CHECK(sp.has_value() && sp->args.size() >= 3 && sp->str(1).empty());
+    if (sp && sp->args.size() >= 3) {
+        auto const json = juce::JSON::parse(juce::String(sp->str(2)));
+        CHECK(json.hasProperty("rebound") && json["rebound"].isVoid());
+        CHECK(static_cast<bool>(json["idsSaved"]));
+    }
+
+    // V15a: the census marks containers (subpatch, abstraction) with isCanvas and counts what they hold.
+    auto census = h.call("/pd/census", { "main", "lr10" }, "/pd/census/reply/lr10");
+    bool sawSub = false, plainFalse = true;
+    if (census) {
+        auto const json = parseJson(*census);
+        for (auto const& o : *json["objects"].getArray()) {
+            bool const isCanvas = static_cast<bool>(o["isCanvas"]);
+            if (o["type"].toString() == "pd" && o["args"][0].toString() == "p11load") {
+                sawSub = isCanvas && static_cast<int>(o["childCount"]) == 3;
+            } else if (o["kind"].toString() != "canvas") {
+                plainFalse = plainFalse && o.hasProperty("isCanvas") && !isCanvas;
+            }
+        }
+    }
+    CHECK(sawSub);
+    CHECK(plainFalse);
+
+    host->pdWait([&] { if (auto* cnv = host->getCanvasBySymbol("main")) glist_delete(cnv, &sub->gl_gobj); }, 3000);
+    ::chmod(locked.getFullPathName().toRawUTF8(), 0644);
+    dir.deleteRecursively();
 }
 
 // P5.1 sink floor S1: /pd/limiter answers the LIVE limiter state and the toolbar threshold
@@ -3094,6 +3231,7 @@ int main()
             runStampCostCases(processor);
             runIdentityValidityCases(processor);
             runSidecarCases(processor);
+            runLoadReportCases(harness, processor);
             runV2HandshakeCases(harness, *bridge, [&] {
                 bridge->setReplySinkForTests([&replies](juce::OSCMessage const& msg) { replies.push(msg); });
             });

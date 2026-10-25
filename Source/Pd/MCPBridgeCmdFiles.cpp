@@ -8,6 +8,127 @@
 
 #include "MCPBridgeCmdCommon.h"
 
+#include <cstring>
+
+namespace {
+
+// P11.2 V10: a .pd file read and checked BEFORE any canvas is cleared. `error` is set (and the caller clears
+// nothing) when the file is missing, binbuf_read fails, or the first statement is not "#N canvas" (not a Pd patch).
+// A valid empty patch ("#N canvas ...;" only) is a valid body of 0 objects. `fileObjects` counts the boxes the paste
+// creates on the target canvas: statements at depth 0 (obj, msg, floatatom, symbolatom, listbox, text, scalar) and
+// each "#X restore" that closes a depth-1 subpatch or graph.
+struct PatchBody {
+    juce::String text;
+    int fileObjects = 0;
+    juce::String error;
+};
+
+bool atomIs(t_atom const& a, char const* s)
+{
+    return a.a_type == A_SYMBOL && a.a_w.w_symbol && std::strcmp(a.a_w.w_symbol->s_name, s) == 0;
+}
+
+PatchBody readPatchBody(juce::File const& file)
+{
+    PatchBody out;
+    if (!file.existsAsFile()) {
+        out.error = "error: file not found: " + file.getFullPathName();
+        return out;
+    }
+    t_binbuf* b = binbuf_new();
+    if (binbuf_read(b, file.getFileName().toRawUTF8(), file.getParentDirectory().getFullPathName().toRawUTF8(), 0) != 0) {
+        binbuf_free(b);
+        out.error = "error: could not read " + file.getFullPathName() + " (the canvas was not touched)";
+        return out;
+    }
+    int const natom = binbuf_getnatom(b);
+    t_atom* vec = binbuf_getvec(b);
+    if (natom < 2 || !atomIs(vec[0], "#N") || !atomIs(vec[1], "canvas")) {
+        binbuf_free(b);
+        out.error = "error: not a Pd patch (no '#N canvas' header): " + file.getFullPathName() + " (the canvas was not touched)";
+        return out;
+    }
+    int startIdx = natom;
+    for (int i = 0; i < natom; i++) {
+        if (vec[i].a_type == A_SEMI) { startIdx = i + 1; break; }
+    }
+    int depth = 0;
+    for (int i = startIdx; i < natom;) {
+        int end = i;
+        while (end < natom && vec[end].a_type != A_SEMI) ++end;
+        if (end - i >= 2 && atomIs(vec[i], "#N") && atomIs(vec[i + 1], "canvas")) {
+            ++depth;
+        } else if (end - i >= 2 && atomIs(vec[i], "#X")) {
+            if (atomIs(vec[i + 1], "restore")) {
+                if (--depth == 0) ++out.fileObjects;
+                if (depth < 0) depth = 0;
+            } else if (depth == 0) {
+                for (char const* k : { "obj", "msg", "floatatom", "symbolatom", "listbox", "text", "scalar" })
+                    if (atomIs(vec[i + 1], k)) { ++out.fileObjects; break; }
+            }
+        }
+        i = end + 1;
+    }
+    if (startIdx < natom) {
+        t_binbuf* body = binbuf_new();
+        binbuf_add(body, natom - startIdx, vec + startIdx);
+        char* textBuf = nullptr;
+        int textLen = 0;
+        binbuf_gettext(body, &textBuf, &textLen);
+        if (textBuf && textLen > 0) {
+            out.text = juce::String::fromUTF8(textBuf, textLen);
+            freebytes(textBuf, textLen);
+        }
+        binbuf_free(body);
+    }
+    binbuf_free(b);
+    return out;
+}
+
+// Pd's red boxes after a paste: text_class objects of type T_OBJECT (a class that could not be created). Top-level
+// entries carry their index; ones inside subpatches/abstractions the top-level container's index and a path.
+void collectFailedCreates(t_canvas* c, int topIndex, juce::String const& path, juce::Array<juce::var>& out, int depth)
+{
+    if (!c || depth > 32) return;
+    int index = 0;
+    for (t_gobj* g = c->gl_list; g; g = g->g_next, ++index) {
+        int const top = depth == 0 ? index : topIndex;
+        if (pd_class(&g->g_pd) == text_class && reinterpret_cast<t_text*>(g)->te_type == T_OBJECT) {
+            char* buf = nullptr;
+            int len = 0;
+            binbuf_gettext(reinterpret_cast<t_text*>(g)->te_binbuf, &buf, &len);
+            auto* o = new juce::DynamicObject();
+            o->setProperty("index", top);
+            o->setProperty("text", buf && len > 0 ? juce::String::fromUTF8(buf, len).trim() : juce::String());
+            if (depth > 0) o->setProperty("path", path + "/" + juce::String(index));
+            if (buf) freebytes(buf, len);
+            out.add(juce::var(o));
+        } else if (pd_class(&g->g_pd) == canvas_class) {
+            auto* sub = reinterpret_cast<t_canvas*>(g);
+            juce::String const name = sub->gl_name ? juce::String::fromUTF8(sub->gl_name->s_name) : juce::String("pd");
+            collectFailedCreates(sub, top, (path.isEmpty() ? juce::String() : path + "/") + juce::String(index) + ":" + name, out, depth + 1);
+        }
+    }
+}
+
+// The "#A saved" lines ELSE savestate objects inside GOP abstractions leak into a canvas's content. They are not
+// real array data (legitimate arrays carry their own name, e.g. "#A gtab") and they break hvcc and external Pd.
+// save_patch and save_content both strip them, so the two write the same bytes (P11.2 V11).
+juce::String stripSavedArrayLines(juce::String const& content)
+{
+    juce::StringArray contentLines;
+    contentLines.addLines(content);
+    juce::String clean;
+    for (auto& ln : contentLines) {
+        if (ln.trimStart().startsWith("#A saved")) continue;
+        clean += ln;
+        clean += "\n";
+    }
+    return clean;
+}
+
+} // namespace
+
 void MCPBridge::pdLoad(const juce::String& action, const juce::OSCMessage& msg)
 {
     if (runInPdContext(&MCPBridge::pdLoad, action, msg)) return; // P3.4 S3: structural edit
@@ -60,14 +181,19 @@ void MCPBridge::pdSaveContent(const juce::String& action, const juce::OSCMessage
             return;
         }
 
-        // Write content to destination path provided by TS
+        // Write content to destination path provided by TS (P11.2 V11: the same bytes save_patch writes)
+        content = stripSavedArrayLines(content);
         juce::File destFile(destFilePath);
         if (!destFile.replaceWithText(content)) {
             sendReply(replyAddr, juce::String("error: could not write to " + destFilePath));
             return;
         }
 
-        sendReply(replyAddr, destFilePath);
+        // arg1 (P11.2 V11): SHA-256 of the written file, the hash the identity sidecar stores as pdHash
+        juce::Array<juce::var> args;
+        args.add(destFilePath);
+        args.add(MCPBridge::sidecarPdHash(destFile));
+        sendReply(replyAddr, args);
     }
     return;
 }
@@ -90,15 +216,12 @@ void MCPBridge::pdLoadContent(const juce::String& action, const juce::OSCMessage
             ? "/pd/load_content/reply/" + correlationId
             : "/pd/load_content/reply";
 
-        juce::File srcFile(srcFilePath);
-        if (!srcFile.existsAsFile()) {
+        // P11.2: read and check the file BEFORE the clear; a missing, unreadable or non-patch file is -1, untouched.
+        auto const patchBody = readPatchBody(juce::File(srcFilePath));
+        if (patchBody.error.isNotEmpty()) {
             sendReply(replyAddr, -1.0f);
             return;
         }
-
-        // Split into dir + filename for binbuf_read
-        auto fileDir  = srcFile.getParentDirectory().getFullPathName();
-        auto fileName = srcFile.getFileName();
 
         int objectCount = 0;
 
@@ -112,37 +235,10 @@ void MCPBridge::pdLoadContent(const juce::String& action, const juce::OSCMessage
             // 1. Clear existing objects
             mcp::PdOps::clearCanvasAudioThread(cnv);
 
-            // 2. Load .pd file — strip the #N canvas header line then
-            //    use pasteDirect() which correctly handles both #X obj
-            //    and #X connect lines via binbuf_eval with sym_X bound
-            //    to the canvas. This is the same path batch_atomic uses.
-            t_binbuf* b = binbuf_new();
-            if (binbuf_read(b, fileName.toRawUTF8(), fileDir.toRawUTF8(), 0) == 0) {
-                // Find the end of the first statement (#N canvas ... ;)
-                // and build a new binbuf from the rest (#X lines only).
-                int natom = binbuf_getnatom(b);
-                t_atom* vec = binbuf_getvec(b);
-                int startIdx = 0;
-                for (int i = 0; i < natom; i++) {
-                    if (vec[i].a_type == A_SEMI) { startIdx = i + 1; break; }
-                }
-                if (startIdx < natom) {
-                    // Serialise remaining atoms back to text for pasteDirect
-                    t_binbuf* body = binbuf_new();
-                    binbuf_add(body, natom - startIdx, vec + startIdx);
-                    char* textBuf = nullptr;
-                    int   textLen = 0;
-                    binbuf_gettext(body, &textBuf, &textLen);
-                    if (textBuf && textLen > 0) {
-                        // pasteDirect binds sym_X to canvas — handles both
-                        // #X obj and #X connect correctly
-                        pasteDirect(cnv, juce::String::fromUTF8(textBuf, textLen).toRawUTF8());
-                        freebytes(textBuf, textLen);
-                    }
-                    binbuf_free(body);
-                }
-            }
-            binbuf_free(b);
+            // 2. Paste the checked body (#X obj and #X connect via pasteDirect, sym_X bound to the canvas: the
+            //    same path batch_atomic uses).
+            if (patchBody.text.isNotEmpty())
+                pasteDirect(cnv, patchBody.text.toRawUTF8());
 
             // 3. Fire loadbang on the ROOT canvas (canvas_loadbang recurses
             // into child subpatches). Previously only direct child subpatches
@@ -213,6 +309,10 @@ void MCPBridge::pdSavePatch(const juce::String& action, const juce::OSCMessage& 
         juce::String content;
         juce::var sidecar;
 
+        // P11.2 V12: which file the tab showing this canvas saves to now (GUI state, read before the Pd lock), so the
+        // reply can say when this save re-points it.
+        auto const tabs = processor->getMcp()->onMessageThread([p = processor] { return p->getMcp()->gui().listTabs(); }, 2000, "save_patch");
+
         sys_lock();
         t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
         if (cnv) {
@@ -225,24 +325,9 @@ void MCPBridge::pdSavePatch(const juce::String& action, const juce::OSCMessage& 
             }
 
             if (content.isNotEmpty()) {
-                // Strip stray "#A saved" lines leaked by ELSE savestate
-                // objects inside GOP abstractions (the same defect
-                // pasteDirect guards against). They are not real array data
-                // — legitimate arrays carry their own name (e.g. "#A gtab")
-                // — and they break hvcc and external Pd. Filtering on save
-                // keeps the written .pd valid for Heavy / vanilla Pd.
-                {
-                    juce::StringArray contentLines;
-                    contentLines.addLines(content);
-                    juce::String clean;
-                    for (auto& ln : contentLines) {
-                        auto trimmed = ln.trimStart();
-                        if (trimmed.startsWith("#A saved")) continue;
-                        clean += ln;
-                        clean += "\n";
-                    }
-                    content = clean;
-                }
+                // Strip stray "#A saved" lines leaked by ELSE savestate objects inside GOP abstractions (shared with
+                // save_content): they keep the written .pd valid for Heavy / vanilla Pd.
+                content = stripSavedArrayLines(content);
 
                 // Identity sidecar: reverse map (gobj → tempId) per canvas.
                 // Built under THIS sys_lock (cnv is only guaranteed valid
@@ -291,14 +376,33 @@ void MCPBridge::pdSavePatch(const juce::String& action, const juce::OSCMessage& 
             });
         });
 
-        if (sidecarError.isEmpty()) {
-            sendReply(replyAddr, destFilePath);
-        } else {
-            juce::Array<juce::var> args;
-            args.add(destFilePath);
-            args.add("ids not saved: " + sidecarError);
-            sendReply(replyAddr, args);
+        // Reply (P11.2 V12): arg0 the path, arg1 "" or "ids not saved: ...", arg2 {rebound:{fromPath,toPath}|null,
+        // idsSaved, tab}: `tab` = an open tab shows this canvas; `rebound` = that tab saved elsewhere until now (its
+        // Ctrl+S goes to toPath from here on). null = nothing re-pointed (same file, or no tab shows the canvas).
+        juce::var rebound;
+        bool shownInTab = false;
+        if (tabs) {
+            for (auto const& tab : *tabs) {
+                if (tab.patch != cnv) continue;
+                shownInTab = true;
+                if (tab.file != destFile) {
+                    auto* r = new juce::DynamicObject();
+                    r->setProperty("fromPath", tab.file.getFullPathName());
+                    r->setProperty("toPath", destFile.getFullPathName());
+                    rebound = juce::var(r);
+                }
+                break;
+            }
         }
+        auto* report = new juce::DynamicObject();
+        report->setProperty("rebound", rebound);
+        report->setProperty("idsSaved", sidecarError.isEmpty());
+        report->setProperty("tab", shownInTab);
+        juce::Array<juce::var> args;
+        args.add(destFilePath);
+        args.add(sidecarError.isEmpty() ? juce::String() : "ids not saved: " + sidecarError);
+        args.add(juce::JSON::toString(juce::var(report), true));
+        sendReply(replyAddr, args);
     }
     return;
 }
@@ -322,45 +426,46 @@ void MCPBridge::pdLoadPatch(const juce::String& action, const juce::OSCMessage& 
             ? "/pd/load_patch/reply/" + correlationId
             : "/pd/load_patch/reply";
 
+        // P11.2 V10: the reply. arg0 the object count (-1 = nothing loaded; old clients read only this), arg1 1 (undo
+        // reset) or "error: ...", arg2 the JSON report {canvasFound, fileObjects, created, failedCreates:[{index,
+        // text, path?}], sidecar:{present, applied, skipped, renamed}, error?}.
+        auto reply = [this, replyAddr](double count, juce::var status, juce::DynamicObject* report) {
+            juce::Array<juce::var> args;
+            args.add(count);
+            args.add(status);
+            args.add(juce::JSON::toString(juce::var(report), true));
+            sendReply(replyAddr, args);
+        };
+        auto failReport = [](juce::String const& error, bool canvasFound, int fileObjects) {
+            auto* r = new juce::DynamicObject();
+            r->setProperty("canvasFound", canvasFound);
+            r->setProperty("fileObjects", fileObjects);
+            r->setProperty("created", 0);
+            r->setProperty("failedCreates", juce::Array<juce::var>());
+            auto* sc = new juce::DynamicObject();
+            sc->setProperty("present", false);
+            sc->setProperty("applied", 0);
+            sc->setProperty("skipped", 0);
+            sc->setProperty("renamed", 0);
+            r->setProperty("sidecar", juce::var(sc));
+            r->setProperty("error", error);
+            return r;
+        };
+
+        // Read and check the file BEFORE anything is cleared: a missing, unreadable or non-patch file leaves the
+        // canvas as it is (X#1: a load used to wipe the canvas and answer success).
         juce::File srcFile(srcFilePath);
-        if (!srcFile.existsAsFile()) {
-            sendReply(replyAddr, -1.0f);
+        auto const patchBody = readPatchBody(srcFile);
+        if (patchBody.error.isNotEmpty()) {
+            reply(-1.0, patchBody.error, failReport(patchBody.error, true, 0));
             return;
         }
+        juce::String const bodyText = patchBody.text;
+        int const fileObjects = patchBody.fileObjects;
 
         // Sidecar read OUTSIDE sys_lock (small file); P3.5 S7: a truncated or unreadable one is ignored with a note.
         juce::String sidecarNote;
         juce::var sidecar = MCPBridge::readIdentitySidecar(srcFile, sidecarNote);
-
-        auto fileDir  = srcFile.getParentDirectory().getFullPathName();
-        auto fileName = srcFile.getFileName();
-
-        // Prepare the paste body OFF the message thread (pure file I/O).
-        juce::String bodyText;
-        {
-            t_binbuf* b = binbuf_new();
-            if (binbuf_read(b, fileName.toRawUTF8(), fileDir.toRawUTF8(), 0) == 0) {
-                int natom = binbuf_getnatom(b);
-                t_atom* vec = binbuf_getvec(b);
-                int startIdx = 0;
-                for (int i = 0; i < natom; i++) {
-                    if (vec[i].a_type == A_SEMI) { startIdx = i + 1; break; }
-                }
-                if (startIdx < natom) {
-                    t_binbuf* body = binbuf_new();
-                    binbuf_add(body, natom - startIdx, vec + startIdx);
-                    char* textBuf = nullptr;
-                    int   textLen = 0;
-                    binbuf_gettext(body, &textBuf, &textLen);
-                    if (textBuf && textLen > 0) {
-                        bodyText = juce::String::fromUTF8(textBuf, textLen);
-                        freebytes(textBuf, textLen);
-                    }
-                    binbuf_free(body);
-                }
-            }
-            binbuf_free(b);
-        }
 
         probeManager.stopAllProbes("load_patch_reset");
 
@@ -370,11 +475,19 @@ void MCPBridge::pdLoadPatch(const juce::String& action, const juce::OSCMessage& 
         // the message thread is illegal and was the intermittent load
         // crash. Same callAsync pattern as the native encapsulate handlers.
         postMessage(
-            [proc = processor, canvasName, bodyText, sidecar, sidecarNote, srcFile, replyAddr, bridge = this]() {
+            [proc = processor, canvasName, bodyText, fileObjects, sidecar, sidecarNote, srcFile, reply, failReport]() {
                 int objectCount = 0;
+                MCPBridge::SidecarStats stats;
+                juce::Array<juce::var> failedCreates;
                 sys_lock();
                 t_canvas* cnv = proc->getMcp()->getCanvasBySymbol(canvasName);
-                if (cnv) {
+                if (!cnv) {
+                    sys_unlock();
+                    auto const error = "error: canvas not found: " + canvasName + " (nothing was loaded)";
+                    reply(-1.0, error, failReport(error, false, fileObjects));
+                    return;
+                }
+                {
                     // 0. Reset identity for this canvas tree BEFORE re-registering
                     proc->getMcp()->identity.clearCanvas(cnv);
 
@@ -395,7 +508,6 @@ void MCPBridge::pdLoadPatch(const juce::String& action, const juce::OSCMessage& 
                     canvas_update_dsp();
 
                     // 5. Re-register sidecar identities (P3.5 S7: the one validating applier)
-                    MCPBridge::SidecarStats stats;
                     if (auto* sidecarObj = sidecar.getDynamicObject())
                         stats = MCPBridge::mcpApplyIdentitySidecar(proc, sidecarObj, cnv, srcFile);
                     auto const report = MCPBridge::sidecarReport(srcFile, stats, sidecarNote);
@@ -404,6 +516,7 @@ void MCPBridge::pdLoadPatch(const juce::String& action, const juce::OSCMessage& 
 
                     for (t_gobj* g = cnv->gl_list; g; g = g->g_next)
                         objectCount++;
+                    collectFailedCreates(cnv, 0, {}, failedCreates, 0); // P11.2 V10: Pd's red boxes
                 }
                 sys_unlock();
 
@@ -413,11 +526,19 @@ void MCPBridge::pdLoadPatch(const juce::String& action, const juce::OSCMessage& 
                 // undo entries now dangle. Reset the queue to stay crash-safe.
                 resetCanvasUndo(proc, canvasName);
 
-                // arg0 = objectCount, arg1 = undoReset.
-                juce::Array<juce::var> loadReplyArgs;
-                loadReplyArgs.add(static_cast<double>(objectCount));
-                loadReplyArgs.add(1.0);
-                bridge->sendReply(replyAddr, loadReplyArgs);
+                auto* report = new juce::DynamicObject();
+                report->setProperty("canvasFound", true);
+                report->setProperty("fileObjects", fileObjects);
+                report->setProperty("created", objectCount);
+                report->setProperty("failedCreates", failedCreates);
+                auto* sc = new juce::DynamicObject();
+                sc->setProperty("present", sidecar.isObject());
+                sc->setProperty("applied", stats.restored);
+                sc->setProperty("skipped", stats.skipped);
+                sc->setProperty("renamed", stats.renamed);
+                if (sidecarNote.isNotEmpty()) sc->setProperty("note", sidecarNote);
+                report->setProperty("sidecar", juce::var(sc));
+                reply(static_cast<double>(objectCount), 1.0, report);
             });
     }
     return;
