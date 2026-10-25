@@ -1244,7 +1244,7 @@ void runConsoleObjectCases(Harness& h)
 
 // MIDI capture (P3.4 S6): the audio thread only queues raw note on/off; the bridge pairs them off the audio
 // thread. Three notes played through processBlock come back as three closed notes.
-void runMidiCaptureCases(PluginProcessor& processor, AudioControl& audio)
+void runMidiCaptureCases(Harness& h, PluginProcessor& processor, AudioControl& audio)
 {
     std::printf("midi capture\n");
     auto* bridge = processor.getMcp()->mcpBridge.get();
@@ -1260,8 +1260,18 @@ void runMidiCaptureCases(PluginProcessor& processor, AudioControl& audio)
     sleepMs(100);
     CHECK(bridge->isMidiCapturing());
     CHECK(bridge->getMidiCaptureNoteCount() == 3);
+    h.replies.clear();
     host->onMessageThread([bridge] { bridge->stopMidiCaptureAndStage(); return true; }, 2000, "test");
     CHECK(!bridge->isMidiCapturing());
+    // P11 take files: the take reaches the TS in the /pd/midi/event reply (the TS writes midi-take.json from it); the
+    // bridge writes no file of its own (scripts/test-bridge-safety.sh refuses a hard-coded user path in the source).
+    auto event = h.replies.waitFor("/pd/midi/event", 2000);
+    CHECK(event.has_value());
+    if (event) {
+        auto const take = parseJson(*event);
+        CHECK(take["id"].toString().startsWith("midi_"));
+        CHECK(static_cast<int>(take["noteCount"]) == 3);
+    }
 }
 
 // P5.1 sink floor S1: /pd/limiter answers the LIVE limiter state and the toolbar threshold
@@ -2867,7 +2877,7 @@ int main()
             runLimiterPatchCases(processor);
             runVolumeGuardCases(processor);
             runIndexRefCases(harness, processor);
-            runMidiCaptureCases(processor, audioControl);
+            runMidiCaptureCases(harness, processor, audioControl);
             runStampCostCases(processor);
             runIdentityValidityCases(processor);
             runSidecarCases(processor);

@@ -31,4 +31,12 @@ if [ -n "$bare" ]; then
   echo "test-bridge-safety: bridge code posts with a bare callAsync/callAfterDelay (use postMessage: THREADING rule 13)" >&2
   exit 1
 fi
+# P11 (take files): no fork source writes to a hard-coded user path (the bridge wrote midi-take.json / voice-take.json
+# into one developer's checkout; the TS persists both from the /pd/midi/event and /pd/voice/event replies).
+userPaths="$(grep -rnE '"/(home|Users)/[^"]*' "$root"/Source/Pd "$root"/Source/Mcp | grep -v ":\s*//" || true)"
+if [ -n "$userPaths" ]; then
+  echo "$userPaths" >&2
+  echo "test-bridge-safety: fork source names a hard-coded user path (take it from the config or leave the file to the TS)" >&2
+  exit 1
+fi
 bash "$root/Tests/mcp/check_seam_test.sh"

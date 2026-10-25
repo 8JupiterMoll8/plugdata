@@ -2708,7 +2708,8 @@ void MCPBridge::stopMidiCaptureAndStage()
     root->setProperty("notes", notesArray);
     juce::String const jsonStr = juce::JSON::toString(juce::var(root));
 
-    juce::File("/home/alphi/Desktop/plugdata/mcp-server/midi-take.json").replaceWithText(jsonStr);
+    // P11: no file write here. The take goes to the TS in the /pd/midi/event reply below, and the TS persists it
+    // (midi-take.json in its data dir); the bridge wrote a hard-coded developer path before.
 
     // Register as a first-class moodboard artifact.
     McpSession::McpMidiTake take;
@@ -2842,8 +2843,7 @@ void MCPBridge::parseVoiceBufferToJson(float const* buffer, int totalSamples, do
         rep->setProperty("rms", globalRms);
         rep->setProperty("message", "No audio detected from microphone");
         juce::String const jsonStr = juce::JSON::toString(juce::var(rep));
-        sendReply("/pd/voice/event", jsonStr);
-        juce::File("/home/alphi/Desktop/plugdata/mcp-server/voice-take.json").replaceWithText(jsonStr);
+        sendReply("/pd/voice/event", jsonStr); // P11: the TS persists voice-take.json from this reply
         sendConsoleLog("MCP: Voice recording silent (RMS: " + juce::String(globalRms, 4) + ")", true);
         return;
     }
@@ -3266,8 +3266,7 @@ void MCPBridge::parseVoiceBufferToJson(float const* buffer, int totalSamples, do
 
     juce::String const jsonStr = juce::JSON::toString(juce::var(root));
 
-    // Save directly to disk
-    juce::File("/home/alphi/Desktop/plugdata/mcp-server/voice-take.json").replaceWithText(jsonStr);
+    // P11: no file write here: the TS persists voice-take.json from the /pd/voice/event reply sent below.
 
     // Phase 3 (slice): persist the take as a real WAV and register it as a
     // first-class moodboard artifact, so any agent can audition/analyse/route it.
