@@ -1274,6 +1274,63 @@ void runMidiCaptureCases(Harness& h, PluginProcessor& processor, AudioControl& a
     }
 }
 
+// P11 V1: every armed window has a generation id. /meter/arm and /meter/arm_spectral answer it (reply arg 0); a read
+// that names an older (or any other) id is refused on /meter/<read|read_spectral>/error/<corr> ("stale_gen ...") and
+// leaves the open window alone; a read without an id is the legacy path. The capability `meter_window_gen` says so.
+bool hasCap(Harness& h, char const* cap, char const* corr)
+{
+    auto caps = h.call("/bridge/capabilities", { corr }, "/bridge/capabilities/reply");
+    bool found = false;
+    if (caps)
+        for (auto const& a : caps->args)
+            found = found || a.text == cap;
+    return found;
+}
+
+void runMeterWindowGenCases(Harness& h, PluginProcessor& processor)
+{
+    std::printf("meter window generation id (P11 V1)\n");
+    auto& session = processor.getMcp()->session;
+    CHECK(hasCap(h, "meter_window_gen", "wg0"));
+
+    auto a1 = h.call("/meter/arm", { "wg1" }, "/meter/arm/reply/wg1");
+    auto a2 = h.call("/meter/arm", { "wg2" }, "/meter/arm/reply/wg2");
+    CHECK(a1.has_value() && a1->args.size() >= 1 && a1->args[0].isNumber);
+    CHECK(a2.has_value() && a2->args.size() >= 1 && a2->args[0].isNumber);
+    int const g1 = a1 && !a1->args.empty() ? static_cast<int>(a1->num(0)) : -1;
+    int const g2 = a2 && !a2->args.empty() ? static_cast<int>(a2->num(0)) : -1;
+    CHECK(g1 >= 0 && g2 > g1);
+    // The older id is refused and the newer window stays open.
+    auto stale = h.call("/meter/read", { "wg3", g1 }, "/meter/read/error/wg3", 2000);
+    CHECK(stale.has_value() && stale->str(0).rfind("stale_gen", 0) == 0);
+    CHECK(session.mcpArmActive.load());
+    // The current id reads and names its window (arg 15).
+    auto cur = h.call("/meter/read", { "wg4", g2 }, "/meter/read/reply/wg4", 2000);
+    CHECK(cur.has_value() && cur->args.size() >= 16 && static_cast<int>(cur->num(15)) == g2);
+    CHECK(!session.mcpArmActive.load());
+    // The legacy read (no id) still answers.
+    auto legacy = h.call("/meter/read", { "wg5" }, "/meter/read/reply/wg5", 2000);
+    CHECK(legacy.has_value() && legacy->args.size() >= 10);
+
+    // The spectral window: the same scheme.
+    auto s1 = h.call("/meter/arm_spectral", { 100, "wg6" }, "/meter/arm_spectral/reply/wg6");
+    auto s2 = h.call("/meter/arm_spectral", { 100, "wg7" }, "/meter/arm_spectral/reply/wg7");
+    CHECK(s1.has_value() && s1->args.size() >= 1 && s1->args[0].isNumber);
+    CHECK(s2.has_value() && s2->args.size() >= 1 && s2->args[0].isNumber);
+    int const sg1 = s1 && !s1->args.empty() ? static_cast<int>(s1->num(0)) : -1;
+    int const sg2 = s2 && !s2->args.empty() ? static_cast<int>(s2->num(0)) : -1;
+    CHECK(sg1 >= 0 && sg2 > sg1);
+    auto sStale = h.call("/meter/read_spectral", { "wg8", sg1 }, "/meter/read_spectral/error/wg8", 2000);
+    CHECK(sStale.has_value() && sStale->str(0).rfind("stale_gen", 0) == 0);
+    sleepMs(250); // the audio thread fills the 100 ms window
+    auto sCur = h.call("/meter/read_spectral", { "wg9", sg2 }, "/meter/read_spectral/reply/wg9", 3000);
+    CHECK(sCur.has_value());
+    if (sCur) {
+        auto const json = parseJson(*sCur);
+        CHECK(json.hasProperty("gen") && static_cast<int>(json["gen"]) == sg2);
+    }
+}
+
 // P5.1 sink floor S1: /pd/limiter answers the LIVE limiter state and the toolbar threshold
 // ({"enabled":bool,"thresholdDb":-12|-6|0|3}), read-only; the capability `limiter` is advertised. The state is set
 // here directly (the AI never switches it) and restored after.
@@ -2872,6 +2929,7 @@ int main()
             runArmedTraceCases(harness);
             runConsoleObjectCases(harness);
             runLimiterCases(harness, processor);
+            runMeterWindowGenCases(harness, processor);
             runOutputCeilingCases(harness, processor, audioControl);
             runMidiDevicesCases(harness, processor);
             runLimiterPatchCases(processor);

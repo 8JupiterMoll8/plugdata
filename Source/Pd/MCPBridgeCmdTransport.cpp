@@ -278,6 +278,10 @@ std::vector<std::string> MCPBridge::capabilityList() const
         "meter_arm",
         "meter_control",
         "meter_spectral_arm",
+        // P11 V1: /meter/arm and /meter/arm_spectral answer a window generation id (arg 0); a read naming another id
+        // is refused on /meter/<read|read_spectral>/error/<corrId> ("stale_gen ..."); /meter/read arg 15 and the
+        // spectral JSON `gen` name the window read
+        "meter_window_gen",
         "meter_trace",
         // T2b: /meter/trace ... arm <windowMs> [focus] / read: the trace of a window's peaks (a triggered voice)
         "meter_trace_armed",
