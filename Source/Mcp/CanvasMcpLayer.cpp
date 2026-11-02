@@ -1037,57 +1037,8 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
         }
     }
 
-    // Tier-2 approval chips — a destructive op waits for the artist's yes.
-    // Drawn in CANVAS coords (same space as the pill) so clicks hit-test free.
-    if (isApprovalRequested()) {
-        juce::Rectangle<int> anchor;
-        if (mcpSelectionPill && mcpSelectionPill->isVisible() && !mcpSelectionPillFrame.isEmpty()) {
-            anchor = mcpSelectionPillFrame;
-        } else {
-            auto const sel = canvas.getSelectionOfType<Object>();
-            juce::Rectangle<int> b;
-            bool first = true;
-            for (auto* o : sel) {
-                if (!o) continue;
-                auto const ob = o->getBounds();
-                b = first ? ob : b.getUnion(ob);
-                first = false;
-            }
-            if (!first) anchor = b;
-            if (anchor.isEmpty())
-                anchor = juce::Rectangle<int>(canvas.canvasOrigin.x - 210, canvas.canvasOrigin.y + 40, 420, 1);
-        }
-        constexpr int barW = 420;
-        constexpr int barH = 46;
-        int const bx = anchor.getCentreX() - barW / 2;
-        int const by = anchor.getBottom() + 14;
-        mcpApprovalFrame = juce::Rectangle<int>(bx, by, barW, barH);
-        int const half = (barW - 24) / 2;
-        mcpApprovalYes = juce::Rectangle<int>(bx + 8, by + 8, half, barH - 16);
-        mcpApprovalNo = juce::Rectangle<int>(bx + 8 + half + 8, by + 8, half, barH - 16);
-
-        NVGScopedState scopedAppr(nvg);
-        nanovg::nvgTranslate(nvg, static_cast<float>(bx), static_cast<float>(by));
-        nanovg::nvgDrawRoundedRect(nvg, 0, 0, static_cast<float>(barW), static_cast<float>(barH),
-                           nanovg::nvgRGBA(28, 16, 16, 250), nanovg::nvgRGBA(255, 90, 70, 225), 10.0f);
-        mcpnvg::nvgFontFace(nvg, "Inter");
-        mcpnvg::nvgFontSize(nvg, 15.0f);
-        mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-        // Approve (green)
-        nanovg::nvgDrawRoundedRect(nvg, 8, 8, static_cast<float>(half), static_cast<float>(barH - 16),
-                           nanovg::nvgRGBA(40, 170, 90, 235), nanovg::nvgRGBA(90, 225, 140, 255), 6.0f);
-        nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(255, 255, 255, 255));
-        mcpnvg::nvgText(nvg, 8 + half * 0.5f, barH * 0.5f, "Approve", nullptr);
-        // Cancel (grey)
-        nanovg::nvgDrawRoundedRect(nvg, 8 + half + 8, 8, static_cast<float>(half), static_cast<float>(barH - 16),
-                           nanovg::nvgRGBA(40, 44, 52, 235), nanovg::nvgRGBA(90, 98, 112, 255), 6.0f);
-        nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(210, 220, 235, 235));
-        mcpnvg::nvgText(nvg, 8 + half + 8 + half * 0.5f, barH * 0.5f, "Cancel", nullptr);
-    } else {
-        mcpApprovalFrame = {};
-        mcpApprovalYes = {};
-        mcpApprovalNo = {};
-    }
+    // P12c approval chips: one per pending record, clamped inside the visible viewport (CanvasMcpApproval.cpp).
+    paintApprovalChips(nvg);
     // Multimodal Pen / Sketch Ink Overlay (Rendered directly on GPU in canvas coords)
     renderSketchOverlay(nvg);
 
@@ -1257,11 +1208,11 @@ void CanvasMcpLayer::paintScreenOverlay(NVGcontext* nvg)
             NVGcolor badgeBg = nanovg::nvgRGBA(56, 189, 248, 30);
             NVGcolor badgeBorder = nanovg::nvgRGBA(56, 189, 248, 110);
 
-            if (upperChapter.contains("DONE") || upperChapter.contains("APPROVED") || upperChapter.contains("VOICE")) {
+            if (upperChapter.contains("DONE") || upperChapter.contains("VOICE")) {
                 accentCol = nanovg::nvgRGBA(16, 185, 129, 255);          // Emerald Green
                 badgeBg = nanovg::nvgRGBA(16, 185, 129, 32);
                 badgeBorder = nanovg::nvgRGBA(16, 185, 129, 120);
-            } else if (upperChapter.contains("APPROVE")) {
+            } else if (upperChapter.contains("WAITING")) {
                 accentCol = nanovg::nvgRGBA(245, 158, 11, 255);          // Amber Gold
                 badgeBg = nanovg::nvgRGBA(245, 158, 11, 40);
                 badgeBorder = nanovg::nvgRGBA(245, 158, 11, 140);

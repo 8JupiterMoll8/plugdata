@@ -167,15 +167,16 @@ public:
     {
         auto* cc = findGuiCanvasFor(proc, cnv);
         if (!cc || !cc->viewport) return;
-        float z = std::sqrt(std::abs(cc->getTransform().getDeterminant()));
-        if (z <= 0.0f) z = 1.0f;
+        // getViewArea() is already in canvas coordinates (view position and size divided by the zoom); it used to be
+        // divided by the zoom a second time, so at any zoom but 1 the "is it on screen" test looked at the wrong area
+        // (P12c review). Canvas -> patch coordinates is only the origin shift.
         auto const origin = cc->canvasOrigin;
         auto area = cc->viewport->getViewArea().toFloat();
         juce::Rectangle<float> viewPatch(
-            area.getX() / z - (float) origin.x,
-            area.getY() / z - (float) origin.y,
-            area.getWidth() / z,
-            area.getHeight() / z);
+            area.getX() - (float) origin.x,
+            area.getY() - (float) origin.y,
+            area.getWidth(),
+            area.getHeight());
 
         bool offscreen = false;
         bool any = false;
@@ -202,7 +203,9 @@ public:
         sys_unlock();
         if (!offscreen || !any) return;
 
-        // Keep zoom, center the new objects.
+        // Keep zoom, center the new objects. setViewPosition takes view pixels: canvas coordinates times the zoom.
+        float z = std::sqrt(std::abs(cc->getTransform().getDeterminant()));
+        if (z <= 0.0f) z = 1.0f;
         auto centre = bbox.getCentre();
         float targetX = centre.x - viewPatch.getWidth() * 0.5f;
         float targetY = centre.y - viewPatch.getHeight() * 0.5f;

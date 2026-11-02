@@ -291,15 +291,22 @@ public:
     void showPillPalette();
     void triggerPaletteItem(int index);
 
-    // Tier-2 artist approval: a destructive op from the agent surfaces as two
-    // in-canvas chips [Approve] [Cancel] (Enter/Esc). Sends "approve"/"deny" —
-    // the server holds the token inert until this human yes. Drawn in CANVAS
-    // coords (like the pill) so click hit-testing is transform-free.
+    // P12c artist approval: one chip per pending record of the server (session.approvals, set only by
+    // /pd/approval_show; HUD text never shows chips). A click answers exactly the record of its chip:
+    // /pd/approval/answer <nonce> yes|no. Enter only for exactly one chip on screen >= 400 ms; Esc cancels all.
+    // Drawn in CANVAS coords (like the pill), the whole stack clamped inside the visible viewport
+    // (CanvasMcpApproval.cpp).
     bool isApprovalRequested() const;
-    void sendApproval(bool approve);
-    juce::Rectangle<int> mcpApprovalFrame; // full bar
-    juce::Rectangle<int> mcpApprovalYes;   // Approve chip
-    juce::Rectangle<int> mcpApprovalNo;    // Cancel chip
+    void answerApproval(juce::String const& nonce, bool yes);
+    void paintApprovalChips(NVGcontext* nvg);
+    bool handleApprovalClick(juce::Point<int> canvasPt);
+    std::optional<bool> handleApprovalKey(juce::KeyPress const& key);
+    struct ApprovalHit {
+        juce::String nonce;
+        juce::Rectangle<int> frame, yes, no;
+    };
+    std::vector<ApprovalHit> mcpApprovalHits;
+    juce::Rectangle<int> mcpApprovalFrame; // the whole stack (hit priority over the pill)
 
 private:
     void renderSketchOverlay(NVGcontext* nvg);
