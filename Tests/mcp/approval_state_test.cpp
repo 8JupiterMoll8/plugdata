@@ -7,7 +7,9 @@
 // inside the visible viewport and falls back to the viewport centre, never to the canvas origin.
 #include "../../Source/Mcp/McpApprovalState.h"
 
+#include <cmath>
 #include <cstdio>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -236,6 +238,104 @@ int main()
         // A scrolls it away; B never showed it: no longer on screen anywhere.
         s.markPaintedIfInside("n", 0xA, ApprovalRect { 5000, 5000, 440, 78 }, viewA, 2000);
         CHECK(!s.clickAllowed("n", 2100));
+    }
+
+
+    // 12. P12c live "Zoom finding" (2026-11-02): from zoom ~1.6 the 440-wide bar, drawn in canvas units, no longer fit
+    //     the view, never counted as fully on screen, and only Esc worked. The bar now has a fixed SCREEN size (canvas
+    //     units = design px / zoom), shrinks further only when the window is smaller than the bar, and is clamped
+    //     inside the view: at every zoom and window size every bar is inside, clickable and its buttons hit-testable.
+    //     Owner 2026-11-02 ("easy to click but a bit big"): ~70-75% of the old 440x78 footprint, buttons >= 36 px.
+    {
+        using M = mcp::ApprovalBarMetrics;
+        CHECK(M::w * M::h <= 440 * 78 * 75 / 100);
+        CHECK(M::w * M::h >= 440 * 78 * 65 / 100);
+        CHECK(M::btnH >= 36);
+        CHECK(M::btnY + M::btnH <= M::h);
+        CHECK(M::minTitleFont >= 9.0f);
+        int const half = mcp::approvalButtonW(M::w);
+        CHECK(M::btnX + half + M::btnGap + half <= M::w - M::btnX);
+
+        struct Win { float w, h; };
+        for (float zoom : { 0.5f, 1.0f, 1.6f, 2.0f, 3.0f })
+            for (Win win : { Win { 1400, 900 }, Win { 1200, 800 }, Win { 800, 500 }, Win { 420, 300 }, Win { 300, 200 }, Win { 200, 120 } })
+                for (float scroll : { 0.0f, 333.3f, 64000.7f, -1234.5f })
+                    for (int shown : { 1, 2, 4 })
+                        for (bool more : { false, true })
+                            for (int a = 0; a < 3; ++a) {
+                                auto const view = mcp::approvalVisibleArea(scroll / zoom, (scroll * 0.75f) / zoom, win.w / zoom, win.h / zoom);
+                                std::optional<ApprovalRect> anchor;
+                                if (a == 1) anchor = ApprovalRect { view.x - 9000, view.y + 9000, 50, 20 };
+                                if (a == 2) anchor = ApprovalRect { view.x + view.w / 3, view.y + view.h / 3, 60, 20 };
+                                for (int barW : { M::w, 520 }) {
+                                    auto const L = mcp::approvalStackLayout(anchor, view, zoom, barW, shown, more);
+                                    CHECK(static_cast<int>(L.bars.size()) == shown);
+                                    CHECK(inside(L.frame, view));
+                                    CHECK(L.scale > 0.0f && L.scale <= 1.0f / zoom + 1e-6f);
+                                    // The drawn bar (design size times the scale) never exceeds its rect.
+                                    CHECK(barW * L.scale <= L.frame.w + 1e-3f);
+                                    for (std::size_t i = 0; i < L.bars.size(); ++i) {
+                                        auto const& b = L.bars[i];
+                                        CHECK(inside(b.frame, view));
+                                        CHECK(inside(b.frame, L.frame));
+                                        CHECK(M::h * L.scale <= b.frame.h + 1e-3f);
+                                        CHECK(b.yes.w > 0 && b.yes.h > 0 && b.no.w > 0 && b.no.h > 0);
+                                        CHECK(inside(b.yes, b.frame) && inside(b.no, b.frame));
+                                        CHECK(b.yes.x + b.yes.w <= b.no.x); // side by side, no overlap
+                                        if (i > 0) CHECK(L.bars[i - 1].frame.y + L.bars[i - 1].frame.h <= b.frame.y);
+                                        // Clickable: the full-visibility rule holds for this rect, so the 400 ms clock
+                                        // starts and a click / Enter can answer it.
+                                        ApprovalState s;
+                                        s.show("n", "pd-main", "r", {}, 60000, 0);
+                                        CHECK(s.markPaintedIfInside("n", b.frame, view, 1000));
+                                        CHECK(s.clickAllowed("n", 1000 + ApprovalState::kEnterMinVisibleMs));
+                                    }
+                                    // A window that holds the bar: it keeps its design size on screen (fixed pixels,
+                                    // whatever the zoom), so the buttons stay >= 36 px tall.
+                                    float const stackPx = static_cast<float>(shown * M::h + (shown - 1) * M::gap + (more ? M::more : 0));
+                                    if (win.w >= barW + 2 * M::margin + 2 && win.h >= stackPx + 2 * M::margin + 2) {
+                                        CHECK(std::abs(L.scale * zoom - 1.0f) < 0.02f);
+                                        CHECK(L.bars[0].yes.h * zoom >= M::btnH - zoom - 1.0f);
+                                        CHECK(std::abs(L.frame.w * zoom - barW) <= zoom + 1.0f);
+                                    }
+                                }
+                            }
+        // No reflow under the cursor when the window holds the full stack: a second chip leaves the first in place.
+        {
+            ApprovalRect const view = mcp::approvalVisibleArea(0, 0, 1200 / 2.0f, 800 / 2.0f);
+            auto const one = mcp::approvalStackLayout(std::nullopt, view, 2.0f, M::w, 1, false);
+            auto const two = mcp::approvalStackLayout(std::nullopt, view, 2.0f, M::w, 2, false);
+            CHECK(one.bars[0].frame.x == two.bars[0].frame.x && one.bars[0].frame.y == two.bars[0].frame.y);
+        }
+        // Hit test: the centre of ✓ is in ✓ only, at zoom 2.
+        {
+            ApprovalRect const view = mcp::approvalVisibleArea(10, 10, 1200 / 2.0f, 800 / 2.0f);
+            auto const L = mcp::approvalStackLayout(std::nullopt, view, 2.0f, M::w, 1, false);
+            auto const& b = L.bars[0];
+            int const cx = b.yes.x + b.yes.w / 2, cy = b.yes.y + b.yes.h / 2;
+            auto contains = [](ApprovalRect const& r, int x, int y) { return x >= r.x && y >= r.y && x < r.x + r.w && y < r.y + r.h; };
+            CHECK(contains(b.yes, cx, cy) && !contains(b.no, cx, cy));
+        }
+        // Nothing to place: no bars.
+        CHECK(mcp::approvalStackLayout(std::nullopt, ApprovalRect { 0, 0, 800, 600 }, 1.0f, M::w, 0, false).bars.empty());
+    }
+
+    // 13. LOW (live check 2026-11-02): an expired chip that is still drawn (no repaint yet) cannot be answered by a
+    //     click or Enter, and the state says when the next chip expires so the canvas repaints it away on time.
+    {
+        ApprovalState s;
+        CHECK(!s.nextExpiryMs().has_value());
+        s.show("n_e", "pd-main", "r", {}, 1000, 0); // expires at 1000
+        s.show("n_f", "pd-main", "r", {}, 5000, 0); // expires at 5000
+        CHECK(s.nextExpiryMs().value_or(-1) == 1000);
+        ApprovalRect const view { 0, 0, 2000, 2000 };
+        CHECK(s.markPaintedIfInside("n_e", ApprovalRect { 100, 100, 340, 74 }, view, 100));
+        CHECK(s.clickAllowed("n_e", 999));
+        CHECK(!s.clickAllowed("n_e", 1000));             // expired, maybe still on the glass: the click is ignored
+        CHECK(!s.take("n_e", 1000).has_value());         // and cannot be answered
+        CHECK(s.nextExpiryMs().value_or(-1) == 5000);    // purged: the next one is the remaining chip
+        s.clear("n_f");
+        CHECK(!s.nextExpiryMs().has_value());
     }
 
     if (failures == 0)

@@ -27,11 +27,9 @@
 #include <set>
 
 namespace {
-constexpr int kBarW = 440;
-constexpr float kMinTitleFont = 9.0f; // line 1 never goes smaller; the bar widens instead (round 3 item 4)
-constexpr int kBarH = 78;
-constexpr int kBarGap = 6;
-constexpr int kMaxBars = 4; // more pending records show as a count line under the stack
+// The bar's size in design (screen) pixels lives in McpApprovalState.h (ApprovalBarMetrics); drawn at a fixed screen
+// size whatever the zoom (live check 2026-11-02). Line 1 never goes below minTitleFont: the bar widens instead.
+using M = mcp::ApprovalBarMetrics;
 
 std::int64_t nowMs() { return static_cast<std::int64_t>(juce::Time::currentTimeMillis()); }
 
@@ -51,8 +49,19 @@ void CanvasMcpLayer::answerApproval(juce::String const& nonce, bool yes)
     if (auto* br = canvas.pd->getMcp()->getMCPBridge()) br->sendApprovalAnswer(nonce, yes);
     mcpApprovalHits.clear();
     mcpApprovalFrame = {};
+    repaintApprovals();
+}
+
+void CanvasMcpLayer::repaintApprovals()
+{
     canvas.repaint();
     if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+}
+
+void CanvasMcpLayer::ApprovalExpiryTimer::timerCallback()
+{
+    stopTimer();
+    canvas->repaintApprovals();
 }
 
 bool CanvasMcpLayer::handleApprovalClick(juce::Point<int> canvasPt)
@@ -64,6 +73,7 @@ bool CanvasMcpLayer::handleApprovalClick(juce::Point<int> canvasPt)
         if (!yes && !hit.no.contains(canvasPt)) continue;
         // A chip that just appeared (or is not fully on screen) is not clickable yet: same 400 ms as Enter.
         if (state.clickAllowed(hit.nonce.toStdString(), nowMs())) answerApproval(hit.nonce, yes);
+        else repaintApprovals(); // expired but still on the glass: ignored, and repainted away
         break;
     }
     return true; // a click on the stack never falls through to the canvas
@@ -91,8 +101,17 @@ void CanvasMcpLayer::paintApprovalChips(NVGcontext* nvg)
     mcpApprovalFrame = {};
     if (!canvas.pd) return;
     auto& state = canvas.pd->getMcp()->session.approvals;
-    auto const chips = state.visible(nowMs());
-    if (chips.empty()) return;
+    auto const now = nowMs();
+    auto const chips = state.visible(now);
+    if (chips.empty()) {
+        if (mcpApprovalExpiryTimer) mcpApprovalExpiryTimer->stopTimer();
+        return;
+    }
+    // The next C++ expiry repaints the canvas, so an expired chip does not stay drawn until some other repaint.
+    if (auto const next = state.nextExpiryMs()) {
+        if (!mcpApprovalExpiryTimer) mcpApprovalExpiryTimer = std::make_unique<ApprovalExpiryTimer>(this);
+        mcpApprovalExpiryTimer->startTimer(static_cast<int>(std::clamp<std::int64_t>(*next - now + 5, 5, 60 * 60 * 1000)));
+    }
 
     // The visible viewport in canvas coordinates (the space objects and the pill are drawn in). getViewArea() already
     // is that (view position and size divided by the zoom): used as it is, never divided by the zoom again.
@@ -172,13 +191,10 @@ void CanvasMcpLayer::paintApprovalChips(NVGcontext* nvg)
         if (!first) anchor = toRect(b);
     }
 
-    int const shown = std::min<int>(static_cast<int>(chips.size()), kMaxBars);
+    int const shown = std::min<int>(static_cast<int>(chips.size()), M::maxBars);
     int const more = static_cast<int>(chips.size()) - shown;
-    // Placed for the FULL stack, whatever is pending now: a new chip is appended below without moving the ones already
-    // on screen (no reflow under the cursor).
-    int const fullH = kMaxBars * kBarH + (kMaxBars - 1) * kBarGap + 22;
     // Line 1 of each chip (fixed words; which tab only as "another tab"), and a bar wide enough for every line 1 at
-    // the minimum font: line 1 is never cut and never overflows (round 3 item 4).
+    // the minimum font: line 1 is never cut and never overflows (round 3 item 4). Measured in design pixels.
     auto titleOf = [&](mcp::ApprovalChip const& c) {
         auto t = c.title;
         if (c.canvasId != 0 && c.canvasId != thisCanvas)
@@ -187,55 +203,62 @@ void CanvasMcpLayer::paintApprovalChips(NVGcontext* nvg)
             t += " (tab not open)";
         return t;
     };
-    int barW = kBarW;
+    int barW = M::w;
     {
         NVGScopedState measure(nvg);
         mcpnvg::nvgFontFace(nvg, "Inter");
-        mcpnvg::nvgFontSize(nvg, kMinTitleFont);
+        mcpnvg::nvgFontSize(nvg, M::minTitleFont);
         float b[4] {};
         for (int i = 0; i < shown; ++i) {
             auto const t = titleOf(chips[static_cast<std::size_t>(i)]);
-            barW = std::max(barW, static_cast<int>(std::ceil(mcpnvg::nvgTextBounds(nvg, 0, 0, t.c_str(), nullptr, b))) + 24);
+            barW = std::max(barW, static_cast<int>(std::ceil(mcpnvg::nvgTextBounds(nvg, 0, 0, t.c_str(), nullptr, b))) + 2 * M::textX + 4);
         }
     }
-    auto place = mcp::approvalBarRect(anchor, view, barW, fullH);
-    place.h = shown * kBarH + (shown - 1) * kBarGap + (more > 0 ? 22 : 0);
+    // A fixed SCREEN size (design px / zoom in canvas units), shrunk only when the window cannot hold it, clamped
+    // inside the view. The full stack's space is reserved when it fits: a new chip never moves the ones on screen.
+    float const zoom = canvas.viewport ? canvas.viewport->getViewScale() : getValue<float>(canvas.zoomScale);
+    auto const layout = mcp::approvalStackLayout(anchor, view, zoom, barW, shown, more > 0);
+    if (layout.bars.empty()) return;
+    auto const& place = layout.frame;
     mcpApprovalFrame = juce::Rectangle<int>(place.x, place.y, place.w, place.h);
+    float const k = layout.scale;
 
-    int const half = (barW - 24) / 2;
+    int const half = mcp::approvalButtonW(barW);
+    float const btnH = static_cast<float>(M::btnH);
     for (int i = 0; i < shown; ++i) {
         // Oldest first: new questions are appended below, nothing already on screen moves.
         auto const& c = chips[static_cast<std::size_t>(i)];
-        int const bx = place.x;
-        int const by = place.y + i * (kBarH + kBarGap);
+        auto const& bl = layout.bars[static_cast<std::size_t>(i)];
+        auto toJ = [](mcp::ApprovalRect const& r) { return juce::Rectangle<int>(r.x, r.y, r.w, r.h); };
         ApprovalHit hit;
         hit.nonce = juce::String(c.nonce);
-        hit.frame = { bx, by, barW, kBarH };
-        hit.yes = { bx + 8, by + 42, half, kBarH - 48 };
-        hit.no = { bx + 8 + half + 8, by + 42, half, kBarH - 48 };
+        hit.frame = toJ(bl.frame);
+        hit.yes = toJ(bl.yes);
+        hit.no = toJ(bl.no);
         mcpApprovalHits.push_back(hit);
         // Its on-screen time (Enter and clicks wait 400 ms) starts only when the whole bar is inside the view.
         // Per chip, shared across views: this view's entry only (round 3 items 3, 6); a moved bar starts again.
-        state.markPaintedIfInside(c.nonce, reinterpret_cast<std::uintptr_t>(this), mcp::ApprovalRect { bx, by, barW, kBarH }, view, nowMs());
+        state.markPaintedIfInside(c.nonce, reinterpret_cast<std::uintptr_t>(this), bl.frame, view, nowMs());
 
         NVGScopedState scopedAppr(nvg);
-        nanovg::nvgTranslate(nvg, static_cast<float>(bx), static_cast<float>(by));
-        nanovg::nvgDrawRoundedRect(nvg, 0, 0, static_cast<float>(barW), static_cast<float>(kBarH),
-            nanovg::nvgRGBA(28, 16, 16, 250), nanovg::nvgRGBA(255, 90, 70, 225), 10.0f);
+        nanovg::nvgTranslate(nvg, static_cast<float>(bl.frame.x), static_cast<float>(bl.frame.y));
+        nanovg::nvgScale(nvg, k, k); // from here on: design pixels
+        nanovg::nvgDrawRoundedRect(nvg, 0, 0, static_cast<float>(barW), static_cast<float>(M::h),
+            nanovg::nvgRGBA(28, 16, 16, 250), nanovg::nvgRGBA(255, 90, 70, 225), 9.0f);
         mcpnvg::nvgFontFace(nvg, "Inter");
         mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
         // Line 1: the server's fixed words, never cut: the font shrinks until it fits (P12c review 5).
         auto const title = titleOf(c); // fixed words only; the tab's name is on line 2 (server-built)
-        float const textW = static_cast<float>(barW - 20);
+        float const textW = static_cast<float>(barW - 2 * M::textX);
         float size = 12.0f;
         float bounds[4] {};
-        for (; size > kMinTitleFont; size -= 0.5f) {
+        for (; size > M::minTitleFont; size -= 0.5f) {
             mcpnvg::nvgFontSize(nvg, size);
             if (mcpnvg::nvgTextBounds(nvg, 0, 0, title.c_str(), nullptr, bounds) <= textW) break;
         }
-        mcpnvg::nvgFontSize(nvg, std::max(size, kMinTitleFont)); // the bar is wide enough for line 1 at this size
+        mcpnvg::nvgFontSize(nvg, std::max(size, M::minTitleFont)); // the bar is wide enough for line 1 at this size
         nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(255, 228, 220, 250));
-        mcpnvg::nvgText(nvg, 10.0f, 13.0f, title.c_str(), nullptr);
+        mcpnvg::nvgText(nvg, static_cast<float>(M::textX), M::line1Y, title.c_str(), nullptr);
         // Line 2: the model-chosen names; the only line cut (ellipsis).
         if (!c.detail.empty()) {
             mcpnvg::nvgFontSize(nvg, 11.0f);
@@ -243,26 +266,31 @@ void CanvasMcpLayer::paintApprovalChips(NVGcontext* nvg)
                 return mcpnvg::nvgTextBounds(nvg, 0, 0, t.c_str(), nullptr, bounds) <= textW;
             });
             nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(255, 190, 175, 210));
-            mcpnvg::nvgText(nvg, 10.0f, 30.0f, line2.c_str(), nullptr);
+            mcpnvg::nvgText(nvg, static_cast<float>(M::textX), M::line2Y, line2.c_str(), nullptr);
         }
         mcpnvg::nvgFontSize(nvg, 14.0f);
         mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-        nanovg::nvgDrawRoundedRect(nvg, 8, 42, static_cast<float>(half), static_cast<float>(kBarH - 48),
+        float const yesX = static_cast<float>(M::btnX);
+        float const noX = static_cast<float>(M::btnX + half + M::btnGap);
+        float const btnY = static_cast<float>(M::btnY);
+        nanovg::nvgDrawRoundedRect(nvg, yesX, btnY, static_cast<float>(half), btnH,
             nanovg::nvgRGBA(40, 170, 90, 235), nanovg::nvgRGBA(90, 225, 140, 255), 6.0f);
         nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(255, 255, 255, 255));
-        mcpnvg::nvgText(nvg, 8 + half * 0.5f, 42 + (kBarH - 48) * 0.5f, juce::String::fromUTF8("\xe2\x9c\x93 Approve").toRawUTF8(), nullptr);
-        nanovg::nvgDrawRoundedRect(nvg, 8 + half + 8, 42, static_cast<float>(half), static_cast<float>(kBarH - 48),
+        mcpnvg::nvgText(nvg, yesX + half * 0.5f, btnY + btnH * 0.5f, juce::String::fromUTF8("\xe2\x9c\x93 Approve").toRawUTF8(), nullptr);
+        nanovg::nvgDrawRoundedRect(nvg, noX, btnY, static_cast<float>(half), btnH,
             nanovg::nvgRGBA(40, 44, 52, 235), nanovg::nvgRGBA(90, 98, 112, 255), 6.0f);
         nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(210, 220, 235, 235));
-        mcpnvg::nvgText(nvg, 8 + half + 8 + half * 0.5f, 42 + (kBarH - 48) * 0.5f, juce::String::fromUTF8("\xe2\x9c\x97 Cancel").toRawUTF8(), nullptr);
+        mcpnvg::nvgText(nvg, noX + half * 0.5f, btnY + btnH * 0.5f, juce::String::fromUTF8("\xe2\x9c\x97 Cancel").toRawUTF8(), nullptr);
     }
     if (more > 0) {
         NVGScopedState scopedMore(nvg);
+        nanovg::nvgTranslate(nvg, static_cast<float>(place.x), static_cast<float>(place.y + place.h));
+        nanovg::nvgScale(nvg, k, k);
         mcpnvg::nvgFontFace(nvg, "Inter");
         mcpnvg::nvgFontSize(nvg, 12.0f);
         mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
         nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(255, 200, 190, 230));
         auto const line = "+" + juce::String(more) + " more waiting";
-        mcpnvg::nvgText(nvg, place.x + barW * 0.5f, place.y + place.h - 10.0f, line.toRawUTF8(), nullptr);
+        mcpnvg::nvgText(nvg, barW * 0.5f, -M::more * 0.5f, line.toRawUTF8(), nullptr);
     }
 }

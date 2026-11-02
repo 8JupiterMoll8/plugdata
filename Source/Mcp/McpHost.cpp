@@ -326,6 +326,18 @@ void McpHost::shutdown()
 {
     if (session.mcpShuttingDown.exchange(true))
         return;
+    // Quit crash (live check 2026-11-02, gdb: ~PluginProcessor -> ~PluginEditor -> ~CopilotPanel ->
+    // getMcp()->getMCPBridge()->setChatCallback on a freed host): `mcp` is the processor's LAST member, so it was
+    // destroyed BEFORE `openedEditors`, whose MCP parts (Copilot panel, canvas layers, approval chips) still reach the
+    // host while they are torn down: use after free, a segfault or glibc's "futex facility returned an unexpected
+    // error code" on a freed mutex. The editors go first, while the host, the bridge and the patches are all alive:
+    // the order a plugin host always uses (JUCE: an editor is deleted before its AudioProcessor). No-op when no
+    // editor is open (plugin builds, the headless handler tests).
+    if (juce::MessageManager::existsAndIsCurrentThread()) {
+        for (auto* editor : processor.openedEditors)
+            processor.editorBeingDeleted(editor); // the wrapper's part of JUCE's contract (no dangling active editor)
+        processor.openedEditors.clear();
+    }
     focusTimer.stopTimer();
     ceilingTimer.stopTimer();
     if (mcpBridge)

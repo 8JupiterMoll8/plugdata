@@ -294,8 +294,8 @@ public:
     // P12c artist approval: one chip per pending record of the server (session.approvals, set only by
     // /pd/approval_show; HUD text never shows chips). A click answers exactly the record of its chip:
     // /pd/approval/answer <nonce> yes|no. Enter only for exactly one chip on screen >= 400 ms; Esc cancels all.
-    // Drawn in CANVAS coords (like the pill), the whole stack clamped inside the visible viewport
-    // (CanvasMcpApproval.cpp).
+    // Drawn in canvas coords at a fixed SCREEN size (design px / zoom, mcp::approvalStackLayout), the whole stack
+    // clamped inside the visible viewport (CanvasMcpApproval.cpp).
     bool isApprovalRequested() const;
     void answerApproval(juce::String const& nonce, bool yes);
     void paintApprovalChips(NVGcontext* nvg);
@@ -307,6 +307,14 @@ public:
     };
     std::vector<ApprovalHit> mcpApprovalHits;
     juce::Rectangle<int> mcpApprovalFrame; // the whole stack (hit priority over the pill)
+    // Repaints the canvas when the next chip expires (C++ TTL), so an expired chip leaves the glass on time.
+    void repaintApprovals();
+    struct ApprovalExpiryTimer : public juce::Timer {
+        explicit ApprovalExpiryTimer(CanvasMcpLayer* c) : canvas(c) {}
+        void timerCallback() override;
+        CanvasMcpLayer* canvas;
+    };
+    std::unique_ptr<ApprovalExpiryTimer> mcpApprovalExpiryTimer;
 
 private:
     void renderSketchOverlay(NVGcontext* nvg);
