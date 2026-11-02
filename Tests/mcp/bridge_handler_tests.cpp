@@ -1838,6 +1838,70 @@ void runSaveCoordsCases(Harness& h, PluginProcessor& processor)
     dir.deleteRecursively();
 }
 
+// P11.6 review M1: a canvas named by the full path of its file resolves to exactly that open root, also when two
+// roots share the file name (a/twin.pd, b/twin.pd); a path no open root has resolves to nothing (never the first tab of
+// that name).
+void runPathCanvasCases(PluginProcessor& processor)
+{
+    std::printf("canvas by full file path (P11.6 M1)\n");
+    auto* host = processor.getMcp();
+    auto base = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("mcp_p116_twins");
+    base.deleteRecursively();
+    auto fa = base.getChildFile("a").getChildFile("p116twin.pd");
+    auto fb = base.getChildFile("b").getChildFile("p116twin.pd");
+    fa.getParentDirectory().createDirectory();
+    fb.getParentDirectory().createDirectory();
+    fa.replaceWithText("#N canvas 0 50 450 300 12;\n#X obj 10 10 r p116_a;\n");
+    fb.replaceWithText("#N canvas 0 50 450 300 12;\n#X obj 10 10 r p116_b;\n");
+    auto open = [&](juce::File const& f) {
+        host->pdWait([&] {
+            t_atom a[2];
+            SETSYMBOL(&a[0], gensym(f.getFileName().toRawUTF8()));
+            SETSYMBOL(&a[1], gensym(f.getParentDirectory().getFullPathName().toRawUTF8()));
+            pd_typedmess(gensym("pd")->s_thing, gensym("open"), 2, a);
+        }, 3000);
+    };
+    open(fa);
+    open(fb);
+    t_canvas* ca = nullptr;
+    t_canvas* cb = nullptr;
+    t_canvas* none = nullptr;
+    t_canvas* byName = nullptr;
+    host->pdWait([&] {
+        ca = host->getCanvasBySymbol(fa.getFullPathName());
+        cb = host->getCanvasBySymbol(fb.getFullPathName());
+        none = host->getCanvasBySymbol(base.getChildFile("c").getChildFile("p116twin.pd").getFullPathName());
+        byName = host->getCanvasBySymbol("p116twin.pd");
+    }, 3000);
+    CHECK(ca != nullptr && cb != nullptr && ca != cb);
+    CHECK(none == nullptr);
+    bool aHoldsA = false, bHoldsB = false;
+    host->pdWait([&] {
+        auto firstText = [](t_canvas* c) {
+            std::string t;
+            if (c && c->gl_list) {
+                char* buf = nullptr; int len = 0;
+                binbuf_gettext(reinterpret_cast<t_text*>(c->gl_list)->te_binbuf, &buf, &len);
+                if (buf) { t.assign(buf, static_cast<size_t>(len)); freebytes(buf, len); }
+            }
+            return t;
+        };
+        aHoldsA = firstText(ca) == "r p116_a";
+        bHoldsB = firstText(cb) == "r p116_b";
+    }, 3000);
+    CHECK(aHoldsA && bHoldsB);
+    CHECK(byName != nullptr); // the bare name still answers (its first tab): TS never sends it for a path
+    host->pdWait([&] {
+        for (auto* c : { ca, cb }) {
+            if (!c) continue;
+            t_atom force;
+            SETFLOAT(&force, 1);
+            pd_typedmess(&c->gl_pd, gensym("menuclose"), 1, &force); // Pd's own close (plugdata hears it)
+        }
+    }, 3000);
+    base.deleteRecursively();
+}
+
 void runBoundCases(Harness& h, PluginProcessor& processor)
 {
     std::printf("/pd/bound (P11.4 V19)\n");
@@ -3867,6 +3931,7 @@ int main()
             runLoadReportCases(harness, processor);
             runBoundCases(harness, processor);
             runSaveCoordsCases(harness, processor);
+            runPathCanvasCases(processor);
             runContentVersionCases(harness, processor);
             runSelectionGetCases(harness);
             runV2HandshakeCases(harness, *bridge, [&] {

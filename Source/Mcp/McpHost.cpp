@@ -688,6 +688,28 @@ t_canvas* McpHost::getCanvasBySymbol(const String& canvas_symbol)
         return nullptr;
     }
 
+    // P11.6 review M1: the full path of an open patch file names exactly that root ("/x/b/twin.pd" while
+    // "/x/a/twin.pd" is open too). No open root with that file, or two of them: nothing (never the first tab of
+    // that name).
+    if (canvas_symbol.startsWith("/") && canvas_symbol.endsWithIgnoreCase(".pd")) {
+        PdLockScope lock(processor);
+        juce::File const want(canvas_symbol);
+        t_canvas* found = nullptr;
+        int matches = 0;
+        for (t_canvas* c = pd_this ? pd_this->pd_canvaslist : nullptr; c; c = c->gl_next) {
+            if (c->gl_owner || !c->gl_name || !c->gl_name->s_name)
+                continue;
+            auto* dir = canvas_getdir(c);
+            if (!dir || !dir->s_name || dir->s_name[0] == 0)
+                continue;
+            if (juce::File(juce::String::fromUTF8(dir->s_name)).getChildFile(juce::String::fromUTF8(c->gl_name->s_name)) == want) {
+                found = c;
+                ++matches;
+            }
+        }
+        return matches == 1 ? found : nullptr;
+    }
+
     // P3.5 S3 (#62): every other name is a wire key of the identity records ("song.pd", "pd-voice", "pd-voice#2",
     // or the "pd-" spelling of either). Unknown names answer nullptr: no fallback to the first canvas, no
     // per-request Pd symbol.
