@@ -1742,6 +1742,22 @@ void runLoadReportCases(Harness& h, PluginProcessor& processor)
     CHECK(sawSub);
     CHECK(plainFalse);
 
+    // P11.6 F4: the identity snapshot carries the same container fields (the TS mirror is replaced from it; without
+    // them an abstraction weighed 1 in the delete budget). The census above adopted the subpatch, so it has an id.
+    auto snap = h.call("/pd/identity_snapshot", { "main", "lr10s" }, "/pd/identity_snapshot/reply/lr10s");
+    bool snapSub = false, snapPlainFalse = true;
+    if (snap) {
+        auto const json = parseJson(*snap);
+        for (auto const& e : *json["entries"].getArray()) {
+            if (e["class"].toString() == "canvas" && e["text"].toString() == "pd p11load")
+                snapSub = static_cast<bool>(e["isContainer"]) && static_cast<int>(e["childCount"]) == 3;
+            else if (e["class"].toString() != "canvas")
+                snapPlainFalse = snapPlainFalse && e.hasProperty("isContainer") && !static_cast<bool>(e["isContainer"]);
+        }
+    }
+    CHECK(snapSub);
+    CHECK(snapPlainFalse);
+
     host->pdWait([&] { if (auto* cnv = host->getCanvasBySymbol("main")) glist_delete(cnv, &sub->gl_gobj); }, 3000);
     ::chmod(locked.getFullPathName().toRawUTF8(), 0644);
     dir.deleteRecursively();
@@ -1844,6 +1860,46 @@ void runBoundCases(Harness& h, PluginProcessor& processor)
     CHECK(unboundOnly.has_value() && static_cast<int>(parseJson(*unboundOnly)["walkObjects"]) == 0);
     auto never = boundEntry(r, "p11_never_used_name");
     CHECK(never && !static_cast<bool>((*never)["bound"]) && static_cast<int>((*never)["count"]) == 0);
+
+    // P11.6 F10: two canvases with ONE name (two tabs a/twin.pd and b/twin.pd; here two [pd p11twin]) answer two
+    // different canvasKeys: the identity wire keys ("pd-p11twin" and "pd-p11twin#2"), each one resolving to its own
+    // canvas (it was the plain name for both, so every call aimed at the second landed on the first).
+    {
+        t_canvas* twinA = nullptr;
+        t_canvas* twinB = nullptr;
+        host->pdWait([&] {
+            t_canvas* cnv = host->getCanvasBySymbol("main");
+            auto mk = [&](t_canvas* c, char const* a0, char const* a1) {
+                t_atom a[4];
+                SETFLOAT(a, 1200);
+                SETFLOAT(a + 1, 700);
+                SETSYMBOL(a + 2, gensym(a0));
+                SETSYMBOL(a + 3, gensym(a1));
+                pd_typedmess(&c->gl_pd, gensym("obj"), 4, a);
+                return pd::Interface::getNewest(c);
+            };
+            twinA = reinterpret_cast<t_canvas*>(mk(cnv, "pd", "p11twin"));
+            made.push_back(&twinA->gl_gobj);
+            mk(twinA, "r", "p11tw_a");
+            twinB = reinterpret_cast<t_canvas*>(mk(cnv, "pd", "p11twin"));
+            made.push_back(&twinB->gl_gobj);
+            mk(twinB, "r", "p11tw_b");
+        }, 3000);
+        auto tw = h.call("/pd/bound", { "bdtw", "p11tw_a", "p11tw_b" }, "/pd/bound/reply/bdtw", 3000);
+        auto ta = boundEntry(tw, "p11tw_a");
+        auto tb = boundEntry(tw, "p11tw_b");
+        CHECK(ta && tb && static_cast<int>((*ta)["count"]) == 1 && static_cast<int>((*tb)["count"]) == 1);
+        if (ta && tb) {
+            auto const ka = (*ta)["receivers"][0]["canvasKey"].toString();
+            auto const kb = (*tb)["receivers"][0]["canvasKey"].toString();
+            CHECK(ka != kb);
+            CHECK(ka.startsWith("pd-p11twin") && kb.startsWith("pd-p11twin"));
+            t_canvas* ra = nullptr;
+            t_canvas* rb = nullptr;
+            host->pdWait([&] { ra = host->getCanvasBySymbol(ka); rb = host->getCanvasBySymbol(kb); }, 3000);
+            CHECK(ra == twinA && rb == twinB);
+        }
+    }
 
     // An armed control probe on a name with no [r]: not bound, the probe is `other`.
     h.call("/meter/arm_control", { "p11kick", "bd2" }, "/meter/arm_control/reply/bd2");

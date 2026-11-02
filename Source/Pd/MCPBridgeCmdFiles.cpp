@@ -754,14 +754,15 @@ void MCPBridge::pdListTabs(const juce::String& action, const juce::OSCMessage& m
             o->setProperty("title", tab.title);
             o->setProperty("file", tab.file.getFullPathName());
             o->setProperty("focused", tab.focused);
-            // C++ TRUTH: the canonical canvas key (the same key the
-            // identity map uses). TS derives receiver-namespace suffixes
-            // from THIS so creation and triggering agree by construction.
-            if (auto* cnvp = tab.patch)
-                o->setProperty("key", canonicalCanvasKey(cnvp));
             int count = 0;
             sys_lock();
             if (auto* cnv = tab.patch) {
+                // C++ TRUTH: the canvas's identity wire key, the name every canvas verb resolves
+                // (McpHost::getCanvasBySymbol). P11.6 F10: it was the file name (canonicalCanvasKey), which two
+                // tabs a/twin.pd and b/twin.pd share, so every call aimed at b landed on a; the wire key of the
+                // second is "twin.pd#2". `keyBase` keeps the plain name.
+                o->setProperty("key", juce::String(p->getMcp()->identity.keyOf(cnv)));
+                o->setProperty("keyBase", canonicalCanvasKey(cnv));
                 for (t_gobj* g = cnv->gl_list; g; g = g->g_next) count++;
             }
             sys_unlock();

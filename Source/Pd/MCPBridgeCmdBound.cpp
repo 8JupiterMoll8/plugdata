@@ -179,7 +179,7 @@ void MCPBridge::pdBound(const juce::String& action, const juce::OSCMessage& msg)
             for (t_canvas* c = pd_this ? pd_this->pd_canvaslist : nullptr; c; c = c->gl_next)
                 roots.push_back(c);
             for (auto it = roots.rbegin(); it != roots.rend() && !walk.done(); ++it)
-                walk.canvas(*it, canonicalCanvasKey(*it), 0);
+                walk.canvas(*it, juce::String(processor->getMcp()->identity.keyOf(*it)), 0); // P11.6 F10: the wire key
         }
         walkObjects = walk.visited;
         truncatedWalk = walk.truncated;
@@ -192,7 +192,8 @@ void MCPBridge::pdBound(const juce::String& action, const juce::OSCMessage& msg)
                 auto const found = walk.found.find(binder);
                 if (found != walk.found.end() && cl != canvas_class) {
                     auto* r = new juce::DynamicObject();
-                    r->setProperty("canvasKey", canonicalCanvasKey(found->second.owner));
+                    // P11.6 F10: the identity wire key (unique: "twin.pd#2" for a second tab of that name).
+                    r->setProperty("canvasKey", juce::String(identity.keyOf(found->second.owner)));
                     r->setProperty("path", found->second.path);
                     r->setProperty("index", found->second.index);
                     r->setProperty("class", juce::String::fromUTF8(class_getname(cl)));
