@@ -1336,7 +1336,8 @@ void runApprovalCases(Harness& h, PluginProcessor& processor)
         if (c.nonce == "n_u") CHECK(c.canvasId == 0);
         if (c.nonce == "n_h") {
             CHECK(c.canvasId == 0);
-            CHECK(c.title.find("CONFIRM") == 0 && c.detail == "r"); // no title sent: generic words, the reason on line 2
+            // no title sent: fixed words on line 1; the canvas label and the reason on line 2 (round 3 item 4)
+            CHECK(c.title == "CONFIRM a change" && c.detail == "hardware \xc2\xb7 r");
         }
     }
     for (auto const* n : { "n_t", "n_u", "n_h" }) state.clear(n);
