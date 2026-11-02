@@ -2732,9 +2732,9 @@ void runOutputCeilingCases(Harness& h, PluginProcessor& processor, AudioControl&
 
         // P11.6 (review): the steps above leave async work queued (JUCE notifies Value listeners asynchronously, the
         // host's write-back is a postMessage, the settings save is a 100 ms timer): drain it past the save timer before
-        // the panel step, and run the panel step on the message thread like the GUI does. NOTE: the 5 checks below
-        // still fail in this harness: after the panel's save writes false, a SettingsFile reload (file watcher) reads a
-        // settings.json without the key and sets the Value back to true (fail closed). Open, see the P11.6 report.
+        // the panel step, and run the panel step on the message thread like the GUI does. (The 5 failures here were
+        // not a race in SettingsFile: the runs used the owner's real settings.json and their running PlugData rewrote
+        // it; fixed by the scratch HOME export and the HERMETIC BREACH guard in main.)
         auto drainSettings = [&] {
             for (int i = 0; i < 4; ++i) {
                 host->onMessageThread([] { return true; }, 2000, "drain");
@@ -3885,6 +3885,19 @@ int main()
     for (char const* name : { "XDG_DOCUMENTS_DIR", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME" })
         ::unsetenv(name);
     std::printf("mcp_bridge_tests: HOME=%s\n", home.c_str());
+    // P11.6 incident: ProjectInfo::appDataDir is a static computed from HOME BEFORE main() runs, so setting HOME here
+    // came too late and every run used the owner's real ~/Documents/plugdata/settings.json. The runner exports HOME;
+    // this refuses to start when the settings folder is not inside the scratch HOME (nothing is created before this).
+    {
+        auto const appData = ProjectInfo::appDataDir.getFullPathName();
+        auto const scratch = juce::File(juce::String(home)).getFullPathName();
+        if (!appData.startsWith(scratch + "/")) {
+            std::printf("mcp_bridge_tests: HERMETIC BREACH: the settings folder is %s, not inside the scratch HOME %s. "
+                        "Run through scripts/run-mcp-bridge-tests.sh (it exports HOME before the binary starts). Nothing was run.\n",
+                appData.toRawUTF8(), scratch.toRawUTF8());
+            return 3;
+        }
+    }
 
     juce::ScopedJuceInitialiser_GUI const juceInitialiser;
 

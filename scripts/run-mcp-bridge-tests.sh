@@ -18,5 +18,8 @@ home="${MCP_TESTS_HOME:-${TMPDIR:-/tmp}/mcp_bridge_tests_home}"
 mkdir -p "$home"
 auth="${XAUTHORITY:-/run/user/$(id -u)/gdm/Xauthority}"
 [ -f "$auth" ] && [ "$auth" != "$home/.Xauthority" ] && cp "$auth" "$home/.Xauthority" 2>/dev/null || true
-export MCP_TESTS_HOME="$home" XAUTHORITY="$home/.Xauthority" DISPLAY="${DISPLAY:-:1}"
+# P11.6 incident: HOME must be the scratch home BEFORE the binary starts: ProjectInfo::appDataDir (settings.json, the
+# MCP port) is a static computed from HOME before main(). Without this, runs used the owner's real settings.
+unset XDG_DOCUMENTS_DIR XDG_DATA_HOME XDG_CONFIG_HOME XDG_CACHE_HOME
+export HOME="$home" MCP_TESTS_HOME="$home" XAUTHORITY="$home/.Xauthority" DISPLAY="${DISPLAY:-:1}"
 exec timeout "${MCP_TESTS_TIMEOUT:-300}" "$bin"
