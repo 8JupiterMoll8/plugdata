@@ -2730,10 +2730,26 @@ void runOutputCeilingCases(Harness& h, PluginProcessor& processor, AudioControl&
             CHECK(ceiling.isEnabled());
         }
 
+        // P11.6 (review): the steps above leave async work queued (JUCE notifies Value listeners asynchronously, the
+        // host's write-back is a postMessage, the settings save is a 100 ms timer): drain it past the save timer before
+        // the panel step, and run the panel step on the message thread like the GUI does. NOTE: the 5 checks below
+        // still fail in this harness: after the panel's save writes false, a SettingsFile reload (file watcher) reads a
+        // settings.json without the key and sets the Value back to true (fail closed). Open, see the P11.6 report.
+        auto drainSettings = [&] {
+            for (int i = 0; i < 4; ++i) {
+                host->onMessageThread([] { return true; }, 2000, "drain");
+                sleepMs(150); // past SettingsFile::saveTimeoutMs (100 ms)
+            }
+            host->onMessageThread([] { return true; }, 2000, "drain");
+        };
+        drainSettings();
         // The owner's panel: off first in the host, then the setting: accepted, nothing written back.
-        host->setOutputCeilingFromGui(false);
-        host->onMessageThread([] { SettingsFile::getInstance()->setProperty("mcp_bridge_ai_ceiling", false); return true; }, 2000, "test");
-        sleepMs(400);
+        host->onMessageThread([host] {
+            host->setOutputCeilingFromGui(false);
+            SettingsFile::getInstance()->setProperty("mcp_bridge_ai_ceiling", false);
+            return true;
+        }, 2000, "test");
+        drainSettings();
         CHECK(!ceiling.isEnabled());
         CHECK(storedSetting() == 0);
         // Startup with it off: off, and a loud console line.
@@ -2748,7 +2764,8 @@ void runOutputCeilingCases(Harness& h, PluginProcessor& processor, AudioControl&
         CHECK(waitUntil([&] { return storedSetting() == 1; }, 2000));
         sleepMs(300);
         CHECK(consoleCount("OUTPUT CEILING IS OFF") == loudSaid + 1); // on: no second loud line
-        host->setOutputCeilingFromGui(false);
+        drainSettings();
+        host->onMessageThread([host] { host->setOutputCeilingFromGui(false); return true; }, 2000, "test");
         host->onMessageThread([host] { host->settingsChanged("mcp_bridge_ai_ceiling", juce::var(true)); return true; }, 2000, "test");
         CHECK(ceiling.isEnabled());
 
