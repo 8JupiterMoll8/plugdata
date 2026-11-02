@@ -370,7 +370,13 @@ void MCPBridge::pdSavePatch(const juce::String& action, const juce::OSCMessage& 
 
         sys_lock();
         t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
+        // P11.6: which canvas this save wrote, and its graph-on-parent state, for the reply (a GOP root saved without
+        // its coords line was seen live; the reply proves which canvas the name resolved to).
+        juce::String savedKey;
+        bool savedIsGraph = false;
         if (cnv) {
+            savedKey = juce::String(processor->getMcp()->identity.keyOf(cnv));
+            savedIsGraph = cnv->gl_isgraph != 0;
             char* buf = nullptr;
             int   bufsize = 0;
             pd::Interface::getCanvasContent(cnv, &buf, &bufsize);
@@ -453,6 +459,11 @@ void MCPBridge::pdSavePatch(const juce::String& action, const juce::OSCMessage& 
         report->setProperty("rebound", rebound);
         report->setProperty("idsSaved", sidecarError.isEmpty());
         report->setProperty("tab", shownInTab);
+        // P11.6: the canvas written (identity wire key), whether it is graph-on-parent, and whether the file carries
+        // its #X coords line (a GOP canvas always does).
+        report->setProperty("canvasKey", savedKey);
+        report->setProperty("isGraph", savedIsGraph);
+        report->setProperty("coordsLine", content.contains("#X coords "));
         juce::Array<juce::var> args;
         args.add(destFilePath);
         args.add(sidecarError.isEmpty() ? juce::String() : "ids not saved: " + sidecarError);

@@ -1780,6 +1780,64 @@ std::optional<juce::var> boundEntry(std::optional<Reply> const& r, std::string c
     return std::nullopt;
 }
 
+// P11.6 (found live 2026-11-02): a root canvas given GOP with `coords 0 0 264 488 264 488 2 25 25` (sent to
+// pd-<file>.pd) showed the frame live, but /pd/save_patch wrote the file without its `#X coords` line, so Plugin mode
+// and the GOP panel were lost on reopen. The saved file must carry the coords line with the GOP fields.
+void runSaveCoordsCases(Harness& h, PluginProcessor& processor)
+{
+    std::printf("save_patch keeps the root #X coords (P11.6)\n");
+    auto* host = processor.getMcp();
+    juce::String rootName;
+    host->pdWait([&] {
+        t_canvas* cnv = host->getCanvasBySymbol("main");
+        if (!cnv || !cnv->gl_name) return;
+        rootName = juce::String::fromUTF8(cnv->gl_name->s_name);
+        // the message the coordinator sent: to the canvas's own receiver pd-<file>.pd
+        t_atom a[9];
+        float const v[9] = { 0, 0, 264, 488, 264, 488, 2, 25, 25 };
+        for (int i = 0; i < 9; ++i) SETFLOAT(&a[i], v[i]);
+        auto* target = gensym(("pd-" + rootName).toRawUTF8())->s_thing;
+        if (target) pd_typedmess(target, gensym("coords"), 9, a);
+        else pd_typedmess(&cnv->gl_pd, gensym("coords"), 9, a);
+    }, 3000);
+    CHECK(rootName.isNotEmpty());
+    bool isGraph = false;
+    host->pdWait([&] { if (auto* cnv = host->getCanvasBySymbol("main")) isGraph = cnv->gl_isgraph; }, 3000);
+    CHECK(isGraph);
+    auto dir = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("mcp_p116_coords");
+    dir.createDirectory();
+    auto dest = dir.getChildFile("coords.pd");
+    auto r = h.call("/pd/save_patch", { "main", dest.getFullPathName(), "sc1" }, "/pd/save_patch/reply/sc1", 3000);
+    CHECK(r.has_value());
+    if (r && r->args.size() >= 3) {
+        auto const report = juce::JSON::parse(juce::String(r->str(2)));
+        CHECK(report["canvasKey"].toString() == rootName);
+        CHECK(static_cast<bool>(report["isGraph"]) && static_cast<bool>(report["coordsLine"]));
+    } else {
+        CHECK(false);
+    }
+    // the content write is synchronous in the handler; give the file a moment anyway
+    for (int i = 0; i < 20 && !dest.existsAsFile(); ++i) juce::Thread::sleep(50);
+    auto const text = dest.loadFileAsString();
+    bool const hasCoords = text.contains("#X coords 0 0 264 488 264 488 2 25 25");
+    if (!hasCoords) std::printf("  saved file:\n%s\n", text.toRawUTF8());
+    CHECK(hasCoords);
+    // the same bytes through save_content
+    auto viaContent = dir.getChildFile("coords_content.pd");
+    h.call("/pd/save_content", { "main", viaContent.getFullPathName(), "sc2" }, "/pd/save_content/reply/sc2", 3000);
+    CHECK(viaContent.loadFileAsString().contains("#X coords 0 0 264 488 264 488 2 25 25"));
+    // back to a plain canvas for the cases after this one
+    host->pdWait([&] {
+        if (auto* cnv = host->getCanvasBySymbol("main")) {
+            t_atom a[7];
+            float const v[7] = { 0, 0, 1, 1, 0, 0, 0 };
+            for (int i = 0; i < 7; ++i) SETFLOAT(&a[i], v[i]);
+            pd_typedmess(&cnv->gl_pd, gensym("coords"), 7, a);
+        }
+    }, 3000);
+    dir.deleteRecursively();
+}
+
 void runBoundCases(Harness& h, PluginProcessor& processor)
 {
     std::printf("/pd/bound (P11.4 V19)\n");
@@ -3808,6 +3866,7 @@ int main()
             runSidecarCases(processor);
             runLoadReportCases(harness, processor);
             runBoundCases(harness, processor);
+            runSaveCoordsCases(harness, processor);
             runContentVersionCases(harness, processor);
             runSelectionGetCases(harness);
             runV2HandshakeCases(harness, *bridge, [&] {
