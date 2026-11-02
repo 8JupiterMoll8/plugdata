@@ -90,8 +90,9 @@ public:
     // P3.4 S8: callAsync that runs `fn` only while this host still exists (checked on the message thread,
     // where the host is destroyed). Every callback the host posts goes through it.
     void postMessage(std::function<void()> fn);
-    // P3.4 S8: called first in ~PluginProcessor (MCP-HOOK(teardown)), before the patches are freed: stops the
-    // bridge (receiver, command worker, background jobs) and drops the queued Pd jobs.
+    // P3.4 S8: called first in ~PluginProcessor (MCP-HOOK(teardown)), before the patches are freed: deletes the open
+    // editors (their MCP parts reach this host; the host is the processor's last member, destroyed before them),
+    // stops the bridge (receiver, command worker, background jobs) and drops the queued Pd jobs.
     void shutdown();
 
     // P3.4 S3: run `fn` on the JUCE message thread and return its result (inline when already there).
