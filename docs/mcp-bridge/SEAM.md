@@ -179,6 +179,16 @@ gate: OK
   - Residue (not covered by the ceiling): the device sums `playVoiceTake`'s clamped take with the clamped processBlock output, and that sum can exceed +-1.0; any full-scale waveform whose short-term RMS stays under -2.5 dBFS (sine, saw, triangle, noise, pulse trains under ~55 % duty) is only clamped, never tripped; a settings-file edit the running app does not pick up (a stale lock file, a crash or quit before the write-back, or an edit while PlugData is closed) leaves the ceiling off at the next launch, with the loud startup line and the TS OFF line (the TS says it on the receipts that read the limiter: `construct_patch_v4` when it wires into a `dac~`/sink or turns DSP on, and `manage_audio_engine` `toggle_dsp` on); the recorder, the toolbar meter and `writeRecorderTap` see the signal before the ceiling (only meters/recordings, not the device); the owner switching it off on purpose; another app on the same audio device; plugin builds; Heavy/Teensy exports (no ceiling there: the TS sink guards stay). Mac/Windows unverified (Linux build and headless tests only).
   - Known follow-up (review L4, no code yet): the construct/play health verdicts do not read the armed window's ceiling fields, so a construct whose verification window the breaker turned down can still report "audible"; only `observe master` and the receipts' ceiling lines say it.
 
+## P12c canvas approval chips (security notes)
+
+The approval chips are the session's own state (`Source/Mcp/McpApprovalState.h`), set only through `/pd/approval_show`
+and `/pd/approval_clear` by the MCP server's `core/approval.ts`; HUD text never shows chips. The artist's click, Enter
+(exactly one chip, fully on screen for 400 ms) or Esc sends the event `/pd/approval/answer <nonce> yes|no`; no read verb
+returns a nonce. **Residue (v1 UDP fallback):** nothing protects against a local process running as the same user. It
+can send any verb to the bridge's UDP port, destructive ones included, and can register itself as the v1 reply target
+and see an answer event. That was already so before P12c and is no worse now: the approval gate guards what the
+server's tools do, not a process that bypasses the server. v2 (token in the discovery file) is the default transport.
+
 ## Known upstream behaviour
 
 - **`PluginProcessor::updateSearchPaths` removes from the `libraries` array inside a range-for (finding L24, P3.4 S8).** Heap-use-after-free under ASan on every start with the default settings (the `juce_Array.h:806` assertion of the handler tests). Not fixed in the fork (decision 15); the ASan clone carries a local fix so `mcp_bridge_tests` runs clean there.

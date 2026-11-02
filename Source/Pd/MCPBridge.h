@@ -432,6 +432,9 @@ public:
     // Modular Tech). Sent to the MCP server, which prepends the lens brief to
     // subsequent agent turns. "free" clears it.
     void sendLens(const juce::String& lens);
+    // P12c: the artist answered one approval chip (click, Enter or Esc on the canvas): /pd/approval/answer <nonce> yes|no.
+    // Called only from the canvas input (CanvasMcpApproval.cpp); no verb leads here.
+    void sendApprovalAnswer(const juce::String& nonce, bool yes);
     // AI Copilot Chat callback: role ("user", "ai", "thought", "error"), text
     void setChatCallback(std::function<void(const juce::String& role, const juce::String& text)> cb);
     void postChatMessage(const juce::String& role, const juce::String& text);

@@ -236,12 +236,9 @@ bool CanvasMcpLayer::isPointOverNote(Point<int> canvasPt) const
 
 bool CanvasMcpLayer::handleNoteClick(Point<int> canvasPt)
 {
-    // Tier-2 approval chips take priority — they float above the pill.
-    if (!mcpApprovalFrame.isEmpty() && mcpApprovalFrame.contains(canvasPt)) {
-        if (mcpApprovalYes.contains(canvasPt)) sendApproval(true);
-        else if (mcpApprovalNo.contains(canvasPt)) sendApproval(false);
+    // P12c approval chips take priority: they float above the pill.
+    if (handleApprovalClick(canvasPt))
         return true;
-    }
 
     if (mcpSelectionPill && mcpSelectionPill->isVisible()) {
         // Smart Command Palette clicks

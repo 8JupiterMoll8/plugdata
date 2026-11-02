@@ -19,6 +19,7 @@
 
 #include "Utility/Config.h"
 #include "Mcp/McpOutputCeiling.h"
+#include "Mcp/McpApprovalState.h"
 
 extern "C" {
 #include <m_pd.h>
@@ -277,6 +278,10 @@ struct McpSession {
         juce::String telemetry; // e.g. "128 BPM · 48kHz"
     };
     McpHud mcpHud;
+
+    // P12c: the canvas approval chips (one per pending record of the server, keyed by its nonce). Set ONLY by
+    // /pd/approval_show and /pd/approval_clear; HUD text never shows chips. Own lock (any thread).
+    mcp::ApprovalState approvals;
     McpHud getMcpHud() const { juce::ScopedLock sl(mcpOverlayLock); return mcpHud; }
 
     // Spatial / Targeted Overlays: restricts visual lenses (connection activity,
