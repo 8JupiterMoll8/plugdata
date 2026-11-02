@@ -39,9 +39,11 @@ void MCPBridge::pdApprovalShow(const juce::String& action, const juce::OSCMessag
         chip.reason = o->getProperty("reason").toString().toStdString();
         // P12c review 5: line 1 is the server's fixed words; without a title the chip says only that something waits
         // (never the reason, which can carry model-chosen text).
+        // Round 3 item 4: line 1 is fixed words only; a canvas name (model-chosen) goes on line 2.
         chip.title = o->hasProperty("title") ? o->getProperty("title").toString().toStdString()
-                                             : std::string("CONFIRM a change \xe2\x80\x94 canvas '") + mcp::approvalCanvasLabel(chip.canvas) + "'";
-        chip.detail = o->hasProperty("title") ? o->getProperty("detail").toString().toStdString() : chip.reason;
+                                             : std::string("CONFIRM a change");
+        chip.detail = o->hasProperty("title") ? o->getProperty("detail").toString().toStdString()
+                                              : mcp::approvalCanvasLabel(chip.canvas) + " \xc2\xb7 " + chip.reason;
         chip.targets = targets;
         // The canvas the question is about (the outline is drawn only there). hardware / snapshots are no canvas.
         if (chip.canvas != "hardware" && chip.canvas != "snapshots")

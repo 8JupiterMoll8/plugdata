@@ -28,6 +28,7 @@
 
 namespace {
 constexpr int kBarW = 440;
+constexpr float kMinTitleFont = 9.0f; // line 1 never goes smaller; the bar widens instead (round 3 item 4)
 constexpr int kBarH = 78;
 constexpr int kBarGap = 6;
 constexpr int kMaxBars = 4; // more pending records show as a count line under the stack
@@ -176,11 +177,32 @@ void CanvasMcpLayer::paintApprovalChips(NVGcontext* nvg)
     // Placed for the FULL stack, whatever is pending now: a new chip is appended below without moving the ones already
     // on screen (no reflow under the cursor).
     int const fullH = kMaxBars * kBarH + (kMaxBars - 1) * kBarGap + 22;
-    auto place = mcp::approvalBarRect(anchor, view, kBarW, fullH);
+    // Line 1 of each chip (fixed words; which tab only as "another tab"), and a bar wide enough for every line 1 at
+    // the minimum font: line 1 is never cut and never overflows (round 3 item 4).
+    auto titleOf = [&](mcp::ApprovalChip const& c) {
+        auto t = c.title;
+        if (c.canvasId != 0 && c.canvasId != thisCanvas)
+            t += " (on another tab)";
+        else if (c.canvasId == 0 && c.canvas != "hardware" && c.canvas != "snapshots")
+            t += " (tab not open)";
+        return t;
+    };
+    int barW = kBarW;
+    {
+        NVGScopedState measure(nvg);
+        mcpnvg::nvgFontFace(nvg, "Inter");
+        mcpnvg::nvgFontSize(nvg, kMinTitleFont);
+        float b[4] {};
+        for (int i = 0; i < shown; ++i) {
+            auto const t = titleOf(chips[static_cast<std::size_t>(i)]);
+            barW = std::max(barW, static_cast<int>(std::ceil(mcpnvg::nvgTextBounds(nvg, 0, 0, t.c_str(), nullptr, b))) + 24);
+        }
+    }
+    auto place = mcp::approvalBarRect(anchor, view, barW, fullH);
     place.h = shown * kBarH + (shown - 1) * kBarGap + (more > 0 ? 22 : 0);
     mcpApprovalFrame = juce::Rectangle<int>(place.x, place.y, place.w, place.h);
 
-    int const half = (kBarW - 24) / 2;
+    int const half = (barW - 24) / 2;
     for (int i = 0; i < shown; ++i) {
         // Oldest first: new questions are appended below, nothing already on screen moves.
         auto const& c = chips[static_cast<std::size_t>(i)];
@@ -188,33 +210,30 @@ void CanvasMcpLayer::paintApprovalChips(NVGcontext* nvg)
         int const by = place.y + i * (kBarH + kBarGap);
         ApprovalHit hit;
         hit.nonce = juce::String(c.nonce);
-        hit.frame = { bx, by, kBarW, kBarH };
+        hit.frame = { bx, by, barW, kBarH };
         hit.yes = { bx + 8, by + 42, half, kBarH - 48 };
         hit.no = { bx + 8 + half + 8, by + 42, half, kBarH - 48 };
         mcpApprovalHits.push_back(hit);
         // Its on-screen time (Enter and clicks wait 400 ms) starts only when the whole bar is inside the view.
         // Per chip, shared across views: this view's entry only (round 3 items 3, 6); a moved bar starts again.
-        state.markPaintedIfInside(c.nonce, reinterpret_cast<std::uintptr_t>(this), mcp::ApprovalRect { bx, by, kBarW, kBarH }, view, nowMs());
+        state.markPaintedIfInside(c.nonce, reinterpret_cast<std::uintptr_t>(this), mcp::ApprovalRect { bx, by, barW, kBarH }, view, nowMs());
 
         NVGScopedState scopedAppr(nvg);
         nanovg::nvgTranslate(nvg, static_cast<float>(bx), static_cast<float>(by));
-        nanovg::nvgDrawRoundedRect(nvg, 0, 0, static_cast<float>(kBarW), static_cast<float>(kBarH),
+        nanovg::nvgDrawRoundedRect(nvg, 0, 0, static_cast<float>(barW), static_cast<float>(kBarH),
             nanovg::nvgRGBA(28, 16, 16, 250), nanovg::nvgRGBA(255, 90, 70, 225), 10.0f);
         mcpnvg::nvgFontFace(nvg, "Inter");
         mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
         // Line 1: the server's fixed words, never cut: the font shrinks until it fits (P12c review 5).
-        auto title = c.title;
-        if (c.canvasId != 0 && c.canvasId != thisCanvas)
-            title += " (on tab " + mcp::approvalCanvasLabel(c.canvas) + ")";
-        else if (c.canvasId == 0 && c.canvas != "hardware" && c.canvas != "snapshots")
-            title += " (tab not open)";
-        float const textW = static_cast<float>(kBarW - 20);
+        auto const title = titleOf(c); // fixed words only; the tab's name is on line 2 (server-built)
+        float const textW = static_cast<float>(barW - 20);
         float size = 12.0f;
         float bounds[4] {};
-        for (; size > 6.0f; size -= 0.5f) {
+        for (; size > kMinTitleFont; size -= 0.5f) {
             mcpnvg::nvgFontSize(nvg, size);
             if (mcpnvg::nvgTextBounds(nvg, 0, 0, title.c_str(), nullptr, bounds) <= textW) break;
         }
+        mcpnvg::nvgFontSize(nvg, std::max(size, kMinTitleFont)); // the bar is wide enough for line 1 at this size
         nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(255, 228, 220, 250));
         mcpnvg::nvgText(nvg, 10.0f, 13.0f, title.c_str(), nullptr);
         // Line 2: the model-chosen names; the only line cut (ellipsis).
@@ -244,6 +263,6 @@ void CanvasMcpLayer::paintApprovalChips(NVGcontext* nvg)
         mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
         nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(255, 200, 190, 230));
         auto const line = "+" + juce::String(more) + " more waiting";
-        mcpnvg::nvgText(nvg, place.x + kBarW * 0.5f, place.y + place.h - 10.0f, line.toRawUTF8(), nullptr);
+        mcpnvg::nvgText(nvg, place.x + barW * 0.5f, place.y + place.h - 10.0f, line.toRawUTF8(), nullptr);
     }
 }
