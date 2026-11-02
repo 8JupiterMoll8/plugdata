@@ -15,6 +15,7 @@
 // approvalBarRect: under its anchor or at the centre of the visible viewport, and always clamped inside it (L5).
 
 #include <algorithm>
+#include <cmath>
 #include <map>
 #include <cstdint>
 #include <mutex>
@@ -189,6 +190,17 @@ public:
         return c.nonce;
     }
 
+    // When the next chip expires (ms clock), or none: the canvas schedules a repaint then, so an expired chip leaves
+    // the glass on time instead of at the next unrelated repaint.
+    std::optional<std::int64_t> nextExpiryMs()
+    {
+        std::lock_guard<std::mutex> const l(lock);
+        std::optional<std::int64_t> next;
+        for (auto const& c : chips)
+            if (!next || c.expiresAtMs < *next) next = c.expiresAtMs;
+        return next;
+    }
+
     // Esc cancels: every chip on screen (cancelling is the safe direction).
     std::vector<std::string> escTargets(std::int64_t nowMs)
     {
@@ -251,10 +263,8 @@ inline ApprovalRect approvalVisibleArea(float x, float y, float w, float h)
 // Where the chip bar (a stack of `h` pixels) goes, in canvas coordinates: under its anchor (the pill or the
 // selection), flipped above when it would leave the bottom; with no anchor at the centre of the VISIBLE viewport.
 // Always clamped inside the viewport (with a margin when it fits); never at the canvas origin.
-inline ApprovalRect approvalBarRect(std::optional<ApprovalRect> anchor, ApprovalRect view, int w, int h)
+inline ApprovalRect approvalBarRect(std::optional<ApprovalRect> anchor, ApprovalRect view, int w, int h, int margin = 12, int gap = 14)
 {
-    constexpr int margin = 12;
-    constexpr int gap = 14;
     if (view.w <= 0 || view.h <= 0)
         return { view.x - w / 2, view.y - h / 2, w, h }; // nothing laid out yet: centred on what there is
     int x, y;
@@ -275,6 +285,102 @@ inline ApprovalRect approvalBarRect(std::optional<ApprovalRect> anchor, Approval
     x = clampAxis(x, view.x, view.w, w);
     y = clampAxis(y, view.y, view.h, h);
     return { x, y, w, h };
+}
+
+// The chip bar in DESIGN pixels: what one bar measures on screen, whatever the canvas zoom (live check 2026-11-02:
+// drawn in canvas units the 440-wide bar outgrew the view from zoom ~1.6). Compact per the owner (2026-11-02, "easy to
+// click but a bit big"): ~73% of the old 440x78 footprint, the buttons taller than before (36 px).
+struct ApprovalBarMetrics {
+    static constexpr int w = 340;      // minimum width; a long line 1 widens the bar (never cut)
+    static constexpr int h = 74;
+    static constexpr int gap = 6;      // between stacked bars
+    static constexpr int more = 20;    // the "+N more waiting" line under the stack
+    static constexpr int margin = 12;  // to the view edge
+    static constexpr int anchorGap = 14;
+    static constexpr int textX = 10;
+    static constexpr float line1Y = 11.0f;
+    static constexpr float line2Y = 25.0f;
+    static constexpr int btnX = 8;
+    static constexpr int btnY = 34;
+    static constexpr int btnH = 36;
+    static constexpr int btnGap = 8;
+    static constexpr int maxBars = 4;
+    static constexpr float minTitleFont = 9.0f;
+};
+
+// Width of one button (✓ or ✗) of a bar `barW` design pixels wide.
+inline int approvalButtonW(int barW)
+{
+    return (barW - 2 * ApprovalBarMetrics::btnX - ApprovalBarMetrics::btnGap) / 2;
+}
+
+struct ApprovalBarLayout {
+    ApprovalRect frame, yes, no; // canvas coordinates
+};
+
+struct ApprovalStackLayout {
+    float scale = 1.0f;          // canvas units per design pixel: draw a bar at frame.x/y, scaled by this
+    ApprovalRect frame;          // the whole stack, "+N more" line included
+    std::vector<ApprovalBarLayout> bars;
+};
+
+// The chip stack in canvas coordinates at a fixed SCREEN size: one design pixel is 1/zoom canvas units, smaller only
+// when the window cannot hold the stack (then it shrinks to fit). Placed by approvalBarRect (under the anchor or at the
+// view centre) and clamped inside the view, so every bar is fully visible and its buttons can be hit at any zoom.
+// The space of the full stack (maxBars) is reserved when the window holds it, so a new chip never moves the ones
+// already on screen.
+inline ApprovalStackLayout approvalStackLayout(std::optional<ApprovalRect> anchor, ApprovalRect view, float zoom, int barW, int shown, bool more)
+{
+    using M = ApprovalBarMetrics;
+    ApprovalStackLayout out;
+    if (shown <= 0 || barW <= 0)
+        return out;
+    if (!(zoom > 0.01f)) zoom = 1.0f;
+    float const k0 = 1.0f / zoom;
+    float const stackPx = static_cast<float>(shown * M::h + (shown - 1) * M::gap + (more ? M::more : 0));
+    float k = k0;
+    if (view.w > 0 && view.h > 0) {
+        float const m = M::margin * k0;
+        auto avail = [&](int len) {
+            float const a = static_cast<float>(len) - 2.0f * m;
+            return a >= len * 0.5f ? a : static_cast<float>(len); // a tiny view: use all of it
+        };
+        k = std::min({ k0, avail(view.w) / barW, avail(view.h) / stackPx });
+    }
+    // Whole canvas units: a rect is never smaller than what is drawn in it (the scale follows the rounded width), and
+    // the bars sit on a whole-unit pitch so neighbours never overlap. Rounding up can outgrow a tiny view: then shrink.
+    int wc = 0, hc = 0, gapC = 0, moreC = 0, stackHc = 0;
+    for (int tries = 0; tries < 32; ++tries) {
+        wc = std::max(1, static_cast<int>(std::floor(barW * k)));
+        k = static_cast<float>(wc) / static_cast<float>(barW);
+        hc = static_cast<int>(std::ceil(M::h * k));
+        gapC = static_cast<int>(std::lround(M::gap * k));
+        moreC = more ? static_cast<int>(std::ceil(M::more * k)) : 0;
+        stackHc = shown * hc + (shown - 1) * gapC + moreC;
+        if (view.h <= 0 || stackHc <= view.h || wc == 1)
+            break;
+        k *= 0.95f;
+    }
+    int const fullHc = M::maxBars * hc + (M::maxBars - 1) * gapC + static_cast<int>(std::ceil(M::more * k));
+    int const marginC = static_cast<int>(std::lround(M::margin * k));
+    int const placeH = (fullHc + 2 * marginC <= view.h) ? fullHc : stackHc;
+    auto const place = approvalBarRect(anchor, view, wc, placeH, marginC, static_cast<int>(std::lround(M::anchorGap * k)));
+
+    out.scale = k;
+    out.frame = { place.x, place.y, wc, stackHc };
+    int const half = approvalButtonW(barW);
+    auto px = [&](float v) { return std::max(1, static_cast<int>(std::floor(v * k))); };
+    for (int i = 0; i < shown; ++i) {
+        int const y = place.y + i * (hc + gapC);
+        ApprovalBarLayout b;
+        b.frame = { place.x, y, wc, hc };
+        int const by = y + static_cast<int>(std::ceil(M::btnY * k));
+        int const bh = std::min(px(static_cast<float>(M::btnH)), y + hc - by);
+        b.yes = { place.x + static_cast<int>(std::ceil(M::btnX * k)), by, px(static_cast<float>(half)), bh };
+        b.no = { place.x + static_cast<int>(std::ceil((M::btnX + half + M::btnGap) * k)), by, px(static_cast<float>(half)), bh };
+        out.bars.push_back(b);
+    }
+    return out;
 }
 
 } // namespace mcp
