@@ -16,6 +16,10 @@
 // HOME decides where plugdata keeps its settings and patches. This program therefore points HOME at a fresh
 // temporary directory before anything else (MCP_TESTS_HOME reuses a directory: the first start unpacks the
 // resources and is slow).
+#include <pwd.h>
+#include <sys/stat.h>
+#include <climits>
+#include <cstdlib>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -3862,6 +3866,56 @@ void runV2HandshakeCases(Harness& h, MCPBridge& bridge, std::function<void()> co
 }
 
 // Where plugdata keeps its files follows HOME: never the real one.
+// P11.6 review N4: why this scratch HOME is unsafe for a run that writes settings, or "" when it is safe. Paths are
+// resolved (realpath) on both sides; the scratch HOME must not be, or contain, the real home of this user
+// (getpwuid); no component from the scratch HOME down to Documents/plugdata may be a symlink; the settings folder
+// must lie inside the scratch HOME. Only reads paths.
+std::string hermeticBreach(std::string const& home, std::string const& appData)
+{
+    auto real = [](std::string const& p) -> std::string {
+        char buf[PATH_MAX];
+        return ::realpath(p.c_str(), buf) ? std::string(buf) : std::string();
+    };
+    auto inside = [](std::string const& child, std::string const& parent) {
+        return child.size() > parent.size() && child.compare(0, parent.size(), parent) == 0 && child[parent.size()] == '/';
+    };
+    std::string const scratch = real(home);
+    if (scratch.empty())
+        return "the scratch HOME " + home + " does not exist";
+    if (scratch == "/")
+        return "the scratch HOME is /";
+    // The homes to protect: this user's real home (getpwuid), plus MCP_TESTS_GUARD_EXTRA_HOME when set. The extra one
+    // only ADDS a home to protect (the self-test plays "the real home" in a temp dir); it never replaces the real one.
+    std::vector<std::string> protectedHomes;
+    if (auto const* pw = ::getpwuid(::getuid()); pw && pw->pw_dir)
+        protectedHomes.push_back(real(pw->pw_dir));
+    if (char const* extra = std::getenv("MCP_TESTS_GUARD_EXTRA_HOME"); extra && *extra)
+        protectedHomes.push_back(real(extra));
+    for (auto const& realHome : protectedHomes)
+        if (!realHome.empty() && (scratch == realHome || inside(realHome, scratch)))
+            return "the scratch HOME " + scratch + " is, or contains, the protected home " + realHome;
+    // Every component below the scratch HOME on the way to the settings folder must be a plain directory, never a link.
+    std::string path = home;
+    for (char const* part : { "Documents", "plugdata" }) {
+        path += "/";
+        path += part;
+        struct stat st {};
+        if (::lstat(path.c_str(), &st) == 0 && S_ISLNK(st.st_mode))
+            return path + " is a symlink";
+    }
+    // The settings folder itself (or, before the first run, its nearest existing parent) must resolve inside it.
+    std::string probe = appData;
+    std::string resolved = real(probe);
+    while (resolved.empty() && probe.size() > 1) {
+        probe = probe.substr(0, probe.find_last_of('/'));
+        if (probe.empty()) probe = "/";
+        resolved = real(probe);
+    }
+    if (!(resolved == scratch || inside(resolved, scratch)) || !inside(appData, home.back() == '/' ? home.substr(0, home.size() - 1) : home))
+        return "the settings folder " + appData + " (resolved " + resolved + ") is not inside the scratch HOME " + scratch;
+    return {};
+}
+
 std::string chooseScratchHome()
 {
     if (char const* given = std::getenv("MCP_TESTS_HOME"); given && *given) {
@@ -3887,16 +3941,11 @@ int main()
     std::printf("mcp_bridge_tests: HOME=%s\n", home.c_str());
     // P11.6 incident: ProjectInfo::appDataDir is a static computed from HOME BEFORE main() runs, so setting HOME here
     // came too late and every run used the owner's real ~/Documents/plugdata/settings.json. The runner exports HOME;
-    // this refuses to start when the settings folder is not inside the scratch HOME (nothing is created before this).
-    {
-        auto const appData = ProjectInfo::appDataDir.getFullPathName();
-        auto const scratch = juce::File(juce::String(home)).getFullPathName();
-        if (!appData.startsWith(scratch + "/")) {
-            std::printf("mcp_bridge_tests: HERMETIC BREACH: the settings folder is %s, not inside the scratch HOME %s. "
-                        "Run through scripts/run-mcp-bridge-tests.sh (it exports HOME before the binary starts). Nothing was run.\n",
-                appData.toRawUTF8(), scratch.toRawUTF8());
-            return 3;
-        }
+    // this refuses to start (nothing is created before it) unless the scratch HOME is safe (review N4).
+    if (auto const why = hermeticBreach(home, ProjectInfo::appDataDir.getFullPathName().toStdString()); !why.empty()) {
+        std::printf("mcp_bridge_tests: HERMETIC BREACH: %s. Run through scripts/run-mcp-bridge-tests.sh with a scratch "
+                    "MCP_TESTS_HOME. Nothing was run.\n", why.c_str());
+        return 3;
     }
 
     juce::ScopedJuceInitialiser_GUI const juceInitialiser;
