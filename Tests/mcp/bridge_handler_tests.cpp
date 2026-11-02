@@ -1835,6 +1835,31 @@ void runSaveCoordsCases(Harness& h, PluginProcessor& processor)
             pd_typedmess(&cnv->gl_pd, gensym("coords"), 7, a);
         }
     }, 3000);
+    // Review L1: coordsLine is the ROOT's line: a plain root holding a GOP subpatch reports isGraph false, coordsLine
+    // false (the subpatch's own #X coords does not count).
+    t_gobj* gopSub = nullptr;
+    host->pdWait([&] {
+        if (auto* cnv = host->getCanvasBySymbol("main")) {
+            t_atom o[4];
+            SETFLOAT(&o[0], 600); SETFLOAT(&o[1], 600); SETSYMBOL(&o[2], gensym("pd")); SETSYMBOL(&o[3], gensym("p116gop"));
+            pd_typedmess(&cnv->gl_pd, gensym("obj"), 4, o);
+            gopSub = pd::Interface::getNewest(cnv);
+            t_atom a[9];
+            float const v[9] = { 0, 0, 100, 100, 100, 100, 1, 0, 0 };
+            for (int i = 0; i < 9; ++i) SETFLOAT(&a[i], v[i]);
+            pd_typedmess(&reinterpret_cast<t_canvas*>(gopSub)->gl_pd, gensym("coords"), 9, a);
+        }
+    }, 3000);
+    auto plain = dir.getChildFile("plain.pd");
+    auto r2 = h.call("/pd/save_patch", { "main", plain.getFullPathName(), "sc3" }, "/pd/save_patch/reply/sc3", 3000);
+    if (r2 && r2->args.size() >= 3) {
+        auto const report = juce::JSON::parse(juce::String(r2->str(2)));
+        CHECK(!static_cast<bool>(report["isGraph"]));
+        CHECK(!static_cast<bool>(report["coordsLine"]));
+    } else {
+        CHECK(false);
+    }
+    host->pdWait([&] { if (auto* cnv = host->getCanvasBySymbol("main")) if (gopSub) glist_delete(cnv, gopSub); }, 3000);
     dir.deleteRecursively();
 }
 

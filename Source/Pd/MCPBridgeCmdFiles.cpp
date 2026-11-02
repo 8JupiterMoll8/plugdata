@@ -182,6 +182,22 @@ juce::String stripSavedArrayLines(juce::String const& content)
     return clean;
 }
 
+// Review L1 (P11.6): whether the ROOT canvas in a saved .pd text has its #X coords line. A subpatch's own coords line
+// sits between its "#N canvas" and "#X restore" (depth 2 or more); the root's is at depth 1.
+bool rootHasCoordsLine(juce::String const& content)
+{
+    juce::StringArray lines;
+    lines.addLines(content);
+    int depth = 0;
+    for (auto const& raw : lines) {
+        auto const ln = raw.trimStart();
+        if (ln.startsWith("#N canvas")) ++depth;
+        else if (ln.startsWith("#X restore")) --depth;
+        else if (depth == 1 && ln.startsWith("#X coords ")) return true;
+    }
+    return false;
+}
+
 } // namespace
 
 void MCPBridge::pdLoad(const juce::String& action, const juce::OSCMessage& msg)
@@ -463,7 +479,7 @@ void MCPBridge::pdSavePatch(const juce::String& action, const juce::OSCMessage& 
         // its #X coords line (a GOP canvas always does).
         report->setProperty("canvasKey", savedKey);
         report->setProperty("isGraph", savedIsGraph);
-        report->setProperty("coordsLine", content.contains("#X coords "));
+        report->setProperty("coordsLine", rootHasCoordsLine(content)); // review L1: the root's own line
         juce::Array<juce::var> args;
         args.add(destFilePath);
         args.add(sidecarError.isEmpty() ? juce::String() : "ids not saved: " + sidecarError);
