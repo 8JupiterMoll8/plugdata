@@ -8,6 +8,20 @@
 
 #include "MCPBridgeCmdCommon.h"
 
+// P11.6 F4: every object inside a canvas, all levels down (the census's V15a count).
+static int mcpCountInside(t_canvas* c, int depth)
+{
+    if (!c || depth > 64)
+        return 0;
+    int n = 0;
+    for (t_gobj* g = c->gl_list; g; g = g->g_next) {
+        ++n;
+        if (pd_class(&g->g_pd) == canvas_class)
+            n += mcpCountInside(reinterpret_cast<t_canvas*>(g), depth + 1);
+    }
+    return n;
+}
+
 void MCPBridge::pdIdentitySnapshot(const juce::String& action, const juce::OSCMessage& msg)
 {
     // /pd/identity_snapshot <canvasName> <correlationId>
@@ -90,6 +104,25 @@ void MCPBridge::pdIdentitySnapshot(const juce::String& action, const juce::OSCMe
                 }
                 entry->setProperty("inlets", obj_ninlets(obj));
                 entry->setProperty("outlets", obj_noutlets(obj));
+            }
+
+            // P11.6 F4: the container fields of the census (V15a) here too. The TS mirror is REPLACED from this
+            // snapshot, so without them a sync erased what the census said and an abstraction weighed 1 in the
+            // delete budget (deleted without a question). childCount = every object inside, all levels down.
+            {
+                auto* cl = pd_class(&ptr->g_pd);
+                bool const isCanvas = cl == canvas_class;
+                int const clones = cl == clone_class ? clone_get_n(ptr) : 0;
+                entry->setProperty("isContainer", isCanvas || clones > 0);
+                if (isCanvas) {
+                    entry->setProperty("childCount", mcpCountInside(reinterpret_cast<t_canvas*>(ptr), 0));
+                } else if (clones > 0) {
+                    int inside = 0;
+                    for (int ci = 0; ci < clones; ++ci)
+                        inside += 1 + mcpCountInside(clone_get_instance(ptr, ci), 0);
+                    entry->setProperty("cloneInstances", clones);
+                    entry->setProperty("childCount", inside);
+                }
             }
 
             entries.add(juce::var(entry));
