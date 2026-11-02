@@ -278,6 +278,10 @@ std::vector<std::string> MCPBridge::capabilityList() const
         "meter_arm",
         "meter_control",
         "meter_spectral_arm",
+        // P11 V1: /meter/arm and /meter/arm_spectral answer a window generation id (arg 0); a read naming another id
+        // is refused on /meter/<read|read_spectral>/error/<corrId> ("stale_gen ..."); /meter/read arg 15 and the
+        // spectral JSON `gen` name the window read
+        "meter_window_gen",
         "meter_trace",
         // T2b: /meter/trace ... arm <windowMs> [focus] / read: the trace of a window's peaks (a triggered voice)
         "meter_trace_armed",
@@ -297,6 +301,16 @@ std::vector<std::string> MCPBridge::capabilityList() const
         // tempIds travel with the file and are re-registered by the engine.
         "save_patch",
         "load_patch",
+        // P11.2 V10/V12: load_patch checks the file before it clears and answers arg2 {canvasFound, fileObjects,
+        // created, failedCreates, sidecar}; save_patch answers arg2 {rebound, idsSaved, tab}; save_content arg1 its hash
+        "load_patch_report",
+        // P11.4 V19: /pd/bound <corrId> <name...>: who listens on each name (canvases, subpatches, abstractions,
+        // clone instances), receivers counted, pd-<name> canvases and bridge probes as `other`
+        "bound",
+        // P11.5 V24: /pd/list_tabs rows carry `ns` (the tab's receiver token, C++), nsCollided, nsFromSidecar
+        "tab_token",
+        // P11.5 V26: /pd/selection_get <corrId> [canvas]: the live editor selection {canvasKey, ids, classes, count}
+        "selection_get",
         // PRD Phase 3 §2.5: multi-tab — open in new tab + enumerate tabs
         "open_patch",
         "list_tabs",

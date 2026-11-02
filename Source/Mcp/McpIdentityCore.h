@@ -477,6 +477,34 @@ public:
         return true;
     }
 
+    // P11.5 V23: the content stamp (wires, x/y and text atoms on top of the structure) has its own counters, per canvas
+    // and global; it never bumps the identity version (a wire or a move changes no identity). True when it bumped.
+    // Review M2: every number a canvas gets, its first observation included, is a fresh value of the global counter,
+    // so a canvas closed and opened again (a new record) never shows a number it had before.
+    bool observeContent(Canvas c, uint64_t stamp)
+    {
+        check("observeContent");
+        auto& r = ensure(c);
+        if (!r.contentStamped) {
+            r.contentStamped = true;
+            r.contentStamp = stamp;
+            r.contentVersion = contentGlobal.fetch_add(1, std::memory_order_relaxed) + 1;
+            return false;
+        }
+        if (r.contentStamp == stamp)
+            return false;
+        r.contentStamp = stamp;
+        r.contentVersion = contentGlobal.fetch_add(1, std::memory_order_relaxed) + 1;
+        return true;
+    }
+    uint64_t contentVersion(Canvas c)
+    {
+        check("contentVersion");
+        auto* r = live(c);
+        return r ? r->contentVersion : 0;
+    }
+    uint64_t contentVersionGlobal() const { return contentGlobal.load(std::memory_order_relaxed); }
+
     // P3.5 S2: called on every access but version(); the audit build installs a check that reports an access
     // without the Pd lock. nullptr (the default) = no check.
     using AccessCheck = void (*)(char const* where);
@@ -494,6 +522,9 @@ private:
         uint64_t version = 0;                                  // S6: bumped by every change of this canvas
         uint64_t stamp = 0;                                    // S6: last structure stamp seen (see observeStamp)
         bool stamped = false;
+        uint64_t contentStamp = 0;                             // P11.5 V23 (see observeContent)
+        bool contentStamped = false;
+        uint64_t contentVersion = 0;
         bool isAlive() const { return !alive || alive(); }
     };
 
@@ -592,6 +623,7 @@ private:
     std::unordered_map<Obj, SerialInfo> serials;
     uint64_t nextSerial = 1;
     std::atomic<uint64_t> identityVersion { 0 };
+    std::atomic<uint64_t> contentGlobal { 0 }; // P11.5 V23
 };
 
 } // namespace mcp::identity

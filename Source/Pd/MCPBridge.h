@@ -717,6 +717,15 @@ private:
     // Phase 4 armed control-message window (native Pd receiver + atom buffer).
     std::unique_ptr<McpControlWindow> controlWindow;
 
+    // P11 V1: the armed windows' generation ids (meter and spectral). An arm bumps its id and answers it; a read
+    // that names another id is refused and leaves the open window alone. Both counters and the arm/read state
+    // changes they guard move only under meterWindowLock (one lock for the meter and the spectral window).
+    std::mutex meterWindowLock;
+    int32 meterWindowGen { 0 };
+    int32 spectralWindowGen { 0 };
+    // The generation id a read names (arg `index`): -1 = none given (the legacy read).
+    static int32 readWindowGen(const juce::OSCMessage& msg, int index);
+
     // Voice & Beatbox capture state
     static constexpr int MAX_VOICE_CAPTURE_SAMPLES = 48000 * 6; // 6 seconds at 48k
     std::vector<float> voiceCaptureBuffer;

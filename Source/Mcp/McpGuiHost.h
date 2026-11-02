@@ -71,6 +71,13 @@ public:
         std::vector<SelectedObject> objects;
     };
     virtual std::optional<Selection> select(t_canvas* cnv, std::vector<t_gobj*> const& objects) = 0;
+    // P11.5 V26: the live selection. `cnv` null: the focused view of the first editor (its canvas may be a
+    // subpatch); else the first open view showing `cnv` (canvas = cnv, no objects when none shows it). Message thread.
+    struct LiveSelection {
+        t_canvas* canvas = nullptr;
+        std::vector<t_gobj*> objects;
+    };
+    virtual LiveSelection liveSelection(t_canvas* cnv) = 0;
 
     // Encapsulate: number of distinct components for `objects`, or -1 when one of
     // them has no component. encapsulate() then wraps exactly those components.

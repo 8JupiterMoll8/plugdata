@@ -11,6 +11,7 @@
 #include "PluginProcessor.h"
 #include "Mcp/McpHost.h"
 #include "Pd/MCPBridge.h"
+#include "Mcp/McpGuiFields.h" // review M2: GUI send/receive/range into the content stamp
 #include "Utility/SettingsFile.h"
 #include "Canvas.h"
 #include "PluginEditor.h"
@@ -96,18 +97,77 @@ void McpHost::registerOpenCanvases()
     // S6: one walk also takes each canvas's structure stamp (object count + FNV-1a of the object pointers): a
     // GUI create/delete/retype changes it, and IdentityCore::observeStamp bumps that canvas's version, so
     // analyze_patch(sync) sees a manual edit on its next identity_version (S0: 0.04-0.13 us per 37 objects).
+    // P11.5 V23: the same walk takes each canvas's CONTENT stamp: the structure plus every object's x/y and text atoms
+    // and the canvas's wires (linetraverser), with the content stamps of the canvases inside it folded in, so a hand
+    // edit anywhere below a tab changes that tab's contentVersion (not its identity version).
     bool edited = false;
-    std::function<void(t_canvas*)> walk = [&](t_canvas* c) {
+    auto mix = [](uint64_t h, uint64_t v) { return (h ^ v) * 1099511628211ull; };
+    // Review M2: a GUI's send/receive names and range live outside its text atoms (a hand change in the properties
+    // dialog edits them only); they go into the stamp through the McpGuiFields readers. The value does not (a moved
+    // slider is play, not an edit).
+    static std::unordered_map<std::string, std::string> const guiClasses {
+        { "hsl", "hsl" }, { "vsl", "vsl" }, { "tgl", "tgl" }, { "hradio", "hradio" }, { "vradio", "vradio" },
+        { "nbx", "nbx" }, { "bng", "bng" }, { "vu", "vu" }, { "cnv", "cnv" }, { "knob", "knob" }, { "gatom", "floatatom" }
+    };
+    auto guiStamp = [&](t_object* ob, uint64_t h) {
+        auto const it = guiClasses.find(class_getname(pd_class(&ob->te_g.g_pd)));
+        if (it == guiClasses.end())
+            return h;
+        std::unique_ptr<juce::DynamicObject> props(mcpBuildGuiProps(juce::String(it->second), ob));
+        for (char const* key : { "min", "max", "send", "receive", "log" })
+            if (props->hasProperty(key))
+                h = mix(h, static_cast<uint64_t>(std::hash<std::string> {}(key + std::string("=") + props->getProperty(key).toString().toStdString())));
+        return h;
+    };
+    std::function<uint64_t(t_canvas*)> walk = [&](t_canvas* c) -> uint64_t {
         identity.canvasMap(c);
         identity.refreshKey(c); // review M3: renamed behind our back (GUI Save-As, subpatch rename)
         uint64_t stamp = 1469598103934665603ull;
+        uint64_t content = 1469598103934665603ull;
         uint64_t count = 0;
+        // Review M2: the graph-on-parent flags and box of this canvas
+        content = mix(content, static_cast<uint64_t>(c->gl_isgraph) | static_cast<uint64_t>(c->gl_hidetext) << 1);
+        content = mix(content, static_cast<uint64_t>(static_cast<uint32_t>(c->gl_pixwidth)) << 32 | static_cast<uint32_t>(c->gl_pixheight));
+        content = mix(content, static_cast<uint64_t>(static_cast<uint32_t>(c->gl_xmargin)) << 32 | static_cast<uint32_t>(c->gl_ymargin));
         for (t_gobj* g = c->gl_list; g; g = g->g_next, ++count) {
             stamp = (stamp ^ reinterpret_cast<uintptr_t>(g)) * 1099511628211ull;
+            content = mix(content, reinterpret_cast<uintptr_t>(g));
+            if (t_object* gui = pd_checkobject(&g->g_pd))
+                content = guiStamp(gui, content);
+            if (t_object* ob = pd_checkobject(&g->g_pd)) {
+                content = mix(content, static_cast<uint32_t>(ob->te_xpix) | (static_cast<uint64_t>(static_cast<uint32_t>(ob->te_ypix)) << 32));
+                if (ob->te_binbuf) {
+                    int const n = binbuf_getnatom(ob->te_binbuf);
+                    t_atom const* a = binbuf_getvec(ob->te_binbuf);
+                    content = mix(content, static_cast<uint64_t>(n));
+                    for (int i = 0; i < n; ++i) {
+                        uint64_t v = static_cast<uint64_t>(a[i].a_type) << 56;
+                        if (a[i].a_type == A_FLOAT) {
+                            uint32_t bits = 0;
+                            std::memcpy(&bits, &a[i].a_w.w_float, sizeof(bits));
+                            v ^= bits;
+                        } else if (a[i].a_type == A_SYMBOL || a[i].a_type == A_DOLLSYM) {
+                            v ^= reinterpret_cast<uintptr_t>(a[i].a_w.w_symbol);
+                        } else if (a[i].a_type == A_DOLLAR) {
+                            v ^= static_cast<uint64_t>(a[i].a_w.w_index);
+                        }
+                        content = mix(content, v);
+                    }
+                }
+            }
             if (pd_class(&g->g_pd) == canvas_class)
-                walk(reinterpret_cast<t_canvas*>(g));
+                content = mix(content, walk(reinterpret_cast<t_canvas*>(g)));
+        }
+        t_linetraverser t;
+        linetraverser_start(&t, c);
+        while (linetraverser_next_nosize(&t)) {
+            content = mix(content, reinterpret_cast<uintptr_t>(t.tr_ob));
+            content = mix(content, reinterpret_cast<uintptr_t>(t.tr_ob2));
+            content = mix(content, static_cast<uint64_t>(t.tr_outno) << 32 | static_cast<uint32_t>(t.tr_inno));
         }
         edited = identity.observeStamp(c, stamp ^ (count << 40)) || edited;
+        identity.observeContent(c, content);
+        return content;
     };
     std::vector<t_canvas*> roots; // pd_canvaslist is newest first: walk it oldest first
     for (t_canvas* c = pd_this->pd_canvaslist; c; c = c->gl_next)
@@ -182,6 +242,59 @@ void McpHost::rebindTombstones()
     };
     for (t_canvas* c = pd_this ? pd_this->pd_canvaslist : nullptr; c; c = c->gl_next)
         walk(c);
+}
+
+std::vector<McpHost::TabTokenRow> McpHost::assignTabTokens(std::vector<McpGuiHost::TabInfo> const& tabs)
+{
+    // Oldest tab first: a root's age is its place in pd_canvaslist (newest first); other tabs go last.
+    std::vector<size_t> order(tabs.size());
+    std::vector<juce::String> keys(tabs.size());
+    {
+        PdLockScope lock(processor);
+        std::map<t_canvas*, int> age;
+        int n = 0;
+        for (t_canvas* c = pd_this ? pd_this->pd_canvaslist : nullptr; c; c = c->gl_next)
+            age[c] = n++;
+        std::vector<int> ageOf(tabs.size());
+        for (size_t i = 0; i < tabs.size(); ++i) {
+            order[i] = i;
+            auto const it = age.find(tabs[i].patch);
+            ageOf[i] = it == age.end() ? -1 : n - it->second; // larger = older
+            keys[i] = tabs[i].patch ? MCPBridge::canonicalCanvasKey(tabs[i].patch) : tabs[i].title;
+        }
+        std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) { return ageOf[a] > ageOf[b]; });
+    }
+    auto sidecarOf = [](juce::File const& pd) { return juce::File(pd.getFullPathName() + ".mcpids.json"); };
+    std::vector<mcp::TabTokens::Tab> in;
+    for (auto const i : order) {
+        std::string persisted;
+        if (tabs[i].file.existsAsFile()) {
+            auto const json = juce::JSON::parse(sidecarOf(tabs[i].file).loadFileAsString());
+            if (json.isObject() && json["ns"].isString())
+                persisted = json["ns"].toString().toStdString();
+        }
+        in.push_back({ tabs[i].patch, keys[i].toStdString(), persisted });
+    }
+    std::vector<TabTokenRow> rows(tabs.size());
+    std::lock_guard<std::mutex> guard(tabTokenLock);
+    auto const assigned = tabTokens.assign(in);
+    tabTokenNonDefault.clear();
+    for (size_t k = 0; k < order.size() && k < assigned.size(); ++k) {
+        auto const i = order[k];
+        auto const& a = assigned[k];
+        rows[i] = { juce::String(a.token), a.collided, a.fromSidecar, a.overridden, juce::String(a.persisted) };
+        // Kept for the tab's next save (buildIdentitySidecar); nothing is written here (review M4).
+        if (a.token != mcp::defaultTabToken(in[k].key))
+            tabTokenNonDefault[tabs[i].patch] = juce::String(a.token);
+    }
+    return rows;
+}
+
+juce::String McpHost::tabTokenToPersist(t_canvas* root)
+{
+    std::lock_guard<std::mutex> guard(tabTokenLock);
+    auto const it = tabTokenNonDefault.find(root);
+    return it == tabTokenNonDefault.end() ? juce::String() : it->second;
 }
 
 McpHost::PdLockScope::PdLockScope(PluginProcessor& p)

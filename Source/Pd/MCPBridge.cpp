@@ -1916,6 +1916,10 @@ juce::var MCPBridge::buildIdentitySidecar(PluginProcessor* processor, t_canvas* 
         subObj->setProperty(key, juce::var(entry));
     }
     root->setProperty("sub", juce::var(subObj));
+    // P11.5 V24: a tab token that is not the file's default (a collision between open tabs gave it) travels with
+    // the file, so the receivers built with it keep working after a reopen.
+    if (auto const ns = processor->getMcp()->tabTokenToPersist(cnv); ns.isNotEmpty())
+        root->setProperty("ns", ns);
     return juce::var(root);
 }
 
@@ -2190,59 +2194,11 @@ float estimateFrequency(const float* buf, int n, float sampleRate)
 }
 
 // ── Precision pitch: YIN (de Cheveigné & Kawahara, 2002) ─────────────────────
-// Difference function → cumulative-mean normalized difference → absolute
-// threshold → parabolic interpolation. Returns Hz (0 = unvoiced) and a
-// per-frame confidence. Far fewer octave errors than FFT-peak picking.
+// Far fewer octave errors than FFT-peak picking. The voice-take lane reads from ~55 Hz up; the implementation is
+// shared with the armed spectral body pitch (estimatePitchYinRange, MCPBridgeSpectral.cpp, P11 V7).
 static float estimatePitchYIN(const float* buf, int n, float sampleRate, float& outConfidence)
 {
-    outConfidence = 0.0f;
-    if (!buf || n < 256 || sampleRate <= 0.0f) return 0.0f;
-
-    int const maxTau = std::min(n / 2, static_cast<int>(sampleRate / 55.0f)); // down to ~55 Hz
-    if (maxTau < 8) return 0.0f;
-    int const halfN = n / 2;
-
-    std::vector<float> dp(maxTau, 1.0f);
-    float running = 0.0f;
-    for (int tau = 1; tau < maxTau; ++tau) {
-        float sum = 0.0f;
-        for (int i = 0; i < halfN; ++i) {
-            float const diff = buf[i] - buf[i + tau];
-            sum += diff * diff;
-        }
-        running += sum;
-        dp[tau] = running > 0.0f ? (sum * static_cast<float>(tau)) / running : 1.0f;
-    }
-
-    constexpr float threshold = 0.15f;
-    int tauEstimate = -1;
-    for (int tau = 2; tau < maxTau; ++tau) {
-        if (dp[tau] < threshold) {
-            while (tau + 1 < maxTau && dp[tau + 1] < dp[tau]) ++tau;
-            tauEstimate = tau;
-            break;
-        }
-    }
-    if (tauEstimate < 0) {
-        int best = 1;
-        for (int tau = 2; tau < maxTau; ++tau) {
-            if (dp[tau] < dp[best]) best = tau;
-        }
-        if (dp[best] > 0.35f) return 0.0f; // too aperiodic → unvoiced
-        tauEstimate = best;
-    }
-
-    outConfidence = juce::jlimit(0.0f, 1.0f, 1.0f - dp[tauEstimate] * 1.6f);
-
-    float betterTau = static_cast<float>(tauEstimate);
-    if (tauEstimate > 1 && tauEstimate < maxTau - 1) {
-        float const s0 = dp[tauEstimate - 1];
-        float const s1 = dp[tauEstimate];
-        float const s2 = dp[tauEstimate + 1];
-        float const denom = 2.0f * (2.0f * s1 - s2 - s0);
-        if (std::abs(denom) > 1e-9f) betterTau = static_cast<float>(tauEstimate) + (s2 - s0) / denom;
-    }
-    return betterTau > 0.0f ? sampleRate / betterTau : 0.0f;
+    return estimatePitchYinRange(buf, n, sampleRate, 55.0f, 0.0f, outConfidence);
 }
 
 void MCPBridge::voiceInputTick(float const* inputSamples, int numSamples)
@@ -2708,7 +2664,8 @@ void MCPBridge::stopMidiCaptureAndStage()
     root->setProperty("notes", notesArray);
     juce::String const jsonStr = juce::JSON::toString(juce::var(root));
 
-    juce::File("/home/alphi/Desktop/plugdata/mcp-server/midi-take.json").replaceWithText(jsonStr);
+    // P11: no file write here. The take goes to the TS in the /pd/midi/event reply below, and the TS persists it
+    // (midi-take.json in its data dir); the bridge wrote a hard-coded developer path before.
 
     // Register as a first-class moodboard artifact.
     McpSession::McpMidiTake take;
@@ -2842,8 +2799,7 @@ void MCPBridge::parseVoiceBufferToJson(float const* buffer, int totalSamples, do
         rep->setProperty("rms", globalRms);
         rep->setProperty("message", "No audio detected from microphone");
         juce::String const jsonStr = juce::JSON::toString(juce::var(rep));
-        sendReply("/pd/voice/event", jsonStr);
-        juce::File("/home/alphi/Desktop/plugdata/mcp-server/voice-take.json").replaceWithText(jsonStr);
+        sendReply("/pd/voice/event", jsonStr); // P11: the TS persists voice-take.json from this reply
         sendConsoleLog("MCP: Voice recording silent (RMS: " + juce::String(globalRms, 4) + ")", true);
         return;
     }
@@ -3266,8 +3222,7 @@ void MCPBridge::parseVoiceBufferToJson(float const* buffer, int totalSamples, do
 
     juce::String const jsonStr = juce::JSON::toString(juce::var(root));
 
-    // Save directly to disk
-    juce::File("/home/alphi/Desktop/plugdata/mcp-server/voice-take.json").replaceWithText(jsonStr);
+    // P11: no file write here: the TS persists voice-take.json from the /pd/voice/event reply sent below.
 
     // Phase 3 (slice): persist the take as a real WAV and register it as a
     // first-class moodboard artifact, so any agent can audition/analyse/route it.

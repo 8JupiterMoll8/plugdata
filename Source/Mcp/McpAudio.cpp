@@ -48,6 +48,20 @@ void McpHost::audioBlockStarted()
     mcp::rt::Scope const rtScope; // P3.4 S6: realtime guard (counts only in a -DMCP_RT_GUARD=ON build)
     session.mcpAudioBlocks.fetch_add(1, std::memory_order_relaxed); // #83 audio-thread liveness
     session.mcpLastBlockMs.store(juce::Time::getMillisecondCounter(), std::memory_order_relaxed);
+    // Review L3: a new arm epoch: this thread empties the window's accumulators before it adds anything to them.
+    if (uint32_t const epoch = session.mcpArmEpoch.load(std::memory_order_acquire); epoch != session.mcpArmEpochSeen) {
+        session.mcpArmEpochSeen = epoch;
+        session.mcpArmPeak.store(0.0f, std::memory_order_relaxed);
+        session.mcpArmPreCeilingPeak.store(0.0f, std::memory_order_relaxed);
+        session.mcpArmedTailPeak.store(0.0f, std::memory_order_relaxed);
+        session.mcpArmPreLimiterPeak.store(0.0f, std::memory_order_relaxed);
+        session.mcpArmPreLimiterSumSq.store(0.0, std::memory_order_relaxed);
+        session.mcpArmPreLimiterCount.store(0, std::memory_order_relaxed);
+        session.mcpArmFinalSumSq.store(0.0, std::memory_order_relaxed);
+        session.mcpArmFinalCount.store(0, std::memory_order_relaxed);
+        session.mcpArmLimiterReductionDbMax.store(0.0f, std::memory_order_relaxed);
+        session.mcpArmPdOutPeak.store(0.0f, std::memory_order_relaxed);
+    }
     // P3.4 S11 test-only: a forced stall, as a very heavy DSP block would hold the Pd lock (never set otherwise).
     // The value turns -1 once the lock is held (the verb answers then) and -2 when the stall ends.
     if (int const stallMs = session.mcpDebugStallMs.load(std::memory_order_relaxed); stallMs > 0) {
@@ -65,6 +79,27 @@ void McpHost::audioBlockStarted()
 void McpHost::midiTick(MidiBuffer& midiInputHistory, AudioBuffer<float>& buffer, double const sampleRate)
 {
     mcp::rt::Scope const rtScope; // P3.4 S6: realtime guard (counts only in a -DMCP_RT_GUARD=ON build)
+    // P11 V2: the PRE-LIMITER tap of an armed window. This hook runs after the master gain and before PlugData's
+    // limiter, on the output channels (as the other armed taps).
+    session.mcpBlockPreLimiterPeak = -1.0f;
+    if (session.mcpArmActive.load(std::memory_order_relaxed)) {
+        int const outputs = std::min(buffer.getNumChannels(), processor.getTotalNumOutputChannels());
+        float peak = 0.0f;
+        double sumSq = 0.0;
+        for (int ch = 0; ch < outputs; ++ch) {
+            auto const* d = buffer.getReadPointer(ch);
+            for (int i = 0; i < buffer.getNumSamples(); ++i) {
+                if (!std::isfinite(d[i])) continue;
+                peak = std::max(peak, std::abs(d[i]));
+                sumSq += static_cast<double>(d[i]) * d[i];
+            }
+        }
+        session.mcpBlockPreLimiterPeak = peak;
+        if (peak > session.mcpArmPreLimiterPeak.load(std::memory_order_relaxed))
+            session.mcpArmPreLimiterPeak.store(peak, std::memory_order_relaxed);
+        session.mcpArmPreLimiterSumSq.store(session.mcpArmPreLimiterSumSq.load(std::memory_order_relaxed) + sumSq, std::memory_order_relaxed);
+        session.mcpArmPreLimiterCount.fetch_add(static_cast<uint64_t>(outputs) * static_cast<uint64_t>(buffer.getNumSamples()), std::memory_order_relaxed);
+    }
     // MIDI melodic-intent capture & playback tap
     if (mcpBridge && (mcpBridge->isMidiCapturing() || mcpBridge->isMidiPlaying()))
         mcpBridge->midiInputTick(midiInputHistory, buffer.getNumSamples(), &buffer, sampleRate);
@@ -87,6 +122,13 @@ void McpHost::audioBlockFinished(AudioBuffer<float>& buffer)
         }
         float prev = session.mcpArmPreCeilingPeak.load(std::memory_order_relaxed);
         while (pre > prev && !session.mcpArmPreCeilingPeak.compare_exchange_weak(prev, pre, std::memory_order_relaxed)) {}
+        // P11 V2: the limiter's gain reduction in this block, from the two measured peaks around it (0 when it is off).
+        float const preLimiter = session.mcpBlockPreLimiterPeak;
+        if (processor.enableLimiter.load() && preLimiter > 1.0e-6f && pre > 1.0e-9f && preLimiter > pre) {
+            float const reductionDb = 20.0f * std::log10(preLimiter / pre);
+            if (reductionDb > session.mcpArmLimiterReductionDbMax.load(std::memory_order_relaxed))
+                session.mcpArmLimiterReductionDbMax.store(reductionDb, std::memory_order_relaxed);
+        }
     }
     session.outputCeiling.process(buffer.getArrayOfWritePointers(), outputs, buffer.getNumSamples(),
         processor.getSampleRate(), juce::Time::getMillisecondCounter());
@@ -99,13 +141,17 @@ void McpHost::audioBlockFinished(AudioBuffer<float>& buffer)
     if (session.mcpArmActive.load(std::memory_order_relaxed)) {
         session.mcpArmedTailRuns.fetch_add(1, std::memory_order_relaxed); // #83 diagnostics
         float p = 0.0f;
+        double sumSq = 0.0; // P11 V2: the final tap's mean square
         for (int ch = 0; ch < outputs; ++ch) { // round 1 (review L2): what leaves the app, not input-only channels
             auto* d = buffer.getReadPointer(ch);
             for (int i = 0; i < buffer.getNumSamples(); ++i) {
                 float const a = std::abs(d[i]);
                 if (a > p) p = a;
+                sumSq += static_cast<double>(d[i]) * d[i];
             }
         }
+        session.mcpArmFinalSumSq.store(session.mcpArmFinalSumSq.load(std::memory_order_relaxed) + sumSq, std::memory_order_relaxed);
+        session.mcpArmFinalCount.fetch_add(static_cast<uint64_t>(outputs) * static_cast<uint64_t>(buffer.getNumSamples()), std::memory_order_relaxed);
         float prevTail = session.mcpArmedTailPeak.load(std::memory_order_relaxed);
         while (p > prevTail && !session.mcpArmedTailPeak.compare_exchange_weak(prevTail, p, std::memory_order_relaxed)) {}
         float prev = session.mcpArmPeak.load(std::memory_order_relaxed);
@@ -152,6 +198,31 @@ void McpHost::pdBlock(float* audioVectorIn, float* audioVectorOut, int const pdB
     // Monitor tap (solo/mute) — per Pd sub-block, before it lands in the
     // JUCE buffer, so it also goes through the master gain/limiter.
     applyMonitorTap(audioVectorOut, pdBlockSize, numChannels);
+
+    // P11 V2: Pd's own output of an armed window, before the master gain (output channels; the vector is one run of
+    // pdBlockSize samples per channel).
+    if (session.mcpArmActive.load(std::memory_order_relaxed) && audioVectorOut) {
+        int const outputs = std::min(numChannels, processor.getTotalNumOutputChannels());
+        float peak = 0.0f;
+        for (int i = 0; i < outputs * pdBlockSize; ++i)
+            if (std::isfinite(audioVectorOut[i]))
+                peak = std::max(peak, std::abs(audioVectorOut[i]));
+        if (peak > session.mcpArmPdOutPeak.load(std::memory_order_relaxed))
+            session.mcpArmPdOutPeak.store(peak, std::memory_order_relaxed);
+    }
+}
+
+float McpHost::masterGainFromSlider(float const slider)
+{
+    // The mapping of PluginProcessor::processBlock (the toolbar volume: 0.8 is unity).
+    if (slider <= 0.8f)
+        return std::pow(juce::jmap(slider, 0.0f, 0.8f, 0.0f, 1.0f), 2.5f);
+    return juce::jmap(slider, 0.8f, 1.0f, 1.0f, 2.0f);
+}
+
+float McpHost::masterGain() const
+{
+    return processor.volume ? masterGainFromSlider(processor.volume->load()) : 1.0f;
 }
 
 // ── The Pd context (Plan 3 P3.4 S2/S3) ──────────────────────────────────────

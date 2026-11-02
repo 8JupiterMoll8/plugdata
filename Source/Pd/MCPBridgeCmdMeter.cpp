@@ -297,6 +297,8 @@ void MCPBridge::meterArm(const juce::String& meterAction, const juce::OSCMessage
     // /meter/arm <correlationId> — open the measurement window: reset + start the
     // master peak-hold. Call this BEFORE triggering, so a one-shot is inside it.
     auto correlationId = msg.size() > 0 ? getArgString(msg[0]) : juce::String("0");
+    std::unique_lock<std::mutex> windowLock(meterWindowLock); // P11 V1: the id and the reset move together
+    int32 const gen = ++meterWindowGen;
     if (processor) {
         processor->getMcp()->session.mcpArmPeak.store(0.0f, std::memory_order_relaxed);
         // #83 diagnostics: snapshot the audio-block counter and zero the
@@ -310,13 +312,46 @@ void MCPBridge::meterArm(const juce::String& meterAction, const juce::OSCMessage
         processor->getMcp()->session.mcpArmClampedAtArm.store(ceilingAtArm.clampedSamples, std::memory_order_relaxed);
         processor->getMcp()->session.mcpArmNonFiniteAtArm.store(ceilingAtArm.nonFiniteSamples, std::memory_order_relaxed);
         processor->getMcp()->session.mcpArmTripsAtArm.store(ceilingAtArm.breakerTrips, std::memory_order_relaxed);
+        // P11 V2: the pre-limiter, final-RMS, limiter-reduction and Pd-output taps of the new window
+        auto& s = processor->getMcp()->session;
+        s.mcpArmPreLimiterPeak.store(0.0f, std::memory_order_relaxed);
+        s.mcpArmPreLimiterSumSq.store(0.0, std::memory_order_relaxed);
+        s.mcpArmPreLimiterCount.store(0, std::memory_order_relaxed);
+        s.mcpArmFinalSumSq.store(0.0, std::memory_order_relaxed);
+        s.mcpArmFinalCount.store(0, std::memory_order_relaxed);
+        s.mcpArmLimiterReductionDbMax.store(0.0f, std::memory_order_relaxed);
+        s.mcpArmPdOutPeak.store(0.0f, std::memory_order_relaxed);
+        s.mcpArmEpoch.fetch_add(1, std::memory_order_release); // review L3: the audio thread empties them again
         // Re-arm race (review L3, kept): a block already past its mcpArmActive check when this re-arm zeroes the
         // peaks can still fold up to one block (~1-10 ms) of pre-arm audio into the new window. Arm comes before the
         // trigger, so at worst a read says "audible" from the block just before the arm.
         processor->getMcp()->session.mcpArmActive.store(true, std::memory_order_release);
     }
-    sendRawReply("/meter/arm/reply/" + correlationId);
+    windowLock.unlock();
+    // P11 V1: arg 0 = this window's generation id (capability meter_window_gen); a read naming another id is refused.
+    juce::OSCMessage rep { juce::OSCAddressPattern("/meter/arm/reply/" + correlationId) };
+    rep.addArgument(gen);
+    sender.send(rep);
     return;
+}
+
+int32 MCPBridge::readWindowGen(const juce::OSCMessage& msg, int const index)
+{
+    if (msg.size() <= index)
+        return -1;
+    auto const& a = msg[index];
+    // Review L5: clamped before the cast (a float or text past int32 is an id no window has: refused as stale).
+    constexpr int32 maxId = std::numeric_limits<int32>::max();
+    if (a.isInt32())
+        return a.getInt32() >= 0 ? a.getInt32() : -1;
+    if (a.isFloat32()) {
+        float const f = a.getFloat32();
+        if (!(f >= 0.0f)) return -1;
+        return f >= 2147483520.0f ? maxId : static_cast<int32>(f);
+    }
+    auto const text = getArgString(a).trim();
+    if (text.isEmpty() || !text.containsOnly("0123456789")) return -1;
+    return text.length() > 10 ? maxId : static_cast<int32>(std::min<juce::int64>(text.getLargeIntValue(), maxId));
 }
 
 void MCPBridge::meterRead(const juce::String& meterAction, const juce::OSCMessage& msg)
@@ -326,7 +361,18 @@ void MCPBridge::meterRead(const juce::String& meterAction, const juce::OSCMessag
     // peakDb > -60 → the trigger produced sound. Never misses a one-shot because
     // the window was armed before the event and accumulated every block since.
     auto correlationId = msg.size() > 0 ? getArgString(msg[0]) : juce::String("0");
+    // P11 V1: a read naming another window's id is refused; the open window stays open and untouched.
+    std::unique_lock<std::mutex> windowLock(meterWindowLock);
+    int32 const asked = readWindowGen(msg, 1);
+    int32 const gen = meterWindowGen;
+    if (asked >= 0 && asked != gen) {
+        windowLock.unlock();
+        sendReply("/meter/read/error/" + correlationId,
+            juce::String("stale_gen ") + juce::String(asked) + " (open window " + juce::String(gen) + ")");
+        return;
+    }
     if (processor) processor->getMcp()->session.mcpArmActive.store(false, std::memory_order_release);
+    windowLock.unlock();
     float const peak = processor ? processor->getMcp()->session.mcpArmPeak.load(std::memory_order_relaxed) : 0.0f;
     float const peakDb = (peak > 1e-7f) ? (20.0f * std::log10(peak)) : -100.0f;
     // #83 diagnostics — split the three causes of "armed read silent":
@@ -369,6 +415,21 @@ void MCPBridge::meterRead(const juce::String& meterAction, const juce::OSCMessag
     rep.addArgument(asInt(nonFinite));
     rep.addArgument(asInt(trips));
     rep.addArgument(static_cast<int32>(engaged ? 1 : 0));
+    // P11 V2 (J3b): three named taps of the one window. FINAL = args 0/1 (+ RMS 12), PRE-CEILING = arg 5 (P9),
+    // PRE-LIMITER = args 10/11 (after the master gain, before PlugData's limiter); 13 the master volume as the linear
+    // gain PlugData applies, 14 the limiter's largest gain reduction in the window (dB, 0 when off), 16 Pd's own
+    // output before the master gain.
+    {
+        auto& s = processor->getMcp()->session;
+        auto const rms = [](double sumSq, uint64_t n) { return n > 0 ? static_cast<float>(std::sqrt(sumSq / static_cast<double>(n))) : 0.0f; };
+        rep.addArgument(s.mcpArmPreLimiterPeak.load(std::memory_order_relaxed));
+        rep.addArgument(rms(s.mcpArmPreLimiterSumSq.load(std::memory_order_relaxed), s.mcpArmPreLimiterCount.load(std::memory_order_relaxed)));
+        rep.addArgument(rms(s.mcpArmFinalSumSq.load(std::memory_order_relaxed), s.mcpArmFinalCount.load(std::memory_order_relaxed)));
+        rep.addArgument(processor->getMcp()->masterGain());
+        rep.addArgument(s.mcpArmLimiterReductionDbMax.load(std::memory_order_relaxed));
+        rep.addArgument(gen); // P11 V1 arg 15: the window this read closed
+        rep.addArgument(s.mcpArmPdOutPeak.load(std::memory_order_relaxed));
+    }
     sender.send(rep);
     return;
 }
@@ -463,11 +524,16 @@ void MCPBridge::meterArmSpectral(const juce::String& meterAction, const juce::OS
     if (target > cap) target = cap;
     if (target < PROBE_RING_SIZE) target = std::min(cap, PROBE_RING_SIZE);
 
+    std::unique_lock<std::mutex> windowLock(meterWindowLock); // P11 V1
+    int32 const gen = ++spectralWindowGen;
     processor->getMcp()->session.mcpSpecArmed.store(false, std::memory_order_release);
     processor->getMcp()->session.mcpSpecWritePos.store(0, std::memory_order_relaxed);
     processor->getMcp()->session.mcpSpecLimit.store(target, std::memory_order_relaxed);
     processor->getMcp()->session.mcpSpecArmed.store(true, std::memory_order_release);
-    sendRawReply("/meter/arm_spectral/reply/" + correlationId);
+    windowLock.unlock();
+    juce::OSCMessage rep { juce::OSCAddressPattern("/meter/arm_spectral/reply/" + correlationId) };
+    rep.addArgument(gen); // P11 V1: arg 0 = the spectral window's generation id
+    sender.send(rep);
     return;
 }
 
@@ -481,7 +547,18 @@ void MCPBridge::meterReadSpectral(const juce::String& meterAction, const juce::O
         sendReply("/meter/read_spectral/reply/" + correlationId, "{\"error\":\"no processor\"}");
         return;
     }
+    // P11 V1: a read naming another spectral window's id is refused; the open window keeps capturing.
+    std::unique_lock<std::mutex> windowLock(meterWindowLock);
+    int32 const asked = readWindowGen(msg, 1);
+    int32 const gen = spectralWindowGen;
+    if (asked >= 0 && asked != gen) {
+        windowLock.unlock();
+        sendReply("/meter/read_spectral/error/" + correlationId,
+            juce::String("stale_gen ") + juce::String(asked) + " (open window " + juce::String(gen) + ")");
+        return;
+    }
     processor->getMcp()->session.mcpSpecArmed.store(false, std::memory_order_release);
+    windowLock.unlock();
     // Wait out any in-flight audio append (a few ms at most) before copying.
     for (int spin = 0; spin < 200; ++spin) {
         if (!processor->getMcp()->session.mcpSpecBusy.load(std::memory_order_acquire)) break;
@@ -494,7 +571,8 @@ void MCPBridge::meterReadSpectral(const juce::String& meterAction, const juce::O
                               - processor->getMcp()->session.mcpArmBlocksAtArm.load(std::memory_order_relaxed));
     int64_t armedTailRuns = (int64_t)processor->getMcp()->session.mcpArmedTailRuns.load(std::memory_order_relaxed);
     float tailPeak = processor->getMcp()->session.mcpArmedTailPeak.load(std::memory_order_relaxed);
-    juce::String diag = ",\"blocksElapsed\":" + juce::String((int)blocksElapsed)
+    juce::String diag = ",\"gen\":" + juce::String(gen) // P11 V1: the window this read closed
+                      + ",\"blocksElapsed\":" + juce::String((int)blocksElapsed)
                       + ",\"armedTailRuns\":" + juce::String((int)armedTailRuns)
                       + ",\"tailPeak\":" + juce::String(tailPeak, 6);
     mcpLogLine(*this, processor, juce::String::formatted("MCP-ARM-DIAG read_spectral: samples=%d blocksElapsed=%lld armedTailRuns=%lld tailPeak=%.6f",

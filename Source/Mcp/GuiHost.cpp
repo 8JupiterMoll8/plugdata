@@ -280,6 +280,30 @@ public:
         return selection;
     }
 
+    LiveSelection liveSelection(t_canvas* cnv) override
+    {
+        LiveSelection out;
+        out.canvas = cnv;
+        for (auto* editor : proc->getEditors()) {
+            if (!editor) continue;
+            if (!cnv) {
+                auto* view = editor->getCurrentCanvas();
+                if (!view) return out;
+                out.canvas = view->patch.getPointer().get();
+                for (auto* o : view->getSelectionOfType<Object>())
+                    if (o && o->getPointer()) out.objects.push_back(o->getPointer());
+                return out;
+            }
+            for (auto* view : editor->getCanvases()) {
+                if (!view || view->patch.getPointer().get() != cnv) continue;
+                for (auto* o : view->getSelectionOfType<Object>())
+                    if (o && o->getPointer()) out.objects.push_back(o->getPointer());
+                return out;
+            }
+        }
+        return out;
+    }
+
     int countViewObjects(t_canvas* cnv, std::vector<t_gobj*> const& objects) override
     {
         SmallArray<Object*> found;

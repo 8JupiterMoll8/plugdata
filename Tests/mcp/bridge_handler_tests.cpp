@@ -50,6 +50,7 @@
 #include "Mcp/McpNativeUndo.h" // P6.2 UF: hand-made undo entries (motion) for /pd/undo_peek
 #include "v2_test_client.h" // P4.1 S2: loopback v2 client
 #include "Pd/MCPBridgeCmdCommon.h" // armedSpectralJson / renderSpectralJson (Plan 5 spectral window)
+#include <juce_cryptography/juce_cryptography.h> // juce::SHA256: the save_content hash (P11.2 V11)
 #include "Utility/PluginParameter.h" // PlugDataParameter: the master volume guard (P5.1 sink floor)
 
 namespace {
@@ -821,6 +822,72 @@ void runSpectralPitchCases()
         CHECK(std::abs(armed - hz) <= hz * 0.03);
         CHECK(std::abs(render - hz) <= hz * 0.03);
     }
+
+    // P11 V7 (J7): an 808-style one-shot in a 0.5 s armed capture at 44.1 kHz. Pre-roll silence, then a pitch sweep
+    // f(t) = body + (start - body) * max(0, 1 - t / 0.09) Hz, amplitude exp(-t / 0.45), tanh(2x), and a 6 ms high-passed
+    // noise click at 0.25 s of the capture. The pitch is the BODY's (median over hop-spaced frames after the onset),
+    // the strongest bin comes from a Welch average of those frames; the attack frame's own pitch is reported apart.
+    double const ksr = 44100.0;
+    auto kick = [ksr](double body, double start, double prerollMs) {
+        int const n = static_cast<int>(ksr * 0.5);
+        std::vector<float> v(static_cast<size_t>(n), 0.0f);
+        int const onset = static_cast<int>(ksr * prerollMs / 1000.0);
+        double phase = 0.0;
+        for (int i = onset; i < n; ++i) {
+            double const t = (i - onset) / ksr;
+            double const f = body + (start - body) * std::max(0.0, 1.0 - t / 0.09);
+            phase += 2.0 * M_PI * f / ksr;
+            v[static_cast<size_t>(i)] = static_cast<float>(std::tanh(2.0 * std::exp(-t / 0.45) * std::sin(phase)));
+        }
+        uint32_t seed = 12345u;
+        float prev = 0.0f;
+        int const click = static_cast<int>(ksr * 0.25);
+        for (int i = click; i < click + static_cast<int>(ksr * 0.006) && i < n; ++i) {
+            seed = seed * 1664525u + 1013904223u;
+            float const noise = static_cast<float>((seed >> 8) & 0xFFFF) / 32768.0f - 1.0f;
+            v[static_cast<size_t>(i)] += 0.3f * (noise - prev); // first difference: a high-passed click
+            prev = noise;
+        }
+        return v;
+    };
+    struct KickCase { double body, start, prerollMs; };
+    // Review L1: a chord or noise has no clear pitch: fundamental 0, pitchMethod says so; the confidence and the voiced
+    // ratio are reported.
+    {
+        int const n = static_cast<int>(ksr);
+        std::vector<float> chord(static_cast<size_t>(n)), noise(static_cast<size_t>(n));
+        uint32_t seed = 777u;
+        for (int i = 0; i < n; ++i) {
+            double const t = i / ksr;
+            chord[static_cast<size_t>(i)] = static_cast<float>(0.2 * (std::sin(2 * M_PI * 220 * t) + std::sin(2 * M_PI * 261.63 * t) + std::sin(2 * M_PI * 329.63 * t)));
+            seed = seed * 1664525u + 1013904223u;
+            noise[static_cast<size_t>(i)] = static_cast<float>((seed >> 8) & 0xFFFF) / 32768.0f - 1.0f;
+        }
+        for (auto* v : { &chord, &noise }) {
+            auto const json = juce::JSON::parse(armedSpectralJson(v->data(), n, ksr));
+            std::printf("  %s -> fundamental %.2f, confidence %.2f, voiced ratio %.2f, %s\n", v == &chord ? "A minor triad" : "noise",
+                static_cast<double>(json["fundamental"]), static_cast<double>(json["pitchConfidence"]),
+                static_cast<double>(json["voicedRatio"]), json["pitchMethod"].toString().toRawUTF8());
+            CHECK(static_cast<double>(json["fundamental"]) == 0.0);
+            CHECK(json["pitchMethod"].toString().contains("no clear pitch"));
+            CHECK(json.hasProperty("pitchConfidence") && json.hasProperty("voicedRatio"));
+        }
+    }
+    for (auto const k : { KickCase { 48, 158, 20 }, KickCase { 45, 155, 20 }, KickCase { 48, 300, 20 },
+             KickCase { 48, 158, 0 }, KickCase { 48, 158, 200 } }) {
+        auto buf = kick(k.body, k.start, k.prerollMs);
+        auto const json = juce::JSON::parse(armedSpectralJson(buf.data(), static_cast<int>(buf.size()), ksr));
+        double const f0 = json.isObject() ? static_cast<double>(json.getProperty("fundamental", -1.0)) : -1.0;
+        double const peakHz = json.isObject() ? static_cast<double>(json.getProperty("peakFrequency", -1.0)) : -1.0;
+        int const voiced = json.isObject() ? static_cast<int>(json.getProperty("voicedFrames", -1)) : -1;
+        bool const hasAttack = json.isObject() && json.hasProperty("attackPitchHz");
+        std::printf("  kick %.0f Hz (from %.0f, pre-roll %.0f ms) -> fundamental %.2f, peak %.1f Hz, voiced %d\n",
+            k.body, k.start, k.prerollMs, f0, peakHz, voiced);
+        CHECK(std::abs(f0 - k.body) <= k.body * 0.05);
+        CHECK(peakHz > 0.0 && peakHz < 70.0);
+        CHECK(voiced >= 3);
+        CHECK(hasAttack);
+    }
 }
 
 void runStampCostCases(PluginProcessor& processor)
@@ -1244,7 +1311,7 @@ void runConsoleObjectCases(Harness& h)
 
 // MIDI capture (P3.4 S6): the audio thread only queues raw note on/off; the bridge pairs them off the audio
 // thread. Three notes played through processBlock come back as three closed notes.
-void runMidiCaptureCases(PluginProcessor& processor, AudioControl& audio)
+void runMidiCaptureCases(Harness& h, PluginProcessor& processor, AudioControl& audio)
 {
     std::printf("midi capture\n");
     auto* bridge = processor.getMcp()->mcpBridge.get();
@@ -1260,8 +1327,732 @@ void runMidiCaptureCases(PluginProcessor& processor, AudioControl& audio)
     sleepMs(100);
     CHECK(bridge->isMidiCapturing());
     CHECK(bridge->getMidiCaptureNoteCount() == 3);
+    h.replies.clear();
     host->onMessageThread([bridge] { bridge->stopMidiCaptureAndStage(); return true; }, 2000, "test");
     CHECK(!bridge->isMidiCapturing());
+    // P11 take files: the take reaches the TS in the /pd/midi/event reply (the TS writes midi-take.json from it); the
+    // bridge writes no file of its own (scripts/test-bridge-safety.sh refuses a hard-coded user path in the source).
+    auto event = h.replies.waitFor("/pd/midi/event", 2000);
+    CHECK(event.has_value());
+    if (event) {
+        auto const take = parseJson(*event);
+        CHECK(take["id"].toString().startsWith("midi_"));
+        CHECK(static_cast<int>(take["noteCount"]) == 3);
+    }
+}
+
+// P11 V1: every armed window has a generation id. /meter/arm and /meter/arm_spectral answer it (reply arg 0); a read
+// that names an older (or any other) id is refused on /meter/<read|read_spectral>/error/<corr> ("stale_gen ...") and
+// leaves the open window alone; a read without an id is the legacy path. The capability `meter_window_gen` says so.
+bool hasCap(Harness& h, char const* cap, char const* corr)
+{
+    auto caps = h.call("/bridge/capabilities", { corr }, "/bridge/capabilities/reply");
+    bool found = false;
+    if (caps)
+        for (auto const& a : caps->args)
+            found = found || a.text == cap;
+    return found;
+}
+
+void runMeterWindowGenCases(Harness& h, PluginProcessor& processor)
+{
+    std::printf("meter window generation id (P11 V1)\n");
+    auto& session = processor.getMcp()->session;
+    CHECK(hasCap(h, "meter_window_gen", "wg0"));
+
+    auto a1 = h.call("/meter/arm", { "wg1" }, "/meter/arm/reply/wg1");
+    auto a2 = h.call("/meter/arm", { "wg2" }, "/meter/arm/reply/wg2");
+    CHECK(a1.has_value() && a1->args.size() >= 1 && a1->args[0].isNumber);
+    CHECK(a2.has_value() && a2->args.size() >= 1 && a2->args[0].isNumber);
+    int const g1 = a1 && !a1->args.empty() ? static_cast<int>(a1->num(0)) : -1;
+    int const g2 = a2 && !a2->args.empty() ? static_cast<int>(a2->num(0)) : -1;
+    CHECK(g1 >= 0 && g2 > g1);
+    // The older id is refused and the newer window stays open.
+    auto stale = h.call("/meter/read", { "wg3", g1 }, "/meter/read/error/wg3", 2000);
+    CHECK(stale.has_value() && stale->str(0).rfind("stale_gen", 0) == 0);
+    CHECK(session.mcpArmActive.load());
+    // The current id reads and names its window (arg 15).
+    auto cur = h.call("/meter/read", { "wg4", g2 }, "/meter/read/reply/wg4", 2000);
+    CHECK(cur.has_value() && cur->args.size() >= 16 && static_cast<int>(cur->num(15)) == g2);
+    CHECK(!session.mcpArmActive.load());
+    // The legacy read (no id) still answers.
+    auto legacy = h.call("/meter/read", { "wg5" }, "/meter/read/reply/wg5", 2000);
+    CHECK(legacy.has_value() && legacy->args.size() >= 10);
+
+    // Review L5: a window id past int32 (a float 3e9) is a stale id, never a legacy read that closes the window.
+    {
+        h.call("/meter/arm", { "wg10" }, "/meter/arm/reply/wg10");
+        auto huge = h.call("/meter/read", { "wg11", 3.0e9 }, "/meter/read/error/wg11", 2000);
+        CHECK(huge.has_value());
+        CHECK(session.mcpArmActive.load());
+        h.call("/meter/read", { "wg12" }, "/meter/read/reply/wg12");
+    }
+
+    // The spectral window: the same scheme.
+    auto s1 = h.call("/meter/arm_spectral", { 100, "wg6" }, "/meter/arm_spectral/reply/wg6");
+    auto s2 = h.call("/meter/arm_spectral", { 100, "wg7" }, "/meter/arm_spectral/reply/wg7");
+    CHECK(s1.has_value() && s1->args.size() >= 1 && s1->args[0].isNumber);
+    CHECK(s2.has_value() && s2->args.size() >= 1 && s2->args[0].isNumber);
+    int const sg1 = s1 && !s1->args.empty() ? static_cast<int>(s1->num(0)) : -1;
+    int const sg2 = s2 && !s2->args.empty() ? static_cast<int>(s2->num(0)) : -1;
+    CHECK(sg1 >= 0 && sg2 > sg1);
+    auto sStale = h.call("/meter/read_spectral", { "wg8", sg1 }, "/meter/read_spectral/error/wg8", 2000);
+    CHECK(sStale.has_value() && sStale->str(0).rfind("stale_gen", 0) == 0);
+    sleepMs(250); // the audio thread fills the 100 ms window
+    auto sCur = h.call("/meter/read_spectral", { "wg9", sg2 }, "/meter/read_spectral/reply/wg9", 3000);
+    CHECK(sCur.has_value());
+    if (sCur) {
+        auto const json = parseJson(*sCur);
+        CHECK(json.hasProperty("gen") && static_cast<int>(json["gen"]) == sg2);
+    }
+}
+
+// P11 V2 (J3b): one armed window, three named taps. /meter/read args 10-14: the PRE-LIMITER tap (after PlugData's
+// master gain, before its limiter; the existing midiTick hook): peak (10) and RMS (11); the FINAL tap's RMS (12); the
+// master volume as the linear gain PlugData applies (13); the limiter's largest gain reduction in the window, dB (14).
+// Arg 15 is the window id (V1), arg 16 Pd's own output peak before the master gain. The PRE-CEILING tap is arg 5 (P9),
+// the FINAL peak arg 1. Rendered through processBlock with this file's audio thread paused.
+void runMeterTapCases(Harness& h, PluginProcessor& processor, AudioControl& audio)
+{
+    std::printf("meter taps: pre-limiter, pre-ceiling, final (P11 V2)\n");
+    auto* host = processor.getMcp();
+    PlugDataParameter* volume = nullptr;
+    for (auto* p : processor.getParameters())
+        if (auto* param = dynamic_cast<PlugDataParameter*>(p); param && param->getTitle().toString() == "volume")
+            volume = param;
+    CHECK(volume != nullptr);
+    if (!volume) return;
+    float const volumeBefore = volume->getUnscaledValue();
+    bool const limiterBefore = processor.getEnableLimiter();
+    int const thresholdBefore = host->onMessageThread(
+        [] { return SettingsFile::getInstance()->getProperty<int>("limiter_threshold"); }, 2000, "test").value_or(1);
+    auto setThreshold = [&](int index) {
+        host->onMessageThread([&processor, index] { processor.setLimiterThreshold(index); return true; }, 2000, "test");
+    };
+
+    audio.paused = true;
+    sleepMs(60);
+    // [osc~ 440] -> [dac~ 1 2]: a full-scale sine at Pd's output.
+    auto made = h.call("/pd/batch_atomic",
+        { "main", "tap1", 0, 0, 0, 2, 2,
+            "tapo", 900, 40, "obj", "osc~", 1, "440",
+            "tapd", 900, 120, "obj", "dac~", 0,
+            "tapo", 0, "tapd", 0,
+            "tapo", 0, "tapd", 1,
+            0, 5, 10, 0 },
+        "/pd/batch_atomic/reply/tap1");
+    CHECK(made.has_value() && made->num(0) == 2);
+    h.fire("/pd/dsp", { 1 });
+    sleepMs(200);
+    int const outputs = processor.getTotalNumOutputChannels();
+    juce::AudioBuffer<float> buffer(std::max(2, outputs), 512);
+    juce::MidiBuffer midi;
+    auto render = [&](int blocks) {
+        for (int k = 0; k < blocks; ++k) {
+            buffer.clear();
+            midi.clear();
+            processor.processBlock(buffer, midi);
+        }
+    };
+    auto window = [&](char const* armCorr, char const* readCorr, int blocks) -> std::optional<Reply> {
+        auto arm = h.call("/meter/arm", { armCorr }, std::string("/meter/arm/reply/") + armCorr);
+        int const gen = arm && !arm->args.empty() ? static_cast<int>(arm->num(0)) : 0;
+        render(blocks);
+        return h.call("/meter/read", { readCorr, gen }, std::string("/meter/read/reply/") + readCorr, 2000);
+    };
+
+    // Limiter on at -12 dB, unity master: pre-limiter ~1.0, final ~0.2512, about 12 dB of gain reduction.
+    processor.setEnableLimiter(true);
+    setThreshold(0);
+    volume->setUnscaledValueNotifyingHost(0.8f);
+    render(60);
+    {
+        auto r = window("tapA", "tapB", 30);
+        CHECK(r.has_value() && r->args.size() >= 17);
+        if (r && r->args.size() >= 17) {
+            std::printf("  limiter -12: pre %.4f/%.4f rms, final %.4f/%.4f rms, volume %.4f, gr %.2f dB, pd %.4f\n",
+                r->num(10), r->num(11), r->num(1), r->num(12), r->num(13), r->num(14), r->num(16));
+            CHECK(r->num(10) > 0.95 && r->num(10) < 1.05);    // pre-limiter peak
+            CHECK(r->num(11) > 0.65 && r->num(11) < 0.75);    // pre-limiter RMS (sine: 0.707)
+            CHECK(r->num(1) > 0.20 && r->num(1) < 0.32);      // final peak, held by the limiter
+            CHECK(r->num(12) > 0.12 && r->num(12) < 0.25);    // final RMS
+            CHECK(std::abs(r->num(13) - 1.0) < 1e-3);         // master volume: unity
+            CHECK(r->num(14) > 9.0 && r->num(14) < 15.0);     // gain reduction, dB
+            CHECK(r->num(16) > 0.95 && r->num(16) < 1.05);    // Pd's own output
+        }
+    }
+    // Review L3: a re-arm starts from empty sums even when the audio thread stores a sum of the old window after the
+    // arm (simulated: a huge sum written right after the arm); the next block drops it.
+    {
+        auto arm = h.call("/meter/arm", { "tapG" }, "/meter/arm/reply/tapG");
+        int const gen = arm && !arm->args.empty() ? static_cast<int>(arm->num(0)) : 0;
+        host->session.mcpArmFinalSumSq.store(1.0e12);
+        host->session.mcpArmFinalCount.store(1);
+        host->session.mcpArmPreLimiterPeak.store(50.0f);
+        render(10);
+        auto r = h.call("/meter/read", { "tapH", gen }, "/meter/read/reply/tapH", 2000);
+        CHECK(r.has_value() && r->args.size() >= 17 && r->num(12) < 1.0 && r->num(10) < 2.0);
+    }
+    // Master volume 0, limiter off: the patch plays (Pd's output ~1.0), nothing passes the master gain.
+    processor.setEnableLimiter(false);
+    volume->setUnscaledValueNotifyingHost(0.0f);
+    render(60);
+    {
+        auto r = window("tapC", "tapD", 20);
+        CHECK(r.has_value() && r->args.size() >= 17);
+        if (r && r->args.size() >= 17) {
+            CHECK(r->num(10) < 1e-4);                         // pre-limiter (after the master gain)
+            CHECK(r->num(1) < 1e-4);                          // final
+            CHECK(r->num(13) == 0.0);                         // master volume 0
+            CHECK(r->num(14) == 0.0);                         // limiter off: no reduction
+            CHECK(r->num(16) > 0.95);                         // the patch itself plays
+        }
+    }
+    // Master slider 0.4: the gain PlugData applies, (0.4 / 0.8) ^ 2.5; the pre-limiter tap shows exactly that.
+    volume->setUnscaledValueNotifyingHost(0.4f);
+    render(60);
+    {
+        auto r = window("tapE", "tapF", 20);
+        CHECK(r.has_value() && r->args.size() >= 17);
+        if (r && r->args.size() >= 17) {
+            double const want = std::pow(0.5, 2.5);
+            CHECK(std::abs(r->num(13) - want) < 1e-3);
+            CHECK(std::abs(r->num(10) - r->num(16) * r->num(13)) < 0.02);
+        }
+    }
+
+    volume->setUnscaledValueNotifyingHost(volumeBefore);
+    processor.setEnableLimiter(limiterBefore);
+    setThreshold(thresholdBefore);
+    h.call("/pd/batch_atomic", { "main", "tap2", 2, 0, 0, 0, 0, "tapo", "tapd", 0, 5, 10, 0 }, "/pd/batch_atomic/reply/tap2");
+    render(4);
+    audio.paused = false;
+}
+
+// P11.2 V10: /pd/load_patch reads and checks the file BEFORE it clears the canvas. An unreadable file or one that is
+// not a Pd patch is an error and the canvas keeps every object; a valid empty patch is a valid load. Reply: arg0 the
+// object count (-1 on an error, old clients read only this), arg1 1 (undo reset) or "error: ...", arg2 the JSON
+// report {canvasFound, fileObjects, created, failedCreates:[{index,text}], sidecar:{applied,skipped}} (capability
+// `load_patch_report`). Failed creates are Pd's red boxes (text_class, T_OBJECT). Loaded into a subpatch so the main
+// canvas of the other cases stays as it is.
+void runLoadReportCases(Harness& h, PluginProcessor& processor)
+{
+    std::printf("load_patch validates before clearing, report (P11.2 V10)\n");
+    auto* host = processor.getMcp();
+    CHECK(hasCap(h, "load_patch_report", "lr0"));
+    juce::File dir = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("mcp_p11_load");
+    dir.deleteRecursively();
+    dir.createDirectory();
+    auto good = dir.getChildFile("good.pd");
+    good.replaceWithText("#N canvas 0 50 450 300 12;\n#X obj 10 10 f;\n#X obj 10 40 p11_no_such_class_xyz 1 2;\n"
+                         "#X msg 10 70 hello;\n#X connect 0 0 2 0;\n");
+    auto empty = dir.getChildFile("empty.pd");
+    empty.replaceWithText("#N canvas 0 50 450 300 12;\n");
+    auto garbage = dir.getChildFile("garbage.pd");
+    garbage.replaceWithText("this is not a patch ; at all ;\n");
+    auto locked = dir.getChildFile("locked.pd");
+    locked.replaceWithText("#N canvas 0 50 450 300 12;\n#X obj 10 10 f;\n");
+    ::chmod(locked.getFullPathName().toRawUTF8(), 0);
+
+    t_canvas* sub = nullptr;
+    CHECK(host->pdWait([&] {
+        t_canvas* cnv = host->getCanvasBySymbol("main");
+        if (!cnv) return;
+        t_atom a[4];
+        SETFLOAT(a, 900);
+        SETFLOAT(a + 1, 600);
+        SETSYMBOL(a + 2, gensym("pd"));
+        SETSYMBOL(a + 3, gensym("p11load"));
+        pd_typedmess(&cnv->gl_pd, gensym("obj"), 4, a);
+        sub = reinterpret_cast<t_canvas*>(pd::Interface::getNewest(cnv));
+        for (char const* cls : { "f", "t" }) {
+            t_atom b[3];
+            SETFLOAT(b, 10);
+            SETFLOAT(b + 1, 10);
+            SETSYMBOL(b + 2, gensym(cls));
+            pd_typedmess(&sub->gl_pd, gensym("obj"), 3, b);
+        }
+    }, 3000));
+    CHECK(sub != nullptr);
+    if (!sub) return;
+    auto count = [&] {
+        int n = -1;
+        host->pdWait([&] { n = 0; for (t_gobj* g = sub->gl_list; g; g = g->g_next) ++n; }, 3000);
+        return n;
+    };
+    auto load = [&](juce::File const& f, char const* canvas, char const* corr) {
+        return h.call("/pd/load_patch", { canvas, f.getFullPathName(), corr }, std::string("/pd/load_patch/reply/") + corr, 5000);
+    };
+    auto report = [](std::optional<Reply> const& r) {
+        return r && r->args.size() >= 3 ? juce::JSON::parse(juce::String(r->str(2))) : juce::var();
+    };
+    CHECK(count() == 2);
+    for (auto const& [file, corr] : { std::make_pair(garbage, "lr1"), std::make_pair(locked, "lr2") }) {
+        auto r = load(file, "pd-p11load", corr);
+        CHECK(r.has_value() && r->num(0) == -1);
+        CHECK(r.has_value() && r->args.size() >= 2 && r->str(1).rfind("error:", 0) == 0);
+        CHECK(count() == 2); // untouched
+    }
+    {
+        auto r = load(good, "pd-p11load", "lr3");
+        CHECK(r.has_value() && r->num(0) == 3);
+        auto const json = report(r);
+        CHECK(static_cast<bool>(json["canvasFound"]));
+        CHECK(static_cast<int>(json["fileObjects"]) == 3);
+        CHECK(static_cast<int>(json["created"]) == 3);
+        auto const* failed = json["failedCreates"].getArray();
+        CHECK(failed && failed->size() == 1);
+        if (failed && failed->size() == 1) {
+            CHECK(static_cast<int>((*failed)[0]["index"]) == 1);
+            CHECK((*failed)[0]["text"].toString() == "p11_no_such_class_xyz 1 2");
+        }
+        CHECK(json["sidecar"].hasProperty("applied") && json["sidecar"].hasProperty("skipped"));
+        CHECK(count() == 3);
+    }
+    {
+        auto r = load(empty, "pd-p11load", "lr4");
+        CHECK(r.has_value() && r->num(0) == 0);
+        auto const json = report(r);
+        CHECK(static_cast<int>(json["fileObjects"]) == 0 && static_cast<int>(json["created"]) == 0);
+        CHECK(json["failedCreates"].isArray() && json["failedCreates"].getArray()->isEmpty());
+        CHECK(count() == 0);
+    }
+    {
+        auto r = load(good, "pd-p11_no_such_canvas", "lr5");
+        CHECK(r.has_value() && r->num(0) == -1);
+        CHECK(!static_cast<bool>(report(r)["canvasFound"]));
+        auto m = load(dir.getChildFile("missing.pd"), "pd-p11load", "lr6");
+        CHECK(m.has_value() && m->num(0) == -1);
+        CHECK(m.has_value() && m->args.size() >= 2 && m->str(1).rfind("error:", 0) == 0);
+    }
+    {
+        // L8: a red box inside clone instances is named (the clone itself is created).
+        juce::File(juce::String::fromUTF8(canvas_getdir(sub)->s_name)).getChildFile("p11redvoice.pd")
+            .replaceWithText("#N canvas 0 50 450 300 12;\n#X obj 10 10 p11_missing_in_clone;\n");
+        auto f = dir.getChildFile("clone.pd");
+        f.replaceWithText("#N canvas 0 50 450 300 12;\n#X obj 10 10 clone p11redvoice 2;\n");
+        auto const json = report(load(f, "pd-p11load", "lr30"));
+        auto const* failed = json["failedCreates"].getArray();
+        CHECK(failed && failed->size() == 2);
+        juce::File(juce::String::fromUTF8(canvas_getdir(sub)->s_name)).getChildFile("p11redvoice.pd").deleteFile();
+    }
+
+    // Review H1: refused BEFORE the clear (the canvas keeps its objects): a header followed by garbage, a file cut off
+    // inside a subpatch, a stray restore at depth 0, atoms after the last ';'. A patch with `#N struct` templates
+    // before its canvas loads (L6 review: it was refused). Wires the file lists but the canvas does not get are named
+    // (missingWires) and the reply is not ok; so are array contents (#A) the paste does not restore. L8: an empty box
+    // is not a failed create. L6: a symbol that is not UTF-8 keeps its bytes.
+    load(good, "pd-p11load", "lr20");
+    CHECK(count() == 3);
+    auto bad = [&](char const* name, char const* text, char const* corr) {
+        auto f = dir.getChildFile(name);
+        f.replaceWithText(text);
+        auto r = load(f, "pd-p11load", corr);
+        bool const refused = r.has_value() && r->num(0) == -1 && r->args.size() >= 2 && r->str(1).rfind("error:", 0) == 0;
+        if (!refused) std::printf("  %s was not refused\n", name);
+        CHECK(refused);
+        CHECK(count() == 3);
+    };
+    bad("hdrgarbage.pd", "#N canvas 0 50 450 300 12;\nhello world;\nfoo 1 2;\n", "lr21");
+    bad("truncated.pd", "#N canvas 0 50 450 300 12;\n#X obj 10 10 f;\n#N canvas 0 0 100 100 inner 0;\n#X obj 1 1 f;\n", "lr22");
+    bad("stray.pd", "#N canvas 0 50 450 300 12;\n#X obj 10 10 f;\n#X restore 10 10 pd x;\n", "lr23");
+    bad("trailing.pd", "#N canvas 0 50 450 300 12;\n#X obj 10 10 f;\n#X obj 10 40 t b", "lr24");
+    {
+        auto f = dir.getChildFile("struct.pd");
+        f.replaceWithText("#N struct p11tpl float x float y;\n#N canvas 0 50 450 300 12;\n#X obj 10 10 f;\n");
+        auto r = load(f, "pd-p11load", "lr25");
+        CHECK(r.has_value() && r->num(0) == 1);
+        CHECK(static_cast<bool>(report(r)["ok"]));
+        CHECK(count() == 1);
+    }
+    {
+        auto f = dir.getChildFile("wires.pd");
+        f.replaceWithText("#N canvas 0 50 450 300 12;\n#X obj 10 10 f;\n#X obj 10 40 f;\n#X connect 0 0 1 0;\n#X connect 0 0 1 5;\n");
+        auto r = load(f, "pd-p11load", "lr26");
+        auto const json = report(r);
+        CHECK(r.has_value() && r->num(0) == 2);
+        CHECK(static_cast<int>(json["fileWires"]) == 2 && static_cast<int>(json["wires"]) == 1 && static_cast<int>(json["missingWires"]) == 1);
+        CHECK(!static_cast<bool>(json["ok"]));
+        CHECK(r.has_value() && r->args.size() >= 2 && r->str(1).rfind("error:", 0) == 0);
+    }
+    {
+        auto f = dir.getChildFile("emptybox.pd");
+        f.replaceWithText("#N canvas 0 50 450 300 12;\n#X obj 10 10;\n#X obj 10 40 f;\n");
+        auto const json = report(load(f, "pd-p11load", "lr27"));
+        CHECK(json["failedCreates"].isArray() && json["failedCreates"].getArray()->isEmpty());
+        CHECK(static_cast<int>(json["created"]) == 2 && static_cast<bool>(json["ok"]));
+    }
+    {
+        auto f = dir.getChildFile("array.pd");
+        f.replaceWithText("#N canvas 0 50 450 300 12;\n#N canvas 0 0 450 300 (subpatch) 0;\n#X array p11arrA 3 float 3;\n"
+                          "#A 0 0.5 0.25 0.125;\n#X coords 0 1 3 -1 200 140 1 0 0;\n#X restore 20 20 graph;\n");
+        auto r = load(f, "pd-p11load", "lr28");
+        auto const json = report(r);
+        CHECK(static_cast<int>(json["arrayLines"]) == 1 && !static_cast<bool>(json["ok"]));
+        CHECK(json["arraysNote"].toString().contains("not restored"));
+    }
+    {
+        auto f = dir.getChildFile("latin1.pd");
+        static char const latin1[] = "#N canvas 0 50 450 300 12;\n#X obj 10 10 r p11\xe9x;\n";
+        f.replaceWithData(latin1, sizeof(latin1) - 1);
+        load(f, "pd-p11load", "lr29");
+        std::string text;
+        host->pdWait([&] {
+            if (sub->gl_list) {
+                char* buf = nullptr;
+                int len = 0;
+                binbuf_gettext(reinterpret_cast<t_text*>(sub->gl_list)->te_binbuf, &buf, &len);
+                if (buf) { text.assign(buf, static_cast<size_t>(len)); freebytes(buf, len); }
+            }
+        }, 3000);
+        CHECK(text == "r p11\xe9x");
+    }
+
+    // V11: save_content writes the bytes save_patch writes (one canvas, two files) and answers their hash (arg1, the
+    // sidecar's pdHash). V12: save_patch answers arg1 "" (or "ids not saved: ...") and arg2 {rebound, idsSaved}; with
+    // no editor showing the canvas nothing is re-pointed (rebound null).
+    load(good, "pd-p11load", "lr7");
+    auto viaContent = dir.getChildFile("content.pd"), viaPatch = dir.getChildFile("patch.pd");
+    auto sc = h.call("/pd/save_content", { "pd-p11load", viaContent.getFullPathName(), "lr8" }, "/pd/save_content/reply/lr8");
+    auto sp = h.call("/pd/save_patch", { "pd-p11load", viaPatch.getFullPathName(), "lr9" }, "/pd/save_patch/reply/lr9");
+    CHECK(sc.has_value() && sp.has_value());
+    CHECK(viaContent.loadFileAsString() == viaPatch.loadFileAsString());
+    CHECK(sc.has_value() && sc->args.size() >= 2 && sc->str(1) == juce::SHA256(viaContent).toHexString().toStdString());
+    CHECK(sp.has_value() && sp->args.size() >= 3 && sp->str(1).empty());
+    if (sp && sp->args.size() >= 3) {
+        auto const json = juce::JSON::parse(juce::String(sp->str(2)));
+        CHECK(json.hasProperty("rebound") && json["rebound"].isVoid());
+        CHECK(static_cast<bool>(json["idsSaved"]));
+    }
+
+    // V15a: the census marks containers (subpatch, abstraction) with isCanvas and counts what they hold.
+    auto census = h.call("/pd/census", { "main", "lr10" }, "/pd/census/reply/lr10");
+    bool sawSub = false, plainFalse = true;
+    if (census) {
+        auto const json = parseJson(*census);
+        for (auto const& o : *json["objects"].getArray()) {
+            bool const isCanvas = static_cast<bool>(o["isCanvas"]);
+            if (o["type"].toString() == "pd" && o["args"][0].toString() == "p11load") {
+                sawSub = isCanvas && static_cast<int>(o["childCount"]) == 3;
+            } else if (o["kind"].toString() != "canvas") {
+                plainFalse = plainFalse && o.hasProperty("isCanvas") && !isCanvas;
+            }
+        }
+    }
+    CHECK(sawSub);
+    CHECK(plainFalse);
+
+    host->pdWait([&] { if (auto* cnv = host->getCanvasBySymbol("main")) glist_delete(cnv, &sub->gl_gobj); }, 3000);
+    ::chmod(locked.getFullPathName().toRawUTF8(), 0644);
+    dir.deleteRecursively();
+}
+
+// P11.4 V19: /pd/bound <corrId> <name...> asks Pd who listens on each name, over every open root canvas, into
+// subpatches, abstractions and clone instances. Per name: {name, bound, count, receivers:[{canvasKey, path, index,
+// tempId?, class}], other:[{kind}]}; `count` holds objects on a canvas only; a canvas's own pd-<name> binding, the
+// bridge's control probes and other non-canvas binders are `other`. A name nothing ever used is unbound and is not
+// added to Pd's symbol table. Three [r] on one name exercise Pd's bindlist (its layout is read by the bridge: a Pd
+// update that changes it fails here).
+std::optional<juce::var> boundEntry(std::optional<Reply> const& r, std::string const& name)
+{
+    if (!r) return std::nullopt;
+    auto const json = parseJson(*r);
+    if (auto const* names = json["names"].getArray())
+        for (auto const& n : *names)
+            if (n["name"].toString().toStdString() == name)
+                return n;
+    return std::nullopt;
+}
+
+void runBoundCases(Harness& h, PluginProcessor& processor)
+{
+    std::printf("/pd/bound (P11.4 V19)\n");
+    auto* host = processor.getMcp();
+    CHECK(hasCap(h, "bound", "bd0"));
+    t_canvas* sub = nullptr;
+    std::vector<t_gobj*> made;
+    CHECK(host->pdWait([&] {
+        t_canvas* cnv = host->getCanvasBySymbol("main");
+        if (!cnv) return;
+        auto obj = [&](t_canvas* c, std::vector<char const*> words) {
+            std::vector<t_atom> a(words.size() + 2);
+            SETFLOAT(&a[0], 1000);
+            SETFLOAT(&a[1], 700);
+            for (size_t i = 0; i < words.size(); ++i) {
+                char* end = nullptr;
+                double const f = std::strtod(words[i], &end);
+                if (end && *end == 0 && end != words[i]) SETFLOAT(&a[i + 2], f);
+                else SETSYMBOL(&a[i + 2], gensym(words[i]));
+            }
+            pd_typedmess(&c->gl_pd, gensym("obj"), static_cast<int>(a.size()), a.data());
+            return pd::Interface::getNewest(c);
+        };
+        juce::File dir(juce::String::fromUTF8(canvas_getdir(cnv)->s_name));
+        dir.getChildFile("p11voice.pd").replaceWithText("#N canvas 0 50 450 300 12;\n#X obj 10 10 r p11cl;\n");
+        made.push_back(obj(cnv, { "r", "p11k" }));
+        made.push_back(obj(cnv, { "pd", "p11bsub" }));
+        sub = reinterpret_cast<t_canvas*>(made.back());
+        obj(sub, { "r", "p11k" });
+        made.push_back(obj(cnv, { "r~", "p11sig" })); // r~ binds nothing: Pd binds the bus's s~ (and catch~, not throw~)
+        made.push_back(obj(cnv, { "s~", "p11sig" }));
+        made.push_back(obj(cnv, { "catch~", "p11c" }));
+        made.push_back(obj(cnv, { "clone", "p11voice", "4" }));
+        made.push_back(obj(cnv, { "p11voice" }));
+        for (int i = 0; i < 3; ++i) made.push_back(obj(cnv, { "r", "p11three" }));
+        made.push_back(obj(cnv, { "table", "p11tab" }));
+        made.push_back(obj(cnv, { "delwrite~", "p11dl", "100" }));
+        host->identity.bind(cnv, "p11k_main", made[0]);
+    }, 3000));
+
+    auto r = h.call("/pd/bound", { "bd1", "p11k", "p11sig", "p11c", "p11cl", "p11three", "pd-p11bsub", "p11_never_used_name" },
+        "/pd/bound/reply/bd1", 3000);
+    CHECK(r.has_value());
+    auto k = boundEntry(r, "p11k");
+    CHECK(k && static_cast<bool>((*k)["bound"]) && static_cast<int>((*k)["count"]) == 2);
+    if (k) {
+        bool mainId = false, inSub = false;
+        for (auto const& rc : *(*k)["receivers"].getArray()) {
+            mainId = mainId || rc["tempId"].toString() == "p11k_main";
+            inSub = inSub || (rc["canvasKey"].toString() == "pd-p11bsub" && rc["path"].toString().contains("[pd p11bsub]"));
+            CHECK(rc["class"].toString() == "receive");
+        }
+        CHECK(mainId && inSub);
+    }
+    auto sig = boundEntry(r, "p11sig");
+    CHECK(sig && static_cast<int>((*sig)["count"]) == 1); // the s~: a signal bus is bound by its sender
+    CHECK(sig && (*sig)["receivers"][0]["class"].toString().contains("send~"));
+    auto c = boundEntry(r, "p11c");
+    CHECK(c && static_cast<int>((*c)["count"]) == 1);
+    auto cl = boundEntry(r, "p11cl");
+    CHECK(cl && static_cast<int>((*cl)["count"]) == 5); // 4 clone instances + 1 abstraction instance
+    auto three = boundEntry(r, "p11three");
+    CHECK(three && static_cast<int>((*three)["count"]) == 3); // the bindlist
+    auto pdSub = boundEntry(r, "pd-p11bsub");
+    CHECK(pdSub && !static_cast<bool>((*pdSub)["bound"]) && static_cast<int>((*pdSub)["count"]) == 0);
+    CHECK(pdSub && (*pdSub)["other"].getArray() && (*pdSub)["other"].getArray()->size() == 1
+        && (*pdSub)["other"][0]["kind"].toString() == "canvas");
+    // Review M3: each receiver says what kind of name it is.
+    if (k) CHECK((*k)["receivers"][0]["kind"].toString() == "control");
+    if (sig) CHECK((*sig)["receivers"][0]["kind"].toString() == "signal");
+    auto kinds = h.call("/pd/bound", { "bd1k", "p11tab", "p11dl" }, "/pd/bound/reply/bd1k", 3000);
+    auto tab = boundEntry(kinds, "p11tab");
+    auto dl = boundEntry(kinds, "p11dl");
+    CHECK(tab && static_cast<int>((*tab)["count"]) == 1 && (*tab)["receivers"][0]["kind"].toString() == "table");
+    CHECK(dl && static_cast<int>((*dl)["count"]) == 1 && (*dl)["receivers"][0]["kind"].toString() == "delay");
+    // A name nothing binds is answered without a walk.
+    auto unboundOnly = h.call("/pd/bound", { "bd1u", "p11_never_used_name" }, "/pd/bound/reply/bd1u", 3000);
+    CHECK(unboundOnly.has_value() && static_cast<int>(parseJson(*unboundOnly)["walkObjects"]) == 0);
+    auto never = boundEntry(r, "p11_never_used_name");
+    CHECK(never && !static_cast<bool>((*never)["bound"]) && static_cast<int>((*never)["count"]) == 0);
+
+    // An armed control probe on a name with no [r]: not bound, the probe is `other`.
+    h.call("/meter/arm_control", { "p11kick", "bd2" }, "/meter/arm_control/reply/bd2");
+    auto probe = boundEntry(h.call("/pd/bound", { "bd3", "p11kick" }, "/pd/bound/reply/bd3", 3000), "p11kick");
+    CHECK(probe && !static_cast<bool>((*probe)["bound"]) && static_cast<int>((*probe)["count"]) == 0);
+    CHECK(probe && (*probe)["other"].getArray() && !(*probe)["other"].getArray()->isEmpty() && (*probe)["other"][0]["kind"].toString() == "bridge_probe");
+    h.call("/meter/read_control", { "bd4" }, "/meter/read_control/reply/bd4");
+
+    // Cost: 2,000 objects, 64 names, under 5 ms for the walk.
+    int before = 0;
+    host->pdWait([&] {
+        t_canvas* cnv = host->getCanvasBySymbol("main");
+        for (t_gobj* g = cnv->gl_list; g; g = g->g_next) ++before;
+        for (int i = 0; i < 2000; ++i) {
+            t_atom a[3];
+            SETFLOAT(a, 10 + (i % 40) * 20);
+            SETFLOAT(a + 1, 900 + (i / 40) * 20);
+            SETSYMBOL(a + 2, gensym("f"));
+            pd_typedmess(&cnv->gl_pd, gensym("obj"), 3, a);
+        }
+    }, 10000);
+    std::vector<A> many { A("bd5") };
+    std::vector<juce::String> names;
+    for (int i = 0; i < 64; ++i) names.push_back("p11k" + juce::String(i));
+    for (auto const& n : names) many.push_back(A(n));
+    // Early exit: the walk stops once every binder of the asked names is found (the three [r p11three] come before
+    // the 2,000 boxes).
+    auto early = h.call("/pd/bound", { "bd6", "p11three" }, "/pd/bound/reply/bd6", 3000);
+    CHECK(early.has_value() && static_cast<int>(parseJson(*early)["walkObjects"]) < 2000);
+    // The budget (test hook: PLUGDATA_MCP_BOUND_BUDGET_OBJECTS): a walk that would pass it stops and says truncated;
+    // the binders it did not reach are named as unresolved.
+    ::setenv("PLUGDATA_MCP_BOUND_BUDGET_OBJECTS", "3", 1);
+    auto budget = h.call("/pd/bound", { "bd7", "p11dl" }, "/pd/bound/reply/bd7", 3000);
+    ::unsetenv("PLUGDATA_MCP_BOUND_BUDGET_OBJECTS");
+    CHECK(budget.has_value() && static_cast<bool>(parseJson(*budget)["truncated"]));
+    auto const cut = boundEntry(budget, "p11dl");
+    CHECK(cut && (*cut)["other"].getArray() && !(*cut)["other"].getArray()->isEmpty() && (*cut)["other"][0]["kind"].toString() == "unresolved");
+    auto timed = h.callList("/pd/bound", many, "/pd/bound/reply/bd5", 5000);
+    CHECK(timed.has_value());
+    if (timed) {
+        double const us = static_cast<double>(parseJson(*timed)["walkUs"]);
+        std::printf("  /pd/bound walk over %d objects, 64 names: %.0f us\n", before + 2000, us);
+        CHECK(us >= 0 && us < 5000);
+    }
+    host->pdWait([&] {
+        t_canvas* cnv = host->getCanvasBySymbol("main");
+        std::vector<t_gobj*> extra;
+        int idx = 0;
+        for (t_gobj* g = cnv->gl_list; g; g = g->g_next, ++idx)
+            if (idx >= before) extra.push_back(g);
+        for (auto* g : extra) glist_delete(cnv, g);
+        for (auto* g : made) glist_delete(cnv, g);
+        juce::File(juce::String::fromUTF8(canvas_getdir(cnv)->s_name)).getChildFile("p11voice.pd").deleteFile();
+    }, 10000);
+}
+
+// P11.5 V23: contentVersion. The read-time stamp (McpHost::registerOpenCanvases) also hashes the wires, each object's
+// x/y and its text atoms, folded up into the parent canvases. /pd/identity_version answers it as arg 2 (arg 1 is the
+// canvas key, "" for the global counter) and the census header carries it. Edits made behind the bridge's back (as a
+// hand edit is) bump it; a wire, a move or a text edit leaves identity_version alone.
+void runContentVersionCases(Harness& h, PluginProcessor& processor)
+{
+    std::printf("contentVersion (P11.5 V23)\n");
+    auto* host = processor.getMcp();
+    auto versions = [&](char const* corr) -> std::pair<double, double> {
+        auto r = h.call("/pd/identity_version", { corr, "main" }, std::string("/pd/identity_version/reply/") + corr, 2000);
+        if (!r || r->args.size() < 3) return { -1, -1 };
+        return { r->num(0), r->num(2) };
+    };
+    t_gobj *a = nullptr, *b = nullptr, *msg = nullptr;
+    host->pdWait([&] {
+        t_canvas* cnv = host->getCanvasBySymbol("main");
+        auto obj = [&](char const* sel, char const* cls, int y) {
+            t_atom at[3];
+            SETFLOAT(at, 1200);
+            SETFLOAT(at + 1, y);
+            SETSYMBOL(at + 2, gensym(cls));
+            pd_typedmess(&cnv->gl_pd, gensym(sel), 3, at);
+            return pd::Interface::getNewest(cnv);
+        };
+        a = obj("obj", "f", 40);
+        b = obj("obj", "f", 80);
+        msg = obj("msg", "hello", 120);
+    }, 3000);
+    auto const v0 = versions("cv0");
+    CHECK(v0.second >= 0);
+    auto edit = [&](char const* what, std::function<void(t_canvas*)> const& fn, bool identityStays, char const* corr) {
+        auto const before = versions((std::string(corr) + "a").c_str());
+        host->pdWait([&] { fn(host->getCanvasBySymbol("main")); }, 3000);
+        auto const after = versions((std::string(corr) + "b").c_str());
+        if (after.second == before.second) std::printf("  %s: contentVersion did not change\n", what);
+        CHECK(after.second >= 0 && after.second != before.second);
+        if (identityStays) CHECK(after.first == before.first);
+    };
+    edit("hand wire", [&](t_canvas* c) { obj_connect(pd_checkobject(&a->g_pd), 0, pd_checkobject(&b->g_pd), 0); (void)c; }, true, "cv1");
+    edit("move", [&](t_canvas*) { reinterpret_cast<t_text*>(b)->te_xpix += 15; }, true, "cv2");
+    edit("text edit", [&](t_canvas*) { binbuf_text(reinterpret_cast<t_text*>(msg)->te_binbuf, "world", 5); }, true, "cv3");
+    edit("paste", [&](t_canvas* c) {
+        t_atom at[4];
+        SETFLOAT(at, 1200);
+        SETFLOAT(at + 1, 160);
+        SETSYMBOL(at + 2, gensym("r"));
+        SETSYMBOL(at + 3, gensym("kick_t3"));
+        pd_typedmess(&c->gl_pd, gensym("obj"), 4, at);
+    }, false, "cv4");
+    edit("delete", [&](t_canvas* c) { glist_delete(c, pd::Interface::getNewest(c)); }, false, "cv5");
+    // Review M2: a hand change of an iemgui's receive name, a disconnect, a retype, an undo and a redo bump it too.
+    t_gobj* slider = nullptr;
+    host->pdWait([&] {
+        t_canvas* c = host->getCanvasBySymbol("main");
+        t_atom at[3];
+        SETFLOAT(at, 1300);
+        SETFLOAT(at + 1, 40);
+        SETSYMBOL(at + 2, gensym("hsl"));
+        pd_typedmess(&c->gl_pd, gensym("obj"), 3, at);
+        slider = pd::Interface::getNewest(c);
+        host->identity.bind(c, "cvB", b);
+    }, 3000);
+    edit("iemgui receive", [&](t_canvas*) {
+        t_atom r;
+        SETSYMBOL(&r, gensym("p11cv_rcv"));
+        pd_typedmess(&slider->g_pd, gensym("receive"), 1, &r);
+    }, true, "cv10");
+    edit("disconnect", [&](t_canvas*) { obj_disconnect(pd_checkobject(&a->g_pd), 0, pd_checkobject(&b->g_pd), 0); }, true, "cv11");
+    {
+        auto const before = versions("cv12a");
+        auto mv = h.call("/pd/move_batch_id", { "main", "cv12m", "cvB", 1260, 95 }, "/pd/mcp_move_batch_id/reply/cv12m");
+        CHECK(mv.has_value());
+        sleepMs(300);
+        auto const moved = versions("cv12b");
+        h.call("/pd/undo", { "main", "cv12u" }, "/pd/undo/reply/cv12u");
+        sleepMs(600);
+        auto const undone = versions("cv12c");
+        h.call("/pd/redo", { "main", "cv12r" }, "/pd/redo/reply/cv12r");
+        sleepMs(600);
+        auto const redone = versions("cv12d");
+        CHECK(moved.second != before.second);
+        CHECK(undone.second != moved.second);
+        CHECK(redone.second != undone.second);
+    }
+    edit("retype", [&](t_canvas* c) {
+        char text[] = "f 7";
+        text_setto(reinterpret_cast<t_text*>(b), c, text, 3);
+        b = nullptr;
+        for (t_gobj* g = c->gl_list; g; g = g->g_next) // the retyped box (text_setto recreates it)
+            if (auto* t = pd_checkobject(&g->g_pd); t && t->te_xpix >= 1200 && t->te_binbuf && binbuf_getnatom(t->te_binbuf) == 2)
+                b = g;
+    }, false, "cv13");
+    // A canvas closed and opened again never gets a version it had before.
+    {
+        auto subVersion = [&](char const* corr) {
+            auto r = h.call("/pd/identity_version", { corr, "pd-p11cvsub" }, std::string("/pd/identity_version/reply/") + corr, 2000);
+            return r && r->args.size() >= 3 ? r->num(2) : -1.0;
+        };
+        auto makeSub = [&] {
+            host->pdWait([&] {
+                t_canvas* c = host->getCanvasBySymbol("main");
+                t_atom at[4];
+                SETFLOAT(at, 1400);
+                SETFLOAT(at + 1, 40);
+                SETSYMBOL(at + 2, gensym("pd"));
+                SETSYMBOL(at + 3, gensym("p11cvsub"));
+                pd_typedmess(&c->gl_pd, gensym("obj"), 4, at);
+            }, 3000);
+        };
+        auto dropSub = [&] {
+            host->pdWait([&] { t_canvas* c = host->getCanvasBySymbol("main"); glist_delete(c, pd::Interface::getNewest(c)); }, 3000);
+        };
+        makeSub();
+        double const first = subVersion("cv14");
+        dropSub();
+        makeSub();
+        double const second = subVersion("cv15");
+        dropSub();
+        std::printf("  reopened canvas: version %.0f then %.0f\n", first, second);
+        CHECK(first >= 0 && second >= 0 && second != first);
+    }
+    // No edit: no change.
+    auto const s1 = versions("cv6");
+    auto const s2 = versions("cv7");
+    CHECK(s1.second == s2.second);
+    // The census header carries the same number.
+    auto census = h.call("/pd/census", { "main", "cv8" }, "/pd/census/reply/cv8");
+    CHECK(census.has_value() && parseJson(*census).hasProperty("contentVersion"));
+    if (census) CHECK(static_cast<double>(parseJson(*census)["contentVersion"]) == s2.second);
+    host->pdWait([&] {
+        t_canvas* c = host->getCanvasBySymbol("main");
+        for (auto* g : { a, b, msg, slider }) if (g) glist_delete(c, g);
+    }, 3000);
+}
+
+// P11.5 V26: /pd/selection_get <corrId> [canvas] answers the live editor selection {canvasKey, ids, classes, count}
+// (empty = nothing selected). Headless there is no editor, so nothing is selected; an unknown canvas is an error.
+void runSelectionGetCases(Harness& h)
+{
+    std::printf("/pd/selection_get (P11.5 V26)\n");
+    CHECK(hasCap(h, "selection_get", "sg0"));
+    auto any = h.call("/pd/selection_get", { "sg1" }, "/pd/selection_get/reply/sg1", 2000);
+    CHECK(any.has_value());
+    if (any) {
+        auto const json = parseJson(*any);
+        CHECK(static_cast<int>(json["count"]) == 0 && json["ids"].isArray() && json["ids"].getArray()->isEmpty());
+        CHECK(json["classes"].isArray());
+    }
+    auto onMain = h.call("/pd/selection_get", { "sg2", "main" }, "/pd/selection_get/reply/sg2", 2000);
+    CHECK(onMain.has_value() && parseJson(*onMain)["canvasKey"].toString().isNotEmpty());
+    CHECK(onMain.has_value() && static_cast<int>(parseJson(*onMain)["count"]) == 0);
+    auto bad = h.call("/pd/selection_get", { "sg3", "pd-p11_no_such_canvas" }, "/pd/selection_get/error/sg3", 2000);
+    CHECK(bad.has_value());
 }
 
 // P5.1 sink floor S1: /pd/limiter answers the LIVE limiter state and the toolbar threshold
@@ -2639,7 +3430,7 @@ void runZeroArgCases(Harness& h)
         auto const* e = f ? f->find("error") : nullptr;
         refused += (f && field(*f, "outcome") == "rejected" && e && field(*e, "code") == "bad_frame") ? 1 : 0;
     }
-    CHECK(guarded == 21 && refused == guarded); // 19 since /pd/midi_devices (minArgs 1); 21 with P12c approval_show/clear (minArgs 2)
+    CHECK(guarded == 23 && refused == guarded); // 19 since /pd/midi_devices (minArgs 1); +2 P11 /pd/bound, /pd/selection_get; +2 P12c approval_show/clear (minArgs 2)
 }
 
 // S6.6 (audit A20): the live props of an IEM GUI carry its label, so a control the builder named (`hsl ... morph_s
@@ -2947,16 +3738,22 @@ int main()
             runArmedTraceCases(harness);
             runConsoleObjectCases(harness);
             runLimiterCases(harness, processor);
+            runMeterWindowGenCases(harness, processor);
+            runMeterTapCases(harness, processor, audioControl);
             runOutputCeilingCases(harness, processor, audioControl);
             runMidiDevicesCases(harness, processor);
             runApprovalCases(harness, processor);
             runLimiterPatchCases(processor);
             runVolumeGuardCases(processor);
             runIndexRefCases(harness, processor);
-            runMidiCaptureCases(processor, audioControl);
+            runMidiCaptureCases(harness, processor, audioControl);
             runStampCostCases(processor);
             runIdentityValidityCases(processor);
             runSidecarCases(processor);
+            runLoadReportCases(harness, processor);
+            runBoundCases(harness, processor);
+            runContentVersionCases(harness, processor);
+            runSelectionGetCases(harness);
             runV2HandshakeCases(harness, *bridge, [&] {
                 bridge->setReplySinkForTests([&replies](juce::OSCMessage const& msg) { replies.push(msg); });
             });
@@ -2967,10 +3764,10 @@ int main()
 
         // A hung handler must not hang the run.
         std::thread watchdog([&] {
-            for (int waited = 0; waited < 1200 && !casesDone.load(); ++waited)
+            for (int waited = 0; waited < 2400 && !casesDone.load(); ++waited)
                 sleepMs(100);
             if (!casesDone.load()) {
-                std::printf("  FAIL the cases did not finish in 120 s\n");
+                std::printf("  FAIL the cases did not finish in 240 s\n");
                 ++failures;
                 casesDone.store(true);
                 stopMessageLoop();
