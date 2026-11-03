@@ -2,8 +2,8 @@
 //  - A1 provenance: the identity core's per-lifetime origin (ai | unknown), set only on a live serial, never carried by
 //    a name, reset when a new object takes a freed address or a retype starts a new lifetime, stamped with the boot id;
 //  - A2 the ownership predicate (McpOwnership.h): which object counts as the AI's own, and why not;
-//  - A3 the flow-mode switch (McpFlowMode.h): off at start, on only through the artist's chip, off from anywhere;
-//    the flow chip's nonce prefix is reserved.
+//  - A3 the flow-mode switch (McpFlowMode.h): off at start, on only through the artist's click (P12a.1: on Alphi,
+//    Tests/mcp/alphi_test.cpp), off from anywhere; the old flow chip's nonce prefix stays reserved.
 // Build + run: scripts/test-bridge-safety.sh
 #include "../../Source/Mcp/McpIdentityCore.h"
 #include "../../Source/Mcp/McpOwnership.h"
@@ -274,75 +274,14 @@ static void flowMode()
         mcp::FlowMode restarted; // a restart builds a new state: off, whatever the last run had
         CHECK(!restarted.isOn());
     }
-    // The flow chip's nonce prefix is reserved; a server nonce never has it.
-    CHECK(mcp::isFlowNonce(mcp::makeFlowNonce(0x1234abcdULL, 0x55ULL)));
-    CHECK(mcp::makeFlowNonce(1, 2) != mcp::makeFlowNonce(1, 3));
+    // P12a.1: the "flow:" nonce prefix stays reserved (/pd/approval_show refuses it), though no flow chip exists now.
+    CHECK(mcp::isFlowNonce("flow:abc"));
     CHECK(!mcp::isFlowNonce("n_a"));
     CHECK(!mcp::isFlowNonce(""));
-    // A chip shown by the server (show() from JSON) is never a flow offer; replacing a flow chip by nonce makes it a
-    // plain chip (the safe direction).
-    {
-        mcp::ApprovalState s;
-        mcp::ApprovalChip offer;
-        offer.nonce = mcp::makeFlowNonce(7, 8);
-        offer.flowOffer = true;
-        CHECK(s.show(offer, 60000, 1000));
-        CHECK(s.visible(1000).size() == 1 && s.visible(1000)[0].flowOffer);
-        CHECK(s.show(offer.nonce, "pd-main", "x", {}, 60000, 1000));
-        CHECK(s.visible(1000).size() == 1 && !s.visible(1000)[0].flowOffer);
-    }
-}
-
-static void offers()
-{
-    std::printf("review M2: offer gate, Enter, chip separation\n");
-    using G = mcp::FlowOfferGate;
-    {
-        G g;
-        CHECK(g.check(100000) == G::Refusal::None);
-        g.offered(100000);
-        CHECK(g.check(100000 + G::kMinIntervalMs - 1) == G::Refusal::TooSoon);
-        CHECK(g.check(100000 + G::kMinIntervalMs) == G::Refusal::None);
-        g.declined(200000);
-        CHECK(g.check(200000 + G::kCooldownAfterDeclineMs - 1) == G::Refusal::Cooldown);
-        CHECK(g.check(200000 + G::kCooldownAfterDeclineMs) == G::Refusal::None);
-        CHECK(std::string(G::name(G::Refusal::Cooldown)) == "cooldown");
-    }
-    // A pending flow offer never takes Enter from a real chip; Enter never answers the flow offer; a real chip arriving
-    // removes the offer (no misplaced click next to it).
-    {
-        mcp::ApprovalState s;
-        mcp::ApprovalChip offer;
-        offer.nonce = mcp::makeFlowNonce(1, 1);
-        offer.flowOffer = true;
-        s.show(offer, 60000, 1000);
-        s.markPaintedIfInside(offer.nonce, mcp::ApprovalRect { 0, 0, 10, 10 }, mcp::ApprovalRect { 0, 0, 100, 100 }, 1000);
-        CHECK(!s.enterTarget(5000).has_value()); // only the offer: Enter does nothing
-        CHECK(s.anyOtherThanFlow(5000) == false);
-        CHECK(s.show("real", "pd-main", "delete", {}, 60000, 5000));
-        auto v = s.visible(5000);
-        CHECK(v.size() == 1 && v[0].nonce == "real"); // the offer went
-        CHECK(s.anyOtherThanFlow(5000));
-        s.markPaintedIfInside("real", mcp::ApprovalRect { 0, 0, 10, 10 }, mcp::ApprovalRect { 0, 0, 100, 100 }, 5000);
-        auto e = s.enterTarget(6000);
-        CHECK(e.has_value() && *e == "real");
-    }
-    {
-        mcp::ApprovalState s;
-        s.show("real", "pd-main", "delete", {}, 60000, 1000);
-        s.markPaintedIfInside("real", mcp::ApprovalRect { 0, 0, 10, 10 }, mcp::ApprovalRect { 0, 0, 100, 100 }, 1000);
-        mcp::ApprovalChip offer; // shown anyway (the host refuses it; the state must still keep Enter for the real one)
-        offer.nonce = mcp::makeFlowNonce(2, 2);
-        offer.flowOffer = true;
-        s.show(offer, 60000, 1500);
-        auto e = s.enterTarget(3000);
-        CHECK(e.has_value() && *e == "real");
-    }
 }
 
 int main()
 {
-    offers();
     provenance();
     ownership();
     flowMode();

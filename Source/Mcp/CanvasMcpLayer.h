@@ -18,7 +18,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "Utility/Config.h"
 #include "Utility/NVGUtils.h"
-#include "Mcp/McpApprovalState.h" // P12a: ApprovalChip / ApprovalRect for the flow offer chip
+#include "Mcp/McpApprovalState.h" // P12c / P12a.1: ApprovalRect for the chips and Alphi
 struct NVGcontext;
 
 class Canvas;
@@ -317,15 +317,17 @@ public:
     };
     std::unique_ptr<ApprovalExpiryTimer> mcpApprovalExpiryTimer;
 
-    // P12a A3: the FLOW badge, drawn while flow mode is on (top-left of the visible viewport, fixed screen size). A
-    // click on it switches flow mode off (CanvasMcpFlow.cpp). Nothing on the canvas switches it on but the flow chip.
-    void paintFlowBadge(NVGcontext* nvg);
-    bool handleFlowBadgeClick(juce::Point<int> canvasPt);
-    juce::Rectangle<int> mcpFlowBadgeFrame;
-    // Review M2: the flow-mode offer chip, drawn apart from the approval stack (top centre of the view, teal, its own
-    // words on the buttons); its hit rects join mcpApprovalHits, its frame is mcpFlowChipFrame.
-    void paintFlowOfferChip(NVGcontext* nvg, mcp::ApprovalChip const& chip, mcp::ApprovalRect view);
-    juce::Rectangle<int> mcpFlowChipFrame;
+    // P12a.1: Alphi, the robot face top left of the visible view (fixed screen size) while the MCP bridge runs. It is
+    // THE flow-mode switch: a click turns flow mode on, the next one off (CanvasMcpFlow.cpp, McpAlphi.h). It counts a
+    // click only once it has been on screen 400 ms; the approval chips are laid out around it (alphiKeepOut); it
+    // steps aside (not drawn, not clickable) while the selection pill covers its corner.
+    void paintAlphi(NVGcontext* nvg);
+    bool handleAlphiClick(juce::Point<int> canvasPt);
+    // Alphi's rect in canvas coordinates when it is drawn on this view, for the chip layout; nullopt when it is not.
+    std::optional<mcp::ApprovalRect> alphiKeepOut(mcp::ApprovalRect view, float zoom) const;
+    bool alphiShown() const;
+    juce::Rectangle<int> mcpAlphiFrame;
+    std::int64_t mcpAlphiShownSinceMs = 0;
 
 private:
     void renderSketchOverlay(NVGcontext* nvg);
