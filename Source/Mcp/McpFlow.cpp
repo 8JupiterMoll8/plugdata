@@ -52,6 +52,12 @@ std::string textOf(t_gobj* g)
     return out;
 }
 
+bool isGuiClass(char const* cls)
+{
+    static std::unordered_set<std::string> const guis { "hsl", "vsl", "tgl", "hradio", "vradio", "nbx", "bng", "vu", "cnv", "knob", "gatom" };
+    return cls && guis.count(cls) > 0;
+}
+
 // Review M1: the edit stamp's GUI part (the properties a hand edit in the properties dialog changes; not the value).
 uint64_t guiPropsStamp(t_object* ob, uint64_t h)
 {
@@ -155,7 +161,10 @@ uint64_t McpHost::editStamp(t_gobj* g)
         return h;
     auto mix = [&h](uint64_t v) { h = (h ^ v) * 1099511628211ull; };
     mix(reinterpret_cast<uintptr_t>(pd_class(&g->g_pd)));
-    if (ob->te_binbuf) {
+    // A played value is not authorship: an atom box keeps its value in te_binbuf, so its atoms stay out; an IEM GUI's
+    // creation atoms carry its init value, so they stay out too (its properties are read below).
+    bool const valueHolder = ob->te_type == T_ATOM || isGuiClass(class_getname(pd_class(&g->g_pd)));
+    if (ob->te_binbuf && !valueHolder) {
         int const n = binbuf_getnatom(ob->te_binbuf);
         t_atom const* a = binbuf_getvec(ob->te_binbuf);
         mix(static_cast<uint64_t>(n));
@@ -176,9 +185,22 @@ uint64_t McpHost::editStamp(t_gobj* g)
     return guiPropsStamp(ob, h);
 }
 
+void McpHost::restampAfterAiChange(t_gobj* g, bool wasIntact)
+{
+    if (g && wasIntact && identity.originOf(g) == mcp::IdentityService::Origin::Ai)
+        identity.setOriginAi(g, editStamp(g));
+}
+
 bool McpHost::aiIntact(t_gobj* g)
 {
-    return g && identity.originOf(g) == mcp::IdentityService::Origin::Ai && identity.originStampOf(g) == editStamp(g);
+    if (!g || identity.originOf(g) != mcp::IdentityService::Origin::Ai)
+        return false;
+    if (identity.originStampOf(g) == editStamp(g))
+        return true;
+    // Seen edited once: the artist's for good (sticky), so a later AI set that happens to restore the old stamp never
+    // makes it the AI's again.
+    identity.clearOrigin(g);
+    return false;
 }
 
 bool McpHost::flowModeOff(juce::String const& by)

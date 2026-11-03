@@ -2512,6 +2512,71 @@ void runFlowProvenanceCases(Harness& h, PluginProcessor& processor)
         CHECK(origin("pd-fl_sub", "fl_m") == "unknown");
     }
 
+    // P12a: the AI's own changes through the bridge keep its boxes the AI's (obj_set range, obj_set_batch, obj_relabel);
+    // a played value (atom box, GUI) is no edit; only the artist's path (here: the message the properties dialog sends,
+    // straight into Pd) marks it edited.
+    {
+        auto const c = next("fb");
+        CHECK(batch({ "pd-fl_sub", c, 0, 0, 0, 3, 0,
+            "fl_s2", 260, 460, "obj", "hsl", 0,
+            "fl_n", 260, 520, "floatatom", "", 0,
+            "fl_m2", 260, 580, "msg", "", 1, "hi", 0, 5, 10, 0 }, c));
+        CHECK(why("pd-fl_sub", "fl_s2") == "ai_own");
+        auto const cs = next("fs");
+        auto set = h.call("/pd/obj_set", { "pd-fl_sub", cs, "fl_s2", 0, "range", 2, 20.0, 2000.0 }, ("/pd/obj_set/reply/" + cs).toStdString());
+        CHECK(set.has_value() && set->num(0) == 1);
+        CHECK(why("pd-fl_sub", "fl_s2") == "ai_own"); // (1) the AI's own range change
+        auto const cb = next("fs");
+        auto sb = h.call("/pd/obj_set_batch", { "pd-fl_sub", cb, 1, "fl_s2", 0, "label", 1, "s:cutoff" }, ("/pd/obj_set_batch/reply/" + cb).toStdString());
+        CHECK(sb.has_value());
+        CHECK(why("pd-fl_sub", "fl_s2") == "ai_own");
+        auto const cr = next("fs");
+        auto rl = h.call("/pd/obj_relabel", { "pd-fl_sub", cr, "fl_m2", "hello there" }, ("/pd/obj_relabel/reply/" + cr).toStdString());
+        CHECK(rl.has_value() && rl->num(0) == 1);
+        CHECK(why("pd-fl_sub", "fl_m2") == "ai_own");
+        // (3) played values: the AI number box, a slider's value, an atom box the artist types into
+        juce::String gatomId;
+        host->pdWait([&] {
+            t_canvas* cv = sub();
+            for (char const* id : { "fl_n", "fl_s2" })
+                if (auto* g = host->identity.resolve(cv, id)) {
+                    t_atom v;
+                    SETFLOAT(&v, 7);
+                    pd_typedmess(&g->g_pd, gensym("float"), 1, &v);
+                }
+            t_atom at[2];
+            SETFLOAT(at, 400);
+            SETFLOAT(at + 1, 600);
+            pd_typedmess(&cv->gl_pd, gensym("floatatom"), 2, at);
+            t_gobj* g = pd::Interface::getNewest(cv);
+            host->identity.bind(cv, "fl_atom", g);
+            host->identity.setOriginAi(g, McpHost::editStamp(g)); // as the batch would mark it
+            t_atom v;
+            SETFLOAT(&v, 42);
+            pd_typedmess(&g->g_pd, gensym("float"), 1, &v);
+        }, 3000);
+        CHECK(why("pd-fl_sub", "fl_n") == "ai_own");
+        CHECK(why("pd-fl_sub", "fl_s2") == "ai_own");
+        CHECK(why("pd-fl_sub", "fl_atom") == "ai_own");
+        // (2) the artist's range change (straight into Pd, as the properties dialog does): edited, and a later AI set
+        // does not make it the AI's again
+        host->pdWait([&] {
+            if (auto* g = host->identity.resolve(sub(), "fl_s2")) {
+                t_atom r[2];
+                SETFLOAT(r, 0);
+                SETFLOAT(r + 1, 1);
+                pd_typedmess(&g->g_pd, gensym("range"), 2, r);
+            }
+        }, 3000);
+        CHECK(why("pd-fl_sub", "fl_s2") == "edited_in_place");
+        auto const cs2 = next("fs");
+        h.call("/pd/obj_set", { "pd-fl_sub", cs2, "fl_s2", 0, "range", 2, 20.0, 2000.0 }, ("/pd/obj_set/reply/" + cs2).toStdString());
+        {
+            auto const back = own("pd-fl_sub", "fl_s2"); // even back at the AI's old range: the artist's for good
+            CHECK(!static_cast<bool>(back["owned"]) && back["origin"].toString() == "unknown");
+        }
+    }
+
     // 5. Containers and data holders always ask, whoever made them.
     {
         auto const c = next("fb");

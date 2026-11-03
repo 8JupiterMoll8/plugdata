@@ -230,8 +230,12 @@ public:
     // Review M1: the object's edit stamp (its text atoms and GUI properties, not its position or value of a slider):
     // recorded with the AI's mark; a different live stamp = edited in place since. Pd lock held.
     static uint64_t editStamp(t_gobj* g);
-    // Origin ai AND still as the AI left it. Pd lock held.
+    // Origin ai AND still as the AI left it. Pd lock held. An edit it sees clears the origin for good (sticky).
     bool aiIntact(t_gobj* g);
+    // P12a: the AI changed its own box through the bridge (obj_set, obj_set_batch, obj_relabel): when the box was
+    // intact BEFORE the change (`wasIntact`), its stamp follows the change, so the AI's own tuning never reads as an
+    // artist edit. A box the artist had edited stays edited. Pd lock held.
+    void restampAfterAiChange(t_gobj* g, bool wasIntact);
     // Switches flow mode off (any door). True when it was on. `by` names the door for the event and the console.
     bool flowModeOff(juce::String const& by);
     // {on, sinceMs, bootToken}

@@ -46,7 +46,9 @@ void MCPBridge::pdObjSet(const juce::String& action, const juce::OSCMessage& msg
             t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
             t_gobj* g = processor->getMcp()->resolveStableId(canvasName, tempId);
             if (g && !mcpGobjIsLive(cnv, g)) g = nullptr; // stale → treat as unknown
+            bool const intact = processor->getMcp()->aiIntact(g); // P12a: the AI's own tuning stays the AI's
             err = mcpObjSetCore(g, tempId, inlet, selector, atoms, &warning);
+            processor->getMcp()->restampAfterAiChange(g, intact);
             sys_unlock();
         }
 
@@ -79,9 +81,11 @@ void MCPBridge::pdObjRelabel(const juce::String& action, const juce::OSCMessage&
     if (g && pd::Interface::isTextObject(g) && newText.isNotEmpty()) {
         auto* t = reinterpret_cast<t_text*>(g);
         if (t->te_binbuf) {
+            bool const intact = processor->getMcp()->aiIntact(g); // P12a
             binbuf_clear(t->te_binbuf);
             binbuf_text(t->te_binbuf, newText.toRawUTF8(), newText.getNumBytesAsUTF8());
             canvas_dirty(cnv, 1);
+            processor->getMcp()->restampAfterAiChange(g, intact);
             ok = 1;
         }
     }
@@ -131,7 +135,9 @@ void MCPBridge::pdObjSetBatch(const juce::String& action, const juce::OSCMessage
             }
             juce::String warning;
             t_gobj* g = processor->getMcp()->resolveStableId(canvasName, tempId);
+            bool const intact = processor->getMcp()->aiIntact(g); // P12a: the AI's own tuning stays the AI's
             auto err = mcpObjSetCore(g, tempId, inlet, selector, atoms, &warning);
+            processor->getMcp()->restampAfterAiChange(g, intact);
             auto* ro = new juce::DynamicObject();
             ro->setProperty("tempId", tempId);
             ro->setProperty("selector", selector);
