@@ -57,6 +57,7 @@
 #include <juce_cryptography/juce_cryptography.h> // juce::SHA256: the save_content hash (P11.2 V11)
 #include "Utility/PluginParameter.h" // PlugDataParameter: the master volume guard (P5.1 sink floor)
 #include "Mcp/McpPdFile.h" // P11.8 item 3: mcp::fileInPdDir
+#include "Pd/MCPBridgeSaveTarget.h" // P11.8 delta review: mcp::saveTargetOf with tabs
 
 namespace {
 
@@ -2055,8 +2056,54 @@ void runSaveGuardCases(Harness& h, PluginProcessor& processor)
     host->pdWait([&] { if (cs) stateDirty = static_cast<int>(cs->gl_dirty); }, 3000);
     CHECK(stateDirty == 0);
 
+    // Delta review HIGH: patch P holds an instance of [p118abs]; that instance is open in a tab. Saving P into
+    // p118abs.pd replaced the abstraction with its own parent (self-recursive) after one click, re-pointed P and marked
+    // it clean: the instance tab's canvas has P as its root, so the tab counted as P's own. An abstraction's file is
+    // never the parent's own: refused, with and without the flag, tab or no tab. A plain subpatch tab of P still is.
+    auto fp = base.getChildFile("p").getChildFile("p118par.pd");
+    auto fabs = fp.getSiblingFile("p118abs.pd");
+    fp.getParentDirectory().createDirectory();
+    fabs.replaceWithText("#N canvas 0 50 450 300 12;\n#X obj 10 10 r p118_inside;\n");
+    fp.replaceWithText("#N canvas 0 50 450 300 12;\n#X obj 10 10 p118abs;\n#N canvas 0 50 450 300 p118plain 0;\n#X obj 10 10 r p118_plain;\n#X restore 10 60 pd p118plain;\n");
+    auto const absText = fabs.loadFileAsString();
+    open(fp);
+    t_canvas* cp = nullptr;
+    t_canvas* inst = nullptr;
+    t_canvas* plainSub = nullptr;
     host->pdWait([&] {
-        for (auto* c : { ca, cb, cs }) {
+        cp = host->getCanvasBySymbol(fp.getFullPathName());
+        for (t_gobj* g = cp ? cp->gl_list : nullptr; g; g = g->g_next) {
+            if (pd_class(&g->g_pd) != canvas_class) continue;
+            auto* c = reinterpret_cast<t_canvas*>(g);
+            if (canvas_isabstraction(c)) inst = c; else plainSub = c;
+        }
+    }, 3000);
+    CHECK(cp != nullptr && inst != nullptr && plainSub != nullptr);
+    bool absRefusedWithTab = false, absOwnWithTab = true, plainOwn = false, plainOther = true;
+    host->pdWait([&] {
+        if (!cp || !inst || !plainSub) return;
+        std::vector<McpGuiHost::TabInfo> tabs {
+            { cp, "p118par.pd", fp, true },
+            { inst, "p118abs.pd", fabs, false },
+            { plainSub, "p118plain", fp, false },
+        };
+        auto const toAbs = mcp::saveTargetOf(cp, fabs, tabs);
+        absRefusedWithTab = toAbs.otherOwner.isNotEmpty();
+        absOwnWithTab = toAbs.ownFile;
+        auto const toOwn = mcp::saveTargetOf(cp, fp, tabs);
+        plainOwn = toOwn.ownFile;
+        plainOther = toOwn.otherOwner.isNotEmpty();
+    }, 3000);
+    CHECK(absRefusedWithTab);
+    CHECK(!absOwnWithTab);
+    CHECK(plainOwn);
+    CHECK(!plainOther);
+    auto const P = fp.getFullPathName();
+    CHECK(isError(save(P, fabs, 1, "sg11"), "another open patch")); // no tab here (headless): the instance alone
+    CHECK(fabs.loadFileAsString() == absText);
+
+    host->pdWait([&] {
+        for (auto* c : { ca, cb, cs, cp }) {
             if (!c) continue;
             t_atom force;
             SETFLOAT(&force, 1);

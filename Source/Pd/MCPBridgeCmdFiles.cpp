@@ -8,6 +8,7 @@
 
 #include "MCPBridgeCmdCommon.h"
 #include "Mcp/McpPdFile.h" // P11.8: the file a root canvas is bound to
+#include "MCPBridgeSaveTarget.h" // P11.8: what a save would overwrite
 
 #include <cstring>
 
@@ -187,50 +188,6 @@ bool rootHasCoordsLine(juce::String const& content)
         else if (depth == 1 && ln.startsWith("#X coords ")) return true;
     }
     return false;
-}
-
-// P11.8: the file a ROOT canvas is bound to on the Pd side (its dir + name), or an empty File (a subpatch, a never-saved
-// patch with a relative dir). CALLER HOLDS sys_lock.
-juce::File pdRootFile(t_canvas* c)
-{
-    if (!c || c->gl_owner || !c->gl_name || !c->gl_name->s_name) return {};
-    auto* dir = canvas_getdir(c);
-    if (!dir || !dir->s_name) return {};
-    return mcp::fileInPdDir(juce::String::fromUTF8(dir->s_name), juce::String::fromUTF8(c->gl_name->s_name));
-}
-
-// P11.8: what a save of `cnv` into `dest` would overwrite. `ownFile`: dest is the file this canvas is bound to (only a
-// root has one: the Pd side's dir + name, or the file its tab saves to); a subpatch has none, so its root's file is
-// "another open patch's" file like any other tab's. `otherOwner`: the name of another open patch whose file dest is
-// (an open tab, or a root on the Pd side); a save there would destroy it, so it is refused whatever the caller says.
-// `tabs` were read on the message thread before the lock: a tab's canvas is dereferenced only while it is live; a tab
-// that is gone counts as another patch (fail closed). CALLER HOLDS sys_lock.
-struct SaveTarget {
-    bool isRoot = false;
-    bool ownFile = false;
-    juce::String otherOwner;
-};
-
-SaveTarget saveTargetOf(t_canvas* cnv, juce::File const& dest, std::vector<McpGuiHost::TabInfo> const& tabs)
-{
-    SaveTarget t;
-    t.isRoot = cnv && cnv->gl_owner == nullptr;
-    if (t.isRoot && pdRootFile(cnv) == dest) t.ownFile = true;
-    for (auto const& tab : tabs) {
-        if (tab.file == juce::File() || tab.file != dest) continue;
-        t_canvas* owner = tab.patch && mcpCanvasIsLive(tab.patch) ? canvas_getrootfor(tab.patch) : nullptr;
-        if (t.isRoot && owner == cnv) {
-            t.ownFile = true;
-            continue;
-        }
-        if (t.otherOwner.isEmpty()) t.otherOwner = tab.title.isNotEmpty() ? tab.title : dest.getFileName();
-    }
-    for (t_canvas* c = pd_this ? pd_this->pd_canvaslist : nullptr; c && t.otherOwner.isEmpty(); c = c->gl_next) {
-        if (c == cnv || c->gl_owner) continue;
-        if (pdRootFile(c) == dest) t.otherOwner = juce::String::fromUTF8(c->gl_name->s_name);
-    }
-    if (t.otherOwner.isNotEmpty()) t.ownFile = false;
-    return t;
 }
 
 } // namespace
@@ -439,11 +396,11 @@ void MCPBridge::pdSavePatch(const juce::String& action, const juce::OSCMessage& 
         juce::String savedKey;
         bool savedIsGraph = false;
         juce::String rawContent; // P11.8: what was written, before the #A strip (the dirty-clear compares it)
-        SaveTarget target;
+        mcp::SaveTarget target;
         if (cnv) {
             savedKey = juce::String(processor->getMcp()->identity.keyOf(cnv));
             savedIsGraph = cnv->gl_isgraph != 0;
-            target = saveTargetOf(cnv, destFile, tabs ? *tabs : std::vector<McpGuiHost::TabInfo> {});
+            target = mcp::saveTargetOf(cnv, destFile, tabs ? *tabs : std::vector<McpGuiHost::TabInfo> {});
         }
         if (cnv && target.otherOwner.isNotEmpty()) {
             sys_unlock();
@@ -885,7 +842,7 @@ void MCPBridge::pdListTabs(const juce::String& action, const juce::OSCMessage& m
                     o->setProperty("isRoot", cnv->gl_owner == nullptr);
                     o->setProperty("isAbstraction", cnv->gl_owner != nullptr && canvas_isabstraction(cnv) != 0);
                     o->setProperty("rootKey", juce::String(p->getMcp()->identity.keyOf(top)));
-                    o->setProperty("rootFile", pdRootFile(top).getFullPathName());
+                    o->setProperty("rootFile", mcp::pdRootFile(top).getFullPathName());
                 }
                 for (t_gobj* g = cnv->gl_list; g; g = g->g_next) count++;
             }
