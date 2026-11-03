@@ -14,6 +14,7 @@
 #include "Canvas.h"
 #include "CanvasViewport.h"
 #include "TabComponent.h"
+#include "PluginMode.h"
 #include "Object.h"
 #include "Connection.h"
 #include "Objects/GemCapture.h"
@@ -99,6 +100,15 @@ Object* findObjectComponent(Canvas* canvasComp, t_gobj* g)
             return objComp;
     }
     return nullptr;
+}
+
+// P11.9 item 1: the editor is on the desktop and its window is not minimised (JUCE isShowing walks up to the peer).
+bool editorWindowShowing(PluginEditor* editor)
+{
+    if (!editor || !editor->isShowing()) return false;
+    auto* top = editor->getTopLevelComponent();
+    auto* peer = top ? top->getPeer() : nullptr;
+    return peer && !peer->isMinimised();
 }
 
 // Was the tab match of /pd/focus_tab and /pd/close_tab.
@@ -452,7 +462,7 @@ public:
         return nullptr;
     }
 
-    std::optional<juce::String> focusTab(juce::String const& target) override
+    std::optional<FocusResult> focusTab(juce::String const& target) override
     {
         juce::File const f = juce::File::isAbsolutePath(target) ? juce::File(target) : juce::File(); // L27: a tab name is no path
         for (auto* editor : proc->getEditors()) {
@@ -463,11 +473,34 @@ public:
                     editor->getTabComponent().showTab(canvas, canvas->patch.splitViewIndex);
                     editor->getTabComponent().setActiveSplit(canvas);
                     proc->getMcp()->refreshFocusedRoot(); // P3.4 S3
-                    return canvas->patch.getTitle();
+                    // P11.9 item 1: read back what the editor shows now; "focused" only when it is this tab, on screen.
+                    auto* current = editor->getCurrentCanvas();
+                    bool const showing = current && editorWindowShowing(editor) && current->viewport && current->viewport->isShowing();
+                    return FocusResult { canvas->patch.getTitle(), mcp::visible::focusOutcome(canvas, current, showing) };
                 }
             }
         }
         return std::nullopt;
+    }
+
+    std::vector<mcp::visible::EditorView> visibleViews() override
+    {
+        std::vector<mcp::visible::EditorView> views;
+        for (auto* editor : proc->getEditors()) {
+            if (!editor) continue;
+            mcp::visible::EditorView v;
+            v.windowShowing = editorWindowShowing(editor);
+            if (editor->pluginMode) {
+                if (auto* c = editor->pluginMode->getCanvas())
+                    v.pluginModeCanvas = c->patch.getUncheckedPointer();
+            }
+            for (auto* c : editor->getTabComponent().getVisibleCanvases()) {
+                if (!c) continue;
+                v.splits.push_back({ c->patch.getUncheckedPointer(), c->viewport && c->viewport->isShowing() });
+            }
+            views.push_back(std::move(v));
+        }
+        return views;
     }
 
     CloseResult closeTab(juce::String const& target, bool force) override

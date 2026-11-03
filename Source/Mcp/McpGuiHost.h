@@ -18,6 +18,8 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
+#include "Mcp/McpVisibleTab.h"
+
 extern "C" {
 #include <m_pd.h>
 }
@@ -135,8 +137,16 @@ public:
     virtual void closeDuplicateTabs(juce::File const& file) = 0;
     // The first editor's first tab showing `file`.
     virtual t_canvas* findOpenPatch(juce::File const& file) = 0;
-    // Matches by full path, file name or title. Returns the focused tab's title.
-    virtual std::optional<juce::String> focusTab(juce::String const& target) = 0;
+    // Matches by full path, file name or title. P11.9 item 1: shows it, then reads back whether the editor's current
+    // canvas IS that tab and its view is on screen (McpVisibleTab.h focusOutcome). Empty when no tab matched.
+    struct FocusResult {
+        juce::String title;
+        mcp::visible::Focus outcome = mcp::visible::Focus::NotCurrent;
+    };
+    virtual std::optional<FocusResult> focusTab(juce::String const& target) = 0;
+    // P11.9 item 1: what every editor window shows right now (window showing, plugin mode, the split views), read from
+    // the component tree. Message thread only. Empty with no editor (headless, window closed).
+    virtual std::vector<mcp::visible::EditorView> visibleViews() = 0;
     struct CloseResult {
         enum Status { NotFound, Dirty, Closed } status = NotFound;
         juce::String title;
