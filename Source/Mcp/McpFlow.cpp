@@ -8,25 +8,21 @@
 //
 //   /pd/flow_mode_get   <corrId>               -> /pd/flow_mode_get/reply/<corrId>   {on, sinceMs, bootToken}
 //   /pd/flow_mode_off   <corrId> [by]          -> /pd/flow_mode_off/reply/<corrId>   {on:false, wasOn}
-//   /pd/flow_mode_offer <corrId>               -> /pd/flow_mode_offer/reply/<corrId> {shown, on}
 //   /pd/ownership       <corrId> <canvas> <id...> -> /pd/ownership/reply/<corrId> {canvasKey, bootToken, ambiguousTab,
 //                       visible (P11.9: on screen now), canvasObjects (P11.9: objects on this canvas, comments not counted),
 //                       objects:[{id, found, origin, owned, why, class}]} | /pd/ownership/error/<corrId> "<reason>"
 //   event /pd/flow_mode/changed <on|off> <by>
 //
-// No verb turns flow mode ON. The offer only shows a chip with fixed words; the artist's ✓ on it
-// (McpHost::answerApprovalChip, called by the canvas input only) is what switches it on.
+// No verb turns flow mode ON. P12a.1: the artist's click on Alphi, the robot face top left of the canvas
+// (McpHost::alphiClicked, called by the canvas click only, McpAlphi.h) switches it on, the next click off.
 
 #include "../Pd/MCPBridgeCmdCommon.h"
 #include "Mcp/McpOwnership.h"
-
-#include <random>
 
 namespace {
 
 std::int64_t flowNowMs() { return static_cast<std::int64_t>(juce::Time::currentTimeMillis()); }
 
-constexpr std::int64_t kFlowOfferTtlMs = 60000;
 constexpr int kOwnershipMaxIds = 256;
 
 bool onCanvas(t_canvas* c, t_gobj* g)
@@ -93,30 +89,7 @@ bool McpHost::answerApprovalChip(std::string const& nonce, bool yes, std::int64_
 {
     if (nonce.empty())
         return false;
-    auto& state = session.approvals;
-    if (mcp::isFlowNonce(nonce)) {
-        // The flow offer: ✓ only once its chip has been fully on screen for the click delay (as every chip's click);
-        // Esc / ✗ just takes it away (flow mode stays as it is).
-        if (yes && !state.clickAllowed(nonce, nowMs))
-            return false;
-        auto chip = state.take(nonce, nowMs);
-        if (!chip)
-            return false;
-        if (!yes)
-            session.flowOffers.declined(nowMs); // review M2: no new offer for a while after a no
-        if (yes && chip->flowOffer) {
-            bool const was = session.flowMode.isOn();
-            session.flowMode.artistTurnOn(nowMs);
-            if (!was) {
-                processor.logMessage("Flow mode ON: the AI changes and deletes its own objects without asking (Ctrl+Z undoes; click FLOW to switch off)");
-                if (mcpBridge)
-                    mcpBridge->sendFlowModeChanged(true, "artist");
-            }
-        }
-        repaintFlowLater(*this);
-        return true;
-    }
-    auto chip = state.take(nonce, nowMs);
+    auto chip = session.approvals.take(nonce, nowMs);
     if (!chip)
         return false;
     if (mcpBridge)
@@ -124,34 +97,38 @@ bool McpHost::answerApprovalChip(std::string const& nonce, bool yes, std::int64_
     return true;
 }
 
-juce::String McpHost::offerFlowMode(std::int64_t nowMs, bool byArtist)
+bool McpHost::alphiClicked(std::int64_t nowMs)
 {
-    if (session.flowMode.isOn())
-        return "on";
-    auto& state = session.approvals;
-    // Review M2: never next to a real question (a misplaced click), never twice, not too often, not right after a no.
-    if (state.anyOtherThanFlow(nowMs))
-        return "other_chip";
-    for (auto const& c : state.visible(nowMs))
-        if (c.flowOffer)
-            return "already_shown";
-    if (auto const r = session.flowOffers.check(nowMs); !byArtist && r != mcp::FlowOfferGate::Refusal::None)
-        return mcp::FlowOfferGate::name(r);
-    // Review L1: a generator of this call (the shared juce one is not for the command worker thread).
-    std::random_device rd;
-    auto const word = [&rd] { return (static_cast<std::uint64_t>(rd()) << 32) ^ static_cast<std::uint64_t>(rd()); };
-    mcp::ApprovalChip chip;
-    chip.nonce = mcp::makeFlowNonce(word(), word());
-    chip.flowOffer = true;
-    chip.canvas = "session";
-    chip.reason = "flow mode";
-    chip.title = "FLOW MODE ON? The AI changes its own objects without asking";
-    chip.detail = "your objects, tables and subpatches still ask \xc2\xb7 Ctrl+Z undoes \xc2\xb7 click FLOW to stop";
-    if (!state.show(std::move(chip), kFlowOfferTtlMs, nowMs))
-        return "refused";
-    session.flowOffers.offered(nowMs);
+    // Review L3: no switch while the bridge does not serve (nothing could use it, and nothing could switch it off).
+    if (!bridgeRunning())
+        return session.flowMode.isOn();
+    // P12a.1: one flip per click (a double click flips once).
+    if (!alphiClicks.accept(nowMs))
+        return session.flowMode.isOn();
+    if (!mcp::alphiNextOn(session.flowMode.isOn())) {
+        flowModeOff("alphi");
+        return false;
+    }
+    session.flowMode.artistTurnOn(nowMs);
+    processor.logMessage("Flow mode ON: the AI changes and deletes its own objects without asking (Ctrl+Z undoes; click Alphi again to stop)");
+    if (mcpBridge)
+        mcpBridge->sendFlowModeChanged(true, "artist");
     repaintFlowLater(*this);
-    return "shown";
+    return true;
+}
+
+bool McpHost::bridgeRunning() const
+{
+    return mcpBridge && mcpBridge->isRunning();
+}
+
+void McpHost::bridgeStopping()
+{
+    if (session.mcpShuttingDown.load()) {
+        session.flowMode.off(); // teardown: no console line, no event, no repaint
+        return;
+    }
+    flowModeOff("bridge_stop");
 }
 
 uint64_t McpHost::editStamp(t_gobj* g)
@@ -344,21 +321,6 @@ void MCPBridge::pdFlowModeOff(const juce::String& action, const juce::OSCMessage
     o->setProperty("on", false);
     o->setProperty("wasOn", was);
     sendReply("/pd/flow_mode_off/reply/" + correlationId, juce::JSON::toString(juce::var(o), true));
-}
-
-void MCPBridge::pdFlowModeOffer(const juce::String& action, const juce::OSCMessage& msg)
-{
-    juce::ignoreUnused(action);
-    auto const correlationId = msg.size() > 0 ? getArgString(msg[0]) : juce::String("0");
-    if (!processor) return;
-    // The chip's words are fixed; no argument reaches it. The reply never carries its nonce.
-    auto const result = processor->getMcp()->offerFlowMode(flowNowMs());
-    auto* o = new juce::DynamicObject();
-    o->setProperty("shown", result == "shown");
-    if (result != "shown")
-        o->setProperty("refused", result);
-    o->setProperty("on", processor->getMcp()->session.flowMode.isOn());
-    sendReply("/pd/flow_mode_offer/reply/" + correlationId, juce::JSON::toString(juce::var(o), true));
 }
 
 void MCPBridge::pdOwnership(const juce::String& action, const juce::OSCMessage& msg)

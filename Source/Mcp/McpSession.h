@@ -21,6 +21,7 @@
 #include "Mcp/McpOutputCeiling.h"
 #include "Mcp/McpApprovalState.h"
 #include "Mcp/McpFlowMode.h"
+#include "Mcp/McpAlphi.h"
 
 extern "C" {
 #include <m_pd.h>
@@ -283,9 +284,8 @@ struct McpSession {
     // P12c: the canvas approval chips (one per pending record of the server, keyed by its nonce). Set ONLY by
     // /pd/approval_show and /pd/approval_clear; HUD text never shows chips. Own lock (any thread).
     mcp::ApprovalState approvals;
-    // P12a A3: flow mode, off at every start; on only through the artist's click on the flow chip (McpFlowMode.h).
+    // P12a A3: flow mode, off at every start; on only through the artist's click on Alphi (P12a.1, McpFlowMode.h).
     mcp::FlowMode flowMode;
-    mcp::FlowOfferGate flowOffers; // review M2: offer rate limit and the cooldown after a no
     McpHud getMcpHud() const { juce::ScopedLock sl(mcpOverlayLock); return mcpHud; }
 
     // Spatial / Targeted Overlays: restricts visual lenses (connection activity,

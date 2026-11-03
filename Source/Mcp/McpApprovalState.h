@@ -15,6 +15,7 @@
 // approvalBarRect: under its anchor or at the centre of the visible viewport, and always clamped inside it (L5).
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <map>
 #include <cstdint>
@@ -39,9 +40,6 @@ struct ApprovalChip {
     std::vector<std::string> targets; // the server-built ghost preview: tempIds, or "*" for the whole canvas
     std::int64_t expiresAtMs = 0;
     std::uint64_t seq = 0;
-    // P12a A3: the flow-mode offer (McpFlowMode.h). Set only by McpHost::offerFlowMode, never from a server's JSON;
-    // its ✓ turns flow mode on in C++ instead of answering a server.
-    bool flowOffer = false;
     // Where each canvas view last drew this chip fully on screen, and since when (round 3 items 3 and 6). A view that
     // draws it outside its area drops only its own entry; a moved bar starts that view's time again.
     struct Seen {
@@ -90,17 +88,16 @@ public:
         c.seen.clear();
         c.expiresAtMs = nowMs + std::clamp<std::int64_t>(ttlMs, kMinTtlMs, kMaxTtlMs);
         c.seq = ++seqCounter;
-        // P12a review M2: a real question removes a pending flow offer, so it never sits next to it (no misplaced click).
-        if (!c.flowOffer)
-            chips.erase(std::remove_if(chips.begin(), chips.end(), [&](ApprovalChip const& x) { return x.flowOffer && x.nonce != nonce; }), chips.end());
         auto it = std::find_if(chips.begin(), chips.end(), [&](ApprovalChip const& x) { return x.nonce == nonce; });
         if (it != chips.end()) {
             c.seq = it->seq; // keeps its place in the stack
             *it = std::move(c);
             return true;
         }
-        if (chips.size() >= kMaxChips)
+        if (chips.size() >= kMaxChips) {
             chips.erase(chips.begin()); // the oldest goes; the server still holds its record
+            noteGoneLocked(nowMs);
+        }
         chips.push_back(std::move(c));
         return true;
     }
@@ -110,7 +107,10 @@ public:
         std::lock_guard<std::mutex> const l(lock);
         auto const before = chips.size();
         chips.erase(std::remove_if(chips.begin(), chips.end(), [&](ApprovalChip const& x) { return x.nonce == nonce; }), chips.end());
-        return chips.size() != before;
+        if (chips.size() == before)
+            return false;
+        noteGoneLocked(wallClockMs());
+        return true;
     }
 
     // Remove and return the chip the artist answered (so a double click cannot answer twice).
@@ -124,6 +124,7 @@ public:
             return std::nullopt;
         auto c = *it;
         chips.erase(it);
+        noteGoneLocked(nowMs > 0 ? nowMs : wallClockMs());
         return c;
     }
 
@@ -138,14 +139,6 @@ public:
     }
 
     bool any(std::int64_t nowMs) { return !visible(nowMs).empty(); }
-
-    // P12a review M2: any chip that is not the flow offer.
-    bool anyOtherThanFlow(std::int64_t nowMs)
-    {
-        for (auto const& c : visible(nowMs))
-            if (!c.flowOffer) return true;
-        return false;
-    }
 
     // A paint drew this chip FULLY inside the visible area: start its on-screen time. A chip drawn off-screen (or cut
     // by the edge) never starts it, so neither Enter nor a click can answer a chip the artist could not see.
@@ -195,20 +188,21 @@ public:
     {
         std::lock_guard<std::mutex> const l(lock);
         purgeLocked(nowMs);
-        // P12a review M2: the flow offer is not counted and never answered by Enter (only a click turns flow mode on).
-        ApprovalChip const* only = nullptr;
-        for (auto const& x : chips) {
-            if (x.flowOffer) continue;
-            if (only) return std::nullopt;
-            only = &x;
-        }
-        if (!only)
+        if (chips.size() != 1)
             return std::nullopt;
-        auto const& c = *only;
+        auto const& c = chips.front();
         auto const since = c.onScreenSince();
         if (since < 0 || nowMs - since < kEnterMinVisibleMs)
             return std::nullopt;
         return c.nonce;
+    }
+
+    // P12a.1 review M2: when a chip last left the glass (answered, cleared, expired, pushed out); 0 = never. Alphi, the
+    // flow switch, ignores clicks for a while after it (a chip that sat on it may have just been cleared under a click).
+    std::int64_t lastChipGoneMs()
+    {
+        std::lock_guard<std::mutex> const l(lock);
+        return lastGoneMs;
     }
 
     // When the next chip expires (ms clock), or none: the canvas schedules a repaint then, so an expired chip leaves
@@ -234,8 +228,20 @@ public:
 private:
     void purgeLocked(std::int64_t nowMs)
     {
+        for (auto const& x : chips)
+            if (x.expiresAtMs <= nowMs)
+                noteGoneLocked(x.expiresAtMs);
         chips.erase(std::remove_if(chips.begin(), chips.end(), [&](ApprovalChip const& x) { return x.expiresAtMs <= nowMs; }), chips.end());
     }
+
+    void noteGoneLocked(std::int64_t atMs) { lastGoneMs = std::max(lastGoneMs, atMs); }
+    // The same clock the canvas passes in (juce::Time::currentTimeMillis: ms since the epoch).
+    static std::int64_t wallClockMs()
+    {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    }
+
+    std::int64_t lastGoneMs = 0;
 
     std::mutex lock;
     std::vector<ApprovalChip> chips;
@@ -308,6 +314,31 @@ inline ApprovalRect approvalBarRect(std::optional<ApprovalRect> anchor, Approval
     return { x, y, w, h };
 }
 
+// P12a.1: two rects share at least one canvas unit.
+inline bool rectsIntersect(ApprovalRect a, ApprovalRect b)
+{
+    return a.w > 0 && a.h > 0 && b.w > 0 && b.h > 0 && a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+}
+
+// P12a.1: `place` moved off `keep` (Alphi, the flow toggle top left), staying inside `view`: to the right of it when
+// the view is wide enough, else below it. Unchanged when the two do not meet, or when the view is too small for either
+// (then the chips, which take clicks before Alphi and are drawn over it, still win).
+inline ApprovalRect avoidRect(ApprovalRect place, ApprovalRect keep, ApprovalRect view, int margin)
+{
+    if (!rectsIntersect(place, keep))
+        return place;
+    int const right = view.x + view.w;
+    int const bottom = view.y + view.h;
+    int const toRight = keep.x + keep.w + margin;
+    if (toRight + place.w <= right - margin)
+        return { toRight, place.y, place.w, place.h };
+    int const below = keep.y + keep.h + margin;
+    for (int edge : { margin, 0 })
+        if (below + place.h <= bottom - edge)
+            return { std::clamp(place.x, view.x, std::max(view.x, right - place.w)), below, place.w, place.h };
+    return place;
+}
+
 // The chip bar in DESIGN pixels: what one bar measures on screen, whatever the canvas zoom (live check 2026-11-02:
 // drawn in canvas units the 440-wide bar outgrew the view from zoom ~1.6). Compact per the owner (2026-11-02, "easy to
 // click but a bit big"): ~73% of the old 440x78 footprint, the buttons taller than before (36 px).
@@ -350,7 +381,9 @@ struct ApprovalStackLayout {
 // view centre) and clamped inside the view, so every bar is fully visible and its buttons can be hit at any zoom.
 // The space of the full stack (maxBars) is reserved when the window holds it, so a new chip never moves the ones
 // already on screen.
-inline ApprovalStackLayout approvalStackLayout(std::optional<ApprovalRect> anchor, ApprovalRect view, float zoom, int barW, int shown, bool more)
+// P12a.1: `keepOut` (Alphi's rect) is a spot the stack never covers when the view has room elsewhere (avoidRect).
+inline ApprovalStackLayout approvalStackLayout(std::optional<ApprovalRect> anchor, ApprovalRect view, float zoom, int barW, int shown, bool more,
+    std::optional<ApprovalRect> keepOut = std::nullopt)
 {
     using M = ApprovalBarMetrics;
     ApprovalStackLayout out;
@@ -385,7 +418,14 @@ inline ApprovalStackLayout approvalStackLayout(std::optional<ApprovalRect> ancho
     int const fullHc = M::maxBars * hc + (M::maxBars - 1) * gapC + static_cast<int>(std::ceil(M::more * k));
     int const marginC = static_cast<int>(std::lround(M::margin * k));
     int const placeH = (fullHc + 2 * marginC <= view.h) ? fullHc : stackHc;
-    auto const place = approvalBarRect(anchor, view, wc, placeH, marginC, static_cast<int>(std::lround(M::anchorGap * k)));
+    auto place = approvalBarRect(anchor, view, wc, placeH, marginC, static_cast<int>(std::lround(M::anchorGap * k)));
+    if (keepOut) {
+        // The reserved space first (a new chip never moves the others); if only the real stack fits, that.
+        auto moved = avoidRect(place, *keepOut, view, marginC);
+        if (rectsIntersect(moved, *keepOut))
+            moved = avoidRect(ApprovalRect { place.x, place.y, wc, stackHc }, *keepOut, view, marginC);
+        place = { moved.x, moved.y, wc, placeH };
+    }
 
     out.scale = k;
     out.frame = { place.x, place.y, wc, stackHc };

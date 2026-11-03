@@ -3045,10 +3045,11 @@ void runFlowProvenanceCases(Harness& h, PluginProcessor& processor)
     h.call("/pd/batch_atomic", { "main", cx, 1, 0, 0, 0, 0, "fl_sub", 0, 5, 10, 0 }, ("/pd/batch_atomic/reply/" + cx).toStdString());
 }
 
-// P12a A3: the flow-mode switch. Off at start; no verb, argument, HUD chapter, note or patch text turns it on (the v1
-// datagram route: oscMessageReceived); a server's approval chip (even one claiming to be the flow offer) cannot; only
-// the artist's ✓ on the flow chip, after it was on screen 400 ms; off from anywhere; never saved.
-void runFlowModeCases(Harness& h, PluginProcessor& processor)
+// P12a A3 / P12a.1: the flow-mode switch. Off at start; no verb, argument, HUD chapter, note or patch text turns it on
+// (the v1 datagram route: oscMessageReceived); a server's approval chip (even one claiming to be the flow offer) cannot;
+// the old offer verb is gone; only the artist's click on Alphi (McpHost::alphiClicked, called by the canvas click
+// only) turns it on, and the next click turns it off; off from anywhere; never saved.
+void runFlowModeCases(Harness& h, PluginProcessor& processor, std::function<void()> const& restoreSink)
 {
     std::printf("P12a flow mode switch\n");
     auto* host = processor.getMcp();
@@ -3077,7 +3078,7 @@ void runFlowModeCases(Harness& h, PluginProcessor& processor)
         auto const c2 = next("fx");
         auto off = h.call("/pd/flow_mode_off", { c2, "on" }, ("/pd/flow_mode_off/reply/" + c2).toStdString(), 2000);
         CHECK(off.has_value() && !static_cast<bool>(parseJson(*off)["on"]));
-        for (char const* verb : { "/pd/flow_mode_on", "/pd/flow_mode_set", "/pd/flow_mode" }) {
+        for (char const* verb : { "/pd/flow_mode_on", "/pd/flow_mode_set", "/pd/flow_mode", "/pd/flow_mode_offer", "/pd/alphi_click", "/pd/alphi" }) {
             h.fire(verb, { "main", next("fx"), 1 });
             sleepMs(100);
         }
@@ -3112,82 +3113,39 @@ void runFlowModeCases(Harness& h, PluginProcessor& processor)
         CHECK(ans && ans->str(0) == "fm_server" && ans->str(1) == "yes");
         CHECK(!isOn());
     }
-    // The offer: fixed words, no nonce in the reply; not answerable before it was on screen 400 ms; Esc leaves it off.
-    auto offer = [&]() -> std::string {
-        auto const c = next("fo");
-        auto r = h.call("/pd/flow_mode_offer", { c, "ignored words" }, ("/pd/flow_mode_offer/reply/" + c).toStdString(), 2000);
-        CHECK(r.has_value() && r->str(0).find("flow:") == std::string::npos);
-        if (r) CHECK(static_cast<bool>(parseJson(*r)["shown"]));
-        for (auto const& chip : state.visible(now()))
-            if (chip.flowOffer) {
-                CHECK(chip.title.find("ignored") == std::string::npos && chip.detail.find("ignored") == std::string::npos);
-                return chip.nonce;
-            }
-        return {};
-    };
-    auto flowNonce = [&]() -> std::string {
-        for (auto const& chip : state.visible(now()))
-            if (chip.flowOffer) return chip.nonce;
-        return {};
-    };
-    auto offerRefusal = [&]() -> std::string {
-        auto const c = next("fo");
-        auto r = h.call("/pd/flow_mode_offer", { c }, ("/pd/flow_mode_offer/reply/" + c).toStdString(), 2000);
-        return r ? parseJson(*r)["refused"].toString().toStdString() : std::string("no reply");
-    };
+    // P12a.1: the offer verb is gone (an unknown verb now): it neither answers as an offer nor shows a chip.
     {
-        auto const n = offer();
-        CHECK(!n.empty() && mcp::isFlowNonce(n));
-        bool early = true;
-        host->pdWait([&] { early = host->answerApprovalChip(n, true, now()); }, 3000); // never painted: not clickable
-        CHECK(!early && !isOn());
-        host->pdWait([&] { host->answerApprovalChip(n, false, now()); }, 3000); // Esc / cancel
-        CHECK(!isOn());
+        auto const c = next("fo");
+        auto r = h.call("/pd/flow_mode_offer", { c }, ("/pd/flow_mode_offer/reply/" + c).toStdString(), 800);
+        CHECK(!r.has_value());
         CHECK(state.visible(now()).empty());
-        // Review M2: after a no, no new offer from a client for 30 s; the artist's own palette item still works.
-        CHECK(offerRefusal() == "cooldown");
-        CHECK(host->offerFlowMode(now(), true) == "shown");
-        auto const p = flowNonce();
-        host->pdWait([&] { host->answerApprovalChip(p, false, now()); }, 3000);
+        CHECK(!isOn());
     }
+    // P12a.1: a click on Alphi turns it on (the artist's event), a double click does not flip it back, the next click
+    // turns it off; nothing goes to a server as an approval.
     {
-        auto const t0 = now() + 40000; // past the cooldown and the rate limit
-        // Review M2: never next to a real question.
-        auto const ca = next("fa");
-        h.call("/pd/approval_show", { ca, R"({"nonce":"fm_real","canvas":"pd-main","reason":"delete","targets":[],"ttlMs":120000})" }, ("/pd/approval_show/reply/" + ca).toStdString());
-        CHECK(host->offerFlowMode(t0) == "other_chip");
-        CHECK(offerRefusal() == "other_chip");
-        state.clear("fm_real");
-        CHECK(host->offerFlowMode(t0) == "shown");
-        CHECK(host->offerFlowMode(t0 + 1000) == "already_shown");
-        // A real question arriving takes the offer away and keeps Enter for itself.
-        auto const cb = next("fa");
-        h.call("/pd/approval_show", { cb, R"({"nonce":"fm_real2","canvas":"pd-main","reason":"delete","targets":[],"ttlMs":120000})" }, ("/pd/approval_show/reply/" + cb).toStdString());
-        CHECK(flowNonce().empty());
-        state.markPaintedIfInside("fm_real2", mcp::ApprovalRect { 0, 0, 10, 10 }, mcp::ApprovalRect { 0, 0, 100, 100 }, now() - 1000);
-        auto const e = state.enterTarget(now());
-        CHECK(e.has_value() && *e == "fm_real2");
-        state.clear("fm_real2");
-        // Rate limit: not again within 10 s of the last offer.
-        CHECK(host->offerFlowMode(t0 + 5000) == "too_soon");
-    }
-    {
-        CHECK(host->offerFlowMode(now() + 60000) == "shown");
-        auto const n = flowNonce();
-        CHECK(!n.empty());
-        state.markPaintedIfInside(n, mcp::ApprovalRect { 0, 0, 10, 10 }, mcp::ApprovalRect { 0, 0, 100, 100 }, now() - 1000);
-        CHECK(!state.enterTarget(now()).has_value()); // Enter never answers the offer
+        auto const t0 = now();
         h.replies.clear();
-        bool clicked = false;
-        host->pdWait([&] { clicked = host->answerApprovalChip(n, true, now()); }, 3000);
-        CHECK(clicked);
+        CHECK(host->alphiClicked(t0));
         auto ev = h.replies.waitFor("/pd/flow_mode/changed", 2000); // before any call (a call clears the replies)
         CHECK(ev && ev->str(0) == "on" && ev->str(1) == "artist");
-        CHECK(!h.replies.waitFor("/pd/approval/answer", 200).has_value()); // nothing went to a server as an approval
+        CHECK(!h.replies.waitFor("/pd/approval/answer", 200).has_value());
         CHECK(isOn());
         auto const g = get();
         CHECK(static_cast<double>(g["sinceMs"]) > 0);
-        CHECK(offerRefusal() == "on");
+        CHECK(host->alphiClicked(t0 + 100)); // the double click's second half: ignored, still on
+        CHECK(isOn());
+        h.replies.clear();
+        CHECK(!host->alphiClicked(t0 + 1000));
+        auto off = h.replies.waitFor("/pd/flow_mode/changed", 2000);
+        CHECK(off && off->str(0) == "off" && off->str(1) == "alphi");
+        CHECK(!isOn());
+        CHECK(host->alphiClicked(t0 + 2000)); // on again, for the cases below
+        CHECK(isOn());
+        // While on, no verb turns it off-and-on again or toggles it: only flow_mode_off switches (off).
+        auto const cg = next("fx");
+        h.call("/pd/flow_mode_get", { cg, "off", "toggle" }, ("/pd/flow_mode_get/reply/" + cg).toStdString(), 2000);
+        CHECK(isOn());
     }
     // Never saved: the settings file has no trace of it, so a restart starts off (the state is a plain member).
     {
@@ -3203,6 +3161,27 @@ void runFlowModeCases(Harness& h, PluginProcessor& processor)
         auto r = h.replies.waitFor(("/pd/flow_mode_off/reply/" + c).toStdString(), 2000);
         CHECK(r && static_cast<bool>(parseJson(*r)["wasOn"]));
         CHECK(ev && ev->str(0) == "off" && ev->str(1) == "test");
+        CHECK(!isOn());
+    }
+    // P12a.1 review L3: Alphi works only while the bridge really runs; stopping the bridge turns flow off, with its
+    // event (sent before the listeners close); a click while it is stopped does nothing.
+    {
+        CHECK(host->bridgeRunning());
+        CHECK(host->alphiClicked(now() + 5000));
+        CHECK(host->session.flowMode.isOn());
+        h.replies.clear();
+        host->mcpBridge->stop();
+        // The click's own "on" event may land after the clear (the reply thread): take the first "off".
+        auto ev = h.replies.waitFor("/pd/flow_mode/changed", 2000);
+        if (ev && ev->str(0) == "on")
+            ev = h.replies.waitFor("/pd/flow_mode/changed", 2000);
+        CHECK(ev && ev->str(0) == "off" && ev->str(1) == "bridge_stop");
+        CHECK(!host->session.flowMode.isOn());
+        CHECK(!host->bridgeRunning());
+        CHECK(!host->alphiClicked(now() + 10000));
+        CHECK(!host->session.flowMode.isOn());
+        restoreSink();
+        CHECK(host->bridgeRunning());
         CHECK(!isOn());
     }
     for (auto const& n : state.escTargets(now())) state.clear(n);
@@ -4512,7 +4491,7 @@ void runZeroArgCases(Harness& h)
         auto const* e = f ? f->find("error") : nullptr;
         refused += (f && field(*f, "outcome") == "rejected" && e && field(*e, "code") == "bad_frame") ? 1 : 0;
     }
-    CHECK(guarded == 27 && refused == guarded); // 19 since /pd/midi_devices (minArgs 1); +2 P11 /pd/bound, /pd/selection_get; +2 P12c approval_show/clear (minArgs 2); +4 P12a flow_mode_get/off/offer, ownership
+    CHECK(guarded == 26 && refused == guarded); // 19 since /pd/midi_devices (minArgs 1); +2 P11 /pd/bound, /pd/selection_get; +2 P12c approval_show/clear (minArgs 2); +3 P12a flow_mode_get/off, ownership (P12a.1: the offer verb is gone)
 }
 
 // S6.6 (audit A20): the live props of an IEM GUI carry its label, so a control the builder named (`hsl ... morph_s
@@ -4898,7 +4877,9 @@ int main()
             runContentVersionCases(harness, processor);
             runSelectionGetCases(harness);
             runFlowProvenanceCases(harness, processor);
-            runFlowModeCases(harness, processor);
+            runFlowModeCases(harness, processor, [&] {
+                bridge->setReplySinkForTests([&replies](juce::OSCMessage const& msg) { replies.push(msg); });
+            });
             runV2HandshakeCases(harness, *bridge, [&] {
                 bridge->setReplySinkForTests([&replies](juce::OSCMessage const& msg) { replies.push(msg); });
             });

@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <future>
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_osc/juce_osc.h>
 #include <juce_core/juce_core.h>
@@ -230,6 +231,18 @@ public:
     // queued behind every reply they sent and the router sees them first.
     bool handlerDone(mcp::v2::OriginPtr origin) { return worker.post(Op { Op::HandlerDone, {}, {}, 0, std::move(origin) }); }
     bool tick() { return worker.post(Op { Op::Tick, {}, {}, 0, {} }); }
+    // P12a.1 review L3: waits (at most timeoutMs) until everything posted before this call went out, so a last event
+    // (flow off when the bridge stops) is not dropped by the stop that follows. Never call it on the reply thread.
+    bool drain(int timeoutMs)
+    {
+        auto done = std::make_shared<std::promise<void>>();
+        auto fut = done->get_future();
+        Op op { Op::Barrier, {}, {}, 0, {} };
+        op.done = done;
+        if (!worker.post(std::move(op)))
+            return false;
+        return fut.wait_for(std::chrono::milliseconds(timeoutMs)) == std::future_status::ready;
+    }
 
     // P4.1 S3: every message passes the v2 router first (nullptr = none). The router outlives this queue.
     void setRouter(mcp::v2::Router* r) { router.store(r); }
@@ -247,11 +260,12 @@ public:
 
 private:
     struct Op {
-        enum Kind { Send, Connect, Disconnect, HandlerDone, Tick } kind = Send;
+        enum Kind { Send, Connect, Disconnect, HandlerDone, Tick, Barrier } kind = Send;
         std::optional<juce::OSCMessage> message;
         juce::String host;
         int port = 0;
         mcp::v2::OriginPtr origin;
+        std::shared_ptr<std::promise<void>> done; // Barrier
     };
 
     static std::int64_t nowMs()
@@ -300,6 +314,10 @@ private:
         case Op::Tick:
             if (auto* r = router.load())
                 r->tick(nowMs());
+            return;
+        case Op::Barrier:
+            if (op.done)
+                op.done->set_value();
             return;
         case Op::Send: {
             if (auto* r = router.load(); r && (r->active() || op.origin))
@@ -360,8 +378,11 @@ public:
                                              const juce::String& destFilePath);
 
     bool start();
+    // P12a.1 review L3: also switches flow mode off (event /pd/flow_mode/changed off bridge_stop) before it closes.
     void stop();
     bool isConnected() const;
+    // P12a.1 review L3: the bridge serves (its UDP socket or its v2 listener runs): Alphi is shown and clickable only then.
+    bool isRunning() const { return canReply(); }
     // P3.4 S8: new ports on the SAME object (it used to be destroyed and rebuilt while the audio thread could be
     // inside audioTick/midiInputTick). Restarts only when it was running.
     void rebind(int newListenPort, int newSendPort);

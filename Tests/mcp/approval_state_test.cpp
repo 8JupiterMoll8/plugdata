@@ -8,6 +8,7 @@
 #include "../../Source/Mcp/McpApprovalState.h"
 
 #include <cmath>
+#include <chrono>
 #include <cstdio>
 #include <optional>
 #include <string>
@@ -28,6 +29,11 @@ using mcp::ApprovalRect;
 static bool inside(ApprovalRect const& r, ApprovalRect const& view)
 {
     return r.x >= view.x && r.y >= view.y && r.x + r.w <= view.x + view.w && r.y + r.h <= view.y + view.h;
+}
+
+static std::int64_t wallMs()
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
 }
 
 int main()
@@ -336,6 +342,32 @@ int main()
         CHECK(s.nextExpiryMs().value_or(-1) == 5000);    // purged: the next one is the remaining chip
         s.clear("n_f");
         CHECK(!s.nextExpiryMs().has_value());
+    }
+
+    // 14. P12a.1 review M2: when ANY chip leaves the glass (answered, cleared by the server, expired, pushed out), the
+    //     state says when, so Alphi (the flow switch under where a chip may have been) ignores clicks for a while.
+    {
+        ApprovalState s;
+        CHECK(s.lastChipGoneMs() == 0);
+        s.show("g_a", "pd-main", "r", {}, 60000, 1000);
+        CHECK(s.lastChipGoneMs() == 0);           // showing is not going
+        CHECK(s.take("g_a", 2000).has_value());
+        CHECK(s.lastChipGoneMs() == 2000);        // answered
+        CHECK(!s.take("g_a", 3000).has_value());
+        CHECK(s.lastChipGoneMs() == 2000);        // nothing went: unchanged
+        s.show("g_b", "pd-main", "r", {}, 60000, 4000);
+        auto const before = wallMs();
+        CHECK(s.clear("g_b"));                    // the server's /pd/approval_clear (no clock passed): the wall clock
+        CHECK(s.lastChipGoneMs() >= before && s.lastChipGoneMs() <= wallMs());
+        CHECK(!s.clear("g_b"));
+        ApprovalState e;
+        e.show("g_c", "pd-main", "r", {}, 1000, 0); // expires at 1000
+        CHECK(e.visible(5000).empty());
+        CHECK(e.lastChipGoneMs() == 1000);        // expired: stamped with its expiry
+        ApprovalState f;
+        for (std::size_t i = 0; i <= ApprovalState::kMaxChips; ++i)
+            f.show("p" + std::to_string(i), "pd-main", "r", {}, 60000, 7000);
+        CHECK(f.lastChipGoneMs() == 7000);        // the oldest pushed out by a new one
     }
 
     if (failures == 0)

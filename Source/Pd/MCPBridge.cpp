@@ -295,6 +295,11 @@ void MCPBridge::setReplySinkForTests(std::function<void(juce::OSCMessage const&)
 
 void MCPBridge::stop()
 {
+    // P12a.1 review L3: no flow mode without a running bridge (the event goes out while the listeners still run).
+    if (processor)
+        if (auto* host = processor->getMcp())
+            host->bridgeStopping();
+    sender.drain(500); // that event out before the sockets and sessions close
     stopTimer();
     bool const v2WasRunning = v2Server.running();
     stopV2(); // P3.4 S8 order: listeners before the worker
