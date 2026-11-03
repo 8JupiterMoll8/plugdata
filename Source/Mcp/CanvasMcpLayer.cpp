@@ -1039,6 +1039,8 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
 
     // P12c approval chips: one per pending record, clamped inside the visible viewport (CanvasMcpApproval.cpp).
     paintApprovalChips(nvg);
+    // P12a A3: the FLOW badge while flow mode is on (CanvasMcpFlow.cpp).
+    paintFlowBadge(nvg);
     // Multimodal Pen / Sketch Ink Overlay (Rendered directly on GPU in canvas coords)
     renderSketchOverlay(nvg);
 

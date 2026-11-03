@@ -412,6 +412,7 @@ public:
     {
         check("assignSerial");
         auto& s = serials[obj];
+        s = SerialInfo {}; // a new lifetime: P12a A1, its origin starts unknown (a reused address never inherits "ai")
         s.serial = nextSerial++;
         s.alive = hooks.objectGuard ? hooks.objectGuard(obj) : std::function<bool()>();
     }
@@ -439,6 +440,62 @@ public:
         check("serialOf");
         auto it = serials.find(obj);
         return it == serials.end() ? 0 : it->second.serial;
+    }
+
+    // P12a A1: provenance. Who made the object of THIS lifetime: Ai only when the bridge's batch create made it in this
+    // run (MCPBridgeCmdBatchPd.cpp, after bind answered Bound), or an MCP retype of such a box carried it over. Every
+    // other way an object appears (hand-made, paste, load, GUI retype, encapsulate, undo, tombstone rebind,
+    // register_id) leaves Unknown, which the flow gate treats as the artist's. A name never carries it: it lives on the
+    // serial, which a new lifetime replaces (assignSerial). Never persisted (no sidecar field): it dies with the run.
+    enum class Origin { Unknown, Ai };
+
+    // The run's boot id (a hash of the bridge's bootToken): a mark from another boot is not this session's. 0 = none:
+    // nothing can be marked. Atomic: set by the bridge at start, outside the Pd lock.
+    void setBootId(uint64_t id) { bootId.store(id, std::memory_order_relaxed); }
+    uint64_t currentBootId() const { return bootId.load(std::memory_order_relaxed); }
+
+    // Marks the live lifetime of `obj` as made by the AI. False (nothing marked) without a live serial or a boot id.
+    // Review M1: `stamp` is the object's edit stamp (text atoms + GUI properties) as the AI left it; the ownership
+    // read compares it with the live one, so an artist edit in place (message, comment, GUI properties) counts.
+    bool setOriginAi(Obj obj, uint64_t stamp = 0)
+    {
+        check("setOriginAi");
+        auto const boot = currentBootId();
+        if (!obj || boot == 0)
+            return false;
+        auto it = serials.find(obj);
+        if (it == serials.end() || !it->second.isAlive())
+            return false;
+        it->second.origin = Origin::Ai;
+        it->second.originBoot = boot;
+        it->second.originStamp = stamp;
+        return true;
+    }
+    // Back to Unknown (the safe direction; encapsulate and undo rebinds call it on purpose).
+    void clearOrigin(Obj obj)
+    {
+        check("clearOrigin");
+        auto it = serials.find(obj);
+        if (it != serials.end()) {
+            it->second.origin = Origin::Unknown;
+            it->second.originBoot = 0;
+            it->second.originStamp = 0;
+        }
+    }
+    // The edit stamp recorded with the AI's mark (0: none, or not the AI's).
+    uint64_t originStampOf(Obj obj) const
+    {
+        check("originStampOf");
+        return originOf(obj) == Origin::Ai ? serials.find(obj)->second.originStamp : 0;
+    }
+    Origin originOf(Obj obj) const
+    {
+        check("originOf");
+        auto it = serials.find(obj);
+        if (!obj || it == serials.end() || !it->second.isAlive())
+            return Origin::Unknown;
+        auto const boot = currentBootId();
+        return it->second.origin == Origin::Ai && boot != 0 && it->second.originBoot == boot ? Origin::Ai : Origin::Unknown;
     }
 
     // Monotonic, bumped on every identity change; TS polls it to skip snapshot fetches. Atomic: readable without
@@ -531,6 +588,9 @@ private:
     struct SerialInfo {
         uint64_t serial = 0;
         std::function<bool()> alive; // S5: this object's weak reference
+        Origin origin = Origin::Unknown; // P12a A1
+        uint64_t originBoot = 0;         // the boot id the mark was made in
+        uint64_t originStamp = 0;        // review M1: the edit stamp as the AI left it
         bool isAlive() const { return !alive || alive(); }
     };
 
@@ -624,6 +684,7 @@ private:
     uint64_t nextSerial = 1;
     std::atomic<uint64_t> identityVersion { 0 };
     std::atomic<uint64_t> contentGlobal { 0 }; // P11.5 V23
+    std::atomic<uint64_t> bootId { 0 };        // P12a A1
 };
 
 } // namespace mcp::identity

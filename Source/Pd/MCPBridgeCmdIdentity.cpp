@@ -91,6 +91,8 @@ void MCPBridge::pdIdentitySnapshot(const juce::String& action, const juce::OSCMe
             // Read class name
             juce::String className = juce::String::fromUTF8(class_getname(pd_class(&ptr->g_pd)));
             entry->setProperty("class", className);
+            // P12a A2: provenance, for observability only (the flow gate reads /pd/ownership fresh, never this).
+            entry->setProperty("origin", processor->getMcp()->identity.originOf(ptr) == mcp::IdentityService::Origin::Ai ? "ai" : "unknown");
 
             // Read object text (type + args)
             t_object* obj = pd::Interface::checkObject(ptr);

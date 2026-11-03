@@ -35,6 +35,9 @@ void MCPBridge::pdApprovalShow(const juce::String& action, const juce::OSCMessag
         auto const ttl = o->hasProperty("ttlMs") ? static_cast<std::int64_t>(static_cast<double>(o->getProperty("ttlMs"))) : 60000;
         mcp::ApprovalChip chip;
         chip.nonce = o->getProperty("nonce").toString().toStdString();
+        // P12a A3: the "flow:" prefix belongs to the flow-mode offer, made in C++ only; a server never shows one.
+        if (mcp::isFlowNonce(chip.nonce))
+            chip.nonce.clear();
         chip.canvas = o->getProperty("canvas").toString().toStdString();
         chip.reason = o->getProperty("reason").toString().toStdString();
         // P12c review 5: line 1 is the server's fixed words; without a title the chip says only that something waits

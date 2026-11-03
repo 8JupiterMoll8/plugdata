@@ -435,6 +435,10 @@ public:
     // P12c: the artist answered one approval chip (click, Enter or Esc on the canvas): /pd/approval/answer <nonce> yes|no.
     // Called only from the canvas input (CanvasMcpApproval.cpp); no verb leads here.
     void sendApprovalAnswer(const juce::String& nonce, bool yes);
+    // P12a A3: the flow-mode switch changed: event /pd/flow_mode/changed <on|off> <by>. Called by McpHost only.
+    void sendFlowModeChanged(bool on, const juce::String& by);
+    // P12a: the run's boot token (also in the v2 discovery file and the hello reply).
+    juce::String const& getBootToken() const { return bootToken; }
     // AI Copilot Chat callback: role ("user", "ai", "thought", "error"), text
     void setChatCallback(std::function<void(const juce::String& role, const juce::String& text)> cb);
     void postChatMessage(const juce::String& role, const juce::String& text);

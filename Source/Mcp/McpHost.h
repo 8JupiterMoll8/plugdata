@@ -218,6 +218,31 @@ public:
     // the editor did not answer. Any thread but the Pd lock's holder.
     std::optional<juce::String> selectionGet(juce::String const& canvasName, juce::String& error);
 
+    // P12a (McpFlow.cpp). The artist answered an approval chip (canvas click, Enter or Esc): a flow offer's ✓ turns
+    // flow mode on here, in C++ (only when its chip has been fully on screen for 400 ms); any other chip's answer goes
+    // to the server as /pd/approval/answer. False when nothing was answered. Called only by the canvas input; no verb
+    // leads here. Message thread.
+    bool answerApprovalChip(std::string const& nonce, bool yes, std::int64_t nowMs);
+    // Shows the flow-mode offer chip (fixed words, a nonce made here, never returned). Answers "shown" or why not:
+    // "on", "other_chip" (any approval chip on screen), "already_shown", "too_soon", "cooldown" (review M2).
+    // `byArtist` (the palette item, a GUI click) skips the rate limit and the cooldown, never the other-chip rule.
+    juce::String offerFlowMode(std::int64_t nowMs, bool byArtist = false);
+    // Review M1: the object's edit stamp (its text atoms and GUI properties, not its position or value of a slider):
+    // recorded with the AI's mark; a different live stamp = edited in place since. Pd lock held.
+    static uint64_t editStamp(t_gobj* g);
+    // Origin ai AND still as the AI left it. Pd lock held. An edit it sees clears the origin for good (sticky).
+    bool aiIntact(t_gobj* g);
+    // P12a: the AI changed its own box through the bridge (obj_set, obj_set_batch, obj_relabel): when the box was
+    // intact BEFORE the change (`wasIntact`), its stamp follows the change, so the AI's own tuning never reads as an
+    // artist edit. A box the artist had edited stays edited. Pd lock held.
+    void restampAfterAiChange(t_gobj* g, bool wasIntact);
+    // Switches flow mode off (any door). True when it was on. `by` names the door for the event and the console.
+    bool flowModeOff(juce::String const& by);
+    // {on, sinceMs, bootToken}
+    juce::String flowModeJson();
+    // A2: /pd/ownership's JSON for ids on a canvas (read fresh under the Pd lock); nullopt + error for an unknown canvas.
+    std::optional<juce::String> ownershipJson(juce::String const& canvasName, juce::StringArray const& ids, juce::String& error);
+
 private:
     std::mutex tabTokenLock;
     mcp::TabTokens tabTokens;

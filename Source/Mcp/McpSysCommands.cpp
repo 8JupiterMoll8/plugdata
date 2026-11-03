@@ -500,6 +500,8 @@ void McpHost::sysCensus(SmallString const& selector, mcp::SysList const& list)
 
                 String tempId = ptrToId.count(y_obj) ? ptrToId[y_obj] : String();
                 o->setProperty("id", tempId);
+                // P12a A2: provenance, for observability only (the flow gate reads /pd/ownership fresh, never this).
+                o->setProperty("origin", identity.originOf(y_obj) == mcp::IdentityService::Origin::Ai ? "ai" : "unknown");
 
                 t_class* cl = pd_class(&y_obj->g_pd);
                 const char* clName = class_getname(cl);

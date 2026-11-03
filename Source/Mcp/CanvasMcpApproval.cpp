@@ -44,11 +44,12 @@ bool CanvasMcpLayer::isApprovalRequested() const
 void CanvasMcpLayer::answerApproval(juce::String const& nonce, bool yes)
 {
     if (!canvas.pd || nonce.isEmpty()) return;
-    // Taken locally first: a double click or a held Enter cannot answer twice; the server clears it too.
-    if (!canvas.pd->getMcp()->session.approvals.take(nonce.toStdString(), nowMs())) return;
-    if (auto* br = canvas.pd->getMcp()->getMCPBridge()) br->sendApprovalAnswer(nonce, yes);
+    // Taken first: a double click or a held Enter cannot answer twice; the server clears it too. A flow-mode offer's ✓
+    // switches flow mode on in C++ (P12a A3); every other answer goes to the server (McpHost::answerApprovalChip).
+    if (!canvas.pd->getMcp()->answerApprovalChip(nonce.toStdString(), yes, nowMs())) return;
     mcpApprovalHits.clear();
     mcpApprovalFrame = {};
+    mcpFlowChipFrame = {};
     repaintApprovals();
 }
 
@@ -66,7 +67,10 @@ void CanvasMcpLayer::ApprovalExpiryTimer::timerCallback()
 
 bool CanvasMcpLayer::handleApprovalClick(juce::Point<int> canvasPt)
 {
-    if (!canvas.pd || mcpApprovalFrame.isEmpty() || !mcpApprovalFrame.contains(canvasPt)) return false;
+    if (!canvas.pd) return false;
+    bool const inStack = !mcpApprovalFrame.isEmpty() && mcpApprovalFrame.contains(canvasPt);
+    bool const inFlow = !mcpFlowChipFrame.isEmpty() && mcpFlowChipFrame.contains(canvasPt); // P12a review M2
+    if (!inStack && !inFlow) return false;
     auto& state = canvas.pd->getMcp()->session.approvals;
     for (auto const& hit : mcpApprovalHits) {
         bool const yes = hit.yes.contains(canvasPt);
@@ -85,7 +89,8 @@ std::optional<bool> CanvasMcpLayer::handleApprovalKey(juce::KeyPress const& key)
     auto& state = canvas.pd->getMcp()->session.approvals;
     if (key == juce::KeyPress::returnKey) {
         // Exactly one pending record, its chip on screen long enough (M5); else Enter does nothing here.
-        if (auto nonce = state.enterTarget(nowMs())) answerApproval(juce::String(*nonce), true);
+        // P12a A3: Enter never turns flow mode on (a stray Enter is too easy for a switch this strong): only a click.
+        if (auto nonce = state.enterTarget(nowMs()); nonce && !mcp::isFlowNonce(*nonce)) answerApproval(juce::String(*nonce), true);
         return true;
     }
     if (key == juce::KeyPress::escapeKey) {
@@ -102,10 +107,18 @@ void CanvasMcpLayer::paintApprovalChips(NVGcontext* nvg)
     if (!canvas.pd) return;
     auto& state = canvas.pd->getMcp()->session.approvals;
     auto const now = nowMs();
-    auto const chips = state.visible(now);
-    if (chips.empty()) {
+    auto const all = state.visible(now);
+    mcpFlowChipFrame = {};
+    if (all.empty()) {
         if (mcpApprovalExpiryTimer) mcpApprovalExpiryTimer->stopTimer();
         return;
+    }
+    // P12a review M2: the flow offer is drawn on its own (top centre, teal, CanvasMcpFlow.cpp), never in this stack.
+    std::vector<mcp::ApprovalChip> chips;
+    std::optional<mcp::ApprovalChip> flowChip;
+    for (auto const& c : all) {
+        if (c.flowOffer) flowChip = c;
+        else chips.push_back(c);
     }
     // The next C++ expiry repaints the canvas, so an expired chip does not stay drawn until some other repaint.
     if (auto const next = state.nextExpiryMs()) {
@@ -120,6 +133,10 @@ void CanvasMcpLayer::paintApprovalChips(NVGcontext* nvg)
         auto const a = canvas.viewport->getViewArea();
         view = mcp::approvalVisibleArea(a.getX(), a.getY(), a.getWidth(), a.getHeight());
     }
+    if (flowChip)
+        paintFlowOfferChip(nvg, *flowChip, view);
+    if (chips.empty())
+        return;
 
     // Server-built ghost preview: outline the targets of the records that are about THIS canvas (P12c review 5: a
     // record about another tab outlines nothing here; its chip says "(on tab X)").
@@ -197,6 +214,8 @@ void CanvasMcpLayer::paintApprovalChips(NVGcontext* nvg)
     // the minimum font: line 1 is never cut and never overflows (round 3 item 4). Measured in design pixels.
     auto titleOf = [&](mcp::ApprovalChip const& c) {
         auto t = c.title;
+        if (c.flowOffer)
+            return t; // about the session, not a tab
         if (c.canvasId != 0 && c.canvasId != thisCanvas)
             t += " (on another tab)";
         else if (c.canvasId == 0 && c.canvas != "hardware" && c.canvas != "snapshots")

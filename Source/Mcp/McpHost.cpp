@@ -232,6 +232,7 @@ void McpHost::rebindTombstones()
                     pd::getAbstractionFileName(g, absName);
                 if (absName.toStdString() == stone.tag && identity.idOf(g).empty()) {
                     identity.bind(c, stone.id, g);
+                    identity.clearOrigin(g); // P12a A1: a reloaded instance is never the AI's own
                     identity.dropTombstone(c, stone.id);
                 }
                 break;
@@ -381,6 +382,12 @@ void McpHost::createBridge()
     processor.setThis();
     mcp::audit::installLock(&processor.audioLock);
     mcpBridge = std::make_unique<MCPBridge>(&processor, mcpListen, mcpSend);
+    // P12a A1/A3: a new run: the AI's marks are of this boot only, and flow mode starts off.
+    {
+        auto const h = std::hash<std::string> {}(mcpBridge->getBootToken().toStdString());
+        identity.setBootId(h == 0 ? 1 : static_cast<uint64_t>(h));
+        session.flowMode.off();
+    }
     focusTimer.startTimer(50); // P3.4 S3: publishes the focused root for getCanvasBySymbol("main")
     if (!mcpEnabled) {
         mcpBridge->stop();
@@ -977,6 +984,7 @@ bool McpHost::undoStep(t_canvas* cnv, bool redo)
         auto bind = [&](t_gobj* g, std::vector<McpUndoGhost>::iterator ghost) {
             if (identity.resolve(cnv, ghost->id)) return; // the id is in use again: leave it there
             if (identity.bind(cnv, ghost->id, g) == mcp::IdentityService::BindResult::Refused) return;
+            identity.clearOrigin(g); // P12a A1: an object brought back by undo is never the AI's own
             journal.erase(ghost);
             tracked.insert(g);
             changed = true;

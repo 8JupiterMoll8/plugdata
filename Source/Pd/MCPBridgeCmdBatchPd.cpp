@@ -211,6 +211,12 @@ void mcp::BatchJob::editPhase(const std::string& canonStr)
         if (obj) {
             t_object* o = pd::Interface::checkObject(obj);
             if (o) {
+                // P12a A1: an MCP retype carries the origin to the recreated box (read BEFORE the rename: the old
+                // lifetime ends in it). Only onto a box that was not on the canvas before (the new one, or the same).
+                // Review M1: only while still as the AI left it (an artist edit in place is never laundered by a retype).
+                bool const wasAi = processor->getMcp()->aiIntact(obj);
+                std::unordered_set<t_gobj*> before;
+                for (t_gobj* y = cnv->gl_list; y; y = y->g_next) before.insert(y);
                 // P4.4: Pd's text_setto registers this retype as UNDO_RECREATE itself.
                 undo.ensure(); // text_setto's own entries go inside this batch's step
                 mcp::PdOps::renameObject(cnv, obj, pe.newText.toRawUTF8(), pe.newText.length());
@@ -220,8 +226,11 @@ void mcp::BatchJob::editPhase(const std::string& canonStr)
                 newObj = still ? obj : pd::Interface::getNewest(cnv);
                 if (newObj) {
                     // The retyped object takes over its id (the old one is freed, so this is no theft).
-                    if (processor->getMcp()->identity.bind(cnv, pe.objectId.toStdString(), newObj) == mcp::IdentityService::BindResult::Same)
+                    auto const rebound = processor->getMcp()->identity.bind(cnv, pe.objectId.toStdString(), newObj);
+                    if (rebound == mcp::IdentityService::BindResult::Same)
                         processor->getMcp()->identity.bumpVersion(cnv); // the edit itself is an identity change
+                    if (wasAi && rebound != mcp::IdentityService::BindResult::Refused && (still || before.count(newObj) == 0))
+                        processor->getMcp()->identity.setOriginAi(newObj, McpHost::editStamp(newObj));
                     // C++ truth: when a class can't be instantiated Pd
                     // substitutes text_class (g_text.c canvas_objtext,
                     // "... couldn't create") and leaves an ERROR BOX — the
@@ -250,7 +259,8 @@ void mcp::BatchJob::createPhase(const std::string& canonStr)
 {
     // PHASE 4: CREATE via pasteDirect
     int preCreateCount = 0;
-    for (t_gobj* g = cnv->gl_list; g; g = g->g_next) preCreateCount++;
+    std::unordered_set<t_gobj*> preCreate; // P12a A1: what was on the canvas before the paste is never marked
+    for (t_gobj* g = cnv->gl_list; g; g = g->g_next) { preCreateCount++; preCreate.insert(g); }
 
     if (createCount > 0 && pastaBuffer.isNotEmpty()) {
         pasteDirect(cnv, pastaBuffer.toRawUTF8());
@@ -386,8 +396,13 @@ void mcp::BatchJob::createPhase(const std::string& canonStr)
             } else {
                 // Map the stable tempId to the live gobj pointer
                 // Parse refused theft already; a refusal here (a race) leaves the object to the minter, said in the log.
-                if (processor->getMcp()->identity.bind(cnv, pc.tempId.toStdString(), no.ptr) == mcp::IdentityService::BindResult::Refused)
+                auto const bound = processor->getMcp()->identity.bind(cnv, pc.tempId.toStdString(), no.ptr);
+                if (bound == mcp::IdentityService::BindResult::Refused)
                     processor->logMessage("batch_atomic: tempId '" + pc.tempId + "' already names another object; the new one gets a minted id");
+                // P12a A1: THE one place an object becomes the AI's own: this batch just pasted it (it was not on the
+                // canvas before, preCreateCount) and the bridge confirmed it under the AI's id. Never from a name.
+                if (bound == mcp::IdentityService::BindResult::Bound && preCreate.count(no.ptr) == 0)
+                    processor->getMcp()->identity.setOriginAi(no.ptr, McpHost::editStamp(no.ptr));
 
                 // Auto-seed line~/vline~ init value (fork ignores creation args)
                 if (pc.seedInit) {

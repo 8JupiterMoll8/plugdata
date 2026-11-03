@@ -149,6 +149,7 @@ void MCPBridge::pdEncapsulate(const juce::String& action, const juce::OSCMessage
                             r.used = true;
                             proc->getMcp()->identity.eraseId(cnv, r.id.toStdString());
                             proc->getMcp()->identity.bind(innerCnv, r.id.toStdString(), y); // review H3
+                            proc->getMcp()->identity.clearOrigin(y); // P12a A1: wrapped objects count as the artist's
                             break;
                         }
                     }
