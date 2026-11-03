@@ -44,9 +44,9 @@ bool CanvasMcpLayer::isApprovalRequested() const
 void CanvasMcpLayer::answerApproval(juce::String const& nonce, bool yes)
 {
     if (!canvas.pd || nonce.isEmpty()) return;
-    // Taken locally first: a double click or a held Enter cannot answer twice; the server clears it too.
-    if (!canvas.pd->getMcp()->session.approvals.take(nonce.toStdString(), nowMs())) return;
-    if (auto* br = canvas.pd->getMcp()->getMCPBridge()) br->sendApprovalAnswer(nonce, yes);
+    // Taken first: a double click or a held Enter cannot answer twice; the server clears it too. A flow-mode offer's ✓
+    // switches flow mode on in C++ (P12a A3); every other answer goes to the server (McpHost::answerApprovalChip).
+    if (!canvas.pd->getMcp()->answerApprovalChip(nonce.toStdString(), yes, nowMs())) return;
     mcpApprovalHits.clear();
     mcpApprovalFrame = {};
     repaintApprovals();
@@ -85,7 +85,8 @@ std::optional<bool> CanvasMcpLayer::handleApprovalKey(juce::KeyPress const& key)
     auto& state = canvas.pd->getMcp()->session.approvals;
     if (key == juce::KeyPress::returnKey) {
         // Exactly one pending record, its chip on screen long enough (M5); else Enter does nothing here.
-        if (auto nonce = state.enterTarget(nowMs())) answerApproval(juce::String(*nonce), true);
+        // P12a A3: Enter never turns flow mode on (a stray Enter is too easy for a switch this strong): only a click.
+        if (auto nonce = state.enterTarget(nowMs()); nonce && !mcp::isFlowNonce(*nonce)) answerApproval(juce::String(*nonce), true);
         return true;
     }
     if (key == juce::KeyPress::escapeKey) {
@@ -197,6 +198,8 @@ void CanvasMcpLayer::paintApprovalChips(NVGcontext* nvg)
     // the minimum font: line 1 is never cut and never overflows (round 3 item 4). Measured in design pixels.
     auto titleOf = [&](mcp::ApprovalChip const& c) {
         auto t = c.title;
+        if (c.flowOffer)
+            return t; // about the session, not a tab
         if (c.canvasId != 0 && c.canvasId != thisCanvas)
             t += " (on another tab)";
         else if (c.canvasId == 0 && c.canvas != "hardware" && c.canvas != "snapshots")

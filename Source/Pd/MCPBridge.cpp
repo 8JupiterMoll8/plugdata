@@ -2001,10 +2001,12 @@ MCPBridge::SidecarStats MCPBridge::mcpApplyIdentitySidecar(PluginProcessor* proc
                 rejected.push_back(g);
                 continue;
             }
-            if (identity.bind(target, id.toStdString(), g) == mcp::IdentityService::BindResult::Refused)
+            if (identity.bind(target, id.toStdString(), g) == mcp::IdentityService::BindResult::Refused) {
                 ++stats.skipped; // the id already names another live object (#38)
-            else
+            } else {
+                identity.clearOrigin(g); // P12a A1: a loaded object is never the AI's own
                 ++stats.restored;
+            }
         }
         for (t_gobj* g : rejected) { // fresh names for the objects whose saved name no longer fits
             identity.mint(target, g, McpHost::mintPrefix(g).toStdString());

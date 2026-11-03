@@ -390,6 +390,9 @@ std::vector<std::string> MCPBridge::capabilityList() const
         "midi_devices",
         // P12c: /pd/approval_show|clear <corrId> ..., the canvas approval chips (answer: event /pd/approval/answer)
         "approval_ui",
+        // P12a: /pd/flow_mode_get|off|offer (the switch lives in C++; no verb turns it on) and /pd/ownership (A2)
+        "flow_mode",
+        "ownership",
     };
     // P4.1 S2: the v2 listener is up (TCP 127.0.0.1, port and token in the discovery file).
     if (v2Server.running())

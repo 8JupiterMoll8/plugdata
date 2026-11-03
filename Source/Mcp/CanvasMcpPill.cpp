@@ -458,6 +458,8 @@ void CanvasMcpLayer::initPaletteItems()
     mcpPaletteItems.push_back({ "undo", "Undo Step", "Action", "Letzte Aenderung sofort rueckgaengig", "↩️", "[@action:undo]" });
     // P6.2 U6: the AI's whole last pill turn (the server refuses when anything else changed the canvas since).
     mcpPaletteItems.push_back({ "undo-turn", "Undo AI Turn", "Action", "Alles vom letzten KI-Zug zurueck", "⏪", "[@action:undo-turn]" });
+    // P12a A3: shows the flow-mode chip on the canvas (C++ only, no prompt is sent); its ✓ switches flow mode on.
+    mcpPaletteItems.push_back({ "flow", "Flow Mode", "Action", "KI aendert eigene Objekte ohne Fragen (Approve klicken)", "🌊", "[@action:flow]" });
 
     // 🧬 Skills (AI Sounddesign)
     mcpPaletteItems.push_back({ "kick-drum", "Punchy 909 Kick", "Skill", "Pitch-Sweep & [tanh~] Saettigung", "🥁", "[@skill:kick-drum]" });
@@ -511,6 +513,13 @@ void CanvasMcpLayer::triggerPaletteItem(int index)
         auto const& item = mcpPaletteItems[static_cast<size_t>(mcpFilteredPaletteIndices[static_cast<size_t>(index)])];
         mcpPillDrawerMode = 0;
         mcpPaletteFrame = {};
+
+        // P12a A3: Flow Mode never travels as a prompt: the chip is shown here and the artist's ✓ on it decides.
+        if (item.id == "flow") {
+            if (canvas.pd) canvas.pd->getMcp()->offerFlowMode(static_cast<std::int64_t>(juce::Time::currentTimeMillis()));
+            dismissSelectionPill();
+            return;
+        }
 
         juce::String currentText = mcpSelectionPill ? mcpSelectionPill->getText().trim() : juce::String();
 

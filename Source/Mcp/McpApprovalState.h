@@ -39,6 +39,9 @@ struct ApprovalChip {
     std::vector<std::string> targets; // the server-built ghost preview: tempIds, or "*" for the whole canvas
     std::int64_t expiresAtMs = 0;
     std::uint64_t seq = 0;
+    // P12a A3: the flow-mode offer (McpFlowMode.h). Set only by McpHost::offerFlowMode, never from a server's JSON;
+    // its ✓ turns flow mode on in C++ instead of answering a server.
+    bool flowOffer = false;
     // Where each canvas view last drew this chip fully on screen, and since when (round 3 items 3 and 6). A view that
     // draws it outside its area drops only its own entry; a moved bar starts that view's time again.
     struct Seen {

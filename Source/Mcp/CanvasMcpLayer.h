@@ -316,6 +316,12 @@ public:
     };
     std::unique_ptr<ApprovalExpiryTimer> mcpApprovalExpiryTimer;
 
+    // P12a A3: the FLOW badge, drawn while flow mode is on (top-left of the visible viewport, fixed screen size). A
+    // click on it switches flow mode off (CanvasMcpFlow.cpp). Nothing on the canvas switches it on but the flow chip.
+    void paintFlowBadge(NVGcontext* nvg);
+    bool handleFlowBadgeClick(juce::Point<int> canvasPt);
+    juce::Rectangle<int> mcpFlowBadgeFrame;
+
 private:
     void renderSketchOverlay(NVGcontext* nvg);
     void renderReferenceImages(NVGcontext* nvg, juce::Rectangle<int> invalidRegion);

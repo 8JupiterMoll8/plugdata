@@ -239,6 +239,9 @@ bool CanvasMcpLayer::handleNoteClick(Point<int> canvasPt)
     // P12c approval chips take priority: they float above the pill.
     if (handleApprovalClick(canvasPt))
         return true;
+    // P12a A3: a click on the FLOW badge switches flow mode off.
+    if (handleFlowBadgeClick(canvasPt))
+        return true;
 
     if (mcpSelectionPill && mcpSelectionPill->isVisible()) {
         // Smart Command Palette clicks

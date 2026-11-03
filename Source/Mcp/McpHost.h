@@ -218,6 +218,20 @@ public:
     // the editor did not answer. Any thread but the Pd lock's holder.
     std::optional<juce::String> selectionGet(juce::String const& canvasName, juce::String& error);
 
+    // P12a (McpFlow.cpp). The artist answered an approval chip (canvas click, Enter or Esc): a flow offer's ✓ turns
+    // flow mode on here, in C++ (only when its chip has been fully on screen for 400 ms); any other chip's answer goes
+    // to the server as /pd/approval/answer. False when nothing was answered. Called only by the canvas input; no verb
+    // leads here. Message thread.
+    bool answerApprovalChip(std::string const& nonce, bool yes, std::int64_t nowMs);
+    // Shows the flow-mode offer chip (fixed words, a nonce made here, never returned). False when flow mode is on.
+    bool offerFlowMode(std::int64_t nowMs);
+    // Switches flow mode off (any door). True when it was on. `by` names the door for the event and the console.
+    bool flowModeOff(juce::String const& by);
+    // {on, sinceMs, bootToken}
+    juce::String flowModeJson();
+    // A2: /pd/ownership's JSON for ids on a canvas (read fresh under the Pd lock); nullopt + error for an unknown canvas.
+    std::optional<juce::String> ownershipJson(juce::String const& canvasName, juce::StringArray const& ids, juce::String& error);
+
 private:
     std::mutex tabTokenLock;
     mcp::TabTokens tabTokens;

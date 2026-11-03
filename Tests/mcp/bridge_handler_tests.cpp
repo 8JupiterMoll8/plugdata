@@ -2350,6 +2350,476 @@ void runApprovalCases(Harness& h, PluginProcessor& processor)
     state.clear("n_b");
 }
 
+// P12a A1/A2: provenance and the ownership read. An object is the AI's own ONLY when the batch create made it in this
+// run (or an MCP retype of such a box); every other way an object appears is the artist's. /pd/ownership answers per id
+// {origin, owned, why}, read fresh. All on a scratch subpatch pd-fl_sub of main.
+void runFlowProvenanceCases(Harness& h, PluginProcessor& processor)
+{
+    std::printf("P12a provenance + /pd/ownership\n");
+    auto* host = processor.getMcp();
+    int corr = 0;
+    auto next = [&corr](char const* p) { return juce::String(p) + juce::String(++corr); };
+    auto batch = [&](std::initializer_list<A> args, juce::String const& c) {
+        auto r = h.call("/pd/batch_atomic", args, ("/pd/batch_atomic/reply/" + c).toStdString());
+        return r.has_value();
+    };
+    // objects[0] of /pd/ownership for one id (void when no reply)
+    auto own = [&](char const* canvas, juce::String const& id) -> juce::var {
+        auto const c = next("fo");
+        auto r = h.call("/pd/ownership", { c, canvas, id }, ("/pd/ownership/reply/" + c).toStdString(), 3000);
+        if (!r) return {};
+        auto const json = parseJson(*r);
+        auto const* arr = json["objects"].getArray();
+        return arr && arr->size() == 1 ? arr->getReference(0) : juce::var();
+    };
+    auto origin = [&](char const* canvas, juce::String const& id) { return own(canvas, id)["origin"].toString().toStdString(); };
+    auto why = [&](char const* canvas, juce::String const& id) { return own(canvas, id)["why"].toString().toStdString(); };
+    auto sub = [&]() { return host->getCanvasBySymbol("pd-fl_sub"); };
+    // A hand-made box on the subpatch, given an id the way the census adopts one.
+    auto handBox = [&](char const* cls) {
+        juce::String id;
+        host->pdWait([&] {
+            t_canvas* c = sub();
+            if (!c) return;
+            t_atom at[3];
+            SETFLOAT(at, 300);
+            SETFLOAT(at + 1, 300);
+            SETSYMBOL(at + 2, gensym(cls));
+            pd_typedmess(&c->gl_pd, gensym("obj"), 3, at);
+            id = juce::String(host->identity.mint(c, pd::Interface::getNewest(c), "hand"));
+        }, 3000);
+        return id;
+    };
+
+    CHECK(hasCap(h, "ownership", "fo0"));
+    auto const c0 = next("fb");
+    CHECK(batch({ "main", c0, 0, 0, 0, 1, 0, "fl_sub", 1500, 40, "obj", "pd", 1, "fl_sub", 0, 5, 10, 0 }, c0));
+    CHECK(sub() != nullptr);
+
+    // 1. Batch create -> ai, its own leaf; an AI wire into an AI box keeps it owned.
+    auto const c1 = next("fb");
+    CHECK(batch({ "pd-fl_sub", c1, 0, 0, 0, 2, 1,
+        "fl_a", 40, 40, "obj", "f", 0,
+        "fl_b", 40, 100, "obj", "f", 0,
+        "fl_a", 0, "fl_b", 0, 0, 5, 10, 0 }, c1));
+    {
+        auto const a = own("pd-fl_sub", "fl_a");
+        CHECK(a["origin"].toString() == "ai" && static_cast<bool>(a["owned"]) && a["why"].toString() == "ai_own");
+        CHECK(a["found"] && !static_cast<bool>(a["isContainer"]) && !static_cast<bool>(a["isDataHolder"]));
+        CHECK(why("pd-fl_sub", "fl_b") == "ai_own");
+    }
+    // The census row and the identity snapshot carry it too (observability).
+    {
+        auto const c = next("fc");
+        auto census = h.call("/pd/census", { "pd-fl_sub", c }, ("/pd/census/reply/" + c).toStdString());
+        bool seen = false;
+        if (census) {
+            auto const json = parseJson(*census);
+            if (auto* arr = json["objects"].getArray())
+                for (auto const& o : *arr)
+                    if (o["id"].toString() == "fl_a") seen = o["origin"].toString() == "ai";
+        }
+        CHECK(seen);
+        auto const cs = next("fs");
+        auto snap = h.call("/pd/identity_snapshot", { "pd-fl_sub", cs }, ("/pd/identity_snapshot/reply/" + cs).toStdString());
+        bool snapSeen = false;
+        if (snap) {
+            auto const json = parseJson(*snap);
+            if (auto* arr = json["entries"].getArray())
+                for (auto const& o : *arr)
+                    if (o["id"].toString() == "fl_a") snapSeen = o["origin"].toString() == "ai";
+        }
+        CHECK(snapSeen);
+    }
+
+    // 2. Hand-made (adopted by the minter) -> unknown. 3. Pasted / created behind the bridge, adopted by a batch's
+    // reconcile -> unknown.
+    auto const hand = handBox("f");
+    CHECK(hand.isNotEmpty() && origin("pd-fl_sub", hand) == "unknown" && why("pd-fl_sub", hand) == "origin_unknown");
+    {
+        host->pdWait([&] {
+            t_canvas* c = sub();
+            t_atom at[3];
+            SETFLOAT(at, 320);
+            SETFLOAT(at + 1, 340);
+            SETSYMBOL(at + 2, gensym("osc~"));
+            pd_typedmess(&c->gl_pd, gensym("obj"), 3, at); // untracked, as a paste looks to the identity layer
+        }, 3000);
+        auto const c = next("fb");
+        CHECK(batch({ "pd-fl_sub", c, 0, 0, 0, 1, 0, "fl_c", 40, 160, "obj", "f", 0, 0, 5, 10, 0 }, c)); // reconciles first
+        juce::String pastedId;
+        host->pdWait([&] {
+            t_canvas* cv = sub();
+            for (t_gobj* g = cv->gl_list; g; g = g->g_next)
+                if (auto* t = pd_checkobject(&g->g_pd); t && t->te_xpix == 320 && t->te_ypix == 340)
+                    pastedId = juce::String(host->identity.idOf(g));
+        }, 3000);
+        CHECK(pastedId.isNotEmpty() && origin("pd-fl_sub", pastedId) == "unknown");
+        CHECK(origin("pd-fl_sub", "fl_c") == "ai");
+    }
+
+    // 4. A wire from an artist box into an AI box: not the AI's own any more.
+    {
+        auto const c = next("fb");
+        CHECK(batch({ "pd-fl_sub", c, 0, 0, 0, 1, 0, "fl_w", 40, 220, "obj", "f", 0, 0, 5, 10, 0 }, c));
+        host->pdWait([&] {
+            t_canvas* cv = sub();
+            auto* from = cv->gl_list ? host->identity.resolve(cv, hand.toStdString()) : nullptr;
+            auto* to = host->identity.resolve(cv, "fl_w");
+            if (from && to) obj_connect(pd_checkobject(&from->g_pd), 0, pd_checkobject(&to->g_pd), 0);
+        }, 3000);
+        auto const w = own("pd-fl_sub", "fl_w");
+        CHECK(w["origin"].toString() == "ai" && !static_cast<bool>(w["owned"]) && w["why"].toString() == "artist_in_wire");
+    }
+
+    // 5. Containers and data holders always ask, whoever made them.
+    {
+        auto const c = next("fb");
+        CHECK(batch({ "pd-fl_sub", c, 0, 0, 0, 3, 0,
+            "fl_pd", 200, 40, "obj", "pd", 1, "fl_inner",
+            "fl_tab", 200, 100, "obj", "table", 2, "fl_tab_t", "16",
+            "fl_arr", 200, 160, "obj", "array", 3, "define", "fl_arr_a", "16",
+            0, 5, 10, 0 }, c));
+        host->pdWait([&] {
+            t_canvas* cv = sub();
+            t_atom at[5];
+            SETFLOAT(at, 200);
+            SETFLOAT(at + 1, 220);
+            SETSYMBOL(at + 2, gensym("text"));
+            SETSYMBOL(at + 3, gensym("define"));
+            SETSYMBOL(at + 4, gensym("fl_txt_t"));
+            pd_typedmess(&cv->gl_pd, gensym("obj"), 5, at);
+            t_gobj* g = pd::Interface::getNewest(cv);
+            host->identity.bind(cv, "fl_txt", g);
+            host->identity.setOriginAi(g); // as if the batch had made it
+        }, 3000);
+        CHECK(why("pd-fl_sub", "fl_pd") == "container");
+        auto const tab = why("pd-fl_sub", "fl_tab");
+        CHECK(tab == "container" || tab == "data_holder");
+        CHECK(why("pd-fl_sub", "fl_arr") == "data_holder");
+        CHECK(why("pd-fl_sub", "fl_txt") == "data_holder");
+        CHECK(origin("pd-fl_sub", "fl_arr") == "ai");
+    }
+
+    // 6. MCP retype carries the origin; of an artist box it stays unknown. 7. GUI retype (the retype hook) -> unknown.
+    {
+        auto const c = next("fb");
+        CHECK(batch({ "pd-fl_sub", c, 0, 0, 1, 0, 0, "fl_a", "f", 1, "9", 0, 5, 10, 0 }, c));
+        CHECK(origin("pd-fl_sub", "fl_a") == "ai");
+        auto const c2 = next("fb");
+        CHECK(batch({ "pd-fl_sub", c2, 0, 0, 1, 0, 0, hand, "f", 1, "3", 0, 5, 10, 0 }, c2));
+        CHECK(origin("pd-fl_sub", hand) == "unknown");
+        auto const c3 = next("fb");
+        CHECK(batch({ "pd-fl_sub", c3, 0, 0, 0, 1, 0, "fl_g", 40, 280, "obj", "f", 0, 0, 5, 10, 0 }, c3));
+        CHECK(origin("pd-fl_sub", "fl_g") == "ai");
+        bool moved = false;
+        host->pdWait([&] {
+            t_canvas* cv = sub();
+            t_gobj* old = host->identity.resolve(cv, "fl_g");
+            if (!old) return;
+            char text[] = "i 4";
+            text_setto(reinterpret_cast<t_text*>(old), cv, text, 3);
+            t_gobj* now = pd::Interface::getNewest(cv);
+            if (processor.onObjectRetyped) processor.onObjectRetyped(old, now); // what Patch::renameObject calls
+            moved = host->identity.resolve(cv, "fl_g") == now;
+        }, 3000);
+        CHECK(moved);
+        CHECK(origin("pd-fl_sub", "fl_g") == "unknown");
+    }
+
+    // 8. register_id of an artist box under an AI-looking id -> unknown. 9. A rename keeps it on the object; an artist
+    // id renamed onto a freed AI id stays unknown.
+    {
+        int index = -1;
+        host->pdWait([&] {
+            t_canvas* cv = sub();
+            t_gobj* target = host->identity.resolve(cv, hand.toStdString());
+            int i = 0;
+            for (t_gobj* g = cv->gl_list; g; g = g->g_next, ++i)
+                if (g == target) index = i;
+        }, 3000);
+        auto const c = next("fr");
+        auto r = h.call("/pd/register_id", { "pd-fl_sub", c, index, "fl_ai_like" }, ("/pd/mcp_register_id/reply/" + c).toStdString());
+        CHECK(r.has_value() && r->num(0) == 1);
+        CHECK(origin("pd-fl_sub", "fl_ai_like") == "unknown");
+        auto const cr = next("fn");
+        auto rn = h.call("/pd/rename_id", { "pd-fl_sub", cr, "fl_b", "fl_b2" }, ("/pd/rename_id/reply/" + cr).toStdString());
+        CHECK(rn.has_value() && rn->num(0) == 1);
+        CHECK(origin("pd-fl_sub", "fl_b2") == "ai");
+        auto const cr2 = next("fn");
+        auto rn2 = h.call("/pd/rename_id", { "pd-fl_sub", cr2, "fl_ai_like", "fl_b" }, ("/pd/rename_id/reply/" + cr2).toStdString());
+        CHECK(rn2.has_value() && rn2->num(0) == 1);
+        CHECK(origin("pd-fl_sub", "fl_b") == "unknown");
+    }
+
+    // 10. A red box is rolled back: nothing to own.
+    {
+        auto const c = next("fb");
+        CHECK(batch({ "pd-fl_sub", c, 0, 0, 0, 1, 0, "fl_red", 40, 340, "obj", "p12_no_such_class", 0, 0, 5, 10, 0 }, c));
+        CHECK(why("pd-fl_sub", "fl_red") == "not_found");
+    }
+
+    // 11. Native undo of an AI delete brings the box back as the artist's.
+    {
+        auto const c = next("fb");
+        CHECK(batch({ "pd-fl_sub", c, 0, 0, 0, 1, 0, "fl_u", 40, 400, "obj", "f", 0, 0, 5, 10, 0 }, c));
+        CHECK(origin("pd-fl_sub", "fl_u") == "ai");
+        auto const cd = next("fb");
+        CHECK(batch({ "pd-fl_sub", cd, 1, 0, 0, 0, 0, "fl_u", 0, 5, 10, 0 }, cd));
+        CHECK(why("pd-fl_sub", "fl_u") == "not_found");
+        auto const cu = next("fu");
+        auto u = h.call("/pd/undo", { "pd-fl_sub", cu }, ("/pd/undo/reply/" + cu).toStdString());
+        sleepMs(300);
+        CHECK(u.has_value() && u->num(0) == 1);
+        auto const back = own("pd-fl_sub", "fl_u");
+        std::printf("  undo of an AI delete: found %d, origin %s\n", static_cast<int>(static_cast<bool>(back["found"])), back["origin"].toString().toRawUTF8());
+        CHECK(back["origin"].toString() == "unknown" && !static_cast<bool>(back["owned"]));
+    }
+
+    // 12. Address reuse: a freed AI box's address taken by a hand-made box never reads as the AI's.
+    {
+        int reused = 0, wrong = 0;
+        host->pdWait([&] {
+            t_canvas* cv = sub();
+            auto newObj = [cv] {
+                t_atom a[3];
+                SETFLOAT(a, 600);
+                SETFLOAT(a + 1, 40);
+                SETSYMBOL(a + 2, gensym("osc~"));
+                pd_typedmess(&cv->gl_pd, gensym("obj"), 3, a);
+                return pd::Interface::getNewest(cv);
+            };
+            for (int i = 0; i < 300 && reused < 20; ++i) {
+                t_gobj* old = newObj();
+                host->identity.bind(cv, "fl_reuse" + std::to_string(i), old);
+                host->identity.setOriginAi(old); // as the batch create marks it
+                glist_delete(cv, old);
+                t_gobj* fresh = newObj();
+                if (fresh == old) ++reused;
+                host->identity.mint(cv, fresh, "hand");
+                if (host->identity.originOf(fresh) == mcp::IdentityService::Origin::Ai) ++wrong;
+                glist_delete(cv, fresh);
+            }
+        }, 20000);
+        std::printf("  address reuse: %d reused, %d read as the AI's\n", reused, wrong);
+        CHECK(wrong == 0);
+    }
+
+    // 13. Encapsulate: the wrapped boxes are the artist's (they leave the AI's leaf set).
+    {
+        auto const c = next("fb");
+        CHECK(batch({ "pd-fl_sub", c, 0, 0, 0, 2, 0,
+            "fl_e1", 400, 40, "obj", "f", 0,
+            "fl_e2", 400, 100, "obj", "f", 0, 0, 5, 10, 0 }, c));
+        CHECK(origin("pd-fl_sub", "fl_e1") == "ai");
+        auto const ce = next("fe");
+        auto e = h.call("/pd/encapsulate", { "pd-fl_sub", "fl_enc", 2, "fl_e1", "fl_e2", ce }, ("/pd/encapsulate/reply/" + ce).toStdString(), 8000);
+        CHECK(e.has_value());
+        if (e) std::printf("  encapsulate reply %.0f %s\n", e->num(0), e->str(1).substr(0, 120).c_str());
+        sleepMs(300);
+        host->pdWait([&] {
+            t_canvas* enc = host->getCanvasBySymbol("pd-fl_enc");
+            std::printf("  pd-fl_enc %s:", enc ? "found" : "missing");
+            for (t_gobj* g = enc ? enc->gl_list : nullptr; g; g = g->g_next)
+                std::printf(" [%s]", host->identity.idOf(g).c_str());
+            std::printf("\n");
+        }, 3000);
+        if (e && e->num(0) == 0) {
+            // /pd/encapsulate needs an editor view (gui().ensureView); headless it refuses. The rule is code
+            // (MCPBridgeCmdEncapsulate.cpp: clearOrigin on every re-attached box) and the A8 live check.
+            std::printf("  encapsulate needs an editor: not run headless (live check A8)\n");
+            CHECK(origin("pd-fl_sub", "fl_e1") == "ai"); // refused: nothing changed
+        } else {
+            auto const inner = own("pd-fl_enc", "fl_e1");
+            std::printf("  encapsulated: found %d, origin %s\n", static_cast<int>(static_cast<bool>(inner["found"])), inner["origin"].toString().toRawUTF8());
+            CHECK(inner["origin"].toString() == "unknown" && !static_cast<bool>(inner["owned"]));
+            auto const box = own("pd-fl_sub", "fl_enc");
+            CHECK(!static_cast<bool>(box["owned"]));
+        }
+    }
+
+    // 14. Tombstone rebind (an abstraction reloaded after its save) -> unknown.
+    {
+        juce::File dir;
+        host->pdWait([&] { dir = juce::File(juce::String::fromUTF8(canvas_getdir(sub())->s_name)); }, 3000);
+        auto absFile = dir.getChildFile("fl_abs.pd");
+        CHECK(absFile.replaceWithText("#N canvas 0 50 450 300 12;\n#X obj 10 10 inlet;\n"));
+        auto const c = next("fb");
+        CHECK(batch({ "pd-fl_sub", c, 0, 0, 0, 1, 0, "fl_abs1", 500, 200, "obj", "fl_abs", 0, 0, 5, 10, 0 }, c));
+        CHECK(origin("pd-fl_sub", "fl_abs1") == "ai");
+        bool rebound = false;
+        host->pdWait([&] {
+            t_gobj* inst = host->identity.resolve(sub(), "fl_abs1");
+            juce::String absName;
+            if (!inst || !pd::getAbstractionFileName(inst, absName)) return;
+            host->tombstoneAbstractionInstances(absName);
+            absFile.replaceWithText("#N canvas 0 50 450 300 12;\n#X obj 10 10 inlet;\n#X obj 10 40 outlet;\n");
+            processor.reloadAbstractions(absFile, nullptr);
+            host->rebindTombstones();
+            t_gobj* after = host->identity.resolve(sub(), "fl_abs1");
+            rebound = after && after != inst;
+        }, 20000);
+        std::printf("  tombstone rebind: %s\n", rebound ? "rebound" : "not rebound");
+        CHECK(origin("pd-fl_sub", "fl_abs1") == "unknown");
+        absFile.deleteFile();
+    }
+
+    // 15. File load with the identity sidecar: the ids come back, as the artist's.
+    {
+        juce::File dir;
+        host->pdWait([&] { dir = juce::File(juce::String::fromUTF8(canvas_getdir(sub())->s_name)); }, 3000);
+        auto file = dir.getChildFile("fl_load.pd");
+        auto const cs = next("fv");
+        auto sp = h.call("/pd/save_patch", { "pd-fl_sub", file.getFullPathName(), cs }, ("/pd/save_patch/reply/" + cs).toStdString(), 5000);
+        CHECK(sp.has_value());
+        CHECK(origin("pd-fl_sub", "fl_c") == "ai");
+        auto const cl = next("fl");
+        auto lp = h.call("/pd/load_patch", { "pd-fl_sub", file.getFullPathName(), cl }, ("/pd/load_patch/reply/" + cl).toStdString(), 8000);
+        CHECK(lp.has_value());
+        sleepMs(300);
+        auto const loaded = own("pd-fl_sub", "fl_c");
+        std::printf("  loaded: found %d, origin %s\n", static_cast<int>(static_cast<bool>(loaded["found"])), loaded["origin"].toString().toRawUTF8());
+        CHECK(static_cast<bool>(loaded["found"]) && loaded["origin"].toString() == "unknown");
+        file.deleteFile();
+        juce::File(file.getFullPathName() + ".mcpids.json").deleteFile();
+    }
+
+    // Unknown canvas: an error, never an empty "nothing is owned".
+    {
+        auto const c = next("fo");
+        auto bad = h.call("/pd/ownership", { c, "pd-p12_no_such_canvas", "x" }, ("/pd/ownership/error/" + c).toStdString(), 2000);
+        CHECK(bad.has_value());
+    }
+    auto const cx = next("fb");
+    h.call("/pd/batch_atomic", { "main", cx, 1, 0, 0, 0, 0, "fl_sub", 0, 5, 10, 0 }, ("/pd/batch_atomic/reply/" + cx).toStdString());
+}
+
+// P12a A3: the flow-mode switch. Off at start; no verb, argument, HUD chapter, note or patch text turns it on (the v1
+// datagram route: oscMessageReceived); a server's approval chip (even one claiming to be the flow offer) cannot; only
+// the artist's ✓ on the flow chip, after it was on screen 400 ms; off from anywhere; never saved.
+void runFlowModeCases(Harness& h, PluginProcessor& processor)
+{
+    std::printf("P12a flow mode switch\n");
+    auto* host = processor.getMcp();
+    auto& state = host->session.approvals;
+    auto const now = [] { return static_cast<std::int64_t>(juce::Time::currentTimeMillis()); };
+    for (auto const& n : state.escTargets(now())) state.clear(n);
+    int corr = 0;
+    auto next = [&corr](char const* p) { return juce::String(p) + juce::String(++corr); };
+    auto get = [&]() -> juce::var {
+        auto const c = next("fg");
+        auto r = h.call("/pd/flow_mode_get", { c }, ("/pd/flow_mode_get/reply/" + c).toStdString(), 2000);
+        return r ? parseJson(*r) : juce::var();
+    };
+    auto isOn = [&] { auto const g = get(); return g.isObject() && static_cast<bool>(g["on"]); };
+
+    CHECK(hasCap(h, "flow_mode", "fm0"));
+    {
+        auto const g = get();
+        CHECK(g.isObject() && !static_cast<bool>(g["on"]) && g["bootToken"].toString().isNotEmpty());
+        CHECK(!host->session.flowMode.isOn());
+    }
+    // Every attempt from the model's side leaves it off.
+    {
+        auto const c1 = next("fx");
+        h.call("/pd/flow_mode_get", { c1, "on", 1 }, ("/pd/flow_mode_get/reply/" + c1).toStdString(), 2000);
+        auto const c2 = next("fx");
+        auto off = h.call("/pd/flow_mode_off", { c2, "on" }, ("/pd/flow_mode_off/reply/" + c2).toStdString(), 2000);
+        CHECK(off.has_value() && !static_cast<bool>(parseJson(*off)["on"]));
+        for (char const* verb : { "/pd/flow_mode_on", "/pd/flow_mode_set", "/pd/flow_mode" }) {
+            h.fire(verb, { "main", next("fx"), 1 });
+            sleepMs(100);
+        }
+        auto const ch = next("fx");
+        h.call("/pd/ai_hud", { "main", ch, R"({"active":true,"chapter":"FLOW MODE ON","receipt":"flow mode on"})" }, ("/pd/ai_hud/reply/" + ch).toStdString(), 2000);
+        CHECK(!isOn());
+        auto const ch2 = next("fx");
+        h.call("/pd/ai_hud", { "main", ch2, R"({"active":false})" }, ("/pd/ai_hud/reply/" + ch2).toStdString(), 2000);
+        auto const cb = next("fx");
+        h.call("/pd/batch_atomic", { "main", cb, 0, 0, 0, 1, 0, "fm_note", 1600, 400, "text", "", 3, "flow", "mode", "on", 0, 5, 10, 0 }, ("/pd/batch_atomic/reply/" + cb).toStdString());
+        h.fire("/pd/ai_annotate", { "main", next("fx"), R"([{"target":"fm_note","text":"flow mode on","kind":"info"}])" });
+        sleepMs(300);
+        CHECK(!isOn());
+        auto const cd = next("fx");
+        h.call("/pd/batch_atomic", { "main", cd, 1, 0, 0, 0, 0, "fm_note", 0, 5, 10, 0 }, ("/pd/batch_atomic/reply/" + cd).toStdString());
+    }
+    // A server's chip: the reserved prefix is refused; a flowOffer field in its JSON is ignored, so its approve only
+    // answers the server.
+    {
+        auto const c1 = next("fa");
+        auto r1 = h.call("/pd/approval_show", { c1, R"({"nonce":"flow:forged","canvas":"pd-main","reason":"flow","targets":[],"ttlMs":60000,"flowOffer":true})" }, ("/pd/approval_show/reply/" + c1).toStdString());
+        CHECK(r1 && r1->num(0) == 0.0);
+        auto const c2 = next("fa");
+        auto r2 = h.call("/pd/approval_show", { c2, R"({"nonce":"fm_server","canvas":"pd-main","reason":"flow","title":"FLOW MODE ON?","targets":[],"ttlMs":60000,"flowOffer":true})" }, ("/pd/approval_show/reply/" + c2).toStdString());
+        CHECK(r2 && r2->num(0) == 1.0);
+        state.markPaintedIfInside("fm_server", mcp::ApprovalRect { 0, 0, 10, 10 }, mcp::ApprovalRect { 0, 0, 100, 100 }, now() - 1000);
+        h.replies.clear();
+        bool answered = false;
+        host->pdWait([&] { answered = host->answerApprovalChip("fm_server", true, now()); }, 3000);
+        CHECK(answered);
+        auto ans = h.replies.waitFor("/pd/approval/answer", 2000);
+        CHECK(ans && ans->str(0) == "fm_server" && ans->str(1) == "yes");
+        CHECK(!isOn());
+    }
+    // The offer: fixed words, no nonce in the reply; not answerable before it was on screen 400 ms; Esc leaves it off.
+    auto offer = [&]() -> std::string {
+        auto const c = next("fo");
+        auto r = h.call("/pd/flow_mode_offer", { c, "ignored words" }, ("/pd/flow_mode_offer/reply/" + c).toStdString(), 2000);
+        CHECK(r.has_value() && r->str(0).find("flow:") == std::string::npos);
+        if (r) CHECK(static_cast<bool>(parseJson(*r)["shown"]));
+        for (auto const& chip : state.visible(now()))
+            if (chip.flowOffer) {
+                CHECK(chip.title.find("ignored") == std::string::npos && chip.detail.find("ignored") == std::string::npos);
+                return chip.nonce;
+            }
+        return {};
+    };
+    {
+        auto const n = offer();
+        CHECK(!n.empty() && mcp::isFlowNonce(n));
+        bool early = true;
+        host->pdWait([&] { early = host->answerApprovalChip(n, true, now()); }, 3000); // never painted: not clickable
+        CHECK(!early && !isOn());
+        host->pdWait([&] { host->answerApprovalChip(n, false, now()); }, 3000); // Esc / cancel
+        CHECK(!isOn());
+        CHECK(state.visible(now()).empty());
+    }
+    {
+        auto const n = offer();
+        state.markPaintedIfInside(n, mcp::ApprovalRect { 0, 0, 10, 10 }, mcp::ApprovalRect { 0, 0, 100, 100 }, now() - 1000);
+        h.replies.clear();
+        bool clicked = false;
+        host->pdWait([&] { clicked = host->answerApprovalChip(n, true, now()); }, 3000);
+        CHECK(clicked);
+        auto ev = h.replies.waitFor("/pd/flow_mode/changed", 2000); // before any call (a call clears the replies)
+        CHECK(ev && ev->str(0) == "on" && ev->str(1) == "artist");
+        CHECK(!h.replies.waitFor("/pd/approval/answer", 200).has_value()); // nothing went to a server as an approval
+        CHECK(isOn());
+        auto const g = get();
+        CHECK(static_cast<double>(g["sinceMs"]) > 0);
+        auto const c = next("fo");
+        auto again = h.call("/pd/flow_mode_offer", { c }, ("/pd/flow_mode_offer/reply/" + c).toStdString(), 2000);
+        CHECK(again && !static_cast<bool>(parseJson(*again)["shown"]));
+    }
+    // Never saved: the settings file has no trace of it, so a restart starts off (the state is a plain member).
+    {
+        auto const settings = juce::File::getSpecialLocation(juce::File::userHomeDirectory).getChildFile("Documents/plugdata/settings.json");
+        CHECK(!settings.loadFileAsString().containsIgnoreCase("flow_mode"));
+    }
+    // Off from any door, with its event.
+    {
+        // fire, not call: the event goes out before the reply, and waiting for the reply drops what came before it
+        auto const c = next("ff");
+        h.fire("/pd/flow_mode_off", { c, "test" });
+        auto ev = h.replies.waitFor("/pd/flow_mode/changed", 2000);
+        auto r = h.replies.waitFor(("/pd/flow_mode_off/reply/" + c).toStdString(), 2000);
+        CHECK(r && static_cast<bool>(parseJson(*r)["wasOn"]));
+        CHECK(ev && ev->str(0) == "off" && ev->str(1) == "test");
+        CHECK(!isOn());
+    }
+    for (auto const& n : state.escTargets(now())) state.clear(n);
+}
+
 void runLimiterCases(Harness& h, PluginProcessor& processor)
 {
     std::printf("limiter read\n");
@@ -3654,7 +4124,7 @@ void runZeroArgCases(Harness& h)
         auto const* e = f ? f->find("error") : nullptr;
         refused += (f && field(*f, "outcome") == "rejected" && e && field(*e, "code") == "bad_frame") ? 1 : 0;
     }
-    CHECK(guarded == 23 && refused == guarded); // 19 since /pd/midi_devices (minArgs 1); +2 P11 /pd/bound, /pd/selection_get; +2 P12c approval_show/clear (minArgs 2)
+    CHECK(guarded == 27 && refused == guarded); // 19 since /pd/midi_devices (minArgs 1); +2 P11 /pd/bound, /pd/selection_get; +2 P12c approval_show/clear (minArgs 2); +4 P12a flow_mode_get/off/offer, ownership
 }
 
 // S6.6 (audit A20): the live props of an IEM GUI carry its label, so a control the builder named (`hsl ... morph_s
@@ -4038,6 +4508,8 @@ int main()
             runPathCanvasCases(processor);
             runContentVersionCases(harness, processor);
             runSelectionGetCases(harness);
+            runFlowProvenanceCases(harness, processor);
+            runFlowModeCases(harness, processor);
             runV2HandshakeCases(harness, *bridge, [&] {
                 bridge->setReplySinkForTests([&replies](juce::OSCMessage const& msg) { replies.push(msg); });
             });
