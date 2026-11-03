@@ -326,8 +326,19 @@ public:
     // Alphi's rect in canvas coordinates when it is drawn on this view, for the chip layout; nullopt when it is not.
     std::optional<mcp::ApprovalRect> alphiKeepOut(mcp::ApprovalRect view, float zoom) const;
     bool alphiShown() const;
+    // Review M2 / L2: a chip stack, the pill or its drawers cover Alphi's rect (then it is not drawn or clickable).
+    bool alphiCoveredNow(juce::Rectangle<int> frame) const;
+    // Review L1: the tab went hidden or came back: Alphi's 400 ms on-screen time starts again.
+    void alphiVisibilityTick();
     juce::Rectangle<int> mcpAlphiFrame;
     std::int64_t mcpAlphiShownSinceMs = 0;
+    bool mcpAlphiWasShowing = false;
+    struct AlphiVisibilityTimer : public juce::Timer {
+        explicit AlphiVisibilityTimer(CanvasMcpLayer* c) : layer(c) {}
+        void timerCallback() override { layer->alphiVisibilityTick(); }
+        CanvasMcpLayer* layer;
+    };
+    std::unique_ptr<AlphiVisibilityTimer> mcpAlphiVisibilityTimer;
 
 private:
     void renderSketchOverlay(NVGcontext* nvg);

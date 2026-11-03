@@ -10,6 +10,7 @@
 #include "Utility/NVGTextShim.h"
 
 #include "Mcp/CanvasMcpLayer.h"
+#include "Mcp/McpAlphi.h"
 #include "Sidebar/Sidebar.h"
 #include "Sidebar/CopilotPanel.h"
 #include "Canvas.h"
@@ -206,6 +207,9 @@ void CanvasMcpLayer::mouseExit(MouseEvent const& e)
 
 bool CanvasMcpLayer::isPointOverNote(Point<int> canvasPt) const
 {
+    // P12a.1 review M1: Alphi's spot is Alphi's (a double click there makes no empty box under it).
+    if (mcp::alphiHit(mcp::ApprovalRect { mcpAlphiFrame.getX(), mcpAlphiFrame.getY(), mcpAlphiFrame.getWidth(), mcpAlphiFrame.getHeight() }, canvasPt.x, canvasPt.y))
+        return true;
     if (mcpSelectionPill && mcpSelectionPill->isVisible()) {
         auto const panel = mcpSelectionPillFrame.isEmpty() ? mcpSelectionPill->getBounds() : mcpSelectionPillFrame;
         if (panel.contains(canvasPt)) return true;

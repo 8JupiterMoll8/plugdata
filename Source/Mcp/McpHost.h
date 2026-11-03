@@ -226,6 +226,10 @@ public:
     // when off, off when on (a double click flips once). Returns whether flow mode is on afterwards. Called only by
     // the canvas click (CanvasMcpLayer::handleAlphiClick); no verb leads here (grep gate). Message thread.
     bool alphiClicked(std::int64_t nowMs);
+    // P12a.1 review L3: the bridge object exists AND serves. Any thread.
+    bool bridgeRunning() const;
+    // P12a.1 review L3: MCPBridge::stop calls this first: flow mode off (with its event unless PlugData is shutting down).
+    void bridgeStopping();
     // Review M1: the object's edit stamp (its text atoms and GUI properties, not its position or value of a slider):
     // recorded with the AI's mark; a different live stamp = edited in place since. Pd lock held.
     static uint64_t editStamp(t_gobj* g);

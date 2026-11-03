@@ -101,6 +101,26 @@ static void clicks()
     CHECK(!mcp::alphiClickAllowed(0, 5000));
     CHECK(!mcp::alphiClickAllowed(5000, 5000 + A::minVisibleMs - 1));
     CHECK(mcp::alphiClickAllowed(5000, 5000 + A::minVisibleMs));
+    // Review M2: for 400 ms after ANY approval chip left the glass (it may have sat on Alphi, in a view too small to
+    // move it) a click on Alphi does nothing: a ✓ click whose chip the AI just cleared never lands on the switch.
+    CHECK(!mcp::alphiClickAllowed(1000, 9000, 9000 - 1));
+    CHECK(!mcp::alphiClickAllowed(1000, 9000, 9000 - A::minVisibleMs + 1));
+    CHECK(mcp::alphiClickAllowed(1000, 9000, 9000 - A::minVisibleMs));
+    CHECK(mcp::alphiClickAllowed(1000, 9000, 0)); // no chip ever went
+    // Review M1: a click (or double click) inside Alphi is Alphi's, never the canvas's (no empty box under it).
+    {
+        ApprovalRect const f { 12, 12, 48, 56 };
+        CHECK(mcp::alphiHit(f, 12, 12) && mcp::alphiHit(f, 59, 67) && mcp::alphiHit(f, 30, 40));
+        CHECK(!mcp::alphiHit(f, 60, 40) && !mcp::alphiHit(f, 30, 68) && !mcp::alphiHit(f, 11, 40));
+        CHECK(!mcp::alphiHit(ApprovalRect {}, 0, 0)); // not drawn: nothing is Alphi's
+    }
+    // Review M2: anything covering Alphi (a chip stack that could not move, the pill, its drawers) hides it.
+    {
+        ApprovalRect const a { 12, 12, 48, 56 };
+        CHECK(mcp::alphiCovered(a, { ApprovalRect { 40, 50, 340, 74 } }));
+        CHECK(!mcp::alphiCovered(a, { ApprovalRect { 72, 12, 340, 74 }, ApprovalRect {} }));
+        CHECK(mcp::alphiCovered(a, { ApprovalRect {}, ApprovalRect { 0, 0, 13, 13 } }));
+    }
     // A double click flips once; a later click flips again.
     mcp::AlphiClickGate g;
     CHECK(g.accept(10000));

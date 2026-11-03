@@ -36,8 +36,30 @@ NVGcolor rgba(mcp::AlphiRgba c, float alphaScale = 1.0f)
 
 bool CanvasMcpLayer::alphiShown() const
 {
-    // Every top-level view of a canvas while the bridge runs; never inside an embedded graph-on-parent box.
-    return canvas.pd && !canvas.isGraph && canvas.viewport && canvas.pd->getMcp()->getMCPBridge() != nullptr;
+    // Every top-level view of a canvas while the bridge really runs (review L3: not merely while the object exists);
+    // never inside an embedded graph-on-parent box.
+    return canvas.pd && !canvas.isGraph && canvas.viewport && canvas.pd->getMcp()->bridgeRunning();
+}
+
+bool CanvasMcpLayer::alphiCoveredNow(juce::Rectangle<int> frame) const
+{
+    auto const r = [](juce::Rectangle<int> const& j) { return mcp::ApprovalRect { j.getX(), j.getY(), j.getWidth(), j.getHeight() }; };
+    bool const pillUp = mcpSelectionPill && mcpSelectionPill->isVisible();
+    return mcp::alphiCovered(r(frame), { r(mcpApprovalFrame), pillUp ? r(mcpSelectionPillFrame) : mcp::ApprovalRect {},
+                                             pillUp ? r(mcpPillDrawerFrame) : mcp::ApprovalRect {}, pillUp ? r(mcpPaletteFrame) : mcp::ApprovalRect {} });
+}
+
+void CanvasMcpLayer::alphiVisibilityTick()
+{
+    bool const showing = canvas.isShowing();
+    if (showing != mcpAlphiWasShowing) {
+        mcpAlphiWasShowing = showing;
+        mcpAlphiShownSinceMs = 0; // hidden: off the glass; shown again: the 400 ms start over at the next paint
+        if (showing) {
+            canvas.repaint();
+            if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+        }
+    }
 }
 
 std::optional<mcp::ApprovalRect> CanvasMcpLayer::alphiKeepOut(mcp::ApprovalRect view, float zoom) const
@@ -62,9 +84,14 @@ void CanvasMcpLayer::paintAlphi(NVGcontext* nvg)
     auto const r = mcp::alphiRect(view, zoom);
     juce::Rectangle<int> const frame(r.x, r.y, r.w, r.h);
 
-    // The selection pill (and its drawers) win their corner: Alphi steps aside while they cover it.
-    bool const pillUp = mcpSelectionPill && mcpSelectionPill->isVisible();
-    if (pillUp && (frame.intersects(mcpSelectionPillFrame) || frame.intersects(mcpPillDrawerFrame) || frame.intersects(mcpPaletteFrame))) {
+    if (!mcpAlphiVisibilityTimer) {
+        mcpAlphiVisibilityTimer = std::make_unique<AlphiVisibilityTimer>(this);
+        mcpAlphiWasShowing = canvas.isShowing();
+        mcpAlphiVisibilityTimer->startTimer(100);
+    }
+    // A chip stack that could not move off it (a tiny or split view), the selection pill and its drawers win the
+    // corner: Alphi steps aside while they cover it, and its 400 ms start again once it is uncovered (review M2).
+    if (alphiCoveredNow(frame)) {
         mcpAlphiShownSinceMs = 0;
         return;
     }
@@ -142,9 +169,17 @@ bool CanvasMcpLayer::handleAlphiClick(juce::Point<int> canvasPt)
 {
     if (!alphiShown() || mcpAlphiFrame.isEmpty() || !mcpAlphiFrame.contains(canvasPt))
         return false;
-    // Just appeared (a new tab, the bridge just started): not clickable yet, but the click is still Alphi's.
+    // Covered right now (review L2: the pill or a chip arrived since the last paint) or on a hidden tab: not Alphi's
+    // click at all; what covers it takes it.
+    if (!canvas.isShowing() || alphiCoveredNow(mcpAlphiFrame)) {
+        mcpAlphiShownSinceMs = 0;
+        mcpAlphiFrame = {};
+        return false;
+    }
+    // Just appeared (a new tab, the bridge just started, uncovered) or an approval chip left the glass less than
+    // 400 ms ago (review M2): not clickable, but the click is still Alphi's.
     auto const now = alphiNowMs();
-    if (!mcp::alphiClickAllowed(mcpAlphiShownSinceMs, now))
+    if (!mcp::alphiClickAllowed(mcpAlphiShownSinceMs, now, canvas.pd->getMcp()->session.approvals.lastChipGoneMs()))
         return true;
     canvas.pd->getMcp()->alphiClicked(now);
     canvas.repaint();

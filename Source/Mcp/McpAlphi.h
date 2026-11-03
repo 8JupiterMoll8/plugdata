@@ -19,6 +19,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <initializer_list>
 
 namespace mcp {
 
@@ -42,10 +43,31 @@ inline ApprovalRect alphiRect(ApprovalRect view, float zoom)
         static_cast<int>(std::ceil(A::w * k)), static_cast<int>(std::ceil(A::h * k)) };
 }
 
-// A click counts only once Alphi has been on screen (painted) for minVisibleMs; `shownSinceMs` 0 = not on screen.
-inline bool alphiClickAllowed(std::int64_t shownSinceMs, std::int64_t nowMs)
+// A click counts only once Alphi has been on screen (painted) for minVisibleMs (`shownSinceMs` 0 = not on screen), and
+// not within minVisibleMs after any approval chip left the glass (review M2: `lastChipGoneMs`, 0 = never): a chip the AI
+// clears from on top of Alphi just before the artist's ✓ click never turns that click into flow ON.
+inline bool alphiClickAllowed(std::int64_t shownSinceMs, std::int64_t nowMs, std::int64_t lastChipGoneMs = 0)
 {
-    return shownSinceMs > 0 && nowMs - shownSinceMs >= AlphiMetrics::minVisibleMs;
+    if (shownSinceMs <= 0 || nowMs - shownSinceMs < AlphiMetrics::minVisibleMs)
+        return false;
+    return lastChipGoneMs <= 0 || nowMs - lastChipGoneMs >= AlphiMetrics::minVisibleMs;
+}
+
+// Review M1: a point inside Alphi's frame (canvas coordinates) belongs to Alphi, never to the canvas (no double-click
+// box, no lasso). An empty frame (Alphi not drawn) holds nothing.
+inline bool alphiHit(ApprovalRect frame, int x, int y)
+{
+    return frame.w > 0 && frame.h > 0 && x >= frame.x && y >= frame.y && x < frame.x + frame.w && y < frame.y + frame.h;
+}
+
+// Review M2: something on the glass (a chip stack that could not move off Alphi, the pill, its drawers) covers Alphi:
+// then Alphi is not drawn and not clickable, and its on-screen time starts again once it is uncovered.
+inline bool alphiCovered(ApprovalRect alphi, std::initializer_list<ApprovalRect> covers)
+{
+    for (auto const& c : covers)
+        if (rectsIntersect(alphi, c))
+            return true;
+    return false;
 }
 
 // The state a click on Alphi leads to: on when off, off when on.

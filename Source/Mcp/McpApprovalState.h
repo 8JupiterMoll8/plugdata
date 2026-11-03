@@ -15,6 +15,7 @@
 // approvalBarRect: under its anchor or at the centre of the visible viewport, and always clamped inside it (L5).
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <map>
 #include <cstdint>
@@ -93,8 +94,10 @@ public:
             *it = std::move(c);
             return true;
         }
-        if (chips.size() >= kMaxChips)
+        if (chips.size() >= kMaxChips) {
             chips.erase(chips.begin()); // the oldest goes; the server still holds its record
+            noteGoneLocked(nowMs);
+        }
         chips.push_back(std::move(c));
         return true;
     }
@@ -104,7 +107,10 @@ public:
         std::lock_guard<std::mutex> const l(lock);
         auto const before = chips.size();
         chips.erase(std::remove_if(chips.begin(), chips.end(), [&](ApprovalChip const& x) { return x.nonce == nonce; }), chips.end());
-        return chips.size() != before;
+        if (chips.size() == before)
+            return false;
+        noteGoneLocked(wallClockMs());
+        return true;
     }
 
     // Remove and return the chip the artist answered (so a double click cannot answer twice).
@@ -118,6 +124,7 @@ public:
             return std::nullopt;
         auto c = *it;
         chips.erase(it);
+        noteGoneLocked(nowMs > 0 ? nowMs : wallClockMs());
         return c;
     }
 
@@ -190,6 +197,14 @@ public:
         return c.nonce;
     }
 
+    // P12a.1 review M2: when a chip last left the glass (answered, cleared, expired, pushed out); 0 = never. Alphi, the
+    // flow switch, ignores clicks for a while after it (a chip that sat on it may have just been cleared under a click).
+    std::int64_t lastChipGoneMs()
+    {
+        std::lock_guard<std::mutex> const l(lock);
+        return lastGoneMs;
+    }
+
     // When the next chip expires (ms clock), or none: the canvas schedules a repaint then, so an expired chip leaves
     // the glass on time instead of at the next unrelated repaint.
     std::optional<std::int64_t> nextExpiryMs()
@@ -213,8 +228,20 @@ public:
 private:
     void purgeLocked(std::int64_t nowMs)
     {
+        for (auto const& x : chips)
+            if (x.expiresAtMs <= nowMs)
+                noteGoneLocked(x.expiresAtMs);
         chips.erase(std::remove_if(chips.begin(), chips.end(), [&](ApprovalChip const& x) { return x.expiresAtMs <= nowMs; }), chips.end());
     }
+
+    void noteGoneLocked(std::int64_t atMs) { lastGoneMs = std::max(lastGoneMs, atMs); }
+    // The same clock the canvas passes in (juce::Time::currentTimeMillis: ms since the epoch).
+    static std::int64_t wallClockMs()
+    {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    }
+
+    std::int64_t lastGoneMs = 0;
 
     std::mutex lock;
     std::vector<ApprovalChip> chips;

@@ -99,6 +99,9 @@ bool McpHost::answerApprovalChip(std::string const& nonce, bool yes, std::int64_
 
 bool McpHost::alphiClicked(std::int64_t nowMs)
 {
+    // Review L3: no switch while the bridge does not serve (nothing could use it, and nothing could switch it off).
+    if (!bridgeRunning())
+        return session.flowMode.isOn();
     // P12a.1: one flip per click (a double click flips once).
     if (!alphiClicks.accept(nowMs))
         return session.flowMode.isOn();
@@ -112,6 +115,20 @@ bool McpHost::alphiClicked(std::int64_t nowMs)
         mcpBridge->sendFlowModeChanged(true, "artist");
     repaintFlowLater(*this);
     return true;
+}
+
+bool McpHost::bridgeRunning() const
+{
+    return mcpBridge && mcpBridge->isRunning();
+}
+
+void McpHost::bridgeStopping()
+{
+    if (session.mcpShuttingDown.load()) {
+        session.flowMode.off(); // teardown: no console line, no event, no repaint
+        return;
+    }
+    flowModeOff("bridge_stop");
 }
 
 uint64_t McpHost::editStamp(t_gobj* g)

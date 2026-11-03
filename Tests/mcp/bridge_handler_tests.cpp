@@ -3049,7 +3049,7 @@ void runFlowProvenanceCases(Harness& h, PluginProcessor& processor)
 // (the v1 datagram route: oscMessageReceived); a server's approval chip (even one claiming to be the flow offer) cannot;
 // the old offer verb is gone; only the artist's click on Alphi (McpHost::alphiClicked, called by the canvas click
 // only) turns it on, and the next click turns it off; off from anywhere; never saved.
-void runFlowModeCases(Harness& h, PluginProcessor& processor)
+void runFlowModeCases(Harness& h, PluginProcessor& processor, std::function<void()> const& restoreSink)
 {
     std::printf("P12a flow mode switch\n");
     auto* host = processor.getMcp();
@@ -3161,6 +3161,27 @@ void runFlowModeCases(Harness& h, PluginProcessor& processor)
         auto r = h.replies.waitFor(("/pd/flow_mode_off/reply/" + c).toStdString(), 2000);
         CHECK(r && static_cast<bool>(parseJson(*r)["wasOn"]));
         CHECK(ev && ev->str(0) == "off" && ev->str(1) == "test");
+        CHECK(!isOn());
+    }
+    // P12a.1 review L3: Alphi works only while the bridge really runs; stopping the bridge turns flow off, with its
+    // event (sent before the listeners close); a click while it is stopped does nothing.
+    {
+        CHECK(host->bridgeRunning());
+        CHECK(host->alphiClicked(now() + 5000));
+        CHECK(host->session.flowMode.isOn());
+        h.replies.clear();
+        host->mcpBridge->stop();
+        // The click's own "on" event may land after the clear (the reply thread): take the first "off".
+        auto ev = h.replies.waitFor("/pd/flow_mode/changed", 2000);
+        if (ev && ev->str(0) == "on")
+            ev = h.replies.waitFor("/pd/flow_mode/changed", 2000);
+        CHECK(ev && ev->str(0) == "off" && ev->str(1) == "bridge_stop");
+        CHECK(!host->session.flowMode.isOn());
+        CHECK(!host->bridgeRunning());
+        CHECK(!host->alphiClicked(now() + 10000));
+        CHECK(!host->session.flowMode.isOn());
+        restoreSink();
+        CHECK(host->bridgeRunning());
         CHECK(!isOn());
     }
     for (auto const& n : state.escTargets(now())) state.clear(n);
@@ -4856,7 +4877,9 @@ int main()
             runContentVersionCases(harness, processor);
             runSelectionGetCases(harness);
             runFlowProvenanceCases(harness, processor);
-            runFlowModeCases(harness, processor);
+            runFlowModeCases(harness, processor, [&] {
+                bridge->setReplySinkForTests([&replies](juce::OSCMessage const& msg) { replies.push(msg); });
+            });
             runV2HandshakeCases(harness, *bridge, [&] {
                 bridge->setReplySinkForTests([&replies](juce::OSCMessage const& msg) { replies.push(msg); });
             });

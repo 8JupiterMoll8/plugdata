@@ -81,6 +81,11 @@ if [ -n "$handleAlphi" ]; then
   echo "test-bridge-safety: handleAlphiClick is named outside the canvas mouse path (CanvasMcpLayer::handleNoteClick)" >&2
   exit 1
 fi
+# P12a.1 review M1: a click inside Alphi is never the canvas's (isPointOverNote, which the double-click box asks).
+if ! awk '/^bool CanvasMcpLayer::isPointOverNote/ { f = 1 } f && /mcp::alphiHit\(/ { print; exit } f && /^}/ { exit }' "$root/Source/Mcp/CanvasMcpNotes.cpp" | grep -q mcpAlphiFrame; then
+  echo "test-bridge-safety: CanvasMcpLayer::isPointOverNote must hold Alphi's frame (mcp::alphiHit(mcpAlphiFrame ...))" >&2
+  exit 1
+fi
 # P12a.1: the flow verbs are get and off only (no verb turns it on; the offer verb is gone for good).
 flowVerbs="$(grep -o 'MCP_VERB([a-z]*, "[a-z_]*flow[a-z_]*"' "$root/Source/Pd/MCPBridgeVerbs.inc" | sort | tr '\n' ' ')"
 if [ "$flowVerbs" != 'MCP_VERB(pd, "flow" MCP_VERB(pd, "flow_mode_get" MCP_VERB(pd, "flow_mode_off" ' ]; then
