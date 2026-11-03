@@ -10,7 +10,7 @@
 //   /pd/flow_mode_off   <corrId> [by]          -> /pd/flow_mode_off/reply/<corrId>   {on:false, wasOn}
 //   /pd/flow_mode_offer <corrId>               -> /pd/flow_mode_offer/reply/<corrId> {shown, on}
 //   /pd/ownership       <corrId> <canvas> <id...> -> /pd/ownership/reply/<corrId> {canvasKey, bootToken, ambiguousTab,
-//                       visible (P11.9: on screen now), canvasObjects (P11.9: objects on this canvas),
+//                       visible (P11.9: on screen now), canvasObjects (P11.9: objects on this canvas, comments not counted),
 //                       objects:[{id, found, origin, owned, why, class}]} | /pd/ownership/error/<corrId> "<reason>"
 //   event /pd/flow_mode/changed <on|off> <by>
 //
@@ -257,8 +257,12 @@ std::optional<juce::String> McpHost::ownershipJson(juce::String const& canvasNam
     // nothing elsewhere). Coordinator decision (P11.9): the canvas's own object count, for the proportional brake.
     rootObj->setProperty("visible", views.has_value() && mcp::visible::onScreen(cnv, *views));
     int canvasObjects = 0;
-    for (t_gobj* y = cnv->gl_list; y; y = y->g_next)
-        ++canvasObjects;
+    for (t_gobj* y = cnv->gl_list; y; y = y->g_next) {
+        // Review M2: comments are not counted (padding a canvas with comments must not loosen the brake).
+        auto* ob = pd_checkobject(&y->g_pd);
+        if (!(ob && ob->te_type == T_TEXT))
+            ++canvasObjects;
+    }
     rootObj->setProperty("canvasObjects", canvasObjects);
     // Review L3: ONE walk of the wires per call. Review M1: an end that is not the AI's intact box makes the other
     // end ask (in-wire and out-wire alike). intact() is cached per object (the stamp reads GUI properties).

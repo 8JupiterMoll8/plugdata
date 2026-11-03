@@ -1,6 +1,6 @@
 // Unit tests for P11.9 item 1 (flow deletes only on the visible tab), JUCE-free:
 //  - which canvases are on the artist's screen (McpVisibleTab.h onScreen): only a split view of a showing, not
-//    minimised editor window; a plugin-mode editor shows its one canvas; a tab that is merely "current" in an editor
+//    minimised editor window; a plugin-mode editor shows no canvas (only its GOP panel, review M1); a tab that is merely "current" in an editor
 //    whose window is hidden is not on screen;
 //  - what focus_tab may answer (focusOutcome): "focused" only when the asked tab is the editor's current canvas AND its
 //    view is showing; otherwise it says it did not switch, and why.
@@ -53,10 +53,11 @@ static void onScreenCases()
     minimised.windowShowing = false;
     CHECK(!mcp::visible::onScreen(A, { minimised }));
 
-    // Plugin mode shows its one canvas only, whatever the splits say.
+    // Review M1: plugin mode shows only the GOP panel, not the canvas's objects: nothing in it is on screen, neither
+    // its canvas nor the splits behind it.
     EditorView plugin = split;
     plugin.pluginModeCanvas = C;
-    CHECK(mcp::visible::onScreen(C, { plugin }));
+    CHECK(!mcp::visible::onScreen(C, { plugin }));
     CHECK(!mcp::visible::onScreen(A, { plugin }));
 
     // Two windows: on screen when any showing window shows it.

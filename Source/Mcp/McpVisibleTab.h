@@ -10,7 +10,7 @@
 //
 // Live check 2026-11-03: focus_tab answered "focused: X" and list_tabs marked X focused while the editor showed another
 // tab; with flow mode on, free deletes landed on a tab the artist could not see. Rule: flow frees objects only on a
-// canvas that is on screen now (a split view of a showing, not minimised window), and focus_tab says "focused" only
+// canvas that is on screen now (a split view of a showing, not minimised window; never in plugin mode, review M1), and focus_tab says "focused" only
 // when the asked tab became the editor's current canvas and its view is showing.
 //
 // Residue: the component tree is the truth here. A window covered by another app, or a GPU that stopped repainting
@@ -27,7 +27,7 @@ struct SplitView {
 
 struct EditorView {
     bool windowShowing = false;            // the editor is showing and its window not minimised
-    void const* pluginModeCanvas = nullptr; // plugin mode shows only this canvas
+    void const* pluginModeCanvas = nullptr; // set in plugin mode: only its GOP panel shows, so nothing is on screen
     std::vector<SplitView> splits;          // the left and right split views of the tab component
 };
 
@@ -38,11 +38,8 @@ inline bool onScreen(void const* canvas, std::vector<EditorView> const& editors)
     for (auto const& e : editors) {
         if (!e.windowShowing)
             continue;
-        if (e.pluginModeCanvas) {
-            if (e.pluginModeCanvas == canvas)
-                return true;
-            continue;
-        }
+        if (e.pluginModeCanvas)
+            continue; // review M1: plugin mode shows only the GOP panel, never the canvas's objects
         for (auto const& s : e.splits)
             if (s.canvas == canvas && s.viewShowing)
                 return true;
