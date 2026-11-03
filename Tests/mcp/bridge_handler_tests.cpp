@@ -16,6 +16,10 @@
 // HOME decides where plugdata keeps its settings and patches. This program therefore points HOME at a fresh
 // temporary directory before anything else (MCP_TESTS_HOME reuses a directory: the first start unpacks the
 // resources and is slow).
+#include <pwd.h>
+#include <sys/stat.h>
+#include <climits>
+#include <cstdlib>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -1742,6 +1746,22 @@ void runLoadReportCases(Harness& h, PluginProcessor& processor)
     CHECK(sawSub);
     CHECK(plainFalse);
 
+    // P11.6 F4: the identity snapshot carries the same container fields (the TS mirror is replaced from it; without
+    // them an abstraction weighed 1 in the delete budget). The census above adopted the subpatch, so it has an id.
+    auto snap = h.call("/pd/identity_snapshot", { "main", "lr10s" }, "/pd/identity_snapshot/reply/lr10s");
+    bool snapSub = false, snapPlainFalse = true;
+    if (snap) {
+        auto const json = parseJson(*snap);
+        for (auto const& e : *json["entries"].getArray()) {
+            if (e["class"].toString() == "canvas" && e["text"].toString() == "pd p11load")
+                snapSub = static_cast<bool>(e["isContainer"]) && static_cast<int>(e["childCount"]) == 3;
+            else if (e["class"].toString() != "canvas")
+                snapPlainFalse = snapPlainFalse && e.hasProperty("isContainer") && !static_cast<bool>(e["isContainer"]);
+        }
+    }
+    CHECK(snapSub);
+    CHECK(snapPlainFalse);
+
     host->pdWait([&] { if (auto* cnv = host->getCanvasBySymbol("main")) glist_delete(cnv, &sub->gl_gobj); }, 3000);
     ::chmod(locked.getFullPathName().toRawUTF8(), 0644);
     dir.deleteRecursively();
@@ -1762,6 +1782,153 @@ std::optional<juce::var> boundEntry(std::optional<Reply> const& r, std::string c
             if (n["name"].toString().toStdString() == name)
                 return n;
     return std::nullopt;
+}
+
+// P11.6 (found live 2026-11-02): a root canvas given GOP with `coords 0 0 264 488 264 488 2 25 25` (sent to
+// pd-<file>.pd) showed the frame live, but /pd/save_patch wrote the file without its `#X coords` line, so Plugin mode
+// and the GOP panel were lost on reopen. The saved file must carry the coords line with the GOP fields.
+void runSaveCoordsCases(Harness& h, PluginProcessor& processor)
+{
+    std::printf("save_patch keeps the root #X coords (P11.6)\n");
+    auto* host = processor.getMcp();
+    juce::String rootName;
+    host->pdWait([&] {
+        t_canvas* cnv = host->getCanvasBySymbol("main");
+        if (!cnv || !cnv->gl_name) return;
+        rootName = juce::String::fromUTF8(cnv->gl_name->s_name);
+        // the message the coordinator sent: to the canvas's own receiver pd-<file>.pd
+        t_atom a[9];
+        float const v[9] = { 0, 0, 264, 488, 264, 488, 2, 25, 25 };
+        for (int i = 0; i < 9; ++i) SETFLOAT(&a[i], v[i]);
+        auto* target = gensym(("pd-" + rootName).toRawUTF8())->s_thing;
+        if (target) pd_typedmess(target, gensym("coords"), 9, a);
+        else pd_typedmess(&cnv->gl_pd, gensym("coords"), 9, a);
+    }, 3000);
+    CHECK(rootName.isNotEmpty());
+    bool isGraph = false;
+    host->pdWait([&] { if (auto* cnv = host->getCanvasBySymbol("main")) isGraph = cnv->gl_isgraph; }, 3000);
+    CHECK(isGraph);
+    auto dir = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("mcp_p116_coords");
+    dir.createDirectory();
+    auto dest = dir.getChildFile("coords.pd");
+    auto r = h.call("/pd/save_patch", { "main", dest.getFullPathName(), "sc1" }, "/pd/save_patch/reply/sc1", 3000);
+    CHECK(r.has_value());
+    if (r && r->args.size() >= 3) {
+        auto const report = juce::JSON::parse(juce::String(r->str(2)));
+        CHECK(report["canvasKey"].toString() == rootName);
+        CHECK(static_cast<bool>(report["isGraph"]) && static_cast<bool>(report["coordsLine"]));
+    } else {
+        CHECK(false);
+    }
+    // the content write is synchronous in the handler; give the file a moment anyway
+    for (int i = 0; i < 20 && !dest.existsAsFile(); ++i) juce::Thread::sleep(50);
+    auto const text = dest.loadFileAsString();
+    bool const hasCoords = text.contains("#X coords 0 0 264 488 264 488 2 25 25");
+    if (!hasCoords) std::printf("  saved file:\n%s\n", text.toRawUTF8());
+    CHECK(hasCoords);
+    // the same bytes through save_content
+    auto viaContent = dir.getChildFile("coords_content.pd");
+    h.call("/pd/save_content", { "main", viaContent.getFullPathName(), "sc2" }, "/pd/save_content/reply/sc2", 3000);
+    CHECK(viaContent.loadFileAsString().contains("#X coords 0 0 264 488 264 488 2 25 25"));
+    // back to a plain canvas for the cases after this one
+    host->pdWait([&] {
+        if (auto* cnv = host->getCanvasBySymbol("main")) {
+            t_atom a[7];
+            float const v[7] = { 0, 0, 1, 1, 0, 0, 0 };
+            for (int i = 0; i < 7; ++i) SETFLOAT(&a[i], v[i]);
+            pd_typedmess(&cnv->gl_pd, gensym("coords"), 7, a);
+        }
+    }, 3000);
+    // Review L1: coordsLine is the ROOT's line: a plain root holding a GOP subpatch reports isGraph false, coordsLine
+    // false (the subpatch's own #X coords does not count).
+    t_gobj* gopSub = nullptr;
+    host->pdWait([&] {
+        if (auto* cnv = host->getCanvasBySymbol("main")) {
+            t_atom o[4];
+            SETFLOAT(&o[0], 600); SETFLOAT(&o[1], 600); SETSYMBOL(&o[2], gensym("pd")); SETSYMBOL(&o[3], gensym("p116gop"));
+            pd_typedmess(&cnv->gl_pd, gensym("obj"), 4, o);
+            gopSub = pd::Interface::getNewest(cnv);
+            t_atom a[9];
+            float const v[9] = { 0, 0, 100, 100, 100, 100, 1, 0, 0 };
+            for (int i = 0; i < 9; ++i) SETFLOAT(&a[i], v[i]);
+            pd_typedmess(&reinterpret_cast<t_canvas*>(gopSub)->gl_pd, gensym("coords"), 9, a);
+        }
+    }, 3000);
+    auto plain = dir.getChildFile("plain.pd");
+    auto r2 = h.call("/pd/save_patch", { "main", plain.getFullPathName(), "sc3" }, "/pd/save_patch/reply/sc3", 3000);
+    if (r2 && r2->args.size() >= 3) {
+        auto const report = juce::JSON::parse(juce::String(r2->str(2)));
+        CHECK(!static_cast<bool>(report["isGraph"]));
+        CHECK(!static_cast<bool>(report["coordsLine"]));
+    } else {
+        CHECK(false);
+    }
+    host->pdWait([&] { if (auto* cnv = host->getCanvasBySymbol("main")) if (gopSub) glist_delete(cnv, gopSub); }, 3000);
+    dir.deleteRecursively();
+}
+
+// P11.6 review M1: a canvas named by the full path of its file resolves to exactly that open root, also when two
+// roots share the file name (a/twin.pd, b/twin.pd); a path no open root has resolves to nothing (never the first tab of
+// that name).
+void runPathCanvasCases(PluginProcessor& processor)
+{
+    std::printf("canvas by full file path (P11.6 M1)\n");
+    auto* host = processor.getMcp();
+    auto base = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("mcp_p116_twins");
+    base.deleteRecursively();
+    auto fa = base.getChildFile("a").getChildFile("p116twin.pd");
+    auto fb = base.getChildFile("b").getChildFile("p116twin.pd");
+    fa.getParentDirectory().createDirectory();
+    fb.getParentDirectory().createDirectory();
+    fa.replaceWithText("#N canvas 0 50 450 300 12;\n#X obj 10 10 r p116_a;\n");
+    fb.replaceWithText("#N canvas 0 50 450 300 12;\n#X obj 10 10 r p116_b;\n");
+    auto open = [&](juce::File const& f) {
+        host->pdWait([&] {
+            t_atom a[2];
+            SETSYMBOL(&a[0], gensym(f.getFileName().toRawUTF8()));
+            SETSYMBOL(&a[1], gensym(f.getParentDirectory().getFullPathName().toRawUTF8()));
+            pd_typedmess(gensym("pd")->s_thing, gensym("open"), 2, a);
+        }, 3000);
+    };
+    open(fa);
+    open(fb);
+    t_canvas* ca = nullptr;
+    t_canvas* cb = nullptr;
+    t_canvas* none = nullptr;
+    t_canvas* byName = nullptr;
+    host->pdWait([&] {
+        ca = host->getCanvasBySymbol(fa.getFullPathName());
+        cb = host->getCanvasBySymbol(fb.getFullPathName());
+        none = host->getCanvasBySymbol(base.getChildFile("c").getChildFile("p116twin.pd").getFullPathName());
+        byName = host->getCanvasBySymbol("p116twin.pd");
+    }, 3000);
+    CHECK(ca != nullptr && cb != nullptr && ca != cb);
+    CHECK(none == nullptr);
+    bool aHoldsA = false, bHoldsB = false;
+    host->pdWait([&] {
+        auto firstText = [](t_canvas* c) {
+            std::string t;
+            if (c && c->gl_list) {
+                char* buf = nullptr; int len = 0;
+                binbuf_gettext(reinterpret_cast<t_text*>(c->gl_list)->te_binbuf, &buf, &len);
+                if (buf) { t.assign(buf, static_cast<size_t>(len)); freebytes(buf, len); }
+            }
+            return t;
+        };
+        aHoldsA = firstText(ca) == "r p116_a";
+        bHoldsB = firstText(cb) == "r p116_b";
+    }, 3000);
+    CHECK(aHoldsA && bHoldsB);
+    CHECK(byName != nullptr); // the bare name still answers (its first tab): TS never sends it for a path
+    host->pdWait([&] {
+        for (auto* c : { ca, cb }) {
+            if (!c) continue;
+            t_atom force;
+            SETFLOAT(&force, 1);
+            pd_typedmess(&c->gl_pd, gensym("menuclose"), 1, &force); // Pd's own close (plugdata hears it)
+        }
+    }, 3000);
+    base.deleteRecursively();
 }
 
 void runBoundCases(Harness& h, PluginProcessor& processor)
@@ -1844,6 +2011,46 @@ void runBoundCases(Harness& h, PluginProcessor& processor)
     CHECK(unboundOnly.has_value() && static_cast<int>(parseJson(*unboundOnly)["walkObjects"]) == 0);
     auto never = boundEntry(r, "p11_never_used_name");
     CHECK(never && !static_cast<bool>((*never)["bound"]) && static_cast<int>((*never)["count"]) == 0);
+
+    // P11.6 F10: two canvases with ONE name (two tabs a/twin.pd and b/twin.pd; here two [pd p11twin]) answer two
+    // different canvasKeys: the identity wire keys ("pd-p11twin" and "pd-p11twin#2"), each one resolving to its own
+    // canvas (it was the plain name for both, so every call aimed at the second landed on the first).
+    {
+        t_canvas* twinA = nullptr;
+        t_canvas* twinB = nullptr;
+        host->pdWait([&] {
+            t_canvas* cnv = host->getCanvasBySymbol("main");
+            auto mk = [&](t_canvas* c, char const* a0, char const* a1) {
+                t_atom a[4];
+                SETFLOAT(a, 1200);
+                SETFLOAT(a + 1, 700);
+                SETSYMBOL(a + 2, gensym(a0));
+                SETSYMBOL(a + 3, gensym(a1));
+                pd_typedmess(&c->gl_pd, gensym("obj"), 4, a);
+                return pd::Interface::getNewest(c);
+            };
+            twinA = reinterpret_cast<t_canvas*>(mk(cnv, "pd", "p11twin"));
+            made.push_back(&twinA->gl_gobj);
+            mk(twinA, "r", "p11tw_a");
+            twinB = reinterpret_cast<t_canvas*>(mk(cnv, "pd", "p11twin"));
+            made.push_back(&twinB->gl_gobj);
+            mk(twinB, "r", "p11tw_b");
+        }, 3000);
+        auto tw = h.call("/pd/bound", { "bdtw", "p11tw_a", "p11tw_b" }, "/pd/bound/reply/bdtw", 3000);
+        auto ta = boundEntry(tw, "p11tw_a");
+        auto tb = boundEntry(tw, "p11tw_b");
+        CHECK(ta && tb && static_cast<int>((*ta)["count"]) == 1 && static_cast<int>((*tb)["count"]) == 1);
+        if (ta && tb) {
+            auto const ka = (*ta)["receivers"][0]["canvasKey"].toString();
+            auto const kb = (*tb)["receivers"][0]["canvasKey"].toString();
+            CHECK(ka != kb);
+            CHECK(ka.startsWith("pd-p11twin") && kb.startsWith("pd-p11twin"));
+            t_canvas* ra = nullptr;
+            t_canvas* rb = nullptr;
+            host->pdWait([&] { ra = host->getCanvasBySymbol(ka); rb = host->getCanvasBySymbol(kb); }, 3000);
+            CHECK(ra == twinA && rb == twinB);
+        }
+    }
 
     // An armed control probe on a name with no [r]: not bound, the probe is `other`.
     h.call("/meter/arm_control", { "p11kick", "bd2" }, "/meter/arm_control/reply/bd2");
@@ -2527,10 +2734,26 @@ void runOutputCeilingCases(Harness& h, PluginProcessor& processor, AudioControl&
             CHECK(ceiling.isEnabled());
         }
 
+        // P11.6 (review): the steps above leave async work queued (JUCE notifies Value listeners asynchronously, the
+        // host's write-back is a postMessage, the settings save is a 100 ms timer): drain it past the save timer before
+        // the panel step, and run the panel step on the message thread like the GUI does. (The 5 failures here were
+        // not a race in SettingsFile: the runs used the owner's real settings.json and their running PlugData rewrote
+        // it; fixed by the scratch HOME export and the HERMETIC BREACH guard in main.)
+        auto drainSettings = [&] {
+            for (int i = 0; i < 4; ++i) {
+                host->onMessageThread([] { return true; }, 2000, "drain");
+                sleepMs(150); // past SettingsFile::saveTimeoutMs (100 ms)
+            }
+            host->onMessageThread([] { return true; }, 2000, "drain");
+        };
+        drainSettings();
         // The owner's panel: off first in the host, then the setting: accepted, nothing written back.
-        host->setOutputCeilingFromGui(false);
-        host->onMessageThread([] { SettingsFile::getInstance()->setProperty("mcp_bridge_ai_ceiling", false); return true; }, 2000, "test");
-        sleepMs(400);
+        host->onMessageThread([host] {
+            host->setOutputCeilingFromGui(false);
+            SettingsFile::getInstance()->setProperty("mcp_bridge_ai_ceiling", false);
+            return true;
+        }, 2000, "test");
+        drainSettings();
         CHECK(!ceiling.isEnabled());
         CHECK(storedSetting() == 0);
         // Startup with it off: off, and a loud console line.
@@ -2545,7 +2768,8 @@ void runOutputCeilingCases(Harness& h, PluginProcessor& processor, AudioControl&
         CHECK(waitUntil([&] { return storedSetting() == 1; }, 2000));
         sleepMs(300);
         CHECK(consoleCount("OUTPUT CEILING IS OFF") == loudSaid + 1); // on: no second loud line
-        host->setOutputCeilingFromGui(false);
+        drainSettings();
+        host->onMessageThread([host] { host->setOutputCeilingFromGui(false); return true; }, 2000, "test");
         host->onMessageThread([host] { host->settingsChanged("mcp_bridge_ai_ceiling", juce::var(true)); return true; }, 2000, "test");
         CHECK(ceiling.isEnabled());
 
@@ -3642,6 +3866,56 @@ void runV2HandshakeCases(Harness& h, MCPBridge& bridge, std::function<void()> co
 }
 
 // Where plugdata keeps its files follows HOME: never the real one.
+// P11.6 review N4: why this scratch HOME is unsafe for a run that writes settings, or "" when it is safe. Paths are
+// resolved (realpath) on both sides; the scratch HOME must not be, or contain, the real home of this user
+// (getpwuid); no component from the scratch HOME down to Documents/plugdata may be a symlink; the settings folder
+// must lie inside the scratch HOME. Only reads paths.
+std::string hermeticBreach(std::string const& home, std::string const& appData)
+{
+    auto real = [](std::string const& p) -> std::string {
+        char buf[PATH_MAX];
+        return ::realpath(p.c_str(), buf) ? std::string(buf) : std::string();
+    };
+    auto inside = [](std::string const& child, std::string const& parent) {
+        return child.size() > parent.size() && child.compare(0, parent.size(), parent) == 0 && child[parent.size()] == '/';
+    };
+    std::string const scratch = real(home);
+    if (scratch.empty())
+        return "the scratch HOME " + home + " does not exist";
+    if (scratch == "/")
+        return "the scratch HOME is /";
+    // The homes to protect: this user's real home (getpwuid), plus MCP_TESTS_GUARD_EXTRA_HOME when set. The extra one
+    // only ADDS a home to protect (the self-test plays "the real home" in a temp dir); it never replaces the real one.
+    std::vector<std::string> protectedHomes;
+    if (auto const* pw = ::getpwuid(::getuid()); pw && pw->pw_dir)
+        protectedHomes.push_back(real(pw->pw_dir));
+    if (char const* extra = std::getenv("MCP_TESTS_GUARD_EXTRA_HOME"); extra && *extra)
+        protectedHomes.push_back(real(extra));
+    for (auto const& realHome : protectedHomes)
+        if (!realHome.empty() && (scratch == realHome || inside(realHome, scratch)))
+            return "the scratch HOME " + scratch + " is, or contains, the protected home " + realHome;
+    // Every component below the scratch HOME on the way to the settings folder must be a plain directory, never a link.
+    std::string path = home;
+    for (char const* part : { "Documents", "plugdata" }) {
+        path += "/";
+        path += part;
+        struct stat st {};
+        if (::lstat(path.c_str(), &st) == 0 && S_ISLNK(st.st_mode))
+            return path + " is a symlink";
+    }
+    // The settings folder itself (or, before the first run, its nearest existing parent) must resolve inside it.
+    std::string probe = appData;
+    std::string resolved = real(probe);
+    while (resolved.empty() && probe.size() > 1) {
+        probe = probe.substr(0, probe.find_last_of('/'));
+        if (probe.empty()) probe = "/";
+        resolved = real(probe);
+    }
+    if (!(resolved == scratch || inside(resolved, scratch)) || !inside(appData, home.back() == '/' ? home.substr(0, home.size() - 1) : home))
+        return "the settings folder " + appData + " (resolved " + resolved + ") is not inside the scratch HOME " + scratch;
+    return {};
+}
+
 std::string chooseScratchHome()
 {
     if (char const* given = std::getenv("MCP_TESTS_HOME"); given && *given) {
@@ -3665,6 +3939,14 @@ int main()
     for (char const* name : { "XDG_DOCUMENTS_DIR", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME" })
         ::unsetenv(name);
     std::printf("mcp_bridge_tests: HOME=%s\n", home.c_str());
+    // P11.6 incident: ProjectInfo::appDataDir is a static computed from HOME BEFORE main() runs, so setting HOME here
+    // came too late and every run used the owner's real ~/Documents/plugdata/settings.json. The runner exports HOME;
+    // this refuses to start (nothing is created before it) unless the scratch HOME is safe (review N4).
+    if (auto const why = hermeticBreach(home, ProjectInfo::appDataDir.getFullPathName().toStdString()); !why.empty()) {
+        std::printf("mcp_bridge_tests: HERMETIC BREACH: %s. Run through scripts/run-mcp-bridge-tests.sh with a scratch "
+                    "MCP_TESTS_HOME. Nothing was run.\n", why.c_str());
+        return 3;
+    }
 
     juce::ScopedJuceInitialiser_GUI const juceInitialiser;
 
@@ -3752,6 +4034,8 @@ int main()
             runSidecarCases(processor);
             runLoadReportCases(harness, processor);
             runBoundCases(harness, processor);
+            runSaveCoordsCases(harness, processor);
+            runPathCanvasCases(processor);
             runContentVersionCases(harness, processor);
             runSelectionGetCases(harness);
             runV2HandshakeCases(harness, *bridge, [&] {

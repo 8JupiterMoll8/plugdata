@@ -71,6 +71,7 @@ Single hunks in an otherwise hooked file that stay as they are. The hunk carries
 | `MCP-CARRIED(lua-gfx-guards)` | `Source/Objects/LuaObject.h` (15 hunks) | Crash fixes in the Lua graphics path: the draw-target map is changed under the audio lock and looked up with `find` (no default-insert from the callback), and every `lua_*` draw message checks `argc` before reading its atoms |
 | `MCP-CARRIED(toolbar-cpu)` | `Source/Toolbar.h` | `getCPUUsage()` accessor for `/pd/perf` (`McpGuiHost::cpuUsage`) |
 | `MCP-CARRIED(l24-library-remove)` | `Source/PluginProcessor.cpp` | `updateSearchPaths` removes empty library entries by index from the back; upstream removes inside a range-for over the same array (a use-after-free at startup, L24, found by the ASan clone); a candidate to send upstream |
+| `MCP-CARRIED(sidebar-hidden-restore)` | `Source/PluginEditor.cpp` (`showWelcomePanel`) | Upstream bug: `right_sidebar_hidden`/`left_sidebar_hidden` are written by `Sidebar::showSidebar` but never read; the welcome panel (shown at every start without a patch) forced both sidebars open, which set the value back to its default and `saveSettings` (non-defaults only) dropped the line from settings.json. The welcome panel now applies the saved state. Not fixed at the base; a candidate to send upstream |
 
 ## Submodule patches (`patches/submodules/`)
 

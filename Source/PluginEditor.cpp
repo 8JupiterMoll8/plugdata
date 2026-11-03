@@ -628,10 +628,12 @@ void PluginEditor::showWelcomePanel(bool const shouldShow)
 
     if (shouldShow) {
         welcomePanel->show();
+        // MCP-CARRIED(sidebar-hidden-restore): keep the saved collapsed state; forcing it open overwrote the setting
+        auto const* settings = SettingsFile::getInstance();
         if (leftSidebar && leftSidebar->hasAnyPanel())
-            leftSidebar->showSidebar(true);
+            leftSidebar->showSidebar(!settings->getProperty<bool>("left_sidebar_hidden"));  // MCP-CARRIED(sidebar-hidden-restore)
         if (rightSidebar && rightSidebar->hasAnyPanel())
-            rightSidebar->showSidebar(true);
+            rightSidebar->showSidebar(!settings->getProperty<bool>("right_sidebar_hidden"));  // MCP-CARRIED(sidebar-hidden-restore)
     } else {
         welcomePanel->hide();
         welcomePanelSearchButton.setToggleState(false, sendNotification);

@@ -87,14 +87,15 @@ std::optional<juce::String> McpHost::selectionGet(juce::String const& canvasName
         }
     }
     auto* root = new juce::DynamicObject();
-    root->setProperty("canvasKey", canvasLive ? MCPBridge::canonicalCanvasKey(canvas) : juce::String());
+    // P11.6 review M2: the identity wire key (unique: "twin.pd#2" for a second tab of that name).
+    root->setProperty("canvasKey", canvasLive ? juce::String(identity.keyOf(canvas)) : juce::String());
     root->setProperty("ids", ids);
     root->setProperty("classes", classes);
     root->setProperty("count", ids.size());
     if (target && live->focused.canvas && live->focused.canvas != target && !live->focused.objects.empty()
         && mcpCanvasIsLive(live->focused.canvas)) {
         auto* other = new juce::DynamicObject();
-        other->setProperty("canvasKey", MCPBridge::canonicalCanvasKey(live->focused.canvas));
+        other->setProperty("canvasKey", juce::String(identity.keyOf(live->focused.canvas)));
         other->setProperty("count", static_cast<int>(live->focused.objects.size()));
         root->setProperty("elsewhere", juce::var(other));
     }
