@@ -2995,6 +2995,46 @@ void runFlowProvenanceCases(Harness& h, PluginProcessor& processor)
         juce::File(file.getFullPathName() + ".mcpids.json").deleteFile();
     }
 
+    // P11.9 item 1 + coordinator brake: the reply says whether the canvas is on the artist's screen (headless: no
+    // editor, so never) and how many objects the canvas holds (the engine's count, for the "more than half" brake).
+    {
+        // Review M2: comments are no objects for the brake (padding a canvas with comments must not raise the count).
+        host->pdWait([&] {
+            if (t_canvas* sc = sub()) {
+                for (int k = 0; k < 3; ++k) {
+                    t_atom at[3];
+                    SETFLOAT(at, 600);
+                    SETFLOAT(at + 1, 40 + 30 * k);
+                    SETSYMBOL(at + 2, gensym("padding"));
+                    pd_typedmess(&sc->gl_pd, gensym("text"), 3, at);
+                }
+            }
+        }, 3000);
+        auto const c = next("fo");
+        auto r = h.call("/pd/ownership", { c, "pd-fl_sub", "fl_a" }, ("/pd/ownership/reply/" + c).toStdString(), 3000);
+        CHECK(r.has_value());
+        if (r) {
+            auto const json = parseJson(*r);
+            CHECK(json.hasProperty("visible") && json["visible"].isBool() && !static_cast<bool>(json["visible"]));
+            int count = -1;
+            host->pdWait([&] {
+                if (t_canvas* sc = sub()) {
+                    count = 0;
+                    for (t_gobj* y = sc->gl_list; y; y = y->g_next) {
+                        auto* ob = pd_checkobject(&y->g_pd);
+                        if (!(ob && ob->te_type == T_TEXT)) ++count;
+                    }
+                }
+            }, 3000);
+            std::printf("  canvasObjects %d (counted %d)\n", static_cast<int>(json["canvasObjects"]), count);
+            CHECK(json.hasProperty("canvasObjects") && static_cast<int>(json["canvasObjects"]) == count && count > 0);
+        }
+        // focus_tab with no editor: no tab, and never "focused".
+        auto const cf = next("ft");
+        auto f = h.call("/pd/focus_tab", { "fl_sub", cf }, ("/pd/focus_tab/reply/" + cf).toStdString(), 3000);
+        CHECK(f.has_value() && f->str(0).rfind("focused", 0) != 0);
+    }
+
     // Unknown canvas: an error, never an empty "nothing is owned".
     {
         auto const c = next("fo");

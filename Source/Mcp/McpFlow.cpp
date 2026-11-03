@@ -10,6 +10,7 @@
 //   /pd/flow_mode_off   <corrId> [by]          -> /pd/flow_mode_off/reply/<corrId>   {on:false, wasOn}
 //   /pd/flow_mode_offer <corrId>               -> /pd/flow_mode_offer/reply/<corrId> {shown, on}
 //   /pd/ownership       <corrId> <canvas> <id...> -> /pd/ownership/reply/<corrId> {canvasKey, bootToken, ambiguousTab,
+//                       visible (P11.9: on screen now), canvasObjects (P11.9: objects on this canvas, comments not counted),
 //                       objects:[{id, found, origin, owned, why, class}]} | /pd/ownership/error/<corrId> "<reason>"
 //   event /pd/flow_mode/changed <on|off> <by>
 //
@@ -227,6 +228,9 @@ juce::String McpHost::flowModeJson()
 std::optional<juce::String> McpHost::ownershipJson(juce::String const& canvasName, juce::StringArray const& ids, juce::String& error)
 {
     using namespace mcp::ownership;
+    // P11.9 item 1: what the artist's screen shows, read on the message thread BEFORE the Pd lock (never wait for the
+    // message thread under it). No answer in time (a stalled GUI), no editor: nothing is on screen, so nothing is free.
+    auto const views = onMessageThread([this] { return gui().visibleViews(); }, 1000, "ownership");
     registerOpenCanvases(); // records and keys for every open canvas (takes the Pd lock itself)
     PdLockScope lock(processor);
     t_canvas* cnv = getCanvasBySymbol(canvasName);
@@ -249,6 +253,17 @@ std::optional<juce::String> McpHost::ownershipJson(juce::String const& canvasNam
     rootObj->setProperty("canvasKey", juce::String(identity.keyOf(cnv)));
     rootObj->setProperty("bootToken", mcpBridge ? mcpBridge->getBootToken() : juce::String());
     rootObj->setProperty("ambiguousTab", ambiguous);
+    // P11.9 item 1: this canvas is a split view of a showing, not minimised editor window right now (flow frees
+    // nothing elsewhere). Coordinator decision (P11.9): the canvas's own object count, for the proportional brake.
+    rootObj->setProperty("visible", views.has_value() && mcp::visible::onScreen(cnv, *views));
+    int canvasObjects = 0;
+    for (t_gobj* y = cnv->gl_list; y; y = y->g_next) {
+        // Review M2: comments are not counted (padding a canvas with comments must not loosen the brake).
+        auto* ob = pd_checkobject(&y->g_pd);
+        if (!(ob && ob->te_type == T_TEXT))
+            ++canvasObjects;
+    }
+    rootObj->setProperty("canvasObjects", canvasObjects);
     // Review L3: ONE walk of the wires per call. Review M1: an end that is not the AI's intact box makes the other
     // end ask (in-wire and out-wire alike). intact() is cached per object (the stamp reads GUI properties).
     std::unordered_map<t_gobj*, bool> intactCache;

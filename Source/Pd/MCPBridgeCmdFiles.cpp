@@ -868,8 +868,12 @@ void MCPBridge::pdFocusTab(const juce::String& action, const juce::OSCMessage& m
     juce::String replyAddr = "/pd/focus_tab/reply/" + correlationId;
 
     postMessage([p = processor, bridge = this, target, replyAddr]() {
-        if (auto title = p->getMcp()->gui().focusTab(target)) {
-            bridge->sendReply(replyAddr, juce::String("focused: ") + *title);
+        if (auto r = p->getMcp()->gui().focusTab(target)) {
+            // P11.9 item 1: "focused" only when the editor now shows that tab on screen (read back), else say so.
+            if (r->outcome == mcp::visible::Focus::Switched)
+                bridge->sendReply(replyAddr, juce::String("focused: ") + r->title);
+            else
+                bridge->sendReply(replyAddr, juce::String("error: '") + r->title + "' " + mcp::visible::focusWords(r->outcome));
             return;
         }
         bridge->sendReply(replyAddr, juce::String("error: tab not found: " + target));
