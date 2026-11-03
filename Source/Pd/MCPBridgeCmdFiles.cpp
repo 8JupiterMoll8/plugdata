@@ -7,6 +7,7 @@
 // Bridge commands: patch files and tabs (Plan 3 P3.3): handlers moved unchanged out of MCPBridge::handlePdDomain.
 
 #include "MCPBridgeCmdCommon.h"
+#include "Mcp/McpPdFile.h" // P11.8: the file a root canvas is bound to
 
 #include <cstring>
 
@@ -198,6 +199,50 @@ bool rootHasCoordsLine(juce::String const& content)
     return false;
 }
 
+// P11.8: the file a ROOT canvas is bound to on the Pd side (its dir + name), or an empty File (a subpatch, a never-saved
+// patch with a relative dir). CALLER HOLDS sys_lock.
+juce::File pdRootFile(t_canvas* c)
+{
+    if (!c || c->gl_owner || !c->gl_name || !c->gl_name->s_name) return {};
+    auto* dir = canvas_getdir(c);
+    if (!dir || !dir->s_name) return {};
+    return mcp::fileInPdDir(juce::String::fromUTF8(dir->s_name), juce::String::fromUTF8(c->gl_name->s_name));
+}
+
+// P11.8: what a save of `cnv` into `dest` would overwrite. `ownFile`: dest is the file this canvas is bound to (only a
+// root has one: the Pd side's dir + name, or the file its tab saves to); a subpatch has none, so its root's file is
+// "another open patch's" file like any other tab's. `otherOwner`: the name of another open patch whose file dest is
+// (an open tab, or a root on the Pd side); a save there would destroy it, so it is refused whatever the caller says.
+// `tabs` were read on the message thread before the lock: a tab's canvas is dereferenced only while it is live; a tab
+// that is gone counts as another patch (fail closed). CALLER HOLDS sys_lock.
+struct SaveTarget {
+    bool isRoot = false;
+    bool ownFile = false;
+    juce::String otherOwner;
+};
+
+SaveTarget saveTargetOf(t_canvas* cnv, juce::File const& dest, std::vector<McpGuiHost::TabInfo> const& tabs)
+{
+    SaveTarget t;
+    t.isRoot = cnv && cnv->gl_owner == nullptr;
+    if (t.isRoot && pdRootFile(cnv) == dest) t.ownFile = true;
+    for (auto const& tab : tabs) {
+        if (tab.file == juce::File() || tab.file != dest) continue;
+        t_canvas* owner = tab.patch && mcpCanvasIsLive(tab.patch) ? canvas_getrootfor(tab.patch) : nullptr;
+        if (t.isRoot && owner == cnv) {
+            t.ownFile = true;
+            continue;
+        }
+        if (t.otherOwner.isEmpty()) t.otherOwner = tab.title.isNotEmpty() ? tab.title : dest.getFileName();
+    }
+    for (t_canvas* c = pd_this ? pd_this->pd_canvaslist : nullptr; c && t.otherOwner.isEmpty(); c = c->gl_next) {
+        if (c == cnv || c->gl_owner) continue;
+        if (pdRootFile(c) == dest) t.otherOwner = juce::String::fromUTF8(c->gl_name->s_name);
+    }
+    if (t.otherOwner.isNotEmpty()) t.ownFile = false;
+    return t;
+}
+
 } // namespace
 
 void MCPBridge::pdLoad(const juce::String& action, const juce::OSCMessage& msg)
@@ -366,12 +411,18 @@ void MCPBridge::pdLoadContent(const juce::String& action, const juce::OSCMessage
     // never crosses the TS boundary, so a later load can restore it exactly
     // (no positional guessing). Vanilla Pd sees a normal .pd file.
     // Reply: /pd/save_patch/reply/<corrId> <destFilePath> | "error: ..."
+    // P11.8 (lost work, live check 2026-11-03: a save of the focused tab into the GOP tab's file overwrote it and said
+    // ok): arg3 `overwrite` (default 0). The save refuses, writing nothing, when the file is another open patch's
+    // (whatever arg3 says), and when it exists on disk and is not this canvas's own file unless arg3 is 1 (the server
+    // passes 1 only after the artist's click). A root saved to its own file is marked clean (Pd's dirty flag) when the
+    // canvas still holds exactly what was written.
 void MCPBridge::pdSavePatch(const juce::String& action, const juce::OSCMessage& msg)
 {
     if (msg.size() >= 2 && processor) {
         auto canvasName    = normalizeCanvas(getArgString(msg[0]));
         auto destFilePath  = getArgString(msg[1]);
         auto correlationId = msg.size() > 2 ? getArgString(msg[2]) : "";
+        bool const overwriteApproved = msg.size() > 3 && getArgFloat(msg[3]) >= 0.5f;
 
         juce::String replyAddr = correlationId.isNotEmpty()
             ? "/pd/save_patch/reply/" + correlationId
@@ -384,20 +435,45 @@ void MCPBridge::pdSavePatch(const juce::String& action, const juce::OSCMessage& 
         // reply can say when this save re-points it.
         auto const tabs = processor->getMcp()->onMessageThread([p = processor] { return p->getMcp()->gui().listTabs(); }, 2000, "save_patch");
 
+        // P11.8: a relative path would make juce::File assert and land nowhere the artist knows.
+        if (!juce::File::isAbsolutePath(destFilePath) || destFilePath.startsWithChar('~')) {
+            sendReply(replyAddr, juce::String("error: not an absolute path: " + destFilePath + " (not saved)"));
+            return;
+        }
+        juce::File const destFile(destFilePath);
+
         sys_lock();
         t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
         // P11.6: which canvas this save wrote, and its graph-on-parent state, for the reply (a GOP root saved without
         // its coords line was seen live; the reply proves which canvas the name resolved to).
         juce::String savedKey;
         bool savedIsGraph = false;
+        juce::String rawContent; // P11.8: what was written, before the #A strip (the dirty-clear compares it)
+        SaveTarget target;
         if (cnv) {
             savedKey = juce::String(processor->getMcp()->identity.keyOf(cnv));
             savedIsGraph = cnv->gl_isgraph != 0;
+            target = saveTargetOf(cnv, destFile, tabs ? *tabs : std::vector<McpGuiHost::TabInfo> {});
+        }
+        if (cnv && target.otherOwner.isNotEmpty()) {
+            sys_unlock();
+            sendReply(replyAddr, juce::String("error: " + destFile.getFullPathName() + " is the file of another open patch ('"
+                + target.otherOwner + "'): not saved, nothing was written"));
+            return;
+        }
+        if (cnv && !target.ownFile && !overwriteApproved && destFile.exists()) {
+            sys_unlock();
+            sendReply(replyAddr, juce::String("error: " + destFile.getFullPathName() + " already exists and is not the file of '"
+                + savedKey + "': not saved, nothing was written (overwriting it needs the artist's approval)"));
+            return;
+        }
+        if (cnv) {
             char* buf = nullptr;
             int   bufsize = 0;
             pd::Interface::getCanvasContent(cnv, &buf, &bufsize);
             if (buf) {
                 content = juce::String::fromUTF8(buf, static_cast<size_t>(bufsize));
+                rawContent = content;
                 freebytes(buf, static_cast<size_t>(bufsize) * sizeof(char));
             }
 
@@ -419,10 +495,30 @@ void MCPBridge::pdSavePatch(const juce::String& action, const juce::OSCMessage& 
             return;
         }
 
-        juce::File destFile(destFilePath);
         if (!destFile.replaceWithText(content)) {
             sendReply(replyAddr, juce::String("error: could not write to " + destFilePath));
             return;
+        }
+        // P11.8: the live check saw a tool save leave the tab dirty (a close then asked about "unsaved changes" that
+        // were on disk). A root written to its own file is clean, as after Pd's own save, but only when the canvas
+        // still holds exactly the bytes written (an edit since the read keeps it dirty).
+        bool dirtyCleared = false;
+        if (target.ownFile && target.isRoot) {
+            sys_lock();
+            if (mcpCanvasIsLive(cnv)) {
+                char* now = nullptr;
+                int nowSize = 0;
+                pd::Interface::getCanvasContent(cnv, &now, &nowSize);
+                if (now) {
+                    bool const same = juce::String::fromUTF8(now, static_cast<size_t>(nowSize)) == rawContent;
+                    freebytes(now, static_cast<size_t>(nowSize) * sizeof(char));
+                    if (same) {
+                        canvas_dirty(cnv, 0);
+                        dirtyCleared = cnv->gl_dirty == 0;
+                    }
+                }
+            }
+            sys_unlock();
         }
         // Sidecar next to the .pd — engine-private, invisible to vanilla Pd. P3.5 S7: v2 with the .pd's hash; a
         // failed write is reported in the reply (arg1) instead of ignored.
@@ -480,6 +576,9 @@ void MCPBridge::pdSavePatch(const juce::String& action, const juce::OSCMessage& 
         report->setProperty("canvasKey", savedKey);
         report->setProperty("isGraph", savedIsGraph);
         report->setProperty("coordsLine", rootHasCoordsLine(content)); // review L1: the root's own line
+        // P11.8: the file was this canvas's own (nothing else was overwritten), and the canvas is clean now.
+        report->setProperty("ownFile", target.ownFile);
+        report->setProperty("dirtyCleared", dirtyCleared);
         juce::Array<juce::var> args;
         args.add(destFilePath);
         args.add(sidecarError.isEmpty() ? juce::String() : "ids not saved: " + sidecarError);

@@ -56,6 +56,7 @@
 #include "Pd/MCPBridgeCmdCommon.h" // armedSpectralJson / renderSpectralJson (Plan 5 spectral window)
 #include <juce_cryptography/juce_cryptography.h> // juce::SHA256: the save_content hash (P11.2 V11)
 #include "Utility/PluginParameter.h" // PlugDataParameter: the master volume guard (P5.1 sink floor)
+#include "Mcp/McpPdFile.h" // P11.8 item 3: mcp::fileInPdDir
 
 namespace {
 
@@ -1926,6 +1927,116 @@ void runPathCanvasCases(PluginProcessor& processor)
             t_atom force;
             SETFLOAT(&force, 1);
             pd_typedmess(&c->gl_pd, gensym("menuclose"), 1, &force); // Pd's own close (plugdata hears it)
+        }
+    }, 3000);
+    base.deleteRecursively();
+}
+
+// P11.8 item 1 (lost work, live check 2026-11-03): `manage_patch_files save filename:X` wrote the FOCUSED canvas into
+// X, which was another open tab's file (the GOP tab lost its coords line), and answered ok. /pd/save_patch now refuses
+// another open patch's file whatever arg3 says, refuses an existing file that is not the canvas's own unless arg3
+// (overwrite) is 1, saves a root into its own file with no flag and marks it clean (the live check saw a tool save
+// leave the tab dirty). Item 3: a canvas dir that is not absolute has no file (juce::File asserted on ".").
+void runSaveGuardCases(Harness& h, PluginProcessor& processor)
+{
+    std::printf("save_patch never overwrites another patch without the flag (P11.8)\n");
+    CHECK(mcp::fileInPdDir(".", "x.pd") == juce::File());
+    CHECK(mcp::fileInPdDir("", "x.pd") == juce::File());
+    CHECK(mcp::fileInPdDir("/tmp", "") == juce::File());
+    CHECK(mcp::fileInPdDir("/tmp", "x.pd") == juce::File("/tmp/x.pd"));
+
+    auto* host = processor.getMcp();
+    auto base = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("mcp_p118_save");
+    base.deleteRecursively();
+    auto fa = base.getChildFile("a").getChildFile("p118own.pd");
+    auto fb = base.getChildFile("b").getChildFile("p118other.pd");
+    auto fx = base.getChildFile("x").getChildFile("p118stranger.pd");
+    auto fn = base.getChildFile("n").getChildFile("p118new.pd");
+    for (auto const& f : { fa, fb, fx, fn }) f.getParentDirectory().createDirectory();
+    juce::String const textA = "#N canvas 0 50 450 300 12;\n#X obj 10 10 r p118_a;\n";
+    juce::String const textB = "#N canvas 0 50 450 300 12;\n#X obj 10 10 r p118_b;\n#X coords 0 0 100 100 100 100 2 0 0;\n";
+    juce::String const textX = "#N canvas 0 50 450 300 12;\n#X obj 10 10 r p118_x;\n";
+    fa.replaceWithText(textA);
+    fb.replaceWithText(textB);
+    fx.replaceWithText(textX);
+    auto const onDiskB = fb.loadFileAsString(); // replaceWithText writes \r\n: compare against what is on disk
+    auto const onDiskX = fx.loadFileAsString();
+    auto open = [&](juce::File const& f) {
+        host->pdWait([&] {
+            t_atom a[2];
+            SETSYMBOL(&a[0], gensym(f.getFileName().toRawUTF8()));
+            SETSYMBOL(&a[1], gensym(f.getParentDirectory().getFullPathName().toRawUTF8()));
+            pd_typedmess(gensym("pd")->s_thing, gensym("open"), 2, a);
+        }, 3000);
+    };
+    open(fa);
+    open(fb);
+    t_canvas* ca = nullptr;
+    t_canvas* cb = nullptr;
+    host->pdWait([&] {
+        ca = host->getCanvasBySymbol(fa.getFullPathName());
+        cb = host->getCanvasBySymbol(fb.getFullPathName());
+    }, 3000);
+    CHECK(ca != nullptr && cb != nullptr && ca != cb);
+    auto const A = fa.getFullPathName();
+    auto save = [&](juce::String const& canvas, juce::File const& dest, int overwrite, char const* id) {
+        return h.call("/pd/save_patch", { canvas, dest.getFullPathName(), id, overwrite }, std::string("/pd/save_patch/reply/") + id, 3000);
+    };
+    auto isError = [](std::optional<Reply> const& r, char const* words) {
+        return r.has_value() && !r->args.empty() && juce::String(r->str(0)).startsWith("error:") && juce::String(r->str(0)).contains(words);
+    };
+
+    // another open patch's file: refused, with and without the flag; the file is untouched
+    CHECK(isError(save(A, fb, 0, "sg1"), "another open patch"));
+    CHECK(isError(save(A, fb, 1, "sg2"), "another open patch"));
+    CHECK(fb.loadFileAsString() == onDiskB);
+    // an existing file that is nobody's open patch: refused without the flag, written with it
+    CHECK(isError(save(A, fx, 0, "sg3"), "already exists"));
+    CHECK(fx.loadFileAsString() == onDiskX);
+    auto withFlag = save(A, fx, 1, "sg4");
+    CHECK(withFlag.has_value() && !juce::String(withFlag->str(0)).startsWith("error:"));
+    CHECK(fx.loadFileAsString().contains("r p118_a"));
+    // a new file: no flag needed
+    auto fresh = save(A, fn, 0, "sg5");
+    CHECK(fresh.has_value() && !juce::String(fresh->str(0)).startsWith("error:") && fn.existsAsFile());
+    // a relative path: refused (juce::File would assert on it)
+    CHECK(isError(h.call("/pd/save_patch", { A, "rel/p118.pd", "sg6" }, "/pd/save_patch/reply/sg6", 3000), "not an absolute path"));
+
+    // its own file: no flag, saved, and the canvas is clean afterwards
+    host->pdWait([&] { if (ca) canvas_dirty(ca, 1); }, 3000);
+    int dirtyBefore = -1;
+    host->pdWait([&] { if (ca) dirtyBefore = static_cast<int>(ca->gl_dirty); }, 3000);
+    CHECK(dirtyBefore == 1);
+    auto own = save(A, fa, 0, "sg7");
+    CHECK(own.has_value() && !juce::String(own->str(0)).startsWith("error:"));
+    if (own && own->args.size() >= 3) {
+        auto const report = juce::JSON::parse(juce::String(own->str(2)));
+        CHECK(static_cast<bool>(report["ownFile"]));
+        CHECK(static_cast<bool>(report["dirtyCleared"]));
+    } else {
+        CHECK(false);
+    }
+    int dirtyAfter = -1;
+    host->pdWait([&] { if (ca) dirtyAfter = static_cast<int>(ca->gl_dirty); }, 3000);
+    CHECK(dirtyAfter == 0);
+
+    // a subpatch of A saved into A's file would replace the whole patch with the subpatch: refused
+    host->pdWait([&] {
+        if (!ca) return;
+        t_atom o[4];
+        SETFLOAT(&o[0], 200); SETFLOAT(&o[1], 200); SETSYMBOL(&o[2], gensym("pd")); SETSYMBOL(&o[3], gensym("p118sub"));
+        pd_typedmess(&ca->gl_pd, gensym("obj"), 4, o);
+    }, 3000);
+    auto const ownText = fa.loadFileAsString();
+    CHECK(isError(save("pd-p118sub", fa, 1, "sg8"), "another open patch"));
+    CHECK(fa.loadFileAsString() == ownText);
+
+    host->pdWait([&] {
+        for (auto* c : { ca, cb }) {
+            if (!c) continue;
+            t_atom force;
+            SETFLOAT(&force, 1);
+            pd_typedmess(&c->gl_pd, gensym("menuclose"), 1, &force);
         }
     }, 3000);
     base.deleteRecursively();
@@ -4036,6 +4147,7 @@ int main()
             runBoundCases(harness, processor);
             runSaveCoordsCases(harness, processor);
             runPathCanvasCases(processor);
+            runSaveGuardCases(harness, processor);
             runContentVersionCases(harness, processor);
             runSelectionGetCases(harness);
             runV2HandshakeCases(harness, *bridge, [&] {

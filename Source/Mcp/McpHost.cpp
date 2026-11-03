@@ -19,6 +19,7 @@
 #include "Mcp/McpAudit.h"
 #include "Mcp/McpRtGuard.h"
 #include "Mcp/McpNativeUndo.h"
+#include "Mcp/McpPdFile.h" // P11.8 item 3
 
 extern "C" int ugen_getsortno(void); // d_ugen.c (P3.4 S5)
 
@@ -702,7 +703,11 @@ t_canvas* McpHost::getCanvasBySymbol(const String& canvas_symbol)
             auto* dir = canvas_getdir(c);
             if (!dir || !dir->s_name || dir->s_name[0] == 0)
                 continue;
-            if (juce::File(juce::String::fromUTF8(dir->s_name)).getChildFile(juce::String::fromUTF8(c->gl_name->s_name)) == want) {
+            // P11.8 item 3: a relative dir (".") has no file to compare, and juce::File would assert on it.
+            auto const file = mcp::fileInPdDir(juce::String::fromUTF8(dir->s_name), juce::String::fromUTF8(c->gl_name->s_name));
+            if (file == juce::File())
+                continue;
+            if (file == want) {
                 found = c;
                 ++matches;
             }
