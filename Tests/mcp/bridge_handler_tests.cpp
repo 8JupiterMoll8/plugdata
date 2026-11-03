@@ -2031,8 +2031,32 @@ void runSaveGuardCases(Harness& h, PluginProcessor& processor)
     CHECK(isError(save("pd-p118sub", fa, 1, "sg8"), "another open patch"));
     CHECK(fa.loadFileAsString() == ownText);
 
+    // Review M1 + the old "#A saved" strip: an abstraction's [savestate] writes its state into the parent's file as an
+    // "#A saved ..." line (g_readwrite.c savestate_list; MERDA's MIDI-learn uses it). A tool save dropped that line, so
+    // the state was lost on reopen, and the dirty-clear then marked the tab clean although the file lacked it. The
+    // state is written now (save_patch and save_content alike), and the tab is clean because the file holds everything.
+    auto fs = base.getChildFile("s").getChildFile("p118state.pd");
+    fs.getParentDirectory().createDirectory();
+    fs.getSiblingFile("p118st.pd").replaceWithText(
+        "#N canvas 0 50 450 300 12;\n#X obj 10 10 savestate;\n#X msg 10 60 42 43;\n#X connect 0 1 1 0;\n#X connect 1 0 0 0;\n");
+    fs.replaceWithText("#N canvas 0 50 450 300 12;\n#X obj 10 10 p118st;\n");
+    open(fs);
+    t_canvas* cs = nullptr;
+    host->pdWait([&] { cs = host->getCanvasBySymbol(fs.getFullPathName()); if (cs) canvas_dirty(cs, 1); }, 3000);
+    CHECK(cs != nullptr);
+    auto const S = fs.getFullPathName();
+    auto stateSave = save(S, fs, 0, "sg9");
+    CHECK(stateSave.has_value() && !juce::String(stateSave->str(0)).startsWith("error:"));
+    CHECK(fs.loadFileAsString().contains("#A saved 42 43"));
+    auto viaContent = fs.getSiblingFile("p118state_content.pd");
+    h.call("/pd/save_content", { S, viaContent.getFullPathName(), "sg10" }, "/pd/save_content/reply/sg10", 3000);
+    CHECK(viaContent.loadFileAsString().contains("#A saved 42 43"));
+    int stateDirty = -1;
+    host->pdWait([&] { if (cs) stateDirty = static_cast<int>(cs->gl_dirty); }, 3000);
+    CHECK(stateDirty == 0);
+
     host->pdWait([&] {
-        for (auto* c : { ca, cb }) {
+        for (auto* c : { ca, cb, cs }) {
             if (!c) continue;
             t_atom force;
             SETFLOAT(&force, 1);
