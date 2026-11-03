@@ -285,6 +285,7 @@ struct McpSession {
     mcp::ApprovalState approvals;
     // P12a A3: flow mode, off at every start; on only through the artist's click on the flow chip (McpFlowMode.h).
     mcp::FlowMode flowMode;
+    mcp::FlowOfferGate flowOffers; // review M2: offer rate limit and the cooldown after a no
     McpHud getMcpHud() const { juce::ScopedLock sl(mcpOverlayLock); return mcpHud; }
 
     // Spatial / Targeted Overlays: restricts visual lenses (connection activity,

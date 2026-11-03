@@ -516,7 +516,7 @@ void CanvasMcpLayer::triggerPaletteItem(int index)
 
         // P12a A3: Flow Mode never travels as a prompt: the chip is shown here and the artist's ✓ on it decides.
         if (item.id == "flow") {
-            if (canvas.pd) canvas.pd->getMcp()->offerFlowMode(static_cast<std::int64_t>(juce::Time::currentTimeMillis()));
+            if (canvas.pd) canvas.pd->getMcp()->offerFlowMode(static_cast<std::int64_t>(juce::Time::currentTimeMillis()), true);
             dismissSelectionPill();
             return;
         }

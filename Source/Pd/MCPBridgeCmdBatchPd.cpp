@@ -213,7 +213,8 @@ void mcp::BatchJob::editPhase(const std::string& canonStr)
             if (o) {
                 // P12a A1: an MCP retype carries the origin to the recreated box (read BEFORE the rename: the old
                 // lifetime ends in it). Only onto a box that was not on the canvas before (the new one, or the same).
-                bool const wasAi = processor->getMcp()->identity.originOf(obj) == mcp::IdentityService::Origin::Ai;
+                // Review M1: only while still as the AI left it (an artist edit in place is never laundered by a retype).
+                bool const wasAi = processor->getMcp()->aiIntact(obj);
                 std::unordered_set<t_gobj*> before;
                 for (t_gobj* y = cnv->gl_list; y; y = y->g_next) before.insert(y);
                 // P4.4: Pd's text_setto registers this retype as UNDO_RECREATE itself.
@@ -229,7 +230,7 @@ void mcp::BatchJob::editPhase(const std::string& canonStr)
                     if (rebound == mcp::IdentityService::BindResult::Same)
                         processor->getMcp()->identity.bumpVersion(cnv); // the edit itself is an identity change
                     if (wasAi && rebound != mcp::IdentityService::BindResult::Refused && (still || before.count(newObj) == 0))
-                        processor->getMcp()->identity.setOriginAi(newObj);
+                        processor->getMcp()->identity.setOriginAi(newObj, McpHost::editStamp(newObj));
                     // C++ truth: when a class can't be instantiated Pd
                     // substitutes text_class (g_text.c canvas_objtext,
                     // "... couldn't create") and leaves an ERROR BOX — the
@@ -401,7 +402,7 @@ void mcp::BatchJob::createPhase(const std::string& canonStr)
                 // P12a A1: THE one place an object becomes the AI's own: this batch just pasted it (it was not on the
                 // canvas before, preCreateCount) and the bridge confirmed it under the AI's id. Never from a name.
                 if (bound == mcp::IdentityService::BindResult::Bound && preCreate.count(no.ptr) == 0)
-                    processor->getMcp()->identity.setOriginAi(no.ptr);
+                    processor->getMcp()->identity.setOriginAi(no.ptr, McpHost::editStamp(no.ptr));
 
                 // Auto-seed line~/vline~ init value (fork ignores creation args)
                 if (pc.seedInit) {

@@ -20,36 +20,64 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <mutex>
 #include <string>
 
 namespace mcp {
 
 class FlowMode {
 public:
-    bool isOn() const { return on.load(std::memory_order_acquire); }
+    bool isOn() const { return state.load(std::memory_order_acquire) != 0; }
     // Wall-clock ms when it went on (0 = off).
-    std::int64_t sinceMs() const { return isOn() ? since.load(std::memory_order_acquire) : 0; }
+    std::int64_t sinceMs() const { return state.load(std::memory_order_acquire); }
 
     // The artist clicked ✓ on the flow chip. Only caller: McpHost::answerApprovalChip (checked by a grep gate).
+    // Review L2: on/off and the start time are ONE atomic word (0 = off, else the start), so this compare-and-swap
+    // cannot interleave with off(): already on keeps its first start.
     void artistTurnOn(std::int64_t nowMs)
     {
-        if (isOn())
-            return; // already on: the first start time stays
-        since.store(nowMs, std::memory_order_release);
-        on.store(true, std::memory_order_release);
+        std::int64_t expected = 0;
+        state.compare_exchange_strong(expected, nowMs > 0 ? nowMs : 1, std::memory_order_acq_rel);
     }
 
     // Any door may switch it off. True when it was on.
-    bool off()
-    {
-        bool const was = on.exchange(false, std::memory_order_acq_rel);
-        since.store(0, std::memory_order_release);
-        return was;
-    }
+    bool off() { return state.exchange(0, std::memory_order_acq_rel) != 0; }
 
 private:
-    std::atomic<bool> on { false };
-    std::atomic<std::int64_t> since { 0 };
+    std::atomic<std::int64_t> state { 0 };
+};
+
+// Review M2: who may show the flow offer how often. The verb is reachable by any client, so an offer is refused within
+// kMinIntervalMs of the last one and for kCooldownAfterDeclineMs after the artist said no (Esc / ✗). The host also
+// refuses it while any other chip is on screen.
+class FlowOfferGate {
+public:
+    static constexpr std::int64_t kMinIntervalMs = 10000;
+    static constexpr std::int64_t kCooldownAfterDeclineMs = 30000;
+    enum class Refusal { None, TooSoon, Cooldown };
+    static char const* name(Refusal r)
+    {
+        switch (r) {
+        case Refusal::None: return "none";
+        case Refusal::TooSoon: return "too_soon";
+        case Refusal::Cooldown: return "cooldown";
+        }
+        return "none";
+    }
+    Refusal check(std::int64_t nowMs) const
+    {
+        std::lock_guard<std::mutex> const l(lock);
+        if (declinedAt != 0 && nowMs < declinedAt + kCooldownAfterDeclineMs) return Refusal::Cooldown;
+        if (offeredAt != 0 && nowMs < offeredAt + kMinIntervalMs) return Refusal::TooSoon;
+        return Refusal::None;
+    }
+    void offered(std::int64_t nowMs) { std::lock_guard<std::mutex> const l(lock); offeredAt = nowMs > 0 ? nowMs : 1; }
+    void declined(std::int64_t nowMs) { std::lock_guard<std::mutex> const l(lock); declinedAt = nowMs > 0 ? nowMs : 1; }
+
+private:
+    mutable std::mutex lock;
+    std::int64_t offeredAt = 0;
+    std::int64_t declinedAt = 0;
 };
 
 inline constexpr char kFlowNoncePrefix[] = "flow:";

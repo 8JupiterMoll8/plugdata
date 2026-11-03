@@ -72,6 +72,23 @@ static void provenance()
         CHECK(core.originOf(&loose) == Origin::Unknown);
         CHECK(!core.setOriginAi(nullptr));
     }
+    // Review M1: the stamp of the object as the AI made it travels with the mark; a new mark replaces it.
+    {
+        Cnv c { "song.pd" };
+        Obj a { 1 };
+        Core core;
+        hook(core);
+        core.bind(&c, "m", &a);
+        CHECK(core.originStampOf(&a) == 0);
+        CHECK(core.setOriginAi(&a, 777));
+        CHECK(core.originStampOf(&a) == 777);
+        CHECK(core.setOriginAi(&a, 778));
+        CHECK(core.originStampOf(&a) == 778);
+        core.clearOrigin(&a);
+        CHECK(core.originStampOf(&a) == 0);
+        a.generation++;
+        CHECK(core.originStampOf(&a) == 0);
+    }
     // A name never carries it: a rename keeps it on the object; a second id (register_id under an AI-looking name)
     // on an artist object gives nothing; binding the AI's id to another object is refused (theft) or gives nothing.
     {
@@ -209,10 +226,24 @@ static void ownership()
         g.nonAiInWire = true;
         CHECK(decide(g) == Why::ArtistInWire);
     }
+    // Review M1: a wire out of it into a non-AI box, and an artist edit in place since the AI made it, also ask.
+    {
+        auto g = f;
+        g.nonAiOutWire = true;
+        CHECK(decide(g) == Why::ArtistOutWire);
+        CHECK(std::string(whyName(Why::ArtistOutWire)) == "artist_out_wire");
+    }
+    {
+        auto g = f;
+        g.editedInPlace = true;
+        CHECK(decide(g) == Why::EditedInPlace);
+        CHECK(std::string(whyName(Why::EditedInPlace)) == "edited_in_place");
+    }
     // Everything at once still never owns.
-    Facts all { true, true, true, true, true, true };
+    Facts all { true, true, true, true, true, true, true, true };
     CHECK(decide(all) != Why::AiOwned);
-    for (auto w : { Why::NotFound, Why::OriginUnknown, Why::AmbiguousTab, Why::Container, Why::DataHolder, Why::ArtistInWire, Why::AiOwned })
+    for (auto w : { Why::NotFound, Why::OriginUnknown, Why::EditedInPlace, Why::AmbiguousTab, Why::Container, Why::DataHolder,
+             Why::ArtistInWire, Why::ArtistOutWire, Why::AiOwned })
         CHECK(std::string(whyName(w)).size() > 0);
 }
 
@@ -228,6 +259,14 @@ static void flowMode()
         CHECK(f.isOn() && f.sinceMs() == 1000);
         f.artistTurnOn(2000); // already on: keeps its start
         CHECK(f.sinceMs() == 1000);
+        CHECK(f.off());
+        CHECK(!f.isOn() && f.sinceMs() == 0);
+    }
+    // Review L2: on and off are one atomic word: a turn-on racing an off never leaves "on since 0" or a stale start.
+    {
+        mcp::FlowMode f;
+        f.artistTurnOn(0); // a zero clock still means on
+        CHECK(f.isOn() && f.sinceMs() > 0);
         CHECK(f.off());
         CHECK(!f.isOn() && f.sinceMs() == 0);
     }
@@ -254,8 +293,56 @@ static void flowMode()
     }
 }
 
+static void offers()
+{
+    std::printf("review M2: offer gate, Enter, chip separation\n");
+    using G = mcp::FlowOfferGate;
+    {
+        G g;
+        CHECK(g.check(100000) == G::Refusal::None);
+        g.offered(100000);
+        CHECK(g.check(100000 + G::kMinIntervalMs - 1) == G::Refusal::TooSoon);
+        CHECK(g.check(100000 + G::kMinIntervalMs) == G::Refusal::None);
+        g.declined(200000);
+        CHECK(g.check(200000 + G::kCooldownAfterDeclineMs - 1) == G::Refusal::Cooldown);
+        CHECK(g.check(200000 + G::kCooldownAfterDeclineMs) == G::Refusal::None);
+        CHECK(std::string(G::name(G::Refusal::Cooldown)) == "cooldown");
+    }
+    // A pending flow offer never takes Enter from a real chip; Enter never answers the flow offer; a real chip arriving
+    // removes the offer (no misplaced click next to it).
+    {
+        mcp::ApprovalState s;
+        mcp::ApprovalChip offer;
+        offer.nonce = mcp::makeFlowNonce(1, 1);
+        offer.flowOffer = true;
+        s.show(offer, 60000, 1000);
+        s.markPaintedIfInside(offer.nonce, mcp::ApprovalRect { 0, 0, 10, 10 }, mcp::ApprovalRect { 0, 0, 100, 100 }, 1000);
+        CHECK(!s.enterTarget(5000).has_value()); // only the offer: Enter does nothing
+        CHECK(s.anyOtherThanFlow(5000) == false);
+        CHECK(s.show("real", "pd-main", "delete", {}, 60000, 5000));
+        auto v = s.visible(5000);
+        CHECK(v.size() == 1 && v[0].nonce == "real"); // the offer went
+        CHECK(s.anyOtherThanFlow(5000));
+        s.markPaintedIfInside("real", mcp::ApprovalRect { 0, 0, 10, 10 }, mcp::ApprovalRect { 0, 0, 100, 100 }, 5000);
+        auto e = s.enterTarget(6000);
+        CHECK(e.has_value() && *e == "real");
+    }
+    {
+        mcp::ApprovalState s;
+        s.show("real", "pd-main", "delete", {}, 60000, 1000);
+        s.markPaintedIfInside("real", mcp::ApprovalRect { 0, 0, 10, 10 }, mcp::ApprovalRect { 0, 0, 100, 100 }, 1000);
+        mcp::ApprovalChip offer; // shown anyway (the host refuses it; the state must still keep Enter for the real one)
+        offer.nonce = mcp::makeFlowNonce(2, 2);
+        offer.flowOffer = true;
+        s.show(offer, 60000, 1500);
+        auto e = s.enterTarget(3000);
+        CHECK(e.has_value() && *e == "real");
+    }
+}
+
 int main()
 {
+    offers();
     provenance();
     ownership();
     flowMode();

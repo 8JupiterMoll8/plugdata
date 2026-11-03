@@ -90,6 +90,9 @@ public:
         c.seen.clear();
         c.expiresAtMs = nowMs + std::clamp<std::int64_t>(ttlMs, kMinTtlMs, kMaxTtlMs);
         c.seq = ++seqCounter;
+        // P12a review M2: a real question removes a pending flow offer, so it never sits next to it (no misplaced click).
+        if (!c.flowOffer)
+            chips.erase(std::remove_if(chips.begin(), chips.end(), [&](ApprovalChip const& x) { return x.flowOffer && x.nonce != nonce; }), chips.end());
         auto it = std::find_if(chips.begin(), chips.end(), [&](ApprovalChip const& x) { return x.nonce == nonce; });
         if (it != chips.end()) {
             c.seq = it->seq; // keeps its place in the stack
@@ -135,6 +138,14 @@ public:
     }
 
     bool any(std::int64_t nowMs) { return !visible(nowMs).empty(); }
+
+    // P12a review M2: any chip that is not the flow offer.
+    bool anyOtherThanFlow(std::int64_t nowMs)
+    {
+        for (auto const& c : visible(nowMs))
+            if (!c.flowOffer) return true;
+        return false;
+    }
 
     // A paint drew this chip FULLY inside the visible area: start its on-screen time. A chip drawn off-screen (or cut
     // by the edge) never starts it, so neither Enter nor a click can answer a chip the artist could not see.
@@ -184,9 +195,16 @@ public:
     {
         std::lock_guard<std::mutex> const l(lock);
         purgeLocked(nowMs);
-        if (chips.size() != 1)
+        // P12a review M2: the flow offer is not counted and never answered by Enter (only a click turns flow mode on).
+        ApprovalChip const* only = nullptr;
+        for (auto const& x : chips) {
+            if (x.flowOffer) continue;
+            if (only) return std::nullopt;
+            only = &x;
+        }
+        if (!only)
             return std::nullopt;
-        auto const& c = chips.front();
+        auto const& c = *only;
         auto const since = c.onScreenSince();
         if (since < 0 || nowMs - since < kEnterMinVisibleMs)
             return std::nullopt;

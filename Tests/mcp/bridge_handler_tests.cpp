@@ -2472,6 +2472,46 @@ void runFlowProvenanceCases(Harness& h, PluginProcessor& processor)
         CHECK(w["origin"].toString() == "ai" && !static_cast<bool>(w["owned"]) && w["why"].toString() == "artist_in_wire");
     }
 
+    // Review M1: a wire OUT of an AI box into an artist box asks too.
+    {
+        auto const c = next("fb");
+        CHECK(batch({ "pd-fl_sub", c, 0, 0, 0, 1, 0, "fl_o", 120, 220, "obj", "f", 0, 0, 5, 10, 0 }, c));
+        CHECK(why("pd-fl_sub", "fl_o") == "ai_own");
+        host->pdWait([&] {
+            t_canvas* cv = sub();
+            auto* from = host->identity.resolve(cv, "fl_o");
+            auto* to = host->identity.resolve(cv, hand.toStdString());
+            if (from && to) obj_connect(pd_checkobject(&from->g_pd), 0, pd_checkobject(&to->g_pd), 0);
+        }, 3000);
+        CHECK(why("pd-fl_sub", "fl_o") == "artist_out_wire");
+    }
+    // Review M1: an artist edit in place (message text, GUI properties) makes it the artist's; a later MCP retype does
+    // not launder it back.
+    {
+        auto const c = next("fb");
+        CHECK(batch({ "pd-fl_sub", c, 0, 0, 0, 2, 0,
+            "fl_m", 120, 460, "msg", "", 1, "hello",
+            "fl_s", 120, 520, "obj", "hsl", 0, 0, 5, 10, 0 }, c));
+        CHECK(why("pd-fl_sub", "fl_m") == "ai_own");
+        CHECK(why("pd-fl_sub", "fl_s") == "ai_own");
+        host->pdWait([&] {
+            t_canvas* cv = sub();
+            if (auto* m = host->identity.resolve(cv, "fl_m")) binbuf_text(reinterpret_cast<t_text*>(m)->te_binbuf, "world", 5);
+            if (auto* sl = host->identity.resolve(cv, "fl_s")) {
+                t_atom r[2];
+                SETFLOAT(r, 20);
+                SETFLOAT(r + 1, 20000);
+                pd_typedmess(&sl->g_pd, gensym("range"), 2, r); // what the properties dialog changes
+            }
+        }, 3000);
+        auto const m = own("pd-fl_sub", "fl_m");
+        CHECK(m["why"].toString() == "edited_in_place" && m["origin"].toString() == "unknown" && !static_cast<bool>(m["owned"]));
+        CHECK(why("pd-fl_sub", "fl_s") == "edited_in_place");
+        auto const ce = next("fb");
+        CHECK(batch({ "pd-fl_sub", ce, 0, 0, 1, 0, 0, "fl_m", "msg", 1, "again", 0, 5, 10, 0 }, ce));
+        CHECK(origin("pd-fl_sub", "fl_m") == "unknown");
+    }
+
     // 5. Containers and data holders always ask, whoever made them.
     {
         auto const c = next("fb");
@@ -2491,7 +2531,7 @@ void runFlowProvenanceCases(Harness& h, PluginProcessor& processor)
             pd_typedmess(&cv->gl_pd, gensym("obj"), 5, at);
             t_gobj* g = pd::Interface::getNewest(cv);
             host->identity.bind(cv, "fl_txt", g);
-            host->identity.setOriginAi(g); // as if the batch had made it
+            host->identity.setOriginAi(g, McpHost::editStamp(g)); // as the batch would mark it
         }, 3000);
         CHECK(why("pd-fl_sub", "fl_pd") == "container");
         auto const tab = why("pd-fl_sub", "fl_tab");
@@ -2774,6 +2814,16 @@ void runFlowModeCases(Harness& h, PluginProcessor& processor)
             }
         return {};
     };
+    auto flowNonce = [&]() -> std::string {
+        for (auto const& chip : state.visible(now()))
+            if (chip.flowOffer) return chip.nonce;
+        return {};
+    };
+    auto offerRefusal = [&]() -> std::string {
+        auto const c = next("fo");
+        auto r = h.call("/pd/flow_mode_offer", { c }, ("/pd/flow_mode_offer/reply/" + c).toStdString(), 2000);
+        return r ? parseJson(*r)["refused"].toString().toStdString() : std::string("no reply");
+    };
     {
         auto const n = offer();
         CHECK(!n.empty() && mcp::isFlowNonce(n));
@@ -2783,10 +2833,39 @@ void runFlowModeCases(Harness& h, PluginProcessor& processor)
         host->pdWait([&] { host->answerApprovalChip(n, false, now()); }, 3000); // Esc / cancel
         CHECK(!isOn());
         CHECK(state.visible(now()).empty());
+        // Review M2: after a no, no new offer from a client for 30 s; the artist's own palette item still works.
+        CHECK(offerRefusal() == "cooldown");
+        CHECK(host->offerFlowMode(now(), true) == "shown");
+        auto const p = flowNonce();
+        host->pdWait([&] { host->answerApprovalChip(p, false, now()); }, 3000);
     }
     {
-        auto const n = offer();
+        auto const t0 = now() + 40000; // past the cooldown and the rate limit
+        // Review M2: never next to a real question.
+        auto const ca = next("fa");
+        h.call("/pd/approval_show", { ca, R"({"nonce":"fm_real","canvas":"pd-main","reason":"delete","targets":[],"ttlMs":120000})" }, ("/pd/approval_show/reply/" + ca).toStdString());
+        CHECK(host->offerFlowMode(t0) == "other_chip");
+        CHECK(offerRefusal() == "other_chip");
+        state.clear("fm_real");
+        CHECK(host->offerFlowMode(t0) == "shown");
+        CHECK(host->offerFlowMode(t0 + 1000) == "already_shown");
+        // A real question arriving takes the offer away and keeps Enter for itself.
+        auto const cb = next("fa");
+        h.call("/pd/approval_show", { cb, R"({"nonce":"fm_real2","canvas":"pd-main","reason":"delete","targets":[],"ttlMs":120000})" }, ("/pd/approval_show/reply/" + cb).toStdString());
+        CHECK(flowNonce().empty());
+        state.markPaintedIfInside("fm_real2", mcp::ApprovalRect { 0, 0, 10, 10 }, mcp::ApprovalRect { 0, 0, 100, 100 }, now() - 1000);
+        auto const e = state.enterTarget(now());
+        CHECK(e.has_value() && *e == "fm_real2");
+        state.clear("fm_real2");
+        // Rate limit: not again within 10 s of the last offer.
+        CHECK(host->offerFlowMode(t0 + 5000) == "too_soon");
+    }
+    {
+        CHECK(host->offerFlowMode(now() + 60000) == "shown");
+        auto const n = flowNonce();
+        CHECK(!n.empty());
         state.markPaintedIfInside(n, mcp::ApprovalRect { 0, 0, 10, 10 }, mcp::ApprovalRect { 0, 0, 100, 100 }, now() - 1000);
+        CHECK(!state.enterTarget(now()).has_value()); // Enter never answers the offer
         h.replies.clear();
         bool clicked = false;
         host->pdWait([&] { clicked = host->answerApprovalChip(n, true, now()); }, 3000);
@@ -2797,9 +2876,7 @@ void runFlowModeCases(Harness& h, PluginProcessor& processor)
         CHECK(isOn());
         auto const g = get();
         CHECK(static_cast<double>(g["sinceMs"]) > 0);
-        auto const c = next("fo");
-        auto again = h.call("/pd/flow_mode_offer", { c }, ("/pd/flow_mode_offer/reply/" + c).toStdString(), 2000);
-        CHECK(again && !static_cast<bool>(parseJson(*again)["shown"]));
+        CHECK(offerRefusal() == "on");
     }
     // Never saved: the settings file has no trace of it, so a restart starts off (the state is a plain member).
     {

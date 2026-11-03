@@ -49,6 +49,7 @@ void CanvasMcpLayer::answerApproval(juce::String const& nonce, bool yes)
     if (!canvas.pd->getMcp()->answerApprovalChip(nonce.toStdString(), yes, nowMs())) return;
     mcpApprovalHits.clear();
     mcpApprovalFrame = {};
+    mcpFlowChipFrame = {};
     repaintApprovals();
 }
 
@@ -66,7 +67,10 @@ void CanvasMcpLayer::ApprovalExpiryTimer::timerCallback()
 
 bool CanvasMcpLayer::handleApprovalClick(juce::Point<int> canvasPt)
 {
-    if (!canvas.pd || mcpApprovalFrame.isEmpty() || !mcpApprovalFrame.contains(canvasPt)) return false;
+    if (!canvas.pd) return false;
+    bool const inStack = !mcpApprovalFrame.isEmpty() && mcpApprovalFrame.contains(canvasPt);
+    bool const inFlow = !mcpFlowChipFrame.isEmpty() && mcpFlowChipFrame.contains(canvasPt); // P12a review M2
+    if (!inStack && !inFlow) return false;
     auto& state = canvas.pd->getMcp()->session.approvals;
     for (auto const& hit : mcpApprovalHits) {
         bool const yes = hit.yes.contains(canvasPt);
@@ -103,10 +107,18 @@ void CanvasMcpLayer::paintApprovalChips(NVGcontext* nvg)
     if (!canvas.pd) return;
     auto& state = canvas.pd->getMcp()->session.approvals;
     auto const now = nowMs();
-    auto const chips = state.visible(now);
-    if (chips.empty()) {
+    auto const all = state.visible(now);
+    mcpFlowChipFrame = {};
+    if (all.empty()) {
         if (mcpApprovalExpiryTimer) mcpApprovalExpiryTimer->stopTimer();
         return;
+    }
+    // P12a review M2: the flow offer is drawn on its own (top centre, teal, CanvasMcpFlow.cpp), never in this stack.
+    std::vector<mcp::ApprovalChip> chips;
+    std::optional<mcp::ApprovalChip> flowChip;
+    for (auto const& c : all) {
+        if (c.flowOffer) flowChip = c;
+        else chips.push_back(c);
     }
     // The next C++ expiry repaints the canvas, so an expired chip does not stay drawn until some other repaint.
     if (auto const next = state.nextExpiryMs()) {
@@ -121,6 +133,10 @@ void CanvasMcpLayer::paintApprovalChips(NVGcontext* nvg)
         auto const a = canvas.viewport->getViewArea();
         view = mcp::approvalVisibleArea(a.getX(), a.getY(), a.getWidth(), a.getHeight());
     }
+    if (flowChip)
+        paintFlowOfferChip(nvg, *flowChip, view);
+    if (chips.empty())
+        return;
 
     // Server-built ghost preview: outline the targets of the records that are about THIS canvas (P12c review 5: a
     // record about another tab outlines nothing here; its chip says "(on tab X)").

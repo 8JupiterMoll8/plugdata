@@ -455,7 +455,9 @@ public:
     uint64_t currentBootId() const { return bootId.load(std::memory_order_relaxed); }
 
     // Marks the live lifetime of `obj` as made by the AI. False (nothing marked) without a live serial or a boot id.
-    bool setOriginAi(Obj obj)
+    // Review M1: `stamp` is the object's edit stamp (text atoms + GUI properties) as the AI left it; the ownership
+    // read compares it with the live one, so an artist edit in place (message, comment, GUI properties) counts.
+    bool setOriginAi(Obj obj, uint64_t stamp = 0)
     {
         check("setOriginAi");
         auto const boot = currentBootId();
@@ -466,6 +468,7 @@ public:
             return false;
         it->second.origin = Origin::Ai;
         it->second.originBoot = boot;
+        it->second.originStamp = stamp;
         return true;
     }
     // Back to Unknown (the safe direction; encapsulate and undo rebinds call it on purpose).
@@ -476,7 +479,14 @@ public:
         if (it != serials.end()) {
             it->second.origin = Origin::Unknown;
             it->second.originBoot = 0;
+            it->second.originStamp = 0;
         }
+    }
+    // The edit stamp recorded with the AI's mark (0: none, or not the AI's).
+    uint64_t originStampOf(Obj obj) const
+    {
+        check("originStampOf");
+        return originOf(obj) == Origin::Ai ? serials.find(obj)->second.originStamp : 0;
     }
     Origin originOf(Obj obj) const
     {
@@ -580,6 +590,7 @@ private:
         std::function<bool()> alive; // S5: this object's weak reference
         Origin origin = Origin::Unknown; // P12a A1
         uint64_t originBoot = 0;         // the boot id the mark was made in
+        uint64_t originStamp = 0;        // review M1: the edit stamp as the AI left it
         bool isAlive() const { return !alive || alive(); }
     };
 

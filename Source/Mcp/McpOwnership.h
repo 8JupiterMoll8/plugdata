@@ -10,7 +10,8 @@
 //
 // Owned = the object's lifetime was made by the AI in this run (identity origin Ai) AND it is not a container
 // (subpatch, abstraction, clone) AND not a data holder (anything that keeps recorded or typed content an undo cannot
-// bring back) AND no wire into it comes from an object that is not the AI's AND its tab name is not ambiguous.
+// bring back) AND no wire into it comes from (or out of it goes to) an object that is not the AI's AND its text and GUI
+// properties are still as the AI left them (review M1) AND its tab name is not ambiguous.
 // Every "not" answers why. Containers and data holders always ask, whoever made them (review round 1, H2).
 
 #include <string>
@@ -21,10 +22,12 @@ enum class Why {
     AiOwned,       // the AI's own: flow mode may change it without a question
     NotFound,      // no live object under this id on this canvas
     OriginUnknown, // made by the artist, pasted, loaded, retyped by hand, restored by undo: the artist's
+    EditedInPlace, // made by the AI, then its text or GUI properties changed outside the AI's own edits (review M1)
     AmbiguousTab,  // another open root tab has the same name (until the TS keys tabs uniquely, P11.6 F10)
     Container,     // subpatch, abstraction, clone
     DataHolder,    // table, array, text, coll, buffer...
     ArtistInWire,  // a wire into it comes from an object that is not the AI's own
+    ArtistOutWire, // a wire out of it goes into an object that is not the AI's own (review M1)
 };
 
 inline char const* whyName(Why w)
@@ -33,10 +36,12 @@ inline char const* whyName(Why w)
     case Why::AiOwned: return "ai_own";
     case Why::NotFound: return "not_found";
     case Why::OriginUnknown: return "origin_unknown";
+    case Why::EditedInPlace: return "edited_in_place";
     case Why::AmbiguousTab: return "ambiguous_tab";
     case Why::Container: return "container";
     case Why::DataHolder: return "data_holder";
     case Why::ArtistInWire: return "artist_in_wire";
+    case Why::ArtistOutWire: return "artist_out_wire";
     }
     return "unknown";
 }
@@ -48,6 +53,8 @@ struct Facts {
     bool container = false;
     bool dataHolder = false;
     bool nonAiInWire = false;
+    bool nonAiOutWire = false;
+    bool editedInPlace = false;
 };
 
 // The first reason that makes it not the AI's own, or AiOwned.
@@ -55,10 +62,12 @@ inline Why decide(Facts const& f)
 {
     if (!f.found) return Why::NotFound;
     if (!f.originAi) return Why::OriginUnknown;
+    if (f.editedInPlace) return Why::EditedInPlace;
     if (f.ambiguousTab) return Why::AmbiguousTab;
     if (f.container) return Why::Container;
     if (f.dataHolder) return Why::DataHolder;
     if (f.nonAiInWire) return Why::ArtistInWire;
+    if (f.nonAiOutWire) return Why::ArtistOutWire;
     return Why::AiOwned;
 }
 

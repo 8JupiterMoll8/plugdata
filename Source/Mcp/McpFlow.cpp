@@ -19,6 +19,8 @@
 #include "../Pd/MCPBridgeCmdCommon.h"
 #include "Mcp/McpOwnership.h"
 
+#include <random>
+
 namespace {
 
 std::int64_t flowNowMs() { return static_cast<std::int64_t>(juce::Time::currentTimeMillis()); }
@@ -50,6 +52,23 @@ std::string textOf(t_gobj* g)
     return out;
 }
 
+// Review M1: the edit stamp's GUI part (the properties a hand edit in the properties dialog changes; not the value).
+uint64_t guiPropsStamp(t_object* ob, uint64_t h)
+{
+    static std::unordered_map<std::string, std::string> const guiClasses {
+        { "hsl", "hsl" }, { "vsl", "vsl" }, { "tgl", "tgl" }, { "hradio", "hradio" }, { "vradio", "vradio" },
+        { "nbx", "nbx" }, { "bng", "bng" }, { "vu", "vu" }, { "cnv", "cnv" }, { "knob", "knob" }, { "gatom", "floatatom" }
+    };
+    auto const it = guiClasses.find(class_getname(pd_class(&ob->te_g.g_pd)));
+    if (it == guiClasses.end())
+        return h;
+    std::unique_ptr<juce::DynamicObject> props(mcpBuildGuiProps(juce::String(it->second), ob));
+    for (char const* key : { "min", "max", "send", "receive", "log", "label", "size", "width", "height" })
+        if (props && props->hasProperty(key))
+            h = (h ^ static_cast<uint64_t>(std::hash<std::string> {}(key + std::string("=") + props->getProperty(key).toString().toStdString()))) * 1099511628211ull;
+    return h;
+}
+
 // Repaint every canvas on the message thread (the badge and the chips), whichever thread changed the state.
 void repaintFlowLater(McpHost& host)
 {
@@ -76,6 +95,8 @@ bool McpHost::answerApprovalChip(std::string const& nonce, bool yes, std::int64_
         auto chip = state.take(nonce, nowMs);
         if (!chip)
             return false;
+        if (!yes)
+            session.flowOffers.declined(nowMs); // review M2: no new offer for a while after a no
         if (yes && chip->flowOffer) {
             bool const was = session.flowMode.isOn();
             session.flowMode.artistTurnOn(nowMs);
@@ -96,26 +117,68 @@ bool McpHost::answerApprovalChip(std::string const& nonce, bool yes, std::int64_
     return true;
 }
 
-bool McpHost::offerFlowMode(std::int64_t nowMs)
+juce::String McpHost::offerFlowMode(std::int64_t nowMs, bool byArtist)
 {
     if (session.flowMode.isOn())
-        return false;
+        return "on";
     auto& state = session.approvals;
+    // Review M2: never next to a real question (a misplaced click), never twice, not too often, not right after a no.
+    if (state.anyOtherThanFlow(nowMs))
+        return "other_chip";
     for (auto const& c : state.visible(nowMs))
-        if (mcp::isFlowNonce(c.nonce))
-            state.clear(c.nonce); // one offer at a time
-    auto& rng = juce::Random::getSystemRandom();
+        if (c.flowOffer)
+            return "already_shown";
+    if (auto const r = session.flowOffers.check(nowMs); !byArtist && r != mcp::FlowOfferGate::Refusal::None)
+        return mcp::FlowOfferGate::name(r);
+    // Review L1: a generator of this call (the shared juce one is not for the command worker thread).
+    std::random_device rd;
+    auto const word = [&rd] { return (static_cast<std::uint64_t>(rd()) << 32) ^ static_cast<std::uint64_t>(rd()); };
     mcp::ApprovalChip chip;
-    chip.nonce = mcp::makeFlowNonce(static_cast<std::uint64_t>(rng.nextInt64()), static_cast<std::uint64_t>(rng.nextInt64()));
+    chip.nonce = mcp::makeFlowNonce(word(), word());
     chip.flowOffer = true;
     chip.canvas = "session";
     chip.reason = "flow mode";
     chip.title = "FLOW MODE ON? The AI changes its own objects without asking";
     chip.detail = "your objects, tables and subpatches still ask \xc2\xb7 Ctrl+Z undoes \xc2\xb7 click FLOW to stop";
-    bool const shown = state.show(std::move(chip), kFlowOfferTtlMs, nowMs);
-    if (shown)
-        repaintFlowLater(*this);
-    return shown;
+    if (!state.show(std::move(chip), kFlowOfferTtlMs, nowMs))
+        return "refused";
+    session.flowOffers.offered(nowMs);
+    repaintFlowLater(*this);
+    return "shown";
+}
+
+uint64_t McpHost::editStamp(t_gobj* g)
+{
+    uint64_t h = 1469598103934665603ull;
+    auto* ob = g ? pd_checkobject(&g->g_pd) : nullptr;
+    if (!ob)
+        return h;
+    auto mix = [&h](uint64_t v) { h = (h ^ v) * 1099511628211ull; };
+    mix(reinterpret_cast<uintptr_t>(pd_class(&g->g_pd)));
+    if (ob->te_binbuf) {
+        int const n = binbuf_getnatom(ob->te_binbuf);
+        t_atom const* a = binbuf_getvec(ob->te_binbuf);
+        mix(static_cast<uint64_t>(n));
+        for (int i = 0; i < n; ++i) {
+            uint64_t v = static_cast<uint64_t>(a[i].a_type) << 56;
+            if (a[i].a_type == A_FLOAT) {
+                uint32_t bits = 0;
+                std::memcpy(&bits, &a[i].a_w.w_float, sizeof(bits));
+                v ^= bits;
+            } else if (a[i].a_type == A_SYMBOL || a[i].a_type == A_DOLLSYM) {
+                v ^= reinterpret_cast<uintptr_t>(a[i].a_w.w_symbol);
+            } else if (a[i].a_type == A_DOLLAR) {
+                v ^= static_cast<uint64_t>(a[i].a_w.w_index);
+            }
+            mix(v);
+        }
+    }
+    return guiPropsStamp(ob, h);
+}
+
+bool McpHost::aiIntact(t_gobj* g)
+{
+    return g && identity.originOf(g) == mcp::IdentityService::Origin::Ai && identity.originStampOf(g) == editStamp(g);
 }
 
 bool McpHost::flowModeOff(juce::String const& by)
@@ -164,6 +227,27 @@ std::optional<juce::String> McpHost::ownershipJson(juce::String const& canvasNam
     rootObj->setProperty("canvasKey", juce::String(identity.keyOf(cnv)));
     rootObj->setProperty("bootToken", mcpBridge ? mcpBridge->getBootToken() : juce::String());
     rootObj->setProperty("ambiguousTab", ambiguous);
+    // Review L3: ONE walk of the wires per call. Review M1: an end that is not the AI's intact box makes the other
+    // end ask (in-wire and out-wire alike). intact() is cached per object (the stamp reads GUI properties).
+    std::unordered_map<t_gobj*, bool> intactCache;
+    auto intact = [&](t_gobj* g) {
+        auto it = intactCache.find(g);
+        if (it != intactCache.end()) return it->second;
+        bool const v = aiIntact(g);
+        intactCache.emplace(g, v);
+        return v;
+    };
+    std::unordered_set<t_gobj*> foreignIn, foreignOut;
+    {
+        t_linetraverser t;
+        linetraverser_start(&t, cnv);
+        while (linetraverser_next_nosize(&t)) {
+            auto* src = &t.tr_ob->te_g;
+            auto* dst = &t.tr_ob2->te_g;
+            if (!intact(src)) foreignIn.insert(dst);
+            if (!intact(dst)) foreignOut.insert(src);
+        }
+    }
     juce::Array<juce::var> rows;
     for (int i = 0; i < ids.size() && i < kOwnershipMaxIds; ++i) {
         auto const id = ids[i];
@@ -177,28 +261,18 @@ std::optional<juce::String> McpHost::ownershipJson(juce::String const& canvasNam
         if (g) {
             f.found = true;
             f.originAi = identity.originOf(g) == mcp::IdentityService::Origin::Ai;
+            f.editedInPlace = f.originAi && !intact(g);
             t_class* cl = pd_class(&g->g_pd);
             juce::String const cls = juce::String::fromUTF8(class_getname(cl));
             row->setProperty("class", cls);
             f.container = cl == canvas_class || cl == clone_class;
             f.dataHolder = cl == garray_class || isDataHolder(cls.toStdString(), textOf(g));
-            if (auto* target = pd_checkobject(&g->g_pd)) {
-                t_linetraverser t;
-                linetraverser_start(&t, cnv);
-                while (linetraverser_next_nosize(&t)) {
-                    if (t.tr_ob2 != target)
-                        continue;
-                    auto* src = &t.tr_ob->te_g;
-                    if (identity.originOf(src) != mcp::IdentityService::Origin::Ai) {
-                        f.nonAiInWire = true;
-                        break;
-                    }
-                }
-            }
+            f.nonAiInWire = foreignIn.count(g) > 0;
+            f.nonAiOutWire = foreignOut.count(g) > 0;
         }
         auto const why = decide(f);
         row->setProperty("found", f.found);
-        row->setProperty("origin", f.originAi ? "ai" : "unknown");
+        row->setProperty("origin", f.originAi && !f.editedInPlace ? "ai" : "unknown"); // edited in place: the artist's
         row->setProperty("isContainer", f.container);
         row->setProperty("isDataHolder", f.dataHolder);
         row->setProperty("owned", why == Why::AiOwned);
@@ -241,9 +315,11 @@ void MCPBridge::pdFlowModeOffer(const juce::String& action, const juce::OSCMessa
     auto const correlationId = msg.size() > 0 ? getArgString(msg[0]) : juce::String("0");
     if (!processor) return;
     // The chip's words are fixed; no argument reaches it. The reply never carries its nonce.
-    bool const shown = processor->getMcp()->offerFlowMode(flowNowMs());
+    auto const result = processor->getMcp()->offerFlowMode(flowNowMs());
     auto* o = new juce::DynamicObject();
-    o->setProperty("shown", shown);
+    o->setProperty("shown", result == "shown");
+    if (result != "shown")
+        o->setProperty("refused", result);
     o->setProperty("on", processor->getMcp()->session.flowMode.isOn());
     sendReply("/pd/flow_mode_offer/reply/" + correlationId, juce::JSON::toString(juce::var(o), true));
 }

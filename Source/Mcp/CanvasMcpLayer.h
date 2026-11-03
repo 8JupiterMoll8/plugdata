@@ -18,6 +18,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "Utility/Config.h"
 #include "Utility/NVGUtils.h"
+#include "Mcp/McpApprovalState.h" // P12a: ApprovalChip / ApprovalRect for the flow offer chip
 struct NVGcontext;
 
 class Canvas;
@@ -321,6 +322,10 @@ public:
     void paintFlowBadge(NVGcontext* nvg);
     bool handleFlowBadgeClick(juce::Point<int> canvasPt);
     juce::Rectangle<int> mcpFlowBadgeFrame;
+    // Review M2: the flow-mode offer chip, drawn apart from the approval stack (top centre of the view, teal, its own
+    // words on the buttons); its hit rects join mcpApprovalHits, its frame is mcpFlowChipFrame.
+    void paintFlowOfferChip(NVGcontext* nvg, mcp::ApprovalChip const& chip, mcp::ApprovalRect view);
+    juce::Rectangle<int> mcpFlowChipFrame;
 
 private:
     void renderSketchOverlay(NVGcontext* nvg);

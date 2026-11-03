@@ -223,8 +223,15 @@ public:
     // to the server as /pd/approval/answer. False when nothing was answered. Called only by the canvas input; no verb
     // leads here. Message thread.
     bool answerApprovalChip(std::string const& nonce, bool yes, std::int64_t nowMs);
-    // Shows the flow-mode offer chip (fixed words, a nonce made here, never returned). False when flow mode is on.
-    bool offerFlowMode(std::int64_t nowMs);
+    // Shows the flow-mode offer chip (fixed words, a nonce made here, never returned). Answers "shown" or why not:
+    // "on", "other_chip" (any approval chip on screen), "already_shown", "too_soon", "cooldown" (review M2).
+    // `byArtist` (the palette item, a GUI click) skips the rate limit and the cooldown, never the other-chip rule.
+    juce::String offerFlowMode(std::int64_t nowMs, bool byArtist = false);
+    // Review M1: the object's edit stamp (its text atoms and GUI properties, not its position or value of a slider):
+    // recorded with the AI's mark; a different live stamp = edited in place since. Pd lock held.
+    static uint64_t editStamp(t_gobj* g);
+    // Origin ai AND still as the AI left it. Pd lock held.
+    bool aiIntact(t_gobj* g);
     // Switches flow mode off (any door). True when it was on. `by` names the door for the event and the console.
     bool flowModeOff(juce::String const& by);
     // {on, sinceMs, bootToken}
