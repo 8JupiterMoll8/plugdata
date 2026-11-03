@@ -2102,8 +2102,32 @@ void runSaveGuardCases(Harness& h, PluginProcessor& processor)
     CHECK(isError(save(P, fabs, 1, "sg11"), "another open patch")); // no tab here (headless): the instance alone
     CHECK(fabs.loadFileAsString() == absText);
 
+    // Final delta M1: the artist edits p118abs.pd in its own ROOT tab while P uses [p118abs] (an instance tab is open
+    // too): saving that root into its own file is its own file, not "another patch's" (the abstraction check refused it).
+    open(fabs);
+    t_canvas* absRoot = nullptr;
+    bool absRootOwn = false, absRootOther = true;
     host->pdWait([&] {
-        for (auto* c : { ca, cb, cs, cp }) {
+        absRoot = host->getCanvasBySymbol(fabs.getFullPathName());
+        if (!absRoot || !inst || !cp) return;
+        std::vector<McpGuiHost::TabInfo> tabs {
+            { cp, "p118par.pd", fp, false },
+            { inst, "p118abs.pd", fabs, false },
+            { absRoot, "p118abs.pd", fabs, true },
+        };
+        auto const own = mcp::saveTargetOf(absRoot, fabs, tabs);
+        absRootOwn = own.ownFile;
+        absRootOther = own.otherOwner.isNotEmpty();
+    }, 3000);
+    CHECK(absRoot != nullptr);
+    CHECK(absRootOwn);
+    CHECK(!absRootOther);
+    auto ownAbs = save(fabs.getFullPathName(), fabs, 0, "sg12");
+    CHECK(ownAbs.has_value() && !juce::String(ownAbs->str(0)).startsWith("error:"));
+    CHECK(isError(save(P, fabs, 1, "sg13"), "another open patch")); // the parent into it: still refused
+
+    host->pdWait([&] {
+        for (auto* c : { ca, cb, cs, cp, absRoot }) {
             if (!c) continue;
             t_atom force;
             SETFLOAT(&force, 1);

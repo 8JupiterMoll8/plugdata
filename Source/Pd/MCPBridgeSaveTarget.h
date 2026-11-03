@@ -51,6 +51,14 @@ inline bool isPlainPartOf(t_canvas* p, t_canvas* cnv)
     return false;
 }
 
+// `p` is an abstraction instance whose file is `file`, or a canvas inside one.
+inline bool insideAbstractionOf(t_canvas* p, juce::File const& file)
+{
+    for (t_canvas* c = p; c; c = c->gl_owner)
+        if (canvas_isabstraction(c) && pdAbstractionFile(c) == file) return true;
+    return false;
+}
+
 // The name of a loaded abstraction instance (anywhere in the open patches) whose file `dest` is, or "".
 inline juce::String abstractionUsing(juce::File const& dest)
 {
@@ -70,7 +78,10 @@ inline SaveTarget saveTargetOf(t_canvas* cnv, juce::File const& dest, std::vecto
 {
     SaveTarget t;
     t.isRoot = cnv && cnv->gl_owner == nullptr;
-    if (t.isRoot && pdRootFile(cnv) == dest) t.ownFile = true;
+    // Final delta M1: a ROOT bound to dest on the Pd side is dest's own patch, also when dest is an abstraction other
+    // patches use (the artist edits abs.pd in its own tab): its instances are copies of this file, not other owners.
+    bool const rootOwn = t.isRoot && pdRootFile(cnv) == dest;
+    if (rootOwn) t.ownFile = true;
     for (auto const& tab : tabs) {
         if (tab.file == juce::File() || tab.file != dest) continue;
         bool const live = tab.patch && mcpCanvasIsLive(tab.patch);
@@ -79,14 +90,16 @@ inline SaveTarget saveTargetOf(t_canvas* cnv, juce::File const& dest, std::vecto
             t.ownFile = true;
             continue;
         }
+        if (rootOwn && live && insideAbstractionOf(tab.patch, dest)) continue; // an instance of this very file
         if (t.otherOwner.isEmpty()) t.otherOwner = tab.title.isNotEmpty() ? tab.title : dest.getFileName();
     }
     for (t_canvas* c = pd_this ? pd_this->pd_canvaslist : nullptr; c && t.otherOwner.isEmpty(); c = c->gl_next) {
         if (c == cnv || c->gl_owner) continue;
         if (pdRootFile(c) == dest) t.otherOwner = juce::String::fromUTF8(c->gl_name->s_name);
     }
-    // An abstraction in use (an instance is loaded, open in a tab or not): its file is the abstraction's.
-    if (t.otherOwner.isEmpty()) {
+    // An abstraction in use (an instance is loaded, open in a tab or not): its file is the abstraction's, unless this
+    // root IS that file (rootOwn).
+    if (t.otherOwner.isEmpty() && !rootOwn) {
         auto const abs = abstractionUsing(dest);
         if (abs.isNotEmpty()) t.otherOwner = "abstraction " + abs;
     }
