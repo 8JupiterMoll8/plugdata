@@ -349,6 +349,7 @@ public:
     // Review M2: Alphi's frame on screen at the last full paint of it.
     juce::Point<int> mcpAlphiScreenPos;
     bool mcpAlphiHasScreenPos = false;
+    mcp::AlphiRepaintState mcpAlphiRepaint; // review N2: one repaint of Alphi's frame per look change / unstarted gate
     juce::Rectangle<int> mcpAlphiFrame;
     std::int64_t mcpAlphiShownSinceMs = 0;
     bool mcpAlphiWasShowing = false;

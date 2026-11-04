@@ -16,8 +16,9 @@
 // - It never moves while the mouse is on or next to it (hover) or while a mouse button is held (an object drag, a
 //   lasso, a wire), and it re-checks 250 ms after the view, a box or a cover last changed (scroll, zoom, move, create).
 //   It never moves into the corner under the pointer (review M1).
-// - Review H1: while a box lies under its frame it is not clickable (alphiOwnsPoint), drawn faded, and the hover hold
-//   does not keep it over the box the pointer is on.
+// - Review H1 / round 3: a click point inside a box (8 px pad) is never Alphi's (alphiOwnsPoint, per point); with a
+//   box under it Alphi is drawn lightly faded, and the hover hold does not keep it over the box the pointer is on.
+//   The pointer's corner is never taken (review M1/N1).
 // - Review H2: the 100 ms timer decides a move; a paint applies it only when it redraws both frames, and the 400 ms
 //   click gate starts only in a paint that redrew the whole frame (alphiGateAfterPaint). A move or a screen move
 //   (review M2) restarts the gate. Guarded in scripts/test-bridge-safety.sh.
@@ -29,6 +30,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <optional>
 #include <vector>
 
 namespace mcp {
@@ -53,6 +55,7 @@ struct AlphiDockChoice {
     AlphiCorner corner = AlphiDockMetrics::preferred;
     bool folded = false;        // no corner had room for `frameSize`: the mini face
     std::int64_t covered = 0;   // canvas units^2 of boxes (padded) and covers under the chosen frame; 0 = free
+    bool none = false;          // review N1: every corner touches the forbidden rect (the pointer): no choice
 };
 
 namespace alphidock {
@@ -104,14 +107,27 @@ inline std::int64_t alphiCoveredArea(ApprovalRect frame, float zoom, std::vector
 
 // The corner Alphi takes: the first free one for `frameSize` from `preferred` on; else the first free one for the
 // mini face (folded); else the least covered one for the mini face (folded; ties go to the earlier corner).
+// Review N1: a corner whose mini frame meets `forbidden` (the pointer and the space around it) is never taken, not even
+// as the least covered one; when that rules out every corner the choice is `none`.
 inline AlphiDockChoice chooseCorner(ApprovalRect view, float zoom, std::vector<ApprovalRect> const& boxes,
-    std::vector<ApprovalRect> const& covers, AlphiCorner preferred, AlphiSize frameSize = {})
+    std::vector<ApprovalRect> const& covers, AlphiCorner preferred, AlphiSize frameSize = {},
+    std::optional<ApprovalRect> forbidden = std::nullopt)
 {
-    AlphiCorner order[4] { preferred };
+    AlphiCorner all[4] { preferred };
     int n = 1;
     for (int i = 0; i < 4; ++i)
         if (static_cast<AlphiCorner>(i) != preferred)
-            order[n++] = static_cast<AlphiCorner>(i);
+            all[n++] = static_cast<AlphiCorner>(i);
+    AlphiCorner order[4] {};
+    n = 0;
+    for (auto c : all)
+        if (!forbidden || !rectsIntersect(alphiCornerRect(view, zoom, c), *forbidden))
+            order[n++] = c;
+    if (n == 0) {
+        AlphiDockChoice none {};
+        none.none = true;
+        return none;
+    }
     // Only boxes and covers near the view can lie under a corner frame: drop the rest once.
     std::vector<ApprovalRect> near, nearCovers;
     {
@@ -127,11 +143,12 @@ inline AlphiDockChoice chooseCorner(ApprovalRect view, float zoom, std::vector<A
     }
     AlphiSize const mini {};
     bool const sameSize = frameSize.w == mini.w && frameSize.h == mini.h;
-    for (auto c : order)
-        if (alphiCoveredArea(alphiCornerRect(view, zoom, c, frameSize), zoom, near, nearCovers) == 0)
-            return { c, false, 0 };
+    for (int i = 0; i < n; ++i)
+        if (alphiCoveredArea(alphiCornerRect(view, zoom, order[i], frameSize), zoom, near, nearCovers) == 0)
+            return { order[i], false, 0 };
     AlphiDockChoice best { order[0], true, -1 };
-    for (auto c : order) {
+    for (int i = 0; i < n; ++i) {
+        auto const c = order[i];
         auto const cov = alphiCoveredArea(alphiCornerRect(view, zoom, c, mini), zoom, near, nearCovers);
         if (cov == 0 && !sameSize)
             return { c, true, 0 };
@@ -165,8 +182,8 @@ inline bool alphiRectContains(ApprovalRect outer, ApprovalRect inner)
 }
 
 // 1a0 review H1: a box (its GUI bounds, unpadded) lies under Alphi's frame: the artist dropped one there, the view
-// scrolled boxes under it, the AI made one, or every corner is full and the fold sits on boxes. Then Alphi is NOT
-// clickable at all (drawn faded, its 400 ms gate restarts): a click there is the box's or the canvas's, never flow.
+// scrolled boxes under it, the AI made one, or every corner is full and the fold sits on boxes. Then Alphi is drawn
+// lightly faded; which click points are still his is alphiOwnsPoint's question (per point).
 inline bool alphiFrameBlocked(ApprovalRect frame, std::vector<ApprovalRect> const& boxes)
 {
     for (auto const& b : boxes)
@@ -176,10 +193,18 @@ inline bool alphiFrameBlocked(ApprovalRect frame, std::vector<ApprovalRect> cons
 }
 
 // The one question the click and the hit map ask (handleAlphiClick, isPointOverNote): is this point Alphi's?
-// Only inside its frame, and only while no box lies under that frame.
-inline bool alphiOwnsPoint(ApprovalRect frame, std::vector<ApprovalRect> const& boxes, int x, int y)
+// Only inside its frame, and never inside a box grown by the 8 px pad (1a0 round 3: PER POINT, replacing the frame
+// rule: with every corner full the folded Alphi sat on boxes and was never clickable, a dead end for flow). A click on
+// a box under Alphi is the box's / the canvas's; a click on a free part of Alphi is his, after the normal gate.
+inline bool alphiOwnsPoint(ApprovalRect frame, std::vector<ApprovalRect> const& boxes, int x, int y, float zoom = 1.0f)
 {
-    return alphiHit(frame, x, y) && !alphiFrameBlocked(frame, boxes);
+    if (!alphiHit(frame, x, y))
+        return false;
+    int const pad = static_cast<int>(std::ceil(AlphiDockMetrics::boxPad / alphidock::safeZoom(zoom)));
+    for (auto const& b : boxes)
+        if (alphiHit(alphidock::grown(b, pad), x, y))
+            return false;
+    return true;
 }
 
 // Alphi holds still: a mouse button is held (an object drag, a lasso, a wire, a resize), or the mouse is on / next
@@ -207,18 +232,46 @@ inline bool alphiScreenMoved(int prevX, int prevY, int nowX, int nowY)
 // paint that redrew Alphi's whole frame (`frameInRegion`); a partial NVG render never starts it.
 struct AlphiGateInput {
     bool covered = false;       // a chip stack, the pill or its drawers cover Alphi (not drawn)
-    bool blocked = false;       // a box lies under Alphi (alphiFrameBlocked)
     bool screenMoved = false;   // its frame moved on screen since the last paint (alphiScreenMoved)
     bool frameInRegion = false; // this paint redrew Alphi's whole frame
 };
 
 inline std::int64_t alphiGateAfterPaint(std::int64_t shownSinceMs, std::int64_t nowMs, AlphiGateInput in)
 {
-    if (in.covered || in.blocked)
+    if (in.covered)
         return 0;
     if (in.screenMoved || shownSinceMs <= 0)
         return in.frameInRegion ? nowMs : 0;
     return shownSinceMs;
+}
+
+// Review N2: after a paint, does Alphi's frame need one more repaint? Yes when his look changed (a box arrived under
+// him or left) or his gate is still 0, and this paint did not redraw his frame; once per state, so it never loops.
+struct AlphiRepaintState {
+    bool known = false;
+    bool blocked = false;
+    bool asked = false;
+};
+
+inline bool alphiAfterPaint(AlphiRepaintState& st, bool blocked, std::int64_t gateMs, bool frameInRegion, bool covered)
+{
+    if (covered) {
+        st.known = false;
+        st.asked = false;
+        return false;
+    }
+    bool const changed = st.known && blocked != st.blocked;
+    st.known = true;
+    st.blocked = blocked;
+    if (frameInRegion) {
+        st.asked = false;
+        return false;
+    }
+    if (changed || (gateMs <= 0 && !st.asked)) {
+        st.asked = true;
+        return true;
+    }
+    return false;
 }
 
 // Where Alphi sits now, and when it may move. One per canvas view, message thread only.
@@ -252,12 +305,21 @@ public:
         if (isPlaced && (!due(nowMs) || hold))
             return false;
         settleAtMs = 0;
-        auto withMouse = covers;
+        // Review M1 / N1: no corner whose frame meets the pointer (grown by 24 px), not even as the least covered one;
+        // if that rules out every corner, Alphi stays where it is (the first place then ignores the pointer).
+        std::optional<ApprovalRect> pointer;
         if (mouse.known) {
             int const pad = static_cast<int>(std::lround(AlphiDockMetrics::hoverPad / alphidock::safeZoom(zoom)));
-            withMouse.push_back(alphidock::grown(ApprovalRect { mouse.x, mouse.y, 1, 1 }, pad));
+            pointer = alphidock::grown(ApprovalRect { mouse.x, mouse.y, 1, 1 }, pad);
         }
-        auto const next = chooseCorner(view, zoom, boxes, withMouse, AlphiDockMetrics::preferred, frameSize);
+        auto next = chooseCorner(view, zoom, boxes, covers, AlphiDockMetrics::preferred, frameSize, pointer);
+        if (next.none) {
+            if (isPlaced) {
+                isStaged = false;
+                return false;
+            }
+            next = chooseCorner(view, zoom, boxes, covers, AlphiDockMetrics::preferred, frameSize);
+        }
         if (isPlaced && next.corner == choice.corner && next.folded == choice.folded) {
             isStaged = false;
             return false;

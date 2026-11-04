@@ -199,12 +199,12 @@ void CanvasMcpLayer::paintAlphi(NVGcontext* nvg)
     juce::Rectangle<int> const frame(r.x, r.y, r.w, r.h);
 
     // The 400 ms click gate (mcp::alphiGateAfterPaint): a chip stack that could not move off it (a tiny or split view),
-    // the selection pill and its drawers cover it (P12a.1 review M2: not drawn); a box lies under it (1a0 review H1:
-    // drawn faded, not clickable); its frame moved on screen (review M2: resize, split view, sidebar); and it starts
-    // only in a render that redrew Alphi's whole frame (review H2).
+    // the selection pill and its drawers cover it (P12a.1 review M2: not drawn); its frame moved on screen (review M2:
+    // resize, split view, sidebar); and it starts only in a render that redrew Alphi's whole frame (review H2). A box
+    // under it does not touch the gate: its click points are the box's (mcp::alphiOwnsPoint, per point).
     mcp::AlphiGateInput gate;
     gate.covered = alphiCoveredNow(frame);
-    gate.blocked = mcp::alphiFrameBlocked(r, mcpAlphiPaintBoxes);
+    bool const underBox = mcp::alphiFrameBlocked(r, mcpAlphiPaintBoxes);
     gate.frameInRegion = mcp::alphiRectContains(region, r);
     auto const screen = canvas.localPointToGlobal(frame.getPosition());
     gate.screenMoved = mcpAlphiHasScreenPos && mcp::alphiScreenMoved(mcpAlphiScreenPos.x, mcpAlphiScreenPos.y, screen.x, screen.y);
@@ -213,6 +213,13 @@ void CanvasMcpLayer::paintAlphi(NVGcontext* nvg)
         mcpAlphiHasScreenPos = true;
     }
     mcpAlphiShownSinceMs = mcp::alphiGateAfterPaint(mcpAlphiShownSinceMs, alphiNowMs(), gate);
+    // Review N2: a box arrived under Alphi or left, or his gate is still 0, and this render missed his frame: repaint
+    // just his frame once (mcp::alphiAfterPaint never asks twice for one state).
+    if (mcp::alphiAfterPaint(mcpAlphiRepaint, underBox, mcpAlphiShownSinceMs, gate.frameInRegion, gate.covered)) {
+        auto const area = frame.expanded(2);
+        canvas.repaint(area);
+        if (canvas.editor) canvas.editor->nvgSurface.invalidateArea(canvas.editor->nvgSurface.getLocalArea(&canvas, area));
+    }
     if (gate.covered)
         return;
     mcpAlphiFrame = frame;
@@ -223,8 +230,8 @@ void CanvasMcpLayer::paintAlphi(NVGcontext* nvg)
     float const k = static_cast<float>(r.w) / static_cast<float>(A::w); // canvas units per design pixel
 
     NVGScopedState scoped(nvg);
-    if (gate.blocked)
-        nanovg::nvgGlobalAlpha(nvg, 0.35f); // a box under it: faded, the box shows through, the click is the box's
+    if (underBox)
+        nanovg::nvgGlobalAlpha(nvg, 0.6f); // a box under it: lightly faded, the box shows through (its points are its own)
     nanovg::nvgTranslate(nvg, static_cast<float>(r.x), static_cast<float>(r.y));
     nanovg::nvgScale(nvg, k, k); // from here on: design pixels, 48 x 56
 
@@ -296,12 +303,10 @@ bool CanvasMcpLayer::handleAlphiClick(juce::Point<int> canvasPt)
         mcpAlphiFrame = {};
         return false;
     }
-    // 1a0 review H1: a box under Alphi (dropped there, scrolled under it, made by the AI, the fold on a full canvas):
-    // the click is the box's or the canvas's, never flow; the gate starts again once the frame is free.
-    if (!mcp::alphiOwnsPoint(toApproval(mcpAlphiFrame), alphiBoxes(), canvasPt.x, canvasPt.y)) {
-        mcpAlphiShownSinceMs = 0;
+    // 1a0 review H1 / round 3 (per point): a click inside a box under Alphi (8 px pad) is the box's or the canvas's,
+    // never flow; a click on a free part of Alphi goes on to the normal gate.
+    if (!mcp::alphiOwnsPoint(toApproval(mcpAlphiFrame), alphiBoxes(), canvasPt.x, canvasPt.y, alphiView().second))
         return false;
-    }
     // Just appeared (a new tab, the bridge just started, uncovered) or an approval chip left the glass less than
     // 400 ms ago (review M2): not clickable, but the click is still Alphi's.
     auto const now = alphiNowMs();

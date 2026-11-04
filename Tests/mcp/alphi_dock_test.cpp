@@ -263,35 +263,46 @@ static void dockHolds()
     CHECK(!mcp::alphiHovered(ApprovalRect {}, 1.0f, 0, 0));
 }
 
-// Review H1: a box under Alphi (dropped there, scrolled under it, made by the AI, or the fold on a full canvas) makes
-// Alphi not clickable at all; a click there is the box's / the canvas's. The hover hold does not keep Alphi over it.
+// Review H1 + the per-point rule (1a0 round 3, replaces the frame rule): a click point inside any box (with the 8 px
+// pad) is the box's / the canvas's, never flow; a click on a part of Alphi with no box under it is Alphi's (after the
+// normal gate), so a folded Alphi on a full canvas stays usable. The hover hold does not keep Alphi over the box the
+// pointer is on.
 static void reviewH1BoxUnderAlphi()
 {
-    std::printf("review H1: a box under Alphi: never Alphi's click, no hover hold over it\n");
+    std::printf("review H1 / per point: a click on a box under Alphi is never flow; Alphi's free parts stay his\n");
     float const zoom = 1.0f;
     auto const view = viewOf(0, 0, 1200, 800, zoom);
     auto const f = mcp::alphiCornerRect(view, zoom, AlphiCorner::bottomRight);
-    ApprovalRect const box { f.x - 30, f.y + 10, 60, 24 }; // its right half under Alphi
+    ApprovalRect const box { f.x - 30, f.y + 10, 40, 24 }; // its right 10 units under Alphi's left edge
     Rects const boxes { box };
     CHECK(mcp::alphiFrameBlocked(f, boxes));
     CHECK(!mcp::alphiFrameBlocked(f, { { f.x - 100, f.y, 60, 24 } })); // a box beside it
-    // The click on the box part inside Alphi's frame: not Alphi's. Nor anywhere else on the blocked frame.
+    // On the box part inside Alphi's frame, and within the 8 px pad of the box: not Alphi's.
     CHECK(!mcp::alphiOwnsPoint(f, boxes, f.x + 5, f.y + 20));
-    CHECK(!mcp::alphiOwnsPoint(f, boxes, f.x + f.w - 3, f.y + f.h - 3));
-    // No box under it: its frame is its own, outside is not.
+    CHECK(!mcp::alphiOwnsPoint(f, boxes, f.x + 10 + 7, f.y + 20));
+    CHECK(!mcp::alphiOwnsPoint(f, boxes, f.x + 3, f.y + 10 - 7));
+    // A free part of Alphi beyond the pad: his.
+    CHECK(mcp::alphiOwnsPoint(f, boxes, f.x + f.w - 3, f.y + f.h - 3));
+    CHECK(mcp::alphiOwnsPoint(f, boxes, f.x + 10 + 9, f.y + 20));
+    // The pad is 8 SCREEN px: at zoom 2 it is 4 canvas units.
+    CHECK(mcp::alphiOwnsPoint(f, boxes, f.x + 10 + 5, f.y + 20, 2.0f));
+    CHECK(!mcp::alphiOwnsPoint(f, boxes, f.x + 10 + 3, f.y + 20, 2.0f));
+    // No box: the frame is his, outside is not.
     CHECK(mcp::alphiOwnsPoint(f, {}, f.x + 5, f.y + 20));
     CHECK(!mcp::alphiOwnsPoint(f, {}, f.x - 1, f.y + 20));
-    // Every corner full: the folded Alphi sits on boxes and is not clickable there.
+    // Every corner full (a dense patch): the folded Alphi sits partly on boxes; the box parts are never his, his free
+    // parts are (no dead end: the artist can still switch flow).
     {
         Rects full;
         for (auto c : allCorners) {
             auto const r = mcp::alphiCornerRect(view, zoom, c);
-            full.push_back({ r.x - 4, r.y - 4, r.w + 8, r.h + 8 });
+            full.push_back({ r.x + r.w / 2, r.y - 4, r.w, r.h + 8 }); // the right half of each frame
         }
         auto const ch = mcp::chooseCorner(view, zoom, full, {}, AlphiCorner::bottomRight);
         auto const ff = mcp::alphiCornerRect(view, zoom, ch.corner);
         CHECK(ch.folded && mcp::alphiFrameBlocked(ff, full));
-        CHECK(!mcp::alphiOwnsPoint(ff, full, ff.x + ff.w / 2, ff.y + ff.h / 2));
+        CHECK(!mcp::alphiOwnsPoint(ff, full, ff.x + ff.w / 2 + 2, ff.y + ff.h / 2));
+        CHECK(mcp::alphiOwnsPoint(ff, full, ff.x + 3, ff.y + ff.h / 2));
     }
     // The hold: the pointer on that box (reaching for its inlet) never holds Alphi there; on Alphi's free part, next
     // to it on empty canvas, or with a button held, it does.
@@ -301,14 +312,8 @@ static void reviewH1BoxUnderAlphi()
     CHECK(mcp::alphiDockHold(f, zoom, {}, false, mcp::AlphiMouse { true, f.x + 5, f.y + 20 }));
     CHECK(mcp::alphiDockHold(f, zoom, boxes, false, mcp::AlphiMouse { true, f.x + f.w + 5, f.y - 5 }));
     CHECK(!mcp::alphiDockHold(f, zoom, boxes, false, mcp::AlphiMouse {})); // mouse elsewhere
-    // A box beside Alphi (not under it) with the pointer on it next to Alphi: still a hold (nothing to step from).
     Rects const beside { { f.x - 70, f.y, 60, 24 } };
     CHECK(mcp::alphiDockHold(f, zoom, beside, false, mcp::AlphiMouse { true, f.x - 15, f.y + 5 }));
-    // The gate: blocked = 0 (restart), like covered.
-    mcp::AlphiGateInput blocked;
-    blocked.blocked = true;
-    blocked.frameInRegion = true;
-    CHECK(mcp::alphiGateAfterPaint(5000, 9000, blocked) == 0);
     // End to end: the box dropped into Alphi's corner while the pointer is on it: Alphi steps aside after 250 ms.
     Glue g;
     std::int64_t t = 1000;
@@ -317,6 +322,28 @@ static void reviewH1BoxUnderAlphi()
     g.step(view, zoom, boxes, {}, hold, onBox, t + 10);
     CHECK(g.step(view, zoom, boxes, {}, hold, onBox, t + 10 + mcp::AlphiDockMetrics::settleMs));
     CHECK(g.d.corner() != AlphiCorner::bottomRight);
+}
+
+// Review N2: after a paint, Alphi's frame is repainted when its look changed (a box arrived under it or left), or
+// when its gate is still 0 because the paint did not redraw his frame; once per state, so it never loops.
+static void reviewN2Repaint()
+{
+    std::printf("review N2: Alphi's frame is repainted after a box arrives or leaves, once\n");
+    mcp::AlphiRepaintState st;
+    // A box leaves: the look changes -> repaint once.
+    CHECK(mcp::alphiAfterPaint(st, /*blocked*/ true, /*gate*/ 5000, /*frameInRegion*/ true, /*covered*/ false) == false);
+    CHECK(mcp::alphiAfterPaint(st, false, 5000, false, false) == true);
+    CHECK(mcp::alphiAfterPaint(st, false, 5000, false, false) == false); // asked already, nothing changed
+    // The gate is 0 and this paint missed his frame: one repaint, not one per paint.
+    mcp::AlphiRepaintState g0;
+    CHECK(mcp::alphiAfterPaint(g0, false, 0, false, false) == true);
+    CHECK(mcp::alphiAfterPaint(g0, false, 0, false, false) == false);
+    // The frame is painted: the gate starts, and a later miss asks again only after a new change.
+    CHECK(mcp::alphiAfterPaint(g0, false, 9000, true, false) == false);
+    CHECK(mcp::alphiAfterPaint(g0, false, 0, false, false) == true);
+    // Covered (not drawn): nothing to repaint for.
+    mcp::AlphiRepaintState c;
+    CHECK(mcp::alphiAfterPaint(c, false, 0, false, true) == false);
 }
 
 // Review H2: a move lands only in a paint that redraws both frames; the 400 ms gate starts only in a paint that
@@ -387,6 +414,29 @@ static void reviewM1M2()
     e.look(view, zoom, onBr, {}, 1000);
     CHECK(e.decide(view, zoom, onBr, {}, false, nearBl, 1000));
     CHECK(e.stagedCorner() == AlphiCorner::topRight);
+    // N1: three corners full and the pointer in the fourth: the fallback never folds under the pointer; Alphi stays.
+    {
+        Rects three;
+        for (auto c : { AlphiCorner::bottomRight, AlphiCorner::bottomLeft, AlphiCorner::topRight }) {
+            auto const r = mcp::alphiCornerRect(view, zoom, c);
+            three.push_back({ r.x - 10, r.y - 10, r.w + 20, r.h + 20 });
+        }
+        auto const tl = mcp::alphiCornerRect(view, zoom, AlphiCorner::topLeft);
+        mcp::AlphiDock p;
+        p.look(view, zoom, {}, {}, 1);
+        p.decide(view, zoom, {}, {}, false, {}, 1);
+        CHECK(p.apply({}, br, view) && p.corner() == AlphiCorner::bottomRight);
+        p.look(view, zoom, three, {}, 10);
+        mcp::AlphiMouse const inTl { true, tl.x + tl.w / 2, tl.y + tl.h / 2 };
+        p.decide(view, zoom, three, {}, false, inTl, 1000);
+        CHECK(p.stagedCorner() != AlphiCorner::topLeft);
+        CHECK(p.stagedCorner() == AlphiCorner::bottomRight); // stays in its corner (folded there at most)
+        // The first place with the pointer in the only free corner: never under the pointer either.
+        mcp::AlphiDock q;
+        q.look(view, zoom, three, {}, 1);
+        q.decide(view, zoom, three, {}, false, inTl, 1);
+        CHECK(q.stagedCorner() != AlphiCorner::topLeft);
+    }
     // M2.
     CHECK(!mcp::alphiScreenMoved(500, 400, 501, 400));
     CHECK(mcp::alphiScreenMoved(500, 400, 520, 400));
@@ -437,6 +487,7 @@ int main()
     coversTakeCorner();
     dockHolds();
     reviewH1BoxUnderAlphi();
+    reviewN2Repaint();
     reviewH2PartialRender();
     reviewM1M2();
     speed();
