@@ -96,6 +96,13 @@ if [ -z "$ownsLine" ] || [ -z "$clickLine" ] || [ "$ownsLine" -ge "$clickLine" ]
   echo "test-bridge-safety: handleAlphiClick must ask mcp::alphiOwnsPoint before alphiClicked (a box under Alphi is never flow)" >&2
   exit 1
 fi
+# 1a0 live check b': alphiBoxes gives the VISIBLE box (Object::getBounds() carries PlugData's invisible 6 px margin;
+# with the 8 px pad that blocked 14 px around every box, and a folded Alphi on a dense patch was clickable only at
+# its top strip).
+if ! awk '/^std::vector<mcp::ApprovalRect> CanvasMcpLayer::alphiBoxes/ { f = 1 } f && /push_back/ { print; exit } f && /^}/ { exit }' "$flowSrc" | grep -q "getBounds().reduced(Object::margin)"; then
+  echo "test-bridge-safety: CanvasMcpLayer::alphiBoxes must push o->getBounds().reduced(Object::margin) (the visible box)" >&2
+  exit 1
+fi
 # 1a0 review H2 / M2: the 400 ms gate. A move (AlphiDock::apply) restarts it on the very next line; it is set only to 0
 # or by mcp::alphiGateAfterPaint (which starts it only in a render that redrew Alphi's whole frame).
 if ! awk '/mcpAlphiDock\.apply\(/ { getline; print; exit }' "$flowSrc" | grep -q "mcpAlphiShownSinceMs = 0;"; then
