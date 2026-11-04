@@ -278,18 +278,18 @@ static void reviewH1BoxUnderAlphi()
     CHECK(mcp::alphiFrameBlocked(f, boxes));
     CHECK(!mcp::alphiFrameBlocked(f, { { f.x - 100, f.y, 60, 24 } })); // a box beside it
     // On the box part inside Alphi's frame, and within the 8 px pad of the box: not Alphi's.
-    CHECK(!mcp::alphiOwnsPoint(f, boxes, f.x + 5, f.y + 20));
-    CHECK(!mcp::alphiOwnsPoint(f, boxes, f.x + 10 + 7, f.y + 20));
-    CHECK(!mcp::alphiOwnsPoint(f, boxes, f.x + 3, f.y + 10 - 7));
+    CHECK(!mcp::alphiOwnsPoint(f, boxes, f.x + 5, f.y + 20, 1.0f));
+    CHECK(!mcp::alphiOwnsPoint(f, boxes, f.x + 10 + 7, f.y + 20, 1.0f));
+    CHECK(!mcp::alphiOwnsPoint(f, boxes, f.x + 3, f.y + 10 - 7, 1.0f));
     // A free part of Alphi beyond the pad: his.
-    CHECK(mcp::alphiOwnsPoint(f, boxes, f.x + f.w - 3, f.y + f.h - 3));
-    CHECK(mcp::alphiOwnsPoint(f, boxes, f.x + 10 + 9, f.y + 20));
+    CHECK(mcp::alphiOwnsPoint(f, boxes, f.x + f.w - 3, f.y + f.h - 3, 1.0f));
+    CHECK(mcp::alphiOwnsPoint(f, boxes, f.x + 10 + 9, f.y + 20, 1.0f));
     // The pad is 8 SCREEN px: at zoom 2 it is 4 canvas units.
     CHECK(mcp::alphiOwnsPoint(f, boxes, f.x + 10 + 5, f.y + 20, 2.0f));
     CHECK(!mcp::alphiOwnsPoint(f, boxes, f.x + 10 + 3, f.y + 20, 2.0f));
     // No box: the frame is his, outside is not.
-    CHECK(mcp::alphiOwnsPoint(f, {}, f.x + 5, f.y + 20));
-    CHECK(!mcp::alphiOwnsPoint(f, {}, f.x - 1, f.y + 20));
+    CHECK(mcp::alphiOwnsPoint(f, {}, f.x + 5, f.y + 20, 1.0f));
+    CHECK(!mcp::alphiOwnsPoint(f, {}, f.x - 1, f.y + 20, 1.0f));
     // Every corner full (a dense patch): the folded Alphi sits partly on boxes; the box parts are never his, his free
     // parts are (no dead end: the artist can still switch flow).
     {
@@ -301,8 +301,8 @@ static void reviewH1BoxUnderAlphi()
         auto const ch = mcp::chooseCorner(view, zoom, full, {}, AlphiCorner::bottomRight);
         auto const ff = mcp::alphiCornerRect(view, zoom, ch.corner);
         CHECK(ch.folded && mcp::alphiFrameBlocked(ff, full));
-        CHECK(!mcp::alphiOwnsPoint(ff, full, ff.x + ff.w / 2 + 2, ff.y + ff.h / 2));
-        CHECK(mcp::alphiOwnsPoint(ff, full, ff.x + 3, ff.y + ff.h / 2));
+        CHECK(!mcp::alphiOwnsPoint(ff, full, ff.x + ff.w / 2 + 2, ff.y + ff.h / 2, 1.0f));
+        CHECK(mcp::alphiOwnsPoint(ff, full, ff.x + 3, ff.y + ff.h / 2, 1.0f));
     }
     // The hold: the pointer on that box (reaching for its inlet) never holds Alphi there; on Alphi's free part, next
     // to it on empty canvas, or with a button held, it does.

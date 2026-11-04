@@ -196,7 +196,7 @@ inline bool alphiFrameBlocked(ApprovalRect frame, std::vector<ApprovalRect> cons
 // Only inside its frame, and never inside a box grown by the 8 px pad (1a0 round 3: PER POINT, replacing the frame
 // rule: with every corner full the folded Alphi sat on boxes and was never clickable, a dead end for flow). A click on
 // a box under Alphi is the box's / the canvas's; a click on a free part of Alphi is his, after the normal gate.
-inline bool alphiOwnsPoint(ApprovalRect frame, std::vector<ApprovalRect> const& boxes, int x, int y, float zoom = 1.0f)
+inline bool alphiOwnsPoint(ApprovalRect frame, std::vector<ApprovalRect> const& boxes, int x, int y, float zoom)
 {
     if (!alphiHit(frame, x, y))
         return false;
