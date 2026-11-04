@@ -1037,10 +1037,13 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
         }
     }
 
+    // Big Alphi 1a0: Alphi's corner first (no box, chip stack, pill or drawer under it), so the chips are laid out
+    // around the corner it takes (CanvasMcpFlow.cpp, McpAlphiDock.h).
+    updateAlphiDock();
     // P12c approval chips: one per pending record, clamped inside the visible viewport (CanvasMcpApproval.cpp).
     paintApprovalChips(nvg);
-    // P12a.1: Alphi, the flow-mode switch, top left of the view (CanvasMcpFlow.cpp). After the chips: they are laid out
-    // around it, and when one could not move off it (a tiny view) Alphi is not drawn at all (review M2).
+    // P12a.1: Alphi, the flow-mode switch, in its corner of the view (CanvasMcpFlow.cpp). After the chips: they are laid
+    // out around it, and when one could not move off it (a tiny view) Alphi is not drawn at all (review M2).
     paintAlphi(nvg);
     // Multimodal Pen / Sketch Ink Overlay (Rendered directly on GPU in canvas coords)
     renderSketchOverlay(nvg);

@@ -5,8 +5,10 @@
 */
 
 // P12a.1: Alphi on one Canvas, the flow-mode switch (owner decision 2026-11-03). A small robot face (white head, dark
-// screen, two dot eyes; Teenage Engineering) at the top left of the visible view, at a fixed screen size, while the MCP
-// bridge runs. Off: calm, dim, flat eyes. On: warm yellow glowing eyes, the antenna tip lit, "FLOW" on its chin.
+// screen, two dot eyes; Teenage Engineering) in a corner of the visible view, at a fixed screen size, while the MCP
+// bridge runs. Big Alphi 1a0: the corner is one no box, chip stack, pill or drawer lies under (default bottom right,
+// McpAlphiDock.h, Tests/mcp/alphi_dock_test.cpp); the A8 live bug was Alphi sitting on the artist's boxes top left.
+// Off: calm, dim, flat eyes. On: warm yellow glowing eyes, the antenna tip lit, "FLOW" on its chin.
 // A click on it turns flow mode on (McpHost::alphiClicked, the only path to FlowMode::artistTurnOn), the next click
 // off. No verb reaches it. Geometry, click rule and look: McpAlphi.h (Tests/mcp/alphi_test.cpp).
 
@@ -22,10 +24,17 @@
 #include "CanvasViewport.h"
 #include "Mcp/McpHost.h"
 #include "Mcp/McpAlphi.h"
+#include "Mcp/McpAlphiDock.h"
 
 namespace {
 
 std::int64_t alphiNowMs() { return static_cast<std::int64_t>(juce::Time::currentTimeMillis()); }
+
+mcp::ApprovalRect toApproval(juce::Rectangle<int> const& j) { return { j.getX(), j.getY(), j.getWidth(), j.getHeight() }; }
+
+// A viewport overlay smaller than this on either side is a scrollbar (9 px at the view edge, clear of Alphi's 12 px
+// margin); anything bigger (the minimap, bottom right) is a cover Alphi must not sit under.
+constexpr int alphiOverlayMinSide = 40;
 
 NVGcolor rgba(mcp::AlphiRgba c, float alphaScale = 1.0f)
 {
@@ -55,18 +64,93 @@ void CanvasMcpLayer::alphiVisibilityTick()
     if (showing != mcpAlphiWasShowing) {
         mcpAlphiWasShowing = showing;
         mcpAlphiShownSinceMs = 0; // hidden: off the glass; shown again: the 400 ms start over at the next paint
+        mcpAlphiDock.reset();     // 1a0: shown again: placed at once at the next paint
         if (showing) {
+            canvas.repaint();
+            if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+        }
+        return;
+    }
+    // 1a0: a re-check is due (250 ms after the last scroll, zoom, move or create) and the mouse lets go of Alphi: paint
+    // once, which runs it. Nothing is painted while nothing is due.
+    if (showing && alphiShown() && mcpAlphiDock.due(alphiNowMs())) {
+        auto const [view, zoom] = alphiView();
+        if (!alphiDockHeld(mcp::alphiCornerRect(view, zoom, mcpAlphiDock.corner()), zoom)) {
             canvas.repaint();
             if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
         }
     }
 }
 
+std::pair<mcp::ApprovalRect, float> CanvasMcpLayer::alphiView() const
+{
+    auto const a = canvas.viewport->getViewArea();
+    auto const view = mcp::approvalVisibleArea(static_cast<float>(a.getX()), static_cast<float>(a.getY()), static_cast<float>(a.getWidth()), static_cast<float>(a.getHeight()));
+    float zoom = canvas.viewport->getViewScale();
+    if (!(zoom > 0.01f) || !std::isfinite(zoom))
+        zoom = 1.0f;
+    return { view, zoom };
+}
+
+std::vector<mcp::ApprovalRect> CanvasMcpLayer::alphiDockCovers() const
+{
+    std::vector<mcp::ApprovalRect> covers;
+    // The chip stack as last laid out (around Alphi; it only counts when it could not move off it), the selection pill,
+    // its drawers and the palette.
+    if (!mcpApprovalFrame.isEmpty())
+        covers.push_back(toApproval(mcpApprovalFrame));
+    if (mcpSelectionPill && mcpSelectionPill->isVisible()) {
+        for (auto const& f : { mcpSelectionPillFrame, mcpPillDrawerFrame, mcpPaletteFrame })
+            if (!f.isEmpty())
+                covers.push_back(toApproval(f));
+    }
+    // PlugData's own overlays on the view (the minimap at the bottom right), in canvas coordinates.
+    if (canvas.viewport) {
+        for (auto* child : canvas.viewport->getChildren()) {
+            if (child == &canvas || !child->isVisible())
+                continue;
+            auto const b = child->getBounds();
+            if (b.getWidth() < alphiOverlayMinSide || b.getHeight() < alphiOverlayMinSide)
+                continue;
+            covers.push_back(toApproval(canvas.getLocalArea(canvas.viewport.get(), b)));
+        }
+    }
+    return covers;
+}
+
+bool CanvasMcpLayer::alphiDockHeld(mcp::ApprovalRect frame, float zoom) const
+{
+    // A mouse button held: an object drag, a lasso, a wire, a resize. Alphi never moves under the artist's hand.
+    if (juce::ModifierKeys::currentModifiers.isAnyMouseButtonDown())
+        return true;
+    auto const m = canvas.getMouseXYRelative();
+    return mcp::alphiHovered(frame, zoom, m.x, m.y);
+}
+
+void CanvasMcpLayer::updateAlphiDock()
+{
+    if (!alphiShown()) {
+        mcpAlphiDock.reset();
+        return;
+    }
+    auto const [view, zoom] = alphiView();
+    // The boxes: GUI bounds of the objects on this canvas (they include the inlet/outlet strips), read here on the
+    // message thread; no Pd lock, no census.
+    std::vector<mcp::ApprovalRect> boxes;
+    boxes.reserve(static_cast<std::size_t>(canvas.objects.size()));
+    for (auto* o : canvas.objects)
+        if (o && o->isVisible())
+            boxes.push_back(toApproval(o->getBounds()));
+    bool const held = mcpAlphiDock.placed() && alphiDockHeld(mcp::alphiCornerRect(view, zoom, mcpAlphiDock.corner()), zoom);
+    if (mcpAlphiDock.update(view, zoom, boxes, alphiDockCovers(), held, held, alphiNowMs()))
+        mcpAlphiShownSinceMs = 0; // moved: a click aimed at what was in that corner is never flow (400 ms gate again)
+}
+
 std::optional<mcp::ApprovalRect> CanvasMcpLayer::alphiKeepOut(mcp::ApprovalRect view, float zoom) const
 {
     if (!alphiShown())
         return std::nullopt;
-    return mcp::alphiRect(view, zoom);
+    return mcp::alphiCornerRect(view, zoom, mcpAlphiDock.corner());
 }
 
 void CanvasMcpLayer::paintAlphi(NVGcontext* nvg)
@@ -76,12 +160,8 @@ void CanvasMcpLayer::paintAlphi(NVGcontext* nvg)
         mcpAlphiShownSinceMs = 0;
         return;
     }
-    auto const a = canvas.viewport->getViewArea();
-    auto const view = mcp::approvalVisibleArea(static_cast<float>(a.getX()), static_cast<float>(a.getY()), static_cast<float>(a.getWidth()), static_cast<float>(a.getHeight()));
-    float zoom = canvas.viewport->getViewScale();
-    if (!(zoom > 0.01f))
-        zoom = 1.0f;
-    auto const r = mcp::alphiRect(view, zoom);
+    auto const [view, zoom] = alphiView();
+    auto const r = mcp::alphiCornerRect(view, zoom, mcpAlphiDock.corner());
     juce::Rectangle<int> const frame(r.x, r.y, r.w, r.h);
 
     if (!mcpAlphiVisibilityTimer) {
