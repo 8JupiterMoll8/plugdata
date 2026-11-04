@@ -5,7 +5,8 @@
 */
 #pragma once
 
-// P12a.1: Alphi, the small robot face top left of every canvas view while the MCP bridge runs. It IS the flow-mode
+// P12a.1: Alphi, the small robot face in a corner of every canvas view while the MCP bridge runs (big Alphi 1a0: the
+// corner no box, chip stack, pill or drawer lies under, default bottom right; McpAlphiDock.h). It IS the flow-mode
 // switch (owner decision 2026-11-03, docs/plans/p12-flow-mode-steps.md): one click turns flow mode on, the next one
 // off. JUCE-free (Tests/mcp/alphi_test.cpp); drawn and clicked in CanvasMcpFlow.cpp, switched in McpHost::alphiClicked.
 //
@@ -27,12 +28,13 @@ namespace mcp {
 struct AlphiMetrics {
     static constexpr int w = 48;      // the whole face (antenna + head) = the touch target
     static constexpr int h = 56;
-    static constexpr int margin = 12; // from the view's top-left corner
+    static constexpr int margin = 12; // from the two edges of its corner of the view
     static constexpr std::int64_t minVisibleMs = 400;
     static constexpr std::int64_t debounceMs = 350;
 };
 
-// Alphi's rect in canvas coordinates: the top-left corner of the visible view (canvas units), screen-constant size.
+// Alphi's rect in canvas coordinates at the top-left corner of the visible view (canvas units), screen-constant size.
+// 1a0: the canvas uses alphiCornerRect (McpAlphiDock.h) for the corner it docks in; this is its top-left case.
 inline ApprovalRect alphiRect(ApprovalRect view, float zoom)
 {
     using A = AlphiMetrics;

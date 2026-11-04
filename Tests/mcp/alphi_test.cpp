@@ -6,11 +6,13 @@
 // Build + run: scripts/test-bridge-safety.sh
 #include "../../Source/Mcp/McpApprovalState.h"
 #include "../../Source/Mcp/McpAlphi.h"
+#include "../../Source/Mcp/McpAlphiDock.h"
 #include "../../Source/Mcp/McpFlowMode.h"
 
 #include <cmath>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 static int failures = 0;
 #define CHECK(cond)                                                            \
@@ -93,6 +95,60 @@ static void chipsKeepClear()
     }
 }
 
+// Big Alphi 1a0, B2a: today's mini face uses the dock. Wherever it docks (each corner, each zoom), the frame is
+// Alphi's for a click or a double click (no empty box made under it: isPointOverNote holds mcp::alphiHit of the docked
+// frame), the point just outside is the canvas's, and the approval chips are laid out around it.
+static void docked()
+{
+    std::printf("Alphi docked: hit map and chips at every corner\n");
+    using M = mcp::ApprovalBarMetrics;
+    mcp::AlphiCorner const corners[] = { mcp::AlphiCorner::bottomRight, mcp::AlphiCorner::bottomLeft,
+        mcp::AlphiCorner::topRight, mcp::AlphiCorner::topLeft };
+    for (float zoom : { 0.5f, 1.0f, 1.92f, 2.39f }) {
+        for (auto view : { ApprovalRect { 300, 200, static_cast<int>(1400 / zoom), static_cast<int>(900 / zoom) },
+                 ApprovalRect { 0, 0, static_cast<int>(890 / zoom), static_cast<int>(660 / zoom) } }) {
+            for (auto c : corners) {
+                auto const f = mcp::alphiCornerRect(view, zoom, c);
+                CHECK(inside(f, view));
+                // The hit map: every point of the frame is Alphi's, the ring around it is not.
+                CHECK(mcp::alphiHit(f, f.x, f.y) && mcp::alphiHit(f, f.x + f.w - 1, f.y + f.h - 1));
+                CHECK(mcp::alphiHit(f, f.x + f.w / 2, f.y + f.h / 2));
+                CHECK(!mcp::alphiHit(f, f.x - 1, f.y) && !mcp::alphiHit(f, f.x, f.y - 1));
+                CHECK(!mcp::alphiHit(f, f.x + f.w, f.y) && !mcp::alphiHit(f, f.x, f.y + f.h));
+                // A box under a double click on Alphi: the dock never puts Alphi on a box when a corner is free, so
+                // the double click lands on Alphi only where no box is (checked per corner with a box on the others).
+                std::vector<ApprovalRect> others;
+                for (auto o : corners)
+                    if (o != c) {
+                        auto const r = mcp::alphiCornerRect(view, zoom, o);
+                        others.push_back({ r.x - 5, r.y - 5, r.w + 10, r.h + 10 });
+                    }
+                auto const choice = mcp::chooseCorner(view, zoom, others, {}, mcp::AlphiCorner::bottomRight);
+                CHECK(choice.corner == c && !choice.folded);
+                for (auto const& b : others)
+                    CHECK(!meets(mcp::alphiCornerRect(view, zoom, choice.corner), b));
+                // The chips, anchored anywhere around Alphi (up to 400 design px up/left, 100 down/right of its
+                // corner; the stack clamps into the corner), keep clear of it: at the right and bottom corners they go
+                // to its left or above it (avoidRect, 1a0; before, 638 of these layouts sat on Alphi).
+                int overlaps = 0;
+                for (int dx = -400; dx <= 100; dx += 20)
+                    for (int dy = -400; dy <= 100; dy += 20) {
+                        ApprovalRect const anchor { f.x + static_cast<int>(dx / zoom), f.y + static_cast<int>(dy / zoom), 10, 10 };
+                        for (int shown = 1; shown <= M::maxBars; ++shown) {
+                            auto const kept = mcp::approvalStackLayout(anchor, view, zoom, M::w, shown, false, f);
+                            CHECK(!kept.bars.empty());
+                            if (!kept.bars.empty() && meets(kept.frame, f))
+                                ++overlaps;
+                            for (auto const& b : kept.bars)
+                                CHECK(inside(b.frame, view));
+                        }
+                    }
+                CHECK(overlaps == 0);
+            }
+        }
+    }
+}
+
 static void clicks()
 {
     std::printf("Alphi click rule\n");
@@ -161,6 +217,7 @@ int main()
 {
     placement();
     chipsKeepClear();
+    docked();
     clicks();
     toggle();
     look();

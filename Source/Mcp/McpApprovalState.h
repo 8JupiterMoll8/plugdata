@@ -320,9 +320,9 @@ inline bool rectsIntersect(ApprovalRect a, ApprovalRect b)
     return a.w > 0 && a.h > 0 && b.w > 0 && b.h > 0 && a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
 }
 
-// P12a.1: `place` moved off `keep` (Alphi, the flow toggle top left), staying inside `view`: to the right of it when
-// the view is wide enough, else below it. Unchanged when the two do not meet, or when the view is too small for either
-// (then the chips, which take clicks before Alphi and are drawn over it, still win).
+// P12a.1: `place` moved off `keep` (Alphi, the flow toggle), staying inside `view`: to the right of it when the view
+// is wide enough, else below it; 1a0 (Alphi docks in any corner): else to its left, else above it. Unchanged when
+// the two do not meet, or when the view is too small for any (then the chips, which take clicks before Alphi and are drawn over it, still win).
 inline ApprovalRect avoidRect(ApprovalRect place, ApprovalRect keep, ApprovalRect view, int margin)
 {
     if (!rectsIntersect(place, keep))
@@ -336,6 +336,14 @@ inline ApprovalRect avoidRect(ApprovalRect place, ApprovalRect keep, ApprovalRec
     for (int edge : { margin, 0 })
         if (below + place.h <= bottom - edge)
             return { std::clamp(place.x, view.x, std::max(view.x, right - place.w)), below, place.w, place.h };
+    // Big Alphi 1a0: Alphi docks in any corner (default bottom right): then to its left, else above it.
+    int const toLeft = keep.x - margin - place.w;
+    if (toLeft >= view.x + margin)
+        return { toLeft, place.y, place.w, place.h };
+    int const above = keep.y - margin - place.h;
+    for (int edge : { margin, 0 })
+        if (above >= view.y + edge)
+            return { std::clamp(place.x, view.x, std::max(view.x, right - place.w)), above, place.w, place.h };
     return place;
 }
 

@@ -4,7 +4,7 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 out="$(mktemp -d)"
 trap 'rm -rf "$out"' EXIT
-for t in bridge_safety_test handoff_test json_escape_test identity_rename_test identity_service_test registry_test worker_test v2_codec_test v2_router_test v2_store_test trace_taps_test output_ceiling_test ceiling_console_test tab_token_test approval_state_test flow_provenance_test visible_tab_test alphi_test; do
+for t in bridge_safety_test handoff_test json_escape_test identity_rename_test identity_service_test registry_test worker_test v2_codec_test v2_router_test v2_store_test trace_taps_test output_ceiling_test ceiling_console_test tab_token_test approval_state_test flow_provenance_test visible_tab_test alphi_test alphi_dock_test; do
   "${CXX:-g++}" -std=c++17 -Wall -Wextra -Werror -pthread -o "$out/$t" "$root/Tests/mcp/$t.cpp"
   "$out/$t"
 done
@@ -82,10 +82,44 @@ if [ -n "$handleAlphi" ]; then
   exit 1
 fi
 # P12a.1 review M1: a click inside Alphi is never the canvas's (isPointOverNote, which the double-click box asks).
-if ! awk '/^bool CanvasMcpLayer::isPointOverNote/ { f = 1 } f && /mcp::alphiHit\(/ { print; exit } f && /^}/ { exit }' "$root/Source/Mcp/CanvasMcpNotes.cpp" | grep -q mcpAlphiFrame; then
-  echo "test-bridge-safety: CanvasMcpLayer::isPointOverNote must hold Alphi's frame (mcp::alphiHit(mcpAlphiFrame ...))" >&2
+# Big Alphi 1a0 review H1: through mcp::alphiOwnsPoint, which gives the point back to the canvas while a box lies
+# under Alphi (Tests/mcp/alphi_dock_test.cpp).
+if ! awk '/^bool CanvasMcpLayer::isPointOverNote/ { f = 1 } f && /mcp::alphiOwnsPoint\(/ { print; exit } f && /^}/ { exit }' "$root/Source/Mcp/CanvasMcpNotes.cpp" | grep -q "mcpAlphiFrame.*alphiBoxes()"; then
+  echo "test-bridge-safety: CanvasMcpLayer::isPointOverNote must hold Alphi's frame through mcp::alphiOwnsPoint(mcpAlphiFrame, alphiBoxes(), ...)" >&2
   exit 1
 fi
+# 1a0 review H1: the canvas click asks mcp::alphiOwnsPoint before it can reach alphiClicked.
+flowSrc="$root/Source/Mcp/CanvasMcpFlow.cpp"
+ownsLine="$(awk '/^bool CanvasMcpLayer::handleAlphiClick/ { f = 1 } f && /mcp::alphiOwnsPoint\(/ { print NR; exit } f && /^}/ { exit }' "$flowSrc")"
+clickLine="$(awk '/^bool CanvasMcpLayer::handleAlphiClick/ { f = 1 } f && /alphiClicked\(/ { print NR; exit } f && /^}/ { exit }' "$flowSrc")"
+if [ -z "$ownsLine" ] || [ -z "$clickLine" ] || [ "$ownsLine" -ge "$clickLine" ]; then
+  echo "test-bridge-safety: handleAlphiClick must ask mcp::alphiOwnsPoint before alphiClicked (a box under Alphi is never flow)" >&2
+  exit 1
+fi
+# 1a0 review H2 / M2: the 400 ms gate. A move (AlphiDock::apply) restarts it on the very next line; it is set only to 0
+# or by mcp::alphiGateAfterPaint (which starts it only in a render that redrew Alphi's whole frame).
+if ! awk '/mcpAlphiDock\.apply\(/ { getline; print; exit }' "$flowSrc" | grep -q "mcpAlphiShownSinceMs = 0;"; then
+  echo "test-bridge-safety: a move of Alphi (mcpAlphiDock.apply) must restart its click gate (mcpAlphiShownSinceMs = 0) on the next line" >&2
+  exit 1
+fi
+gateSets="$(grep -rn "mcpAlphiShownSinceMs = " "$root"/Source --include=*.cpp --include=*.h | codeOnly \
+  | grep -v "mcpAlphiShownSinceMs = 0;" | grep -v "mcpAlphiShownSinceMs = mcp::alphiGateAfterPaint(" || true)"
+if [ -n "$gateSets" ]; then
+  echo "$gateSets" >&2
+  echo "test-bridge-safety: Alphi's click gate is set outside mcp::alphiGateAfterPaint (only 0 or the paint rule)" >&2
+  exit 1
+fi
+# 1a0 review H2: a move is decided by the timer (alphiVisibilityTick); a paint decides only the first place.
+decides="$(grep -n "mcpAlphiDock\.decide(" "$flowSrc" | codeOnly | cut -d: -f1)"
+for n in $decides; do
+  fn="$(awk -v n="$n" 'NR <= n && /^[a-zA-Z].*CanvasMcpLayer::[a-zA-Z]+\(/ { h = $0 } NR == n { print h; exit }' "$flowSrc")"
+  prev="$(sed -n "$((n - 1))p" "$flowSrc")"
+  case "$fn" in
+    *"CanvasMcpLayer::alphiVisibilityTick("*) ;;
+    *"CanvasMcpLayer::updateAlphiDock("*) echo "$prev" | grep -q '!mcpAlphiDock.placed()' || { echo "test-bridge-safety: updateAlphiDock decides a move inside a paint (only the first place may be decided there)" >&2; exit 1; } ;;
+    *) echo "test-bridge-safety: mcpAlphiDock.decide called in '$fn' (only the timer decides a move)" >&2; exit 1 ;;
+  esac
+done
 # P12a.1: the flow verbs are get and off only (no verb turns it on; the offer verb is gone for good).
 flowVerbs="$(grep -o 'MCP_VERB([a-z]*, "[a-z_]*flow[a-z_]*"' "$root/Source/Pd/MCPBridgeVerbs.inc" | sort | tr '\n' ' ')"
 if [ "$flowVerbs" != 'MCP_VERB(pd, "flow" MCP_VERB(pd, "flow_mode_get" MCP_VERB(pd, "flow_mode_off" ' ]; then

@@ -217,7 +217,7 @@ void CanvasMcpLayer::paintApprovalChips(NVGcontext* nvg)
     }
     // A fixed SCREEN size (design px / zoom in canvas units), shrunk only when the window cannot hold it, clamped
     // inside the view. The full stack's space is reserved when it fits: a new chip never moves the ones on screen.
-    // P12a.1: laid out around Alphi (top left), so a ✓ never sits on the flow switch.
+    // P12a.1: laid out around Alphi (in its docked corner, 1a0), so a ✓ never sits on the flow switch.
     float const zoom = canvas.viewport ? canvas.viewport->getViewScale() : getValue<float>(canvas.zoomScale);
     auto const layout = mcp::approvalStackLayout(anchor, view, zoom, barW, shown, more > 0, alphiKeepOut(view, zoom));
     if (layout.bars.empty()) return;

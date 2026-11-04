@@ -13,7 +13,7 @@
 //                       objects:[{id, found, origin, owned, why, class}]} | /pd/ownership/error/<corrId> "<reason>"
 //   event /pd/flow_mode/changed <on|off> <by>
 //
-// No verb turns flow mode ON. P12a.1: the artist's click on Alphi, the robot face top left of the canvas
+// No verb turns flow mode ON. P12a.1: the artist's click on Alphi, the robot face in a corner of the canvas
 // (McpHost::alphiClicked, called by the canvas click only, McpAlphi.h) switches it on, the next click off.
 
 #include "../Pd/MCPBridgeCmdCommon.h"

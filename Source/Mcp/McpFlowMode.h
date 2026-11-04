@@ -9,7 +9,7 @@
 // for the whole PlugData run, shared by every MCP server talking to it. JUCE-free (Tests/mcp/flow_provenance_test.cpp).
 //
 // - Off at every start: in memory only, never saved (a restart, or a new bridge, builds it off).
-// - ON only by the artist's own click on Alphi, the robot face top left of the canvas (P12a.1, owner decision
+// - ON only by the artist's own click on Alphi, the robot face in a corner of the canvas (P12a.1, owner decision
 //   2026-11-03; McpAlphi.h): McpHost::alphiClicked applies it directly, called only by the canvas click
 //   (CanvasMcpLayer::handleAlphiClick). No verb, HTTP field, HUD text, note or patch text turns it on.
 //   scripts/test-bridge-safety.sh fails when artistTurnOn is called from anywhere else.

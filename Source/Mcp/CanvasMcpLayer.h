@@ -12,6 +12,7 @@
 #pragma once
 
 #include <optional>
+#include <utility>
 #include <unordered_map>
 #include <vector>
 
@@ -19,6 +20,7 @@
 #include "Utility/Config.h"
 #include "Utility/NVGUtils.h"
 #include "Mcp/McpApprovalState.h" // P12c / P12a.1: ApprovalRect for the chips and Alphi
+#include "Mcp/McpAlphiDock.h"     // big Alphi 1a0: where Alphi docks
 struct NVGcontext;
 
 class Canvas;
@@ -317,10 +319,14 @@ public:
     };
     std::unique_ptr<ApprovalExpiryTimer> mcpApprovalExpiryTimer;
 
-    // P12a.1: Alphi, the robot face top left of the visible view (fixed screen size) while the MCP bridge runs. It is
+    // P12a.1: Alphi, the robot face in a corner of the visible view (fixed screen size) while the MCP bridge runs. It is
     // THE flow-mode switch: a click turns flow mode on, the next one off (CanvasMcpFlow.cpp, McpAlphi.h). It counts a
     // click only once it has been on screen 400 ms; the approval chips are laid out around it (alphiKeepOut); it
     // steps aside (not drawn, not clickable) while the selection pill covers its corner.
+    // Big Alphi 1a0: it docks in a corner no box, chip stack, pill or drawer lies under (default bottom right;
+    // McpAlphiDock.h). updateAlphiDock runs each paint before the chips and applies a move the 100 ms timer decided,
+    // only in a render that redraws both frames (review H2); a move restarts the 400 ms click gate.
+    void updateAlphiDock();
     void paintAlphi(NVGcontext* nvg);
     bool handleAlphiClick(juce::Point<int> canvasPt);
     // Alphi's rect in canvas coordinates when it is drawn on this view, for the chip layout; nullopt when it is not.
@@ -330,6 +336,20 @@ public:
     bool alphiCoveredNow(juce::Rectangle<int> frame) const;
     // Review L1: the tab went hidden or came back: Alphi's 400 ms on-screen time starts again.
     void alphiVisibilityTick();
+    // 1a0: the view (canvas units) and zoom Alphi docks on; what lies on the glass that Alphi must not sit under;
+    // whether the mouse is on/next to Alphi or holds a button (then it never moves).
+    std::pair<mcp::ApprovalRect, float> alphiView() const;
+    std::vector<mcp::ApprovalRect> alphiDockCovers() const;
+    std::vector<mcp::ApprovalRect> alphiBoxes() const;
+    mcp::AlphiMouse alphiMouse() const;
+    mcp::AlphiDock mcpAlphiDock;
+    std::vector<mcp::ApprovalRect> mcpAlphiPaintBoxes; // the boxes of this paint (updateAlphiDock -> paintAlphi)
+    // Review H2: the canvas region this render redraws (paintUnderObjects), used once by updateAlphiDock/paintAlphi.
+    juce::Rectangle<int> mcpAlphiRenderRegion;
+    // Review M2: Alphi's frame on screen at the last full paint of it.
+    juce::Point<int> mcpAlphiScreenPos;
+    bool mcpAlphiHasScreenPos = false;
+    mcp::AlphiRepaintState mcpAlphiRepaint; // review N2: one repaint of Alphi's frame per look change / unstarted gate
     juce::Rectangle<int> mcpAlphiFrame;
     std::int64_t mcpAlphiShownSinceMs = 0;
     bool mcpAlphiWasShowing = false;

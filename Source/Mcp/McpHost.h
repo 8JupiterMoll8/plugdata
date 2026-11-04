@@ -222,7 +222,7 @@ public:
     // server as /pd/approval/answer. False when nothing was answered. Called only by the canvas input; no verb leads
     // here. Message thread.
     bool answerApprovalChip(std::string const& nonce, bool yes, std::int64_t nowMs);
-    // P12a.1 (McpFlow.cpp, McpAlphi.h): the artist clicked Alphi, the robot face top left of the canvas: flow mode on
+    // P12a.1 (McpFlow.cpp, McpAlphi.h): the artist clicked Alphi, the robot face in a corner of the canvas: flow mode on
     // when off, off when on (a double click flips once). Returns whether flow mode is on afterwards. Called only by
     // the canvas click (CanvasMcpLayer::handleAlphiClick); no verb leads here (grep gate). Message thread.
     bool alphiClicked(std::int64_t nowMs);
