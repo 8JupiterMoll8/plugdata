@@ -131,13 +131,14 @@ std::vector<mcp::ApprovalRect> CanvasMcpLayer::alphiDockCovers() const
 
 std::vector<mcp::ApprovalRect> CanvasMcpLayer::alphiBoxes() const
 {
-    // The boxes: GUI bounds of the objects on this canvas (they include the inlet/outlet strips), read on the message
-    // thread; no Pd lock, no census.
+    // The boxes: the VISIBLE box of each object on this canvas, read on the message thread; no Pd lock, no census.
+    // Object::getBounds() carries PlugData's invisible margin on every side (1a0 live check: with the 8 px pad that
+    // blocked 14 px around each box); the pad in alphiOwnsPoint covers the inlet/outlet strips.
     std::vector<mcp::ApprovalRect> boxes;
     boxes.reserve(static_cast<std::size_t>(canvas.objects.size()));
     for (auto* o : canvas.objects)
         if (o && o->isVisible())
-            boxes.push_back(toApproval(o->getBounds()));
+            boxes.push_back(toApproval(o->getBounds().reduced(Object::margin)));
     return boxes;
 }
 
