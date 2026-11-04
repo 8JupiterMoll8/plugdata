@@ -28,7 +28,7 @@ namespace mcp {
 struct AlphiMetrics {
     static constexpr int w = 48;      // the whole face (antenna + head) = the touch target
     static constexpr int h = 56;
-    static constexpr int margin = 12; // from the view's top-left corner
+    static constexpr int margin = 12; // from the two edges of its corner of the view
     static constexpr std::int64_t minVisibleMs = 400;
     static constexpr std::int64_t debounceMs = 350;
 };

@@ -71,14 +71,25 @@ void CanvasMcpLayer::alphiVisibilityTick()
         }
         return;
     }
-    // 1a0: a re-check is due (250 ms after the last scroll, zoom, move or create) and the mouse lets go of Alphi: paint
-    // once, which runs it. Nothing is painted while nothing is due.
-    if (showing && alphiShown() && mcpAlphiDock.due(alphiNowMs())) {
+    if (!showing || !alphiShown())
+        return;
+    // 1a0 review H2: the move is DECIDED here, never inside a paint (a partial NVG render redraws only the damaged
+    // area). A staged move asks for a full repaint; paintOverObjects applies it only when the render covers both the
+    // old and the new frame (AlphiDock::apply), and asks at most maxApplyTries times (review L1).
+    bool wantFull = false;
+    if (mcpAlphiDock.hasStaged()) {
+        wantFull = mcpAlphiDock.retryStaged();
+    } else if (mcpAlphiDock.placed() && mcpAlphiDock.due(alphiNowMs())) {
         auto const [view, zoom] = alphiView();
-        if (!alphiDockHeld(mcp::alphiCornerRect(view, zoom, mcpAlphiDock.corner()), zoom)) {
-            canvas.repaint();
-            if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
-        }
+        auto const boxes = alphiBoxes();
+        auto const mouse = alphiMouse();
+        bool const hold = mcp::alphiDockHold(mcp::alphiCornerRect(view, zoom, mcpAlphiDock.corner()), zoom, boxes,
+            juce::ModifierKeys::currentModifiers.isAnyMouseButtonDown(), mouse);
+        wantFull = mcpAlphiDock.decide(view, zoom, boxes, alphiDockCovers(), hold, mouse, alphiNowMs());
+    }
+    if (wantFull) {
+        canvas.repaint();
+        if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
     }
 }
 
@@ -118,31 +129,47 @@ std::vector<mcp::ApprovalRect> CanvasMcpLayer::alphiDockCovers() const
     return covers;
 }
 
-bool CanvasMcpLayer::alphiDockHeld(mcp::ApprovalRect frame, float zoom) const
+std::vector<mcp::ApprovalRect> CanvasMcpLayer::alphiBoxes() const
 {
-    // A mouse button held: an object drag, a lasso, a wire, a resize. Alphi never moves under the artist's hand.
-    if (juce::ModifierKeys::currentModifiers.isAnyMouseButtonDown())
-        return true;
-    auto const m = canvas.getMouseXYRelative();
-    return mcp::alphiHovered(frame, zoom, m.x, m.y);
-}
-
-void CanvasMcpLayer::updateAlphiDock()
-{
-    if (!alphiShown()) {
-        mcpAlphiDock.reset();
-        return;
-    }
-    auto const [view, zoom] = alphiView();
-    // The boxes: GUI bounds of the objects on this canvas (they include the inlet/outlet strips), read here on the
-    // message thread; no Pd lock, no census.
+    // The boxes: GUI bounds of the objects on this canvas (they include the inlet/outlet strips), read on the message
+    // thread; no Pd lock, no census.
     std::vector<mcp::ApprovalRect> boxes;
     boxes.reserve(static_cast<std::size_t>(canvas.objects.size()));
     for (auto* o : canvas.objects)
         if (o && o->isVisible())
             boxes.push_back(toApproval(o->getBounds()));
-    bool const held = mcpAlphiDock.placed() && alphiDockHeld(mcp::alphiCornerRect(view, zoom, mcpAlphiDock.corner()), zoom);
-    if (mcpAlphiDock.update(view, zoom, boxes, alphiDockCovers(), held, held, alphiNowMs()))
+    return boxes;
+}
+
+mcp::AlphiMouse CanvasMcpLayer::alphiMouse() const
+{
+    // Known only while the mouse is over this canvas (or a button is held on it); else no hover hold, no cover.
+    bool const known = canvas.isMouseOver(true) || canvas.isMouseButtonDown(true);
+    auto const m = canvas.getMouseXYRelative();
+    return { known, m.x, m.y };
+}
+
+void CanvasMcpLayer::updateAlphiDock()
+{
+    mcpAlphiPaintBoxes.clear();
+    if (!alphiShown()) {
+        mcpAlphiDock.reset();
+        return;
+    }
+    auto const [view, zoom] = alphiView();
+    mcpAlphiPaintBoxes = alphiBoxes();
+    auto const covers = alphiDockCovers();
+    auto const now = alphiNowMs();
+    mcpAlphiDock.look(view, zoom, mcpAlphiPaintBoxes, covers, now);
+    // The first place is chosen here (there is no old frame to leave behind); every later move by the timer.
+    if (!mcpAlphiDock.placed() && !mcpAlphiDock.hasStaged())
+        mcpAlphiDock.decide(view, zoom, mcpAlphiPaintBoxes, covers, false, alphiMouse(), now);
+    if (!mcpAlphiDock.hasStaged())
+        return;
+    // Review H2: the staged move lands only when this render redraws the old and the new frame.
+    auto const oldFrame = mcp::alphiCornerRect(view, zoom, mcpAlphiDock.corner());
+    auto const newFrame = mcp::alphiCornerRect(view, zoom, mcpAlphiDock.stagedCorner());
+    if (mcpAlphiDock.apply(oldFrame, newFrame, toApproval(mcpAlphiRenderRegion)))
         mcpAlphiShownSinceMs = 0; // moved: a click aimed at what was in that corner is never flow (400 ms gate again)
 }
 
@@ -156,7 +183,14 @@ std::optional<mcp::ApprovalRect> CanvasMcpLayer::alphiKeepOut(mcp::ApprovalRect 
 void CanvasMcpLayer::paintAlphi(NVGcontext* nvg)
 {
     mcpAlphiFrame = {};
-    if (!alphiShown()) {
+    auto const region = toApproval(mcpAlphiRenderRegion);
+    mcpAlphiRenderRegion = {}; // used once: a paint that skipped paintUnderObjects never reuses a stale full region
+    if (!mcpAlphiVisibilityTimer && alphiShown()) {
+        mcpAlphiVisibilityTimer = std::make_unique<AlphiVisibilityTimer>(this);
+        mcpAlphiWasShowing = canvas.isShowing();
+        mcpAlphiVisibilityTimer->startTimer(100);
+    }
+    if (!alphiShown() || !mcpAlphiDock.placed()) {
         mcpAlphiShownSinceMs = 0;
         return;
     }
@@ -164,20 +198,24 @@ void CanvasMcpLayer::paintAlphi(NVGcontext* nvg)
     auto const r = mcp::alphiCornerRect(view, zoom, mcpAlphiDock.corner());
     juce::Rectangle<int> const frame(r.x, r.y, r.w, r.h);
 
-    if (!mcpAlphiVisibilityTimer) {
-        mcpAlphiVisibilityTimer = std::make_unique<AlphiVisibilityTimer>(this);
-        mcpAlphiWasShowing = canvas.isShowing();
-        mcpAlphiVisibilityTimer->startTimer(100);
+    // The 400 ms click gate (mcp::alphiGateAfterPaint): a chip stack that could not move off it (a tiny or split view),
+    // the selection pill and its drawers cover it (P12a.1 review M2: not drawn); a box lies under it (1a0 review H1:
+    // drawn faded, not clickable); its frame moved on screen (review M2: resize, split view, sidebar); and it starts
+    // only in a render that redrew Alphi's whole frame (review H2).
+    mcp::AlphiGateInput gate;
+    gate.covered = alphiCoveredNow(frame);
+    gate.blocked = mcp::alphiFrameBlocked(r, mcpAlphiPaintBoxes);
+    gate.frameInRegion = mcp::alphiRectContains(region, r);
+    auto const screen = canvas.localPointToGlobal(frame.getPosition());
+    gate.screenMoved = mcpAlphiHasScreenPos && mcp::alphiScreenMoved(mcpAlphiScreenPos.x, mcpAlphiScreenPos.y, screen.x, screen.y);
+    if (gate.frameInRegion) {
+        mcpAlphiScreenPos = screen;
+        mcpAlphiHasScreenPos = true;
     }
-    // A chip stack that could not move off it (a tiny or split view), the selection pill and its drawers win the
-    // corner: Alphi steps aside while they cover it, and its 400 ms start again once it is uncovered (review M2).
-    if (alphiCoveredNow(frame)) {
-        mcpAlphiShownSinceMs = 0;
+    mcpAlphiShownSinceMs = mcp::alphiGateAfterPaint(mcpAlphiShownSinceMs, alphiNowMs(), gate);
+    if (gate.covered)
         return;
-    }
     mcpAlphiFrame = frame;
-    if (mcpAlphiShownSinceMs == 0)
-        mcpAlphiShownSinceMs = alphiNowMs();
 
     using A = mcp::AlphiMetrics;
     bool const on = canvas.pd->getMcp()->session.flowMode.isOn();
@@ -185,6 +223,8 @@ void CanvasMcpLayer::paintAlphi(NVGcontext* nvg)
     float const k = static_cast<float>(r.w) / static_cast<float>(A::w); // canvas units per design pixel
 
     NVGScopedState scoped(nvg);
+    if (gate.blocked)
+        nanovg::nvgGlobalAlpha(nvg, 0.35f); // a box under it: faded, the box shows through, the click is the box's
     nanovg::nvgTranslate(nvg, static_cast<float>(r.x), static_cast<float>(r.y));
     nanovg::nvgScale(nvg, k, k); // from here on: design pixels, 48 x 56
 
@@ -254,6 +294,12 @@ bool CanvasMcpLayer::handleAlphiClick(juce::Point<int> canvasPt)
     if (!canvas.isShowing() || alphiCoveredNow(mcpAlphiFrame)) {
         mcpAlphiShownSinceMs = 0;
         mcpAlphiFrame = {};
+        return false;
+    }
+    // 1a0 review H1: a box under Alphi (dropped there, scrolled under it, made by the AI, the fold on a full canvas):
+    // the click is the box's or the canvas's, never flow; the gate starts again once the frame is free.
+    if (!mcp::alphiOwnsPoint(toApproval(mcpAlphiFrame), alphiBoxes(), canvasPt.x, canvasPt.y)) {
+        mcpAlphiShownSinceMs = 0;
         return false;
     }
     // Just appeared (a new tab, the bridge just started, uncovered) or an approval chip left the glass less than

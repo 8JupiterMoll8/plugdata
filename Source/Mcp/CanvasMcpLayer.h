@@ -324,7 +324,8 @@ public:
     // click only once it has been on screen 400 ms; the approval chips are laid out around it (alphiKeepOut); it
     // steps aside (not drawn, not clickable) while the selection pill covers its corner.
     // Big Alphi 1a0: it docks in a corner no box, chip stack, pill or drawer lies under (default bottom right;
-    // McpAlphiDock.h). updateAlphiDock runs each paint before the chips; a move restarts the 400 ms click gate.
+    // McpAlphiDock.h). updateAlphiDock runs each paint before the chips and applies a move the 100 ms timer decided,
+    // only in a render that redraws both frames (review H2); a move restarts the 400 ms click gate.
     void updateAlphiDock();
     void paintAlphi(NVGcontext* nvg);
     bool handleAlphiClick(juce::Point<int> canvasPt);
@@ -339,8 +340,15 @@ public:
     // whether the mouse is on/next to Alphi or holds a button (then it never moves).
     std::pair<mcp::ApprovalRect, float> alphiView() const;
     std::vector<mcp::ApprovalRect> alphiDockCovers() const;
-    bool alphiDockHeld(mcp::ApprovalRect frame, float zoom) const;
+    std::vector<mcp::ApprovalRect> alphiBoxes() const;
+    mcp::AlphiMouse alphiMouse() const;
     mcp::AlphiDock mcpAlphiDock;
+    std::vector<mcp::ApprovalRect> mcpAlphiPaintBoxes; // the boxes of this paint (updateAlphiDock -> paintAlphi)
+    // Review H2: the canvas region this render redraws (paintUnderObjects), used once by updateAlphiDock/paintAlphi.
+    juce::Rectangle<int> mcpAlphiRenderRegion;
+    // Review M2: Alphi's frame on screen at the last full paint of it.
+    juce::Point<int> mcpAlphiScreenPos;
+    bool mcpAlphiHasScreenPos = false;
     juce::Rectangle<int> mcpAlphiFrame;
     std::int64_t mcpAlphiShownSinceMs = 0;
     bool mcpAlphiWasShowing = false;

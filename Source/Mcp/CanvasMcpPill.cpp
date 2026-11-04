@@ -458,7 +458,7 @@ void CanvasMcpLayer::initPaletteItems()
     mcpPaletteItems.push_back({ "undo", "Undo Step", "Action", "Letzte Aenderung sofort rueckgaengig", "↩️", "[@action:undo]" });
     // P6.2 U6: the AI's whole last pill turn (the server refuses when anything else changed the canvas since).
     mcpPaletteItems.push_back({ "undo-turn", "Undo AI Turn", "Action", "Alles vom letzten KI-Zug zurueck", "⏪", "[@action:undo-turn]" });
-    // P12a.1: no "Flow Mode" item: flow mode is the click on Alphi (top left of the canvas), nothing else.
+    // P12a.1: no "Flow Mode" item: flow mode is the click on Alphi (the robot face in a corner of the canvas), nothing else.
 
     // 🧬 Skills (AI Sounddesign)
     mcpPaletteItems.push_back({ "kick-drum", "Punchy 909 Kick", "Skill", "Pitch-Sweep & [tanh~] Saettigung", "🥁", "[@skill:kick-drum]" });

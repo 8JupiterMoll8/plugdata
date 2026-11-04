@@ -196,6 +196,19 @@ static void coversTakeCorner()
     CHECK(c.corner == AlphiCorner::topLeft && !c.folded);
 }
 
+// A test driver of the canvas glue (CanvasMcpFlow.cpp): every paint looks; the timer decides; a paint applies only
+// what its region redraws. `step` runs one timer tick plus one FULL paint and returns whether Alphi moved.
+struct Glue {
+    mcp::AlphiDock d;
+    bool step(ApprovalRect view, float zoom, Rects const& boxes, Rects const& covers, bool hold, mcp::AlphiMouse m, std::int64_t t)
+    {
+        d.look(view, zoom, boxes, covers, t);
+        if (!d.placed() || d.due(t))
+            d.decide(view, zoom, boxes, covers, hold, m, t);
+        return d.apply(mcp::alphiCornerRect(view, zoom, d.corner()), mcp::alphiCornerRect(view, zoom, d.stagedCorner()), view);
+    }
+};
+
 static void dockHolds()
 {
     std::printf("AlphiDock: placed at once, re-checked 250 ms after a change, holds while hovered or dragging\n");
@@ -205,55 +218,185 @@ static void dockHolds()
     auto const br = mcp::alphiCornerRect(view, zoom, AlphiCorner::bottomRight);
     Rects const none;
     Rects const onBr { { br.x, br.y, 60, 30 } };
+    mcp::AlphiMouse const away {};
 
-    mcp::AlphiDock d;
-    CHECK(!d.placed());
+    Glue g;
+    CHECK(!g.d.placed());
     std::int64_t t = 10000;
-    d.update(view, zoom, onBr, none, false, false, t); // the first look places it at once
-    CHECK(d.placed() && d.corner() == AlphiCorner::bottomLeft && !d.pending());
+    CHECK(g.step(view, zoom, onBr, none, false, away, t)); // the first look places it at once
+    CHECK(g.d.placed() && g.d.corner() == AlphiCorner::bottomLeft && !g.d.pending());
 
     // A box removed: nothing moves before the 250 ms settle.
-    CHECK(!d.update(view, zoom, none, none, false, false, t + 10));
-    CHECK(d.pending() && d.corner() == AlphiCorner::bottomLeft);
-    CHECK(!d.due(t + 10 + D::settleMs - 1) && d.due(t + 10 + D::settleMs));
-    CHECK(!d.update(view, zoom, none, none, false, false, t + 10 + D::settleMs - 1));
-    CHECK(d.corner() == AlphiCorner::bottomLeft);
-    CHECK(d.update(view, zoom, none, none, false, false, t + 10 + D::settleMs));
-    CHECK(d.corner() == AlphiCorner::bottomRight && !d.pending());
+    CHECK(!g.step(view, zoom, none, none, false, away, t + 10));
+    CHECK(g.d.pending() && g.d.corner() == AlphiCorner::bottomLeft);
+    CHECK(!g.d.due(t + 10 + D::settleMs - 1) && g.d.due(t + 10 + D::settleMs));
+    CHECK(!g.step(view, zoom, none, none, false, away, t + 10 + D::settleMs - 1));
+    CHECK(g.step(view, zoom, none, none, false, away, t + 10 + D::settleMs));
+    CHECK(g.d.corner() == AlphiCorner::bottomRight && !g.d.pending());
 
-    // An object placed on it while hovered: no jump while the mouse is next to it, nor during a drag.
+    // An object placed on it while hovered or during a drag: no jump.
     t += 1000;
-    CHECK(!d.update(view, zoom, onBr, none, true, false, t));
-    CHECK(!d.update(view, zoom, onBr, none, true, false, t + 5000));
-    CHECK(d.corner() == AlphiCorner::bottomRight && d.pending());
-    CHECK(!d.update(view, zoom, onBr, none, false, true, t + 6000));
-    CHECK(d.corner() == AlphiCorner::bottomRight);
+    CHECK(!g.step(view, zoom, onBr, none, true, away, t));
+    CHECK(!g.step(view, zoom, onBr, none, true, away, t + 5000));
+    CHECK(g.d.corner() == AlphiCorner::bottomRight && g.d.pending());
     // Hover and drag end: the next look moves it.
-    CHECK(d.update(view, zoom, onBr, none, false, false, t + 6001));
-    CHECK(d.corner() == AlphiCorner::bottomLeft && !d.pending());
+    CHECK(g.step(view, zoom, onBr, none, false, away, t + 6001));
+    CHECK(g.d.corner() == AlphiCorner::bottomLeft && !g.d.pending());
 
     // A scroll keeps changing the view: the re-check waits for 250 ms of quiet.
     t += 10000;
-    for (int i = 0; i < 10; ++i) {
-        auto const v = viewOf(i * 15, 0, 1200, 800, zoom);
-        CHECK(!d.update(v, zoom, none, none, false, false, t + i * 50));
-    }
-    CHECK(d.corner() == AlphiCorner::bottomLeft && d.pending());
+    for (int i = 0; i < 10; ++i)
+        CHECK(!g.step(viewOf(i * 15, 0, 1200, 800, zoom), zoom, none, none, false, away, t + i * 50));
+    CHECK(g.d.corner() == AlphiCorner::bottomLeft && g.d.pending());
     auto const v9 = viewOf(9 * 15, 0, 1200, 800, zoom);
-    CHECK(!d.update(v9, zoom, none, none, false, false, t + 9 * 50 + D::settleMs - 1));
-    CHECK(d.update(v9, zoom, none, none, false, false, t + 9 * 50 + D::settleMs));
-    CHECK(d.corner() == AlphiCorner::bottomRight);
-
-    // Nothing changed: no re-check is pending, nothing moves.
-    CHECK(!d.update(v9, zoom, none, none, false, false, t + 100000));
-    CHECK(!d.pending());
+    CHECK(!g.step(v9, zoom, none, none, false, away, t + 9 * 50 + D::settleMs - 1));
+    CHECK(g.step(v9, zoom, none, none, false, away, t + 9 * 50 + D::settleMs));
+    CHECK(g.d.corner() == AlphiCorner::bottomRight);
+    CHECK(!g.step(v9, zoom, none, none, false, away, t + 100000));
+    CHECK(!g.d.pending());
 
     // A hover check: next to Alphi (24 design px around it) counts, far away does not.
     auto const f = mcp::alphiCornerRect(view, 2.0f, AlphiCorner::topLeft);
     CHECK(mcp::alphiHovered(f, 2.0f, f.x + f.w / 2, f.y + f.h / 2));
-    CHECK(mcp::alphiHovered(f, 2.0f, f.x + f.w + 10, f.y)); // 20 design px to the right at zoom 2
-    CHECK(!mcp::alphiHovered(f, 2.0f, f.x + f.w + 20, f.y)); // 40 design px
+    CHECK(mcp::alphiHovered(f, 2.0f, f.x + f.w + 10, f.y));
+    CHECK(!mcp::alphiHovered(f, 2.0f, f.x + f.w + 20, f.y));
     CHECK(!mcp::alphiHovered(ApprovalRect {}, 1.0f, 0, 0));
+}
+
+// Review H1: a box under Alphi (dropped there, scrolled under it, made by the AI, or the fold on a full canvas) makes
+// Alphi not clickable at all; a click there is the box's / the canvas's. The hover hold does not keep Alphi over it.
+static void reviewH1BoxUnderAlphi()
+{
+    std::printf("review H1: a box under Alphi: never Alphi's click, no hover hold over it\n");
+    float const zoom = 1.0f;
+    auto const view = viewOf(0, 0, 1200, 800, zoom);
+    auto const f = mcp::alphiCornerRect(view, zoom, AlphiCorner::bottomRight);
+    ApprovalRect const box { f.x - 30, f.y + 10, 60, 24 }; // its right half under Alphi
+    Rects const boxes { box };
+    CHECK(mcp::alphiFrameBlocked(f, boxes));
+    CHECK(!mcp::alphiFrameBlocked(f, { { f.x - 100, f.y, 60, 24 } })); // a box beside it
+    // The click on the box part inside Alphi's frame: not Alphi's. Nor anywhere else on the blocked frame.
+    CHECK(!mcp::alphiOwnsPoint(f, boxes, f.x + 5, f.y + 20));
+    CHECK(!mcp::alphiOwnsPoint(f, boxes, f.x + f.w - 3, f.y + f.h - 3));
+    // No box under it: its frame is its own, outside is not.
+    CHECK(mcp::alphiOwnsPoint(f, {}, f.x + 5, f.y + 20));
+    CHECK(!mcp::alphiOwnsPoint(f, {}, f.x - 1, f.y + 20));
+    // Every corner full: the folded Alphi sits on boxes and is not clickable there.
+    {
+        Rects full;
+        for (auto c : allCorners) {
+            auto const r = mcp::alphiCornerRect(view, zoom, c);
+            full.push_back({ r.x - 4, r.y - 4, r.w + 8, r.h + 8 });
+        }
+        auto const ch = mcp::chooseCorner(view, zoom, full, {}, AlphiCorner::bottomRight);
+        auto const ff = mcp::alphiCornerRect(view, zoom, ch.corner);
+        CHECK(ch.folded && mcp::alphiFrameBlocked(ff, full));
+        CHECK(!mcp::alphiOwnsPoint(ff, full, ff.x + ff.w / 2, ff.y + ff.h / 2));
+    }
+    // The hold: the pointer on that box (reaching for its inlet) never holds Alphi there; on Alphi's free part, next
+    // to it on empty canvas, or with a button held, it does.
+    mcp::AlphiMouse onBox { true, f.x + 5, f.y + 20 };
+    CHECK(!mcp::alphiDockHold(f, zoom, boxes, false, onBox));
+    CHECK(mcp::alphiDockHold(f, zoom, boxes, true, onBox)); // a drag in progress: wait for the release
+    CHECK(mcp::alphiDockHold(f, zoom, {}, false, mcp::AlphiMouse { true, f.x + 5, f.y + 20 }));
+    CHECK(mcp::alphiDockHold(f, zoom, boxes, false, mcp::AlphiMouse { true, f.x + f.w + 5, f.y - 5 }));
+    CHECK(!mcp::alphiDockHold(f, zoom, boxes, false, mcp::AlphiMouse {})); // mouse elsewhere
+    // A box beside Alphi (not under it) with the pointer on it next to Alphi: still a hold (nothing to step from).
+    Rects const beside { { f.x - 70, f.y, 60, 24 } };
+    CHECK(mcp::alphiDockHold(f, zoom, beside, false, mcp::AlphiMouse { true, f.x - 15, f.y + 5 }));
+    // The gate: blocked = 0 (restart), like covered.
+    mcp::AlphiGateInput blocked;
+    blocked.blocked = true;
+    blocked.frameInRegion = true;
+    CHECK(mcp::alphiGateAfterPaint(5000, 9000, blocked) == 0);
+    // End to end: the box dropped into Alphi's corner while the pointer is on it: Alphi steps aside after 250 ms.
+    Glue g;
+    std::int64_t t = 1000;
+    CHECK(g.step(view, zoom, {}, {}, false, {}, t) && g.d.corner() == AlphiCorner::bottomRight);
+    bool const hold = mcp::alphiDockHold(f, zoom, boxes, false, onBox);
+    g.step(view, zoom, boxes, {}, hold, onBox, t + 10);
+    CHECK(g.step(view, zoom, boxes, {}, hold, onBox, t + 10 + mcp::AlphiDockMetrics::settleMs));
+    CHECK(g.d.corner() != AlphiCorner::bottomRight);
+}
+
+// Review H2: a move lands only in a paint that redraws both frames; the 400 ms gate starts only in a paint that
+// redrew Alphi's whole frame. L1: a staged move asks for at most maxApplyTries full repaints.
+static void reviewH2PartialRender()
+{
+    std::printf("review H2: moves and the click gate need a full paint of Alphi's frames\n");
+    float const zoom = 1.0f;
+    auto const view = viewOf(0, 0, 1200, 800, zoom);
+    auto const br = mcp::alphiCornerRect(view, zoom, AlphiCorner::bottomRight);
+    auto const bl = mcp::alphiCornerRect(view, zoom, AlphiCorner::bottomLeft);
+    mcp::AlphiDock d;
+    std::int64_t t = 1000;
+    d.look(view, zoom, {}, {}, t);
+    CHECK(d.decide(view, zoom, {}, {}, false, {}, t));
+    // A partial render elsewhere (a blinking number box): the first place does not land.
+    ApprovalRect const damage { 400, 300, 60, 20 };
+    CHECK(!d.apply(br, br, damage));
+    CHECK(!d.placed());
+    CHECK(d.apply(br, br, view) && d.placed() && d.corner() == AlphiCorner::bottomRight);
+    // A box onto BR; after the settle the timer stages bottom left.
+    Rects const onBr { { br.x, br.y, 60, 30 } };
+    d.look(view, zoom, onBr, {}, t + 10);
+    CHECK(d.decide(view, zoom, onBr, {}, false, {}, t + 10 + mcp::AlphiDockMetrics::settleMs));
+    CHECK(d.hasStaged() && d.stagedCorner() == AlphiCorner::bottomLeft);
+    // Partial renders: one holding only the new frame (the old one would stay a ghost), one only the old.
+    CHECK(!d.apply(br, bl, ApprovalRect { bl.x - 2, bl.y - 2, bl.w + 4, bl.h + 4 }));
+    CHECK(!d.apply(br, bl, ApprovalRect { br.x - 2, br.y - 2, br.w + 4, br.h + 4 }));
+    CHECK(d.corner() == AlphiCorner::bottomRight);
+    CHECK(d.apply(br, bl, view) && d.corner() == AlphiCorner::bottomLeft && !d.hasStaged());
+    // The gate: a partial paint that did not redraw Alphi never starts it; a full one does; once started, a partial
+    // paint keeps it.
+    mcp::AlphiGateInput partial;
+    CHECK(mcp::alphiGateAfterPaint(0, 9000, partial) == 0);
+    mcp::AlphiGateInput full;
+    full.frameInRegion = true;
+    CHECK(mcp::alphiGateAfterPaint(0, 9000, full) == 9000);
+    CHECK(mcp::alphiGateAfterPaint(8000, 9000, partial) == 8000);
+    // L1: a staged move that never meets a full paint is dropped after maxApplyTries asks.
+    mcp::AlphiDock e;
+    e.look(view, zoom, {}, {}, t);
+    CHECK(e.decide(view, zoom, {}, {}, false, {}, t));
+    int asks = 0;
+    while (e.retryStaged() && asks < 100)
+        ++asks;
+    CHECK(asks == mcp::AlphiDock::maxApplyTries);
+    CHECK(!e.hasStaged());
+}
+
+// Review M1: Alphi never moves into the corner where the pointer is. M2: the gate restarts when the frame moves on
+// screen (window resize, split view, sidebar), not only when the corner changes.
+static void reviewM1M2()
+{
+    std::printf("review M1/M2: never under the pointer; screen moves restart the gate\n");
+    float const zoom = 1.0f;
+    auto const view = viewOf(0, 0, 1200, 800, zoom);
+    auto const br = mcp::alphiCornerRect(view, zoom, AlphiCorner::bottomRight);
+    auto const bl = mcp::alphiCornerRect(view, zoom, AlphiCorner::bottomLeft);
+    Rects const onBr { { br.x, br.y, 60, 30 } };
+    mcp::AlphiMouse const inBl { true, bl.x + bl.w / 2, bl.y + bl.h / 2 };
+    mcp::AlphiDock d;
+    d.look(view, zoom, onBr, {}, 1000);
+    CHECK(d.decide(view, zoom, onBr, {}, false, inBl, 1000));
+    CHECK(d.stagedCorner() != AlphiCorner::bottomLeft && d.stagedCorner() != AlphiCorner::bottomRight);
+    // Pointer just next to the BL frame (within 24 px): still not there.
+    mcp::AlphiMouse const nearBl { true, bl.x + bl.w + 15, bl.y };
+    mcp::AlphiDock e;
+    e.look(view, zoom, onBr, {}, 1000);
+    CHECK(e.decide(view, zoom, onBr, {}, false, nearBl, 1000));
+    CHECK(e.stagedCorner() == AlphiCorner::topRight);
+    // M2.
+    CHECK(!mcp::alphiScreenMoved(500, 400, 501, 400));
+    CHECK(mcp::alphiScreenMoved(500, 400, 520, 400));
+    CHECK(mcp::alphiScreenMoved(500, 400, 500, 360));
+    mcp::AlphiGateInput moved;
+    moved.screenMoved = true;
+    moved.frameInRegion = true;
+    CHECK(mcp::alphiGateAfterPaint(5000, 9000, moved) == 9000); // restarted now, not kept at 5000
+    moved.frameInRegion = false;
+    CHECK(mcp::alphiGateAfterPaint(5000, 9000, moved) == 0);
 }
 
 static void speed()
@@ -276,8 +419,10 @@ static void speed()
     // The dock with 300 boxes per look (the signature included).
     mcp::AlphiDock d;
     auto const t1 = std::chrono::steady_clock::now();
-    for (int i = 0; i < runs; ++i)
-        d.update(view, zoom, boxes, {}, false, false, 1000 + i);
+    for (int i = 0; i < runs; ++i) {
+        d.look(view, zoom, boxes, {}, 1000 + i);
+        d.decide(view, zoom, boxes, {}, false, {}, 1000 + i);
+    }
     auto const us2 = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t1).count() / runs;
     std::printf("  %.1f us per dock update\n", us2);
     CHECK(us2 < 1000.0);
@@ -291,6 +436,9 @@ int main()
     allFull();
     coversTakeCorner();
     dockHolds();
+    reviewH1BoxUnderAlphi();
+    reviewH2PartialRender();
+    reviewM1M2();
     speed();
     if (failures == 0)
         std::printf("alphi_dock_test: all passed\n");

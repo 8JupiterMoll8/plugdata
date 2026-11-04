@@ -207,8 +207,9 @@ void CanvasMcpLayer::mouseExit(MouseEvent const& e)
 
 bool CanvasMcpLayer::isPointOverNote(Point<int> canvasPt) const
 {
-    // P12a.1 review M1: Alphi's spot is Alphi's (a double click there makes no empty box under it).
-    if (mcp::alphiHit(mcp::ApprovalRect { mcpAlphiFrame.getX(), mcpAlphiFrame.getY(), mcpAlphiFrame.getWidth(), mcpAlphiFrame.getHeight() }, canvasPt.x, canvasPt.y))
+    // P12a.1 review M1: Alphi's spot is Alphi's (a double click there makes no empty box under it). 1a0 review H1: not
+    // while a box lies under Alphi: then the point is the box's / the canvas's.
+    if (mcp::alphiOwnsPoint(mcp::ApprovalRect { mcpAlphiFrame.getX(), mcpAlphiFrame.getY(), mcpAlphiFrame.getWidth(), mcpAlphiFrame.getHeight() }, alphiBoxes(), canvasPt.x, canvasPt.y))
         return true;
     if (mcpSelectionPill && mcpSelectionPill->isVisible()) {
         auto const panel = mcpSelectionPillFrame.isEmpty() ? mcpSelectionPill->getBounds() : mcpSelectionPillFrame;

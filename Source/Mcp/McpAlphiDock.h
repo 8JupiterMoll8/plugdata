@@ -15,7 +15,12 @@
 //
 // - It never moves while the mouse is on or next to it (hover) or while a mouse button is held (an object drag, a
 //   lasso, a wire), and it re-checks 250 ms after the view, a box or a cover last changed (scroll, zoom, move, create).
-// - A move restarts its 400 ms click gate (CanvasMcpFlow.cpp): a click aimed at what was in that corner is never flow.
+//   It never moves into the corner under the pointer (review M1).
+// - Review H1: while a box lies under its frame it is not clickable (alphiOwnsPoint), drawn faded, and the hover hold
+//   does not keep it over the box the pointer is on.
+// - Review H2: the 100 ms timer decides a move; a paint applies it only when it redraws both frames, and the 400 ms
+//   click gate starts only in a paint that redrew the whole frame (alphiGateAfterPaint). A move or a screen move
+//   (review M2) restarts the gate. Guarded in scripts/test-bridge-safety.sh.
 
 #include "McpAlphi.h"
 #include "McpApprovalState.h"
@@ -136,6 +141,13 @@ inline AlphiDockChoice chooseCorner(ApprovalRect view, float zoom, std::vector<A
     return best;
 }
 
+
+// The mouse in canvas coordinates; `known` = it is over this canvas (or a button is held on it).
+struct AlphiMouse {
+    bool known = false;
+    int x = 0, y = 0;
+};
+
 // The mouse (canvas coordinates) is on Alphi's frame or within 24 design px of it.
 inline bool alphiHovered(ApprovalRect frame, float zoom, int x, int y)
 {
@@ -146,51 +158,160 @@ inline bool alphiHovered(ApprovalRect frame, float zoom, int x, int y)
     return x >= g.x && y >= g.y && x < g.x + g.w && y < g.y + g.h;
 }
 
+inline bool alphiRectContains(ApprovalRect outer, ApprovalRect inner)
+{
+    return inner.w > 0 && inner.h > 0 && outer.w > 0 && outer.h > 0 && inner.x >= outer.x && inner.y >= outer.y
+        && inner.x + inner.w <= outer.x + outer.w && inner.y + inner.h <= outer.y + outer.h;
+}
+
+// 1a0 review H1: a box (its GUI bounds, unpadded) lies under Alphi's frame: the artist dropped one there, the view
+// scrolled boxes under it, the AI made one, or every corner is full and the fold sits on boxes. Then Alphi is NOT
+// clickable at all (drawn faded, its 400 ms gate restarts): a click there is the box's or the canvas's, never flow.
+inline bool alphiFrameBlocked(ApprovalRect frame, std::vector<ApprovalRect> const& boxes)
+{
+    for (auto const& b : boxes)
+        if (rectsIntersect(frame, b))
+            return true;
+    return false;
+}
+
+// The one question the click and the hit map ask (handleAlphiClick, isPointOverNote): is this point Alphi's?
+// Only inside its frame, and only while no box lies under that frame.
+inline bool alphiOwnsPoint(ApprovalRect frame, std::vector<ApprovalRect> const& boxes, int x, int y)
+{
+    return alphiHit(frame, x, y) && !alphiFrameBlocked(frame, boxes);
+}
+
+// Alphi holds still: a mouse button is held (an object drag, a lasso, a wire, a resize), or the mouse is on / next
+// to it. Review H1: NOT while the pointer is on a box that lies under Alphi (the artist reaches for that box; Alphi
+// steps aside instead of holding over it).
+inline bool alphiDockHold(ApprovalRect frame, float zoom, std::vector<ApprovalRect> const& boxes, bool buttonDown, AlphiMouse m)
+{
+    if (buttonDown)
+        return true;
+    if (!m.known || !alphiHovered(frame, zoom, m.x, m.y))
+        return false;
+    for (auto const& b : boxes)
+        if (rectsIntersect(frame, b) && alphiHit(b, m.x, m.y))
+            return false;
+    return true;
+}
+
+// Review M2: Alphi's frame moved on SCREEN (a window resize, a split view, the sidebar) by more than a rounding step.
+inline bool alphiScreenMoved(int prevX, int prevY, int nowX, int nowY)
+{
+    return std::abs(prevX - nowX) > 1 || std::abs(prevY - nowY) > 1;
+}
+
+// What the 400 ms click gate (`shownSinceMs`, 0 = not on screen) is after one paint. Review H2: it starts only in a
+// paint that redrew Alphi's whole frame (`frameInRegion`); a partial NVG render never starts it.
+struct AlphiGateInput {
+    bool covered = false;       // a chip stack, the pill or its drawers cover Alphi (not drawn)
+    bool blocked = false;       // a box lies under Alphi (alphiFrameBlocked)
+    bool screenMoved = false;   // its frame moved on screen since the last paint (alphiScreenMoved)
+    bool frameInRegion = false; // this paint redrew Alphi's whole frame
+};
+
+inline std::int64_t alphiGateAfterPaint(std::int64_t shownSinceMs, std::int64_t nowMs, AlphiGateInput in)
+{
+    if (in.covered || in.blocked)
+        return 0;
+    if (in.screenMoved || shownSinceMs <= 0)
+        return in.frameInRegion ? nowMs : 0;
+    return shownSinceMs;
+}
+
 // Where Alphi sits now, and when it may move. One per canvas view, message thread only.
+// Review H2: a move is DECIDED by the 100 ms timer (decide) and APPLIED only in a paint that redraws both the old and
+// the new frame (apply), so a partial render never leaves a ghost Alphi or an invisible, clickable one.
 class AlphiDock {
 public:
-    // Called with every look at the view (each paint): the first look places Alphi at once; afterwards a change of the
-    // view, a box or a cover schedules a re-check settleMs later, which runs at the first look after that time while
-    // the mouse is neither on/next to Alphi (`hovered`) nor holding a button (`dragging`). True when Alphi moved.
-    bool update(ApprovalRect view, float zoom, std::vector<ApprovalRect> const& boxes, std::vector<ApprovalRect> const& covers,
-        bool hovered, bool dragging, std::int64_t nowMs, AlphiSize frameSize = {})
+    static constexpr int maxApplyTries = 5; // review L1: full repaints asked for one staged move, then it is dropped
+
+    // Every paint: a change of the view, a box or a cover schedules a re-check settleMs later.
+    void look(ApprovalRect view, float zoom, std::vector<ApprovalRect> const& boxes, std::vector<ApprovalRect> const& covers,
+        std::int64_t nowMs)
     {
         auto const sig = signature(view, zoom, boxes, covers);
-        if (!isPlaced) {
-            choice = chooseCorner(view, zoom, boxes, covers, AlphiDockMetrics::preferred, frameSize);
-            isPlaced = true;
-            lastSig = sig;
-            settleAtMs = 0;
-            return true;
-        }
-        if (sig != lastSig) {
-            lastSig = sig;
+        if (sig == lastSig)
+            return;
+        lastSig = sig;
+        if (isPlaced) {
             settleAtMs = nowMs + AlphiDockMetrics::settleMs;
             if (settleAtMs == 0)
                 settleAtMs = 1;
         }
-        if (!due(nowMs) || hovered || dragging)
+    }
+
+    // Not placed yet: choose now. Placed: once the re-check is due and Alphi is not held, choose again. The mouse
+    // and the space around it count as a cover (review M1: Alphi never jumps under the artist's hand). True when a
+    // move (or the first place) is staged and waits for a full paint.
+    bool decide(ApprovalRect view, float zoom, std::vector<ApprovalRect> const& boxes, std::vector<ApprovalRect> const& covers,
+        bool hold, AlphiMouse mouse, std::int64_t nowMs, AlphiSize frameSize = {})
+    {
+        if (isPlaced && (!due(nowMs) || hold))
             return false;
         settleAtMs = 0;
-        auto const next = chooseCorner(view, zoom, boxes, covers, AlphiDockMetrics::preferred, frameSize);
-        bool const moved = next.corner != choice.corner || next.folded != choice.folded;
-        choice = next;
-        return moved;
+        auto withMouse = covers;
+        if (mouse.known) {
+            int const pad = static_cast<int>(std::lround(AlphiDockMetrics::hoverPad / alphidock::safeZoom(zoom)));
+            withMouse.push_back(alphidock::grown(ApprovalRect { mouse.x, mouse.y, 1, 1 }, pad));
+        }
+        auto const next = chooseCorner(view, zoom, boxes, withMouse, AlphiDockMetrics::preferred, frameSize);
+        if (isPlaced && next.corner == choice.corner && next.folded == choice.folded) {
+            isStaged = false;
+            return false;
+        }
+        staged = next;
+        isStaged = true;
+        tries = 0;
+        return true;
+    }
+
+    // A paint that redrew `region` (canvas coordinates): the staged move lands only when the region holds the new
+    // frame and, once placed, the old one too. True when Alphi moved (the caller restarts its 400 ms gate).
+    bool apply(ApprovalRect oldFrame, ApprovalRect newFrame, ApprovalRect region)
+    {
+        if (!isStaged || !alphiRectContains(region, newFrame))
+            return false;
+        if (isPlaced && !alphiRectContains(region, oldFrame))
+            return false;
+        choice = staged;
+        isPlaced = true;
+        isStaged = false;
+        return true;
+    }
+
+    // The timer asks for one more full repaint for the staged move; false (and the move dropped, to be decided
+    // again at the next change) once maxApplyTries repaints never reached a full paint.
+    bool retryStaged()
+    {
+        if (!isStaged)
+            return false;
+        if (++tries > maxApplyTries) {
+            isStaged = false;
+            tries = 0;
+            return false;
+        }
+        return true;
     }
 
     AlphiCorner corner() const { return choice.corner; }
+    AlphiCorner stagedCorner() const { return isStaged ? staged.corner : choice.corner; }
     bool folded() const { return choice.folded; }
     bool placed() const { return isPlaced; }
+    bool hasStaged() const { return isStaged; }
     // A re-check is waiting (for the settle time, the hover or the drag).
     bool pending() const { return settleAtMs != 0; }
-    // The re-check may run now (the timer asks, to repaint once the settle time is over).
     bool due(std::int64_t nowMs) const { return settleAtMs != 0 && nowMs >= settleAtMs; }
-    // Forget the place (the bridge stopped, the tab was hidden): the next look places Alphi at once.
+    // Forget the place (the bridge stopped, the tab was hidden): the next paint places Alphi again.
     void reset()
     {
         isPlaced = false;
+        isStaged = false;
         settleAtMs = 0;
         lastSig = 0;
+        tries = 0;
     }
 
 private:
@@ -219,13 +340,16 @@ private:
         h = mix(h, covers.size());
         for (auto const& c : covers)
             h = mixRect(h, c);
-        return h;
+        return h | 1; // never 0 (0 = nothing seen yet)
     }
 
     AlphiDockChoice choice {};
+    AlphiDockChoice staged {};
     bool isPlaced = false;
+    bool isStaged = false;
     std::int64_t settleAtMs = 0;
     std::uint64_t lastSig = 0;
+    int tries = 0;
 };
 
 } // namespace mcp

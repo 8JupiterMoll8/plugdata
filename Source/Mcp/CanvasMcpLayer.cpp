@@ -60,6 +60,8 @@ float CanvasMcpLayer::getChipWidth(const juce::String& label)
 
 void CanvasMcpLayer::paintUnderObjects(NVGcontext* nvg, Rectangle<int> invalidRegion)
 {
+    // Big Alphi 1a0 review H2: what this render redraws (canvas coordinates), for Alphi's move and click gate.
+    mcpAlphiRenderRegion = invalidRegion;
     // PRD overlay: titled regions drawn BEHIND the objects (structure at a glance).
     if (canvas.pd && shouldShowAIRegions() && !canvas.pd->getMcp()->session.getMcpRegions().empty()) {
         for (auto const& r : canvas.pd->getMcp()->session.getMcpRegions()) {
