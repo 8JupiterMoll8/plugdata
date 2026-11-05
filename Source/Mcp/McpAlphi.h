@@ -21,6 +21,7 @@
 #include <cmath>
 #include <cstdint>
 #include <initializer_list>
+#include <optional>
 
 namespace mcp {
 
@@ -184,6 +185,31 @@ inline float alphiPulseFollow(float level, float target, float dtMs)
     if (!(dtMs > 0.0f) || !std::isfinite(dtMs)) return level;
     if (target > level) return std::fmin(target, level + dtMs / P::attackMs);
     return std::fmax(target, level - dtMs / P::releaseMs);
+}
+
+// Alphi drop 1, F2 (D5): his eyes look toward the selection. The offset (design px) points from his frame's centre to
+// the selection's centre, 1 px per 40 design px of screen distance, clamped to +-maxPx on the larger axis (direction
+// kept); no selection, or none of his frame: straight ahead. Screen-constant: the zoom comes from his frame's size.
+struct AlphiGazeMetrics {
+    static constexpr float maxPx = 3.0f;          // design px, per axis
+    static constexpr float designPxPerPx = 40.0f; // screen distance (design px) per px of gaze
+};
+
+struct AlphiGaze {
+    float dx = 0.0f, dy = 0.0f; // design px
+};
+
+inline AlphiGaze alphiGaze(ApprovalRect frame, std::optional<ApprovalRect> selection)
+{
+    using G = AlphiGazeMetrics;
+    if (!selection || selection->w <= 0 || selection->h <= 0 || frame.w <= 0 || frame.h <= 0) return {};
+    double const unitsPerDesignPx = static_cast<double>(frame.w) / AlphiMetrics::w;
+    double const vx = ((selection->x + selection->w * 0.5) - (frame.x + frame.w * 0.5)) / unitsPerDesignPx / G::designPxPerPx;
+    double const vy = ((selection->y + selection->h * 0.5) - (frame.y + frame.h * 0.5)) / unitsPerDesignPx / G::designPxPerPx;
+    if (!std::isfinite(vx) || !std::isfinite(vy)) return {};
+    double const big = std::fmax(std::fabs(vx), std::fabs(vy));
+    double const scale = big > G::maxPx ? G::maxPx / big : 1.0;
+    return { static_cast<float>(vx * scale), static_cast<float>(vy * scale) };
 }
 
 } // namespace mcp

@@ -10,6 +10,7 @@
 #include "../../Source/Mcp/McpFlowMode.h"
 
 #include <cmath>
+#include <optional>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -289,8 +290,60 @@ static void pulseFollow()
     CHECK(l == 0.0f);
 }
 
+// Alphi drop 1 F2 (D5): his eyes look toward the selection's centre, clamped to +-3 design px per axis (direction
+// kept); no selection: straight ahead. Screen-constant: the same screen distance gives the same look at any zoom.
+static void gaze()
+{
+    std::printf("Alphi gaze\n");
+    using A = mcp::AlphiMetrics;
+    using G = mcp::AlphiGazeMetrics;
+    CHECK(G::maxPx == 3.0f);
+    ApprovalRect const view { 0, 0, 1200, 800 };
+    auto const face = mcp::alphiCornerRect(view, 1.0f, mcp::AlphiCorner::bottomRight);
+    int const cx = face.x + face.w / 2, cy = face.y + face.h / 2;
+    auto const at = [](int x, int y) { return ApprovalRect { x - 10, y - 5, 20, 10 }; };
+    // None: straight ahead (also an empty selection rect, and no face).
+    auto g = mcp::alphiGaze(face, std::nullopt);
+    CHECK(g.dx == 0.0f && g.dy == 0.0f);
+    g = mcp::alphiGaze(face, ApprovalRect {});
+    CHECK(g.dx == 0.0f && g.dy == 0.0f);
+    g = mcp::alphiGaze(ApprovalRect {}, at(10, 10));
+    CHECK(g.dx == 0.0f && g.dy == 0.0f);
+    // On his centre: straight ahead.
+    g = mcp::alphiGaze(face, at(cx, cy));
+    CHECK(std::fabs(g.dx) < 1e-4f && std::fabs(g.dy) < 1e-4f);
+    // Left / right at his height: x only, toward the selection.
+    g = mcp::alphiGaze(face, at(cx - 80, cy));
+    CHECK(g.dx < -0.5f && g.dx >= -G::maxPx && std::fabs(g.dy) < 1e-4f);
+    float const left80 = g.dx;
+    g = mcp::alphiGaze(face, at(cx + 80, cy));
+    CHECK(std::fabs(g.dx + left80) < 1e-4f && std::fabs(g.dy) < 1e-4f);
+    // Nearer = less turned (until the clamp).
+    CHECK(std::fabs(mcp::alphiGaze(face, at(cx - 20, cy)).dx) < std::fabs(left80));
+    // Far: clamped to +-3 per axis, direction kept (the larger axis at exactly 3).
+    g = mcp::alphiGaze(face, at(cx - 1200, cy - 600));
+    CHECK(std::fabs(g.dx + G::maxPx) < 1e-4f);
+    CHECK(g.dy < 0.0f && std::fabs(g.dy - (-G::maxPx * 0.5f)) < 0.01f);
+    g = mcp::alphiGaze(face, at(cx, cy - 100000));
+    CHECK(std::fabs(g.dy + G::maxPx) < 1e-4f && std::fabs(g.dx) < 1e-3f);
+    // Zoomed: canvas units are 1/zoom design px; the same screen distance gives the same gaze.
+    for (float zoom : { 0.5f, 2.0f, 2.39f }) {
+        ApprovalRect const v { 100, 50, static_cast<int>(1200 / zoom), static_cast<int>(800 / zoom) };
+        auto const f = mcp::alphiCornerRect(v, zoom, mcp::AlphiCorner::bottomRight);
+        CHECK(std::abs(static_cast<int>(f.w * zoom) - A::w) <= 3); // the frame is ceil(48 / zoom) canvas units
+        int const fx = f.x + f.w / 2, fy = f.y + f.h / 2;
+        auto const z = mcp::alphiGaze(f, at(fx - static_cast<int>(std::lround(80 / zoom)), fy));
+        CHECK(std::fabs(z.dx - left80) < 0.12f);
+        CHECK(std::fabs(z.dy) < 0.12f);
+    }
+    // Never NaN, whatever comes in.
+    g = mcp::alphiGaze(ApprovalRect { 0, 0, 1, 1 }, ApprovalRect { 2147480000, 2147480000, 10, 10 });
+    CHECK(std::isfinite(g.dx) && std::isfinite(g.dy) && std::fabs(g.dx) <= G::maxPx && std::fabs(g.dy) <= G::maxPx);
+}
+
 int main()
 {
+    gaze();
     pulse();
     pulseFollow();
     placement();
