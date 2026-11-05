@@ -18,6 +18,7 @@
 //   refuses it, so no server chip can ever pass for a flow switch.
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <string>
 
@@ -38,11 +39,27 @@ public:
         state.compare_exchange_strong(expected, nowMs > 0 ? nowMs : 1, std::memory_order_acq_rel);
     }
 
-    // Any door may switch it off. True when it was on.
-    bool off() { return state.exchange(0, std::memory_order_acq_rel) != 0; }
+    // Any door may switch it off. True when it was on. Review of 2a13ec760: an off records its wall-clock time
+    // (`nowMs`, default now), so the way ON can wait after ANY off (McpAlphi.h alphiClickAllowed, flowOffGapMs).
+    bool off(std::int64_t nowMs = wallNowMs())
+    {
+        bool const was = state.exchange(0, std::memory_order_acq_rel) != 0;
+        if (was)
+            lastOff.store(nowMs > 0 ? nowMs : 1, std::memory_order_release);
+        return was;
+    }
+    // Wall-clock ms of the last off (0 = never since the start).
+    std::int64_t lastOffMs() const { return lastOff.load(std::memory_order_acquire); }
+
+    // The same epoch ms as juce::Time::currentTimeMillis (the canvas click's clock).
+    static std::int64_t wallNowMs()
+    {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    }
 
 private:
     std::atomic<std::int64_t> state { 0 };
+    std::atomic<std::int64_t> lastOff { 0 };
 };
 
 inline constexpr char kFlowNoncePrefix[] = "flow:";

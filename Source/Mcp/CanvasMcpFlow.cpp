@@ -444,12 +444,15 @@ bool CanvasMcpLayer::handleAlphiClick(juce::Point<int> canvasPt)
     // never flow; a click on a free part of Alphi goes on to the normal gate.
     if (!mcp::alphiOwnsPoint(toApproval(mcpAlphiFrame), alphiBoxes(), canvasPt.x, canvasPt.y, alphiView().second))
         return false;
-    // The brake (mcp::alphiClickAct): flow ON + a click on his drawn face = OFF at once, through alphiBrake, which never
-    // turns flow on. The way ON: just appeared (a new tab, the bridge just started, uncovered, moved) or an approval
-    // chip left the glass less than 400 ms ago (review M2): not clickable, but the click is still Alphi's.
+    // The brake (mcp::alphiClickAct): flow ON + a click on his drawn face (150 ms floor; 400 ms for the face just out of
+    // the edge tab) = OFF, through alphiBrake, which never turns flow on. The way ON: just appeared (a new tab, the
+    // bridge just started, uncovered, moved), an approval chip left the glass less than 400 ms ago (review M2) or flow
+    // went off by any door less than 600 ms ago: not clickable, but the click is still Alphi's.
     auto const now = alphiNowMs();
     auto* host = canvas.pd->getMcp();
-    auto const act = mcp::alphiClickAct(host->session.flowMode.isOn(), mcpAlphiShownSinceMs, now, host->session.approvals.lastChipGoneMs());
+    bool const peekOut = mcpAlphiDock.folded() && mcpAlphiPeek.out();
+    auto const act = mcp::alphiClickAct(host->session.flowMode.isOn(), mcpAlphiShownSinceMs, now,
+        host->session.approvals.lastChipGoneMs(), host->session.flowMode.lastOffMs(), peekOut);
     if (act == mcp::AlphiClickAct::None)
         return true;
     if (act == mcp::AlphiClickAct::Brake)

@@ -121,7 +121,8 @@ bool McpHost::alphiBrake(std::int64_t nowMs)
 {
     if (!bridgeRunning())
         return session.flowMode.isOn();
-    // One flip per click: the second half of a double click never turns flow back on.
+    // The 350 ms double-click guard, as for alphiClicked; a slower second click meets the 600 ms after this off in
+    // the canvas's way ON (mcp::alphiClickAllowed).
     if (!alphiClicks.accept(nowMs))
         return session.flowMode.isOn();
     flowModeOff("alphi"); // off already (another door won the race): nothing happens

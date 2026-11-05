@@ -3143,14 +3143,16 @@ void runFlowModeCases(Harness& h, PluginProcessor& processor, std::function<void
         CHECK(host->alphiClicked(t0 + 2000));
         CHECK(isOn());
         // The brake (d1 live check 2026-11-05): a click on Alphi while flow is on turns it off through alphiBrake,
-        // which never turns it on: off already (another door won the race) stays off, with no event; it shares the
-        // double-click guard (the second half of a double click never turns flow back on).
+        // which never turns it on: off already (another door won the race) stays off, with no event. The 350 ms
+        // double-click guard applies to it; the off records its time (the canvas's way ON waits 600 ms after it).
         h.replies.clear();
+        auto const beforeBrake = juce::Time::currentTimeMillis();
         CHECK(!host->alphiBrake(t0 + 3000));
         auto brake = h.replies.waitFor("/pd/flow_mode/changed", 2000);
         CHECK(brake && brake->str(0) == "off" && brake->str(1) == "alphi");
         CHECK(!isOn());
-        CHECK(!host->alphiClicked(t0 + 3100)); // the double click's second half: ignored, still off
+        CHECK(host->session.flowMode.lastOffMs() >= beforeBrake);
+        CHECK(!host->alphiClicked(t0 + 3100)); // within the 350 ms double-click guard: ignored, still off
         CHECK(!isOn());
         h.replies.clear();
         CHECK(!host->alphiBrake(t0 + 4000)); // off already: stays off, no event

@@ -332,41 +332,70 @@ static void sayExpiryRepaint()
 }
 
 // Live check 2026-11-05 (d1-live L7b, flow on + sparks) and the owner's brake rule: while the face is drawn and flow is
-// ON, a click on it always turns flow OFF. The 400 ms "shown" gate (and the 400 ms after a chip left, review M2) only
-// guard the way ON: a gate that restarted under a face that stayed visible (a screen move, a dock move, uncovered)
-// never swallows the brake. Turning ON keeps the full rule; a face not drawn whole at its spot (gate 0) takes nothing.
-static void brakeNeverWaits()
+// ON, a click on it turns flow OFF after a short floor (brakeFloorMs since the face was drawn whole at its spot), not
+// the 400 ms shown gate nor the 400 ms after a chip left (review M2). A face just out of the edge tab (D11 peek) keeps
+// the full 400 ms, so a double click on the tab never brakes. The 350 ms double-click guard (AlphiClickGate in
+// McpHost) applies to the brake too. Turning ON keeps the full rule, plus flowOffGapMs after ANY flow-off (review of
+// 2a13ec760): a slow double click on the brake, or a click on a face still drawn ON after another door switched flow
+// off, never turns flow back on.
+static void brakeFloorAndOnGap()
 {
-    std::printf("brake: flow ON + a click on the drawn face = OFF at once; the way ON keeps the 400 ms gate\n");
+    std::printf("brake: flow ON + a click on the drawn face = OFF after a %d ms floor; ON waits %d ms after any OFF\n",
+        static_cast<int>(mcp::AlphiMetrics::brakeFloorMs), static_cast<int>(mcp::AlphiMetrics::flowOffGapMs));
     using Act = mcp::AlphiClickAct;
     auto const view = viewOf(0, 0, 1.0f);
     Painter p { mcp::alphiCornerRect(view, 1.0f, AlphiCorner::bottomRight) };
     p.paint(view, 1000);
     CHECK(mcp::alphiClickAct(true, p.shownSinceMs, 1500) == Act::Brake);
     CHECK(mcp::alphiClickAct(false, p.shownSinceMs, 1500) == Act::TurnOn);
-    // His frame moved on screen while he stayed in view: the gate restarts; 100 ms later the brake still counts,
-    // the way ON does not.
+    // His frame moved on screen while he stayed in view: the gate restarts. The brake counts after the 150 ms floor
+    // (not 400 ms); before the floor (a face that slid under a canvas click) nothing happens. The way ON waits 400 ms.
     p.paint(view, 4000, false, true);
     CHECK(p.shownSinceMs == 4000);
-    CHECK(mcp::alphiClickAct(true, p.shownSinceMs, 4100) == Act::Brake);
-    CHECK(mcp::alphiClickAct(true, p.shownSinceMs, 4000) == Act::Brake);
-    CHECK(mcp::alphiClickAct(false, p.shownSinceMs, 4100) == Act::None);
+    CHECK(mcp::alphiClickAct(true, p.shownSinceMs, 4000) == Act::None);
+    CHECK(mcp::alphiClickAct(true, p.shownSinceMs, 4149) == Act::None);
+    CHECK(mcp::alphiClickAct(true, p.shownSinceMs, 4150) == Act::Brake);
+    CHECK(mcp::alphiClickAct(true, p.shownSinceMs, 4300) == Act::Brake);
+    CHECK(mcp::alphiClickAct(false, p.shownSinceMs, 4300) == Act::None);
     CHECK(mcp::alphiClickAct(false, p.shownSinceMs, 4400) == Act::TurnOn);
     // An approval chip just left the glass: the brake still counts; the way ON waits 400 ms (review M2).
     CHECK(mcp::alphiClickAct(true, p.shownSinceMs, 9000, 8990) == Act::Brake);
     CHECK(mcp::alphiClickAct(false, p.shownSinceMs, 9000, 8990) == Act::None);
     CHECK(mcp::alphiClickAct(false, p.shownSinceMs, 9000, 8600) == Act::TurnOn);
+    // Review MEDIUM: a slow double click on the brake. ON -> brake at t (flow off at t) -> the second click at t + 400
+    // passes the 350 ms double-click guard but must not turn flow back on; at t + 700 the way ON is open again.
+    std::int64_t const t = 20000;
+    CHECK(mcp::alphiClickAct(true, p.shownSinceMs, t) == Act::Brake);
+    CHECK(mcp::alphiClickAct(false, p.shownSinceMs, t + 400, 0, t) == Act::None);
+    CHECK(mcp::alphiClickAct(false, p.shownSinceMs, t + 599, 0, t) == Act::None);
+    CHECK(mcp::alphiClickAct(false, p.shownSinceMs, t + 700, 0, t) == Act::TurnOn);
+    // Another door (flow_mode_off, the pill, a bridge stop) switched flow off at t; the face may still be drawn ON
+    // until the async repaint: a click at t + 100 reads off and must not turn it on.
+    CHECK(mcp::alphiClickAct(false, p.shownSinceMs, t + 100, 0, t) == Act::None);
+    CHECK(mcp::alphiClickAct(false, p.shownSinceMs, t + 700, 0, t) == Act::TurnOn);
+    CHECK(mcp::alphiClickAct(false, p.shownSinceMs, t + 700, 0, 0) == Act::TurnOn); // never off before
+    // D11: the face just out of the edge tab (peek) keeps the full 400 ms for the brake too: the second half of a
+    // double click on the tab (the out face is drawn ~16 ms after the first) is never flow.
+    std::int64_t const out = 30000; // the out face's first full paint
+    CHECK(mcp::alphiClickAct(true, out, out + 16, 0, 0, true) == Act::None);
+    CHECK(mcp::alphiClickAct(true, out, out + 300, 0, 0, true) == Act::None);
+    CHECK(mcp::alphiClickAct(true, out, out + 399, 0, 0, true) == Act::None);
+    CHECK(mcp::alphiClickAct(true, out, out + 400, 0, 0, true) == Act::Brake);
+    CHECK(mcp::alphiClickAct(false, out, out + 300, 0, 0, true) == Act::None);
+    CHECK(mcp::alphiClickAct(false, out, out + 400, 0, 0, true) == Act::TurnOn);
     // Covered (not drawn) or never drawn whole at this spot: no click at all, in either direction.
-    p.paint(view, 10000, true);
+    p.paint(view, 40000, true);
     CHECK(p.shownSinceMs == 0);
-    CHECK(mcp::alphiClickAct(true, p.shownSinceMs, 10100) == Act::None);
-    CHECK(mcp::alphiClickAct(false, p.shownSinceMs, 10100) == Act::None);
-    // 100 motion repaints (sparks at 30 Hz) after the next full paint: the brake counts at every one of them.
-    p.paint(view, 11000);
+    CHECK(mcp::alphiClickAct(true, p.shownSinceMs, 40100) == Act::None);
+    CHECK(mcp::alphiClickAct(false, p.shownSinceMs, 40100) == Act::None);
+    // 100 motion repaints (sparks at 30 Hz) after the next full paint: once past the floor the brake counts at each.
+    p.paint(view, 41000);
     auto const motion = mcp::alphiMotionArea(p.frame, 1.0f);
     for (int i = 1; i <= 100; ++i) {
-        p.paint(renderRegionOf(motion, view, 1.0f), 11000 + i * 33);
-        CHECK(mcp::alphiClickAct(true, p.shownSinceMs, 11000 + i * 33 + 1) == Act::Brake);
+        std::int64_t const now = 41000 + i * 33;
+        p.paint(renderRegionOf(motion, view, 1.0f), now);
+        auto const want = now + 1 - 41000 >= mcp::AlphiMetrics::brakeFloorMs ? Act::Brake : Act::None;
+        CHECK(mcp::alphiClickAct(true, p.shownSinceMs, now + 1) == want);
     }
 }
 
@@ -381,7 +410,7 @@ int main()
     stripFrameAfterPaint();
     motionRepaintArea();
     whatRestartsTheGate();
-    brakeNeverWaits();
+    brakeFloorAndOnGap();
     if (failures == 0)
         std::printf("alphi_gate_test: all passed\n");
     else

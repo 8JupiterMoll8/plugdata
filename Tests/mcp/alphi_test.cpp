@@ -195,8 +195,16 @@ static void toggle()
     CHECK(mcp::alphiNextOn(f.isOn()) == true);
     f.artistTurnOn(1000);
     CHECK(mcp::alphiNextOn(f.isOn()) == false);
-    CHECK(f.off());
+    CHECK(f.off(5000));
+    // Review of 2a13ec760: every door that switches flow off records when (the way ON waits flowOffGapMs after it);
+    // an off while already off keeps the first time.
+    CHECK(f.lastOffMs() == 5000);
+    CHECK(!f.off(6000));
+    CHECK(f.lastOffMs() == 5000);
+    CHECK(!mcp::alphiClickAllowed(1000, 5000 + mcp::AlphiMetrics::flowOffGapMs - 1, 0, f.lastOffMs()));
+    CHECK(mcp::alphiClickAllowed(1000, 5000 + mcp::AlphiMetrics::flowOffGapMs, 0, f.lastOffMs()));
     mcp::FlowMode restarted;
+    CHECK(restarted.lastOffMs() == 0);
     CHECK(!restarted.isOn());
 }
 

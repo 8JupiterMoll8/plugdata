@@ -32,6 +32,8 @@ struct AlphiMetrics {
     static constexpr int margin = 12; // from the two edges of its corner of the view
     static constexpr std::int64_t minVisibleMs = 400;
     static constexpr std::int64_t debounceMs = 350;
+    static constexpr std::int64_t brakeFloorMs = 150;
+    static constexpr std::int64_t flowOffGapMs = 600;
 };
 
 // Alphi's rect in canvas coordinates at the top-left corner of the visible view (canvas units), screen-constant size.
@@ -48,25 +50,36 @@ inline ApprovalRect alphiRect(ApprovalRect view, float zoom)
 
 // A click counts only once Alphi has been on screen (painted) for minVisibleMs (`shownSinceMs` 0 = not on screen), and
 // not within minVisibleMs after any approval chip left the glass (review M2: `lastChipGoneMs`, 0 = never): a chip the AI
-// clears from on top of Alphi just before the artist's ✓ click never turns that click into flow ON.
-inline bool alphiClickAllowed(std::int64_t shownSinceMs, std::int64_t nowMs, std::int64_t lastChipGoneMs = 0)
+// clears from on top of Alphi just before the artist's ✓ click never turns that click into flow ON. Review of
+// 2a13ec760: nor within flowOffGapMs after flow went off by ANY door (`lastFlowOffMs`, 0 = never): the second half of
+// a slow double click on the brake (past the 350 ms double-click guard), or a click on a face still drawn ON after
+// another door switched flow off, never turns flow back on.
+inline bool alphiClickAllowed(std::int64_t shownSinceMs, std::int64_t nowMs, std::int64_t lastChipGoneMs = 0,
+    std::int64_t lastFlowOffMs = 0)
 {
     if (shownSinceMs <= 0 || nowMs - shownSinceMs < AlphiMetrics::minVisibleMs)
+        return false;
+    if (lastFlowOffMs > 0 && nowMs - lastFlowOffMs < AlphiMetrics::flowOffGapMs)
         return false;
     return lastChipGoneMs <= 0 || nowMs - lastChipGoneMs >= AlphiMetrics::minVisibleMs;
 }
 
 // What a click on a point of Alphi's face (alphiOwnsPoint) does. The brake (owner rule, d1 live check 2026-11-05):
-// while flow is ON, a click on the face drawn whole at its spot (`shownSinceMs` > 0) always turns flow OFF, at once.
-// The 400 ms waits (alphiClickAllowed: just shown, a chip just left) guard only the way ON: a gate that restarted
-// under a face that stayed in view (a screen or dock move, uncovered) never swallows the artist's brake, and an
-// accidental OFF is the safe direction. Flow OFF -> ON keeps the full rule. A face not drawn (gate 0) takes nothing.
+// while flow is ON, a click on the face drawn whole at its spot (`shownSinceMs` > 0) for brakeFloorMs turns flow OFF.
+// The floor (not the 400 ms of the way ON, and no wait after a chip left) keeps a face that slid under a canvas click
+// from eating it; a gate that restarted under a face that stayed in view never holds the brake longer. The face just
+// out of the edge tab (`peekOut`, D11) keeps the full minVisibleMs: a double click on the tab is never flow. The
+// 350 ms double-click guard (McpHost's AlphiClickGate) applies to the brake as to every Alphi click. Flow OFF -> ON
+// keeps the full rule (alphiClickAllowed, with `lastFlowOffMs`). A face not drawn (gate 0) takes nothing.
 enum class AlphiClickAct { None, Brake, TurnOn };
-inline AlphiClickAct alphiClickAct(bool flowOn, std::int64_t shownSinceMs, std::int64_t nowMs, std::int64_t lastChipGoneMs = 0)
+inline AlphiClickAct alphiClickAct(bool flowOn, std::int64_t shownSinceMs, std::int64_t nowMs, std::int64_t lastChipGoneMs = 0,
+    std::int64_t lastFlowOffMs = 0, bool peekOut = false)
 {
-    if (flowOn)
-        return shownSinceMs > 0 ? AlphiClickAct::Brake : AlphiClickAct::None;
-    return alphiClickAllowed(shownSinceMs, nowMs, lastChipGoneMs) ? AlphiClickAct::TurnOn : AlphiClickAct::None;
+    if (flowOn) {
+        std::int64_t const floor = peekOut ? AlphiMetrics::minVisibleMs : AlphiMetrics::brakeFloorMs;
+        return shownSinceMs > 0 && nowMs - shownSinceMs >= floor ? AlphiClickAct::Brake : AlphiClickAct::None;
+    }
+    return alphiClickAllowed(shownSinceMs, nowMs, lastChipGoneMs, lastFlowOffMs) ? AlphiClickAct::TurnOn : AlphiClickAct::None;
 }
 
 // Review M1: a point inside Alphi's frame (canvas coordinates) belongs to Alphi, never to the canvas (no double-click

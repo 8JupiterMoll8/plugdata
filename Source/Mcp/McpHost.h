@@ -227,7 +227,8 @@ public:
     // the canvas click (CanvasMcpLayer::handleAlphiClick); no verb leads here (grep gate). Message thread.
     bool alphiClicked(std::int64_t nowMs);
     // The brake (McpFlow.cpp, McpAlphi.h alphiClickAct; d1 live check 2026-11-05): the artist clicked Alphi while flow
-    // mode was on: off, never on (off already stays off). Same double-click guard as alphiClicked. Returns whether
+    // mode was on: off, never on (off already stays off). The 350 ms double-click guard (alphiClicks) applies to it as
+    // to alphiClicked; a slower second click is held by the 600 ms after any off (alphiClickAllowed). Returns whether
     // flow mode is on afterwards. Called only by the canvas click (CanvasMcpLayer::handleAlphiClick). Message thread.
     bool alphiBrake(std::int64_t nowMs);
     // P12a.1 review L3: the bridge object exists AND serves. Any thread.
