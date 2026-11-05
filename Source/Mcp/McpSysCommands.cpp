@@ -482,6 +482,13 @@ void McpHost::sysCensus(SmallString const& selector, mcp::SysList const& list)
             // canvas's identity version beside it
             rootObj->setProperty("contentVersion", static_cast<int>(identity.contentVersion(canvas) & 0x7FFFFFFF));
             rootObj->setProperty("identityVersion", static_cast<int>(identity.canvasVersion(canvas) & 0x7FFFFFFF));
+            // V1 tabs: the canvas's $0 as Pd expands it here (the abstraction or root patch it lives in), so the server can
+            // address a "$0-name" receiver of exactly this canvas instead of refusing it. Under sys_lock, as the walk below.
+            if (auto* dz = canvas_realizedollar(canvas, gensym("$0")); dz && dz->s_name) {
+                auto const n = juce::String::fromUTF8(dz->s_name).getIntValue();
+                if (n > 0)
+                    rootObj->setProperty("dollarZero", n);
+            }
 
             // Build reverse map of gobj* -> tempId
             std::unordered_map<t_gobj*, String> ptrToId;

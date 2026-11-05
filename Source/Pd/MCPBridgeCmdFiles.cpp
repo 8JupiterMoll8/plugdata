@@ -843,6 +843,13 @@ void MCPBridge::pdListTabs(const juce::String& action, const juce::OSCMessage& m
                     o->setProperty("isAbstraction", cnv->gl_owner != nullptr && canvas_isabstraction(cnv) != 0);
                     o->setProperty("rootKey", juce::String(p->getMcp()->identity.keyOf(top)));
                     o->setProperty("rootFile", mcp::pdRootFile(top).getFullPathName());
+                    // V1 tabs: a root tab that is an abstraction file used inside other open patches (the server
+                    // refuses an unnamed edit there: it would change every instance).
+                    if (cnv->gl_owner == nullptr) {
+                        juce::Array<juce::var> users;
+                        for (auto const& name : mcp::rootsUsingFileOf(cnv)) users.add(name);
+                        o->setProperty("usedIn", users);
+                    }
                 }
                 for (t_gobj* g = cnv->gl_list; g; g = g->g_next) count++;
             }

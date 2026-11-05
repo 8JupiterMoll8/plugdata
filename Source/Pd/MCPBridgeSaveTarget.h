@@ -51,6 +51,33 @@ inline bool isPlainPartOf(t_canvas* p, t_canvas* cnv)
     return false;
 }
 
+// V1 tabs: does `c` (any canvas) hold, at any depth, an abstraction instance whose file is `file`? CALLER HOLDS sys_lock.
+inline bool holdsInstanceOf(t_canvas* c, juce::File const& file, int depth = 0)
+{
+    if (!c || depth > 64) return false;
+    for (t_gobj* g = c->gl_list; g; g = g->g_next) {
+        if (pd_class(&g->g_pd) != canvas_class) continue;
+        auto* sub = reinterpret_cast<t_canvas*>(g);
+        if (canvas_isabstraction(sub) && pdAbstractionFile(sub) == file) return true;
+        if (holdsInstanceOf(sub, file, depth + 1)) return true;
+    }
+    return false;
+}
+
+// V1 tabs: the names of the OTHER open root patches that hold an instance of `root`'s own file (an abstraction file
+// open as its own tab: an edit there changes every instance). Empty for an unsaved root. CALLER HOLDS sys_lock.
+inline std::vector<juce::String> rootsUsingFileOf(t_canvas* root)
+{
+    std::vector<juce::String> out;
+    auto const file = pdRootFile(root);
+    if (file == juce::File()) return out;
+    for (t_canvas* c = pd_this ? pd_this->pd_canvaslist : nullptr; c; c = c->gl_next) {
+        if (c == root || c->gl_owner || !c->gl_name || !c->gl_name->s_name) continue;
+        if (holdsInstanceOf(c, file)) out.push_back(juce::String::fromUTF8(c->gl_name->s_name));
+    }
+    return out;
+}
+
 // `p` is an abstraction instance whose file is `file`, or a canvas inside one.
 inline bool insideAbstractionOf(t_canvas* p, juce::File const& file)
 {
