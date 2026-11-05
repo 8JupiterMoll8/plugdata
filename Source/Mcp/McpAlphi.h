@@ -56,6 +56,19 @@ inline bool alphiClickAllowed(std::int64_t shownSinceMs, std::int64_t nowMs, std
     return lastChipGoneMs <= 0 || nowMs - lastChipGoneMs >= AlphiMetrics::minVisibleMs;
 }
 
+// What a click on a point of Alphi's face (alphiOwnsPoint) does. The brake (owner rule, d1 live check 2026-11-05):
+// while flow is ON, a click on the face drawn whole at its spot (`shownSinceMs` > 0) always turns flow OFF, at once.
+// The 400 ms waits (alphiClickAllowed: just shown, a chip just left) guard only the way ON: a gate that restarted
+// under a face that stayed in view (a screen or dock move, uncovered) never swallows the artist's brake, and an
+// accidental OFF is the safe direction. Flow OFF -> ON keeps the full rule. A face not drawn (gate 0) takes nothing.
+enum class AlphiClickAct { None, Brake, TurnOn };
+inline AlphiClickAct alphiClickAct(bool flowOn, std::int64_t shownSinceMs, std::int64_t nowMs, std::int64_t lastChipGoneMs = 0)
+{
+    if (flowOn)
+        return shownSinceMs > 0 ? AlphiClickAct::Brake : AlphiClickAct::None;
+    return alphiClickAllowed(shownSinceMs, nowMs, lastChipGoneMs) ? AlphiClickAct::TurnOn : AlphiClickAct::None;
+}
+
 // Review M1: a point inside Alphi's frame (canvas coordinates) belongs to Alphi, never to the canvas (no double-click
 // box, no lasso). An empty frame (Alphi not drawn) holds nothing.
 inline bool alphiHit(ApprovalRect frame, int x, int y)

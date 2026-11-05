@@ -117,6 +117,17 @@ bool McpHost::alphiClicked(std::int64_t nowMs)
     return true;
 }
 
+bool McpHost::alphiBrake(std::int64_t nowMs)
+{
+    if (!bridgeRunning())
+        return session.flowMode.isOn();
+    // One flip per click: the second half of a double click never turns flow back on.
+    if (!alphiClicks.accept(nowMs))
+        return session.flowMode.isOn();
+    flowModeOff("alphi"); // off already (another door won the race): nothing happens
+    return false;
+}
+
 bool McpHost::bridgeRunning() const
 {
     return mcpBridge && mcpBridge->isRunning();

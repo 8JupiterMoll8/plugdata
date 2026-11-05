@@ -66,10 +66,21 @@ fi
 alphiCallers="$(grep -rnw "alphiClicked" "$root"/Source --include=*.cpp --include=*.h --include=*.inc | codeOnly \
   | grep -v "Source/Mcp/McpHost.h:[0-9]*:    bool alphiClicked(std::int64_t nowMs);$" \
   | grep -v "Source/Mcp/McpFlow.cpp:[0-9]*:bool McpHost::alphiClicked(std::int64_t nowMs)$" \
-  | grep -v "Source/Mcp/CanvasMcpFlow.cpp:[0-9]*:    canvas.pd->getMcp()->alphiClicked(now);$" || true)"
+  | grep -v "Source/Mcp/CanvasMcpFlow.cpp:[0-9]*:        canvas.pd->getMcp()->alphiClicked(now);$" || true)"
 if [ -n "$alphiCallers" ]; then
   echo "$alphiCallers" >&2
   echo "test-bridge-safety: alphiClicked is named outside the canvas click (CanvasMcpLayer::handleAlphiClick)" >&2
+  exit 1
+fi
+# The brake (d1 live check 2026-11-05): flow ON + a click on Alphi goes to McpHost::alphiBrake, which only turns flow
+# off (artistTurnOn stays alphiClicked's alone, above); it too is called only by the canvas click.
+brakeCallers="$(grep -rnw "alphiBrake" "$root"/Source --include=*.cpp --include=*.h --include=*.inc | codeOnly \
+  | grep -v "Source/Mcp/McpHost.h:[0-9]*:    bool alphiBrake(std::int64_t nowMs);$" \
+  | grep -v "Source/Mcp/McpFlow.cpp:[0-9]*:bool McpHost::alphiBrake(std::int64_t nowMs)$" \
+  | grep -v "Source/Mcp/CanvasMcpFlow.cpp:[0-9]*:        host->alphiBrake(now);$" || true)"
+if [ -n "$brakeCallers" ]; then
+  echo "$brakeCallers" >&2
+  echo "test-bridge-safety: alphiBrake is named outside the canvas click (CanvasMcpLayer::handleAlphiClick)" >&2
   exit 1
 fi
 handleAlphi="$(grep -rnw "handleAlphiClick" "$root"/Source --include=*.cpp --include=*.h --include=*.inc | codeOnly \
@@ -94,6 +105,11 @@ ownsLine="$(awk '/^bool CanvasMcpLayer::handleAlphiClick/ { f = 1 } f && /mcp::a
 clickLine="$(awk '/^bool CanvasMcpLayer::handleAlphiClick/ { f = 1 } f && /alphiClicked\(/ { print NR; exit } f && /^}/ { exit }' "$flowSrc")"
 if [ -z "$ownsLine" ] || [ -z "$clickLine" ] || [ "$ownsLine" -ge "$clickLine" ]; then
   echo "test-bridge-safety: handleAlphiClick must ask mcp::alphiOwnsPoint before alphiClicked (a box under Alphi is never flow)" >&2
+  exit 1
+fi
+brakeLine="$(awk '/^bool CanvasMcpLayer::handleAlphiClick/ { f = 1 } f && /alphiBrake\(/ { print NR; exit } f && /^}/ { exit }' "$flowSrc")"
+if [ -z "$brakeLine" ] || [ "$ownsLine" -ge "$brakeLine" ]; then
+  echo "test-bridge-safety: handleAlphiClick must ask mcp::alphiOwnsPoint before alphiBrake (a box under Alphi is never flow)" >&2
   exit 1
 fi
 # 1a0 live check b': alphiBoxes gives the VISIBLE box (Object::getBounds() carries PlugData's invisible 6 px margin;

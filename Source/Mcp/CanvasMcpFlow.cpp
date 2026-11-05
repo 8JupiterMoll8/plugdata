@@ -444,12 +444,18 @@ bool CanvasMcpLayer::handleAlphiClick(juce::Point<int> canvasPt)
     // never flow; a click on a free part of Alphi goes on to the normal gate.
     if (!mcp::alphiOwnsPoint(toApproval(mcpAlphiFrame), alphiBoxes(), canvasPt.x, canvasPt.y, alphiView().second))
         return false;
-    // Just appeared (a new tab, the bridge just started, uncovered) or an approval chip left the glass less than
-    // 400 ms ago (review M2): not clickable, but the click is still Alphi's.
+    // The brake (mcp::alphiClickAct): flow ON + a click on his drawn face = OFF at once, through alphiBrake, which never
+    // turns flow on. The way ON: just appeared (a new tab, the bridge just started, uncovered, moved) or an approval
+    // chip left the glass less than 400 ms ago (review M2): not clickable, but the click is still Alphi's.
     auto const now = alphiNowMs();
-    if (!mcp::alphiClickAllowed(mcpAlphiShownSinceMs, now, canvas.pd->getMcp()->session.approvals.lastChipGoneMs()))
+    auto* host = canvas.pd->getMcp();
+    auto const act = mcp::alphiClickAct(host->session.flowMode.isOn(), mcpAlphiShownSinceMs, now, host->session.approvals.lastChipGoneMs());
+    if (act == mcp::AlphiClickAct::None)
         return true;
-    canvas.pd->getMcp()->alphiClicked(now);
+    if (act == mcp::AlphiClickAct::Brake)
+        host->alphiBrake(now);
+    else
+        canvas.pd->getMcp()->alphiClicked(now);
     canvas.repaint();
     if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
     return true;

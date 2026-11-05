@@ -3140,7 +3140,23 @@ void runFlowModeCases(Harness& h, PluginProcessor& processor, std::function<void
         auto off = h.replies.waitFor("/pd/flow_mode/changed", 2000);
         CHECK(off && off->str(0) == "off" && off->str(1) == "alphi");
         CHECK(!isOn());
-        CHECK(host->alphiClicked(t0 + 2000)); // on again, for the cases below
+        CHECK(host->alphiClicked(t0 + 2000));
+        CHECK(isOn());
+        // The brake (d1 live check 2026-11-05): a click on Alphi while flow is on turns it off through alphiBrake,
+        // which never turns it on: off already (another door won the race) stays off, with no event; it shares the
+        // double-click guard (the second half of a double click never turns flow back on).
+        h.replies.clear();
+        CHECK(!host->alphiBrake(t0 + 3000));
+        auto brake = h.replies.waitFor("/pd/flow_mode/changed", 2000);
+        CHECK(brake && brake->str(0) == "off" && brake->str(1) == "alphi");
+        CHECK(!isOn());
+        CHECK(!host->alphiClicked(t0 + 3100)); // the double click's second half: ignored, still off
+        CHECK(!isOn());
+        h.replies.clear();
+        CHECK(!host->alphiBrake(t0 + 4000)); // off already: stays off, no event
+        CHECK(!isOn());
+        CHECK(!h.replies.waitFor("/pd/flow_mode/changed", 200).has_value());
+        CHECK(host->alphiClicked(t0 + 5000)); // on again, for the cases below
         CHECK(isOn());
         // While on, no verb turns it off-and-on again or toggles it: only flow_mode_off switches (off).
         auto const cg = next("fx");
