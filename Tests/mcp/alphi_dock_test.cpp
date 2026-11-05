@@ -10,10 +10,13 @@
 //  - 300 boxes: one choice well under 1 ms.
 // Build + run: scripts/test-bridge-safety.sh
 #include "../../Source/Mcp/McpAlphiDock.h"
+#include "../../Source/Mcp/McpAlphiStrip.h"
+#include "../../Source/Mcp/McpApprovalState.h"
 
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <string>
 #include <vector>
 
 static int failures = 0;
@@ -478,8 +481,214 @@ static void speed()
     CHECK(us2 < 1000.0);
 }
 
+// Alphi drop 1 F3 (D6, review R4 / R7 / N1 / N8): the line strip beside the face. Left of the face in the right
+// corners, right of it in the left corners; screen-constant; shown only when its rect is inside the view and free of
+// padded boxes, covers (chips, pill, drawers, minimap) and the pointer; never in his hit frame, never a cover, never
+// a dock input; a click on a shown strip is swallowed (never Alphi's, never the canvas's).
+static void strip()
+{
+    std::printf("F3: the line strip\n");
+    using S = mcp::AlphiStripMetrics;
+    for (float zoom : { 0.5f, 1.0f, 2.39f }) {
+        auto const view = viewOf(40, 60, 1200, 800, zoom);
+        for (auto c : allCorners) {
+            auto const face = mcp::alphiCornerRect(view, zoom, c);
+            auto const st = mcp::alphiStripRect(face, c, view, zoom);
+            CHECK(st.w > 0 && st.h > 0);
+            CHECK(inside(st, view));
+            CHECK(!meets(st, face)); // never part of his frame
+            bool const right = c == AlphiCorner::bottomRight || c == AlphiCorner::topRight;
+            CHECK(right ? st.x + st.w <= face.x : st.x >= face.x + face.w);
+            // Screen-constant size.
+            CHECK(std::abs(static_cast<int>(std::lround(st.w * zoom)) - S::w) <= 2);
+            CHECK(std::abs(static_cast<int>(std::lround(st.h * zoom)) - S::h) <= 2);
+            // Bottom corners: bottom-aligned with the face; top corners: top-aligned.
+            bool const bottom = c == AlphiCorner::bottomRight || c == AlphiCorner::bottomLeft;
+            CHECK(bottom ? st.y + st.h == face.y + face.h : st.y == face.y);
+            // The hit rule: a point in the strip is never Alphi's (no flow click), and a shown strip swallows it.
+            int const px = st.x + st.w / 2, py = st.y + st.h / 2;
+            CHECK(!mcp::alphiOwnsPoint(face, {}, px, py, zoom));
+            CHECK(!mcp::alphiHit(face, px, py));
+            CHECK(mcp::alphiStripTakesClick(st, px, py));
+            CHECK(!mcp::alphiStripTakesClick({}, px, py)); // not shown: the click goes on (to the canvas)
+            CHECK(!mcp::alphiStripTakesClick(st, face.x + 1, face.y + 1));
+            // Free: shown.
+            mcp::AlphiStripInput in { st, view, zoom };
+            CHECK(mcp::alphiStripShown(in, {}, {}));
+            // A box under the strip (padded by 8 design px): not shown; the dock keeps its corner.
+            int const pad = static_cast<int>(std::ceil(8 / zoom));
+            Rects box { { st.x + st.w / 3, st.y + st.h + pad - 1, 30, 20 } };
+            CHECK(!mcp::alphiStripShown(in, box, {}));
+            Rects farBox { { st.x + st.w / 3, st.y + st.h + pad + 2, 30, 20 } };
+            CHECK(mcp::alphiStripShown(in, farBox, {}) == !meets(st, mcp::alphidock::grown(farBox[0], pad)));
+            // A cover (a chip stack, the pill, its drawers, the minimap) on it: not shown.
+            Rects cover { { st.x + 4, st.y + 4, 10, 10 } };
+            CHECK(!mcp::alphiStripShown(in, {}, cover));
+            // The pointer over it: hidden (N8: no hover re-show); next to it: shown.
+            mcp::AlphiStripInput hov = in;
+            hov.mouse = { true, px, py };
+            CHECK(!mcp::alphiStripShown(hov, {}, {}));
+            hov.mouse = { true, st.x - 3, st.y - 3 };
+            CHECK(mcp::alphiStripShown(hov, {}, {}));
+            hov.mouse = { false, px, py }; // not over this canvas
+            CHECK(mcp::alphiStripShown(hov, {}, {}));
+            // His face not drawn (covered, the edge tab): no strip.
+            mcp::AlphiStripInput gone = in;
+            gone.faceShown = false;
+            CHECK(!mcp::alphiStripShown(gone, {}, {}));
+        }
+    }
+    // A view too small for the strip beside the face: not shown (empty rect).
+    {
+        float const zoom = 1.0f;
+        auto const view = viewOf(0, 0, 200, 300, zoom);
+        auto const face = mcp::alphiCornerRect(view, zoom, AlphiCorner::bottomRight);
+        auto const st = mcp::alphiStripRect(face, AlphiCorner::bottomRight, view, zoom);
+        CHECK(st.w == 0 || st.h == 0);
+        CHECK(!mcp::alphiStripShown({ st, view, zoom }, {}, {}));
+    }
+}
+
+static void stripNeverMovesDockOrChips()
+{
+    std::printf("F3: the strip never changes the dock decision or the chips (N1)\n");
+    for (float zoom : { 0.5f, 1.0f, 2.39f }) {
+        auto const view = viewOf(0, 0, 1200, 800, zoom);
+        auto const face = mcp::alphiCornerRect(view, zoom, AlphiCorner::bottomRight);
+        auto const st = mcp::alphiStripRect(face, AlphiCorner::bottomRight, view, zoom);
+        // A box over the strip's spot, clear of the face's 8 design px pad: the corner stays bottom right, the strip hides.
+        int const pad = static_cast<int>(std::ceil(8 / zoom));
+        Rects boxes { { st.x, st.y, st.w - 2 * pad, st.h } };
+        auto const c = mcp::chooseCorner(view, zoom, boxes, {}, AlphiCorner::bottomRight);
+        CHECK(c.corner == AlphiCorner::bottomRight && !c.folded);
+        CHECK(!mcp::alphiStripShown({ st, view, zoom }, boxes, {}));
+        // The chips' keep-out is the face only: the chip stack's layout is the same with or without a line.
+        auto const keep = mcp::alphiCornerRect(view, zoom, AlphiCorner::bottomRight);
+        auto const a = mcp::approvalStackLayout(ApprovalRect { st.x + 10, st.y - 60, 40, 20 }, view, zoom, 200, 1, false, keep);
+        CHECK(!meets(a.frame, keep));
+        // A chip stack over the strip: the strip hides, the stack stays where it is.
+        Rects covers { a.frame };
+        bool const hidden = meets(st, a.frame);
+        CHECK(mcp::alphiStripShown({ st, view, zoom }, {}, covers) == !hidden);
+        auto const b = mcp::approvalStackLayout(ApprovalRect { st.x + 10, st.y - 60, 40, 20 }, view, zoom, 200, 1, false, keep);
+        CHECK(b.frame.x == a.frame.x && b.frame.y == a.frame.y && b.frame.w == a.frame.w && b.frame.h == a.frame.h);
+    }
+}
+
+static void stripLines()
+{
+    std::printf("F3: the strip's two lines\n");
+    using S = mcp::AlphiStripMetrics;
+    auto l = mcp::alphiStripLines("plays at -18 dB");
+    CHECK(l.size() == 1 && l[0] == "plays at -18 dB");
+    CHECK(mcp::alphiStripLines("").empty());
+    // Wrapped at a word, at most perLine code points each, at most two lines.
+    std::string const longText = "built, not heard yet: the filter sweep and the dusty delay are placed but nothing measured";
+    l = mcp::alphiStripLines(longText);
+    CHECK(l.size() == 2);
+    for (auto const& x : l)
+        CHECK(mcp::alphiStripCodePoints(x) <= S::perLine);
+    CHECK(l[0].back() != ' ' && l[1].front() != ' ');
+    // Over two lines: the second ends with an ellipsis, still within perLine.
+    std::string over;
+    for (int i = 0; i < 30; ++i)
+        over += "word ";
+    l = mcp::alphiStripLines(over);
+    CHECK(l.size() == 2 && l[1].size() >= 3 && l[1].substr(l[1].size() - 3) == "\xE2\x80\xA6"); // U+2026
+    CHECK(mcp::alphiStripCodePoints(l[1]) <= S::perLine);
+    // One word longer than a line: cut at whole code points (no broken UTF-8).
+    std::string umlauts;
+    for (int i = 0; i < 60; ++i)
+        umlauts += "\xC3\xBC"; // ü
+    l = mcp::alphiStripLines(umlauts);
+    CHECK(!l.empty() && mcp::alphiStripCodePoints(l[0]) == S::perLine);
+    for (auto const& x : l)
+        for (size_t i = 0; i < x.size(); ++i)
+            CHECK(static_cast<unsigned char>(x[i]) != 0xC3 || i + 1 < x.size());
+}
+
+// Alphi drop 1 F3 (D11): no free corner -> a 28 x 56 tab behind the view's right edge (one eye showing), at the first
+// edge spot free of padded boxes searching outward from the middle; no free spot -> the middle, under the boxes.
+// A click on the tab brings him out (never flow); the next click sends him back (a click on his face then is a normal
+// face click under the usual 400 ms gate).
+static void edgeTab()
+{
+    std::printf("F3: the edge tab\n");
+    using T = mcp::AlphiTabMetrics;
+    for (float zoom : { 0.5f, 1.0f, 2.39f }) {
+        auto const view = viewOf(10, 20, 1200, 800, zoom);
+        int const pad = static_cast<int>(std::ceil(8 / zoom));
+        // Full corners -> the tab.
+        Rects full;
+        for (auto c : allCorners) {
+            auto const r = mcp::alphiCornerRect(view, zoom, c);
+            full.push_back({ r.x - 20, r.y - 20, r.w + 40, r.h + 40 });
+        }
+        auto const choice = mcp::chooseCorner(view, zoom, full, {}, AlphiCorner::bottomRight);
+        CHECK(mcp::alphiUseTab(choice));
+        CHECK(!mcp::alphiUseTab(mcp::chooseCorner(view, zoom, {}, {}, AlphiCorner::bottomRight)));
+        // An empty edge: the middle, flush with the right edge, screen-constant.
+        auto const t0 = mcp::alphiEdgeTab(view, zoom, full);
+        CHECK(!t0.underBoxes);
+        CHECK(t0.rect.x + t0.rect.w == view.x + view.w);
+        CHECK(std::abs(static_cast<int>(std::lround(t0.rect.w * zoom)) - T::w) <= 2);
+        CHECK(std::abs(static_cast<int>(std::lround(t0.rect.h * zoom)) - T::h) <= 2);
+        CHECK(std::abs((t0.rect.y + t0.rect.h / 2) - (view.y + view.h / 2)) <= 1);
+        CHECK(inside(t0.rect, view));
+        // A box on the middle of the edge: the tab moves to the nearest free spot, never on a padded box.
+        Rects mid = full;
+        mid.push_back({ view.x + view.w - 60, view.y + view.h / 2 - 40, 100, 80 });
+        auto const t1 = mcp::alphiEdgeTab(view, zoom, mid);
+        CHECK(!t1.underBoxes);
+        for (auto const& b : mid)
+            CHECK(!meets(t1.rect, mcp::alphidock::grown(b, pad)));
+        CHECK(inside(t1.rect, view));
+        CHECK(std::abs((t1.rect.y + t1.rect.h / 2) - (view.y + view.h / 2)) < view.h / 4); // near the middle
+        // The whole edge full: the middle, drawn under the boxes.
+        Rects wall = full;
+        wall.push_back({ view.x + view.w - 80, view.y - 10, 100, view.h + 20 });
+        auto const t2 = mcp::alphiEdgeTab(view, zoom, wall);
+        CHECK(t2.underBoxes);
+        CHECK(t2.rect.y == t0.rect.y && t2.rect.x == t0.rect.x);
+    }
+    // The tab's clicks: out, back; the tab is never a flow click.
+    {
+        using mcp::AlphiPeek;
+        AlphiPeek p;
+        CHECK(!p.out());
+        auto r = p.click(true, false); // on the tab
+        CHECK(r.consumed && !r.mayFlow && p.out());
+        r = p.click(false, false); // the next click, elsewhere: back, the click goes on
+        CHECK(!r.consumed && !r.mayFlow && !p.out());
+        r = p.click(false, false); // tabbed, a click elsewhere: nothing
+        CHECK(!r.consumed && !r.mayFlow && !p.out());
+        p.click(true, false);
+        r = p.click(false, true); // out, a click on his face: a normal face click, then back
+        CHECK(r.mayFlow && !p.out());
+        // A click on the tab spot while out is not a tab click (he is out over it): judged as a face click or not.
+        p.click(true, false);
+        r = p.click(true, false);
+        CHECK(!r.mayFlow && !p.out());
+        p.click(true, false);
+        p.reset();
+        CHECK(!p.out());
+        // The face while out: at the right edge at the tab's height, inside the view, the normal 48 x 56 face.
+        auto const view = viewOf(0, 0, 1200, 800, 1.0f);
+        auto const tab = mcp::alphiEdgeTab(view, 1.0f, {});
+        auto const face = mcp::alphiOutRect(view, 1.0f, tab.rect);
+        CHECK(face.w == mcp::AlphiMetrics::w && face.h == mcp::AlphiMetrics::h);
+        CHECK(inside(face, view));
+        CHECK(face.y == tab.rect.y);
+        CHECK(face.x + face.w == view.x + view.w - mcp::AlphiMetrics::margin);
+    }
+}
+
 int main()
 {
+    strip();
+    stripNeverMovesDockOrChips();
+    stripLines();
+    edgeTab();
     cornerFrames();
     liveBug();
     skipsCovered();

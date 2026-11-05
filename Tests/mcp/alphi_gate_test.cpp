@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <optional>
 #include <vector>
 
 static int failures = 0;
@@ -147,8 +148,109 @@ static void whatRestartsTheGate()
     CHECK(p.shownSinceMs == 4000);
 }
 
+// D4 / D8 / D6 timing: the line's clock (2 s dizzy spiral for a failed final, then the line; 6 s, then a 0.5 s fade),
+// when the motion timer runs, when the 10 Hz tick wakes it, and a say's expiry repaint (W does not repaint on expiry).
+static void lineClock()
+{
+    std::printf("D8 / D6: the line clock (dizzy, fade)\n");
+    using T = mcp::AlphiLineTiming;
+    CHECK(T::dizzyMs == 2000 && T::showMs == 6000);
+    auto const slot = [](char const* text, mcp::AlphiSayPhase ph, char const* turn) {
+        mcp::AlphiSaySlot s;
+        s.text = text;
+        s.kind = ph == mcp::AlphiSayPhase::Failed ? mcp::AlphiSayKind::Fail : mcp::AlphiSayKind::Plain;
+        s.phase = ph;
+        s.turn = turn;
+        s.expiresAtMs = 1000000;
+        return s;
+    };
+    mcp::AlphiLineClock c;
+    CHECK(c.lineAlpha(0) == 0.0f && !c.dizzy(0) && !c.moving(0));
+    c.observe(slot("plays at -18 dB", mcp::AlphiSayPhase::Idle, "t1"), 1000);
+    CHECK(!c.dizzy(1000));
+    CHECK(c.lineAlpha(1000) == 1.0f && c.lineAlpha(6999) == 1.0f);
+    CHECK(c.lineAlpha(7250) > 0.0f && c.lineAlpha(7250) < 1.0f);
+    CHECK(c.moving(7250) && !c.moving(3000));
+    CHECK(c.lineAlpha(7500) == 0.0f && !c.moving(7600));
+    // The same line seen again (every paint) never restarts its clock (no hover re-show, no revive).
+    c.observe(slot("plays at -18 dB", mcp::AlphiSayPhase::Idle, "t1"), 7000);
+    CHECK(c.lineAlpha(7600) == 0.0f);
+    // A failed final: 2 s spiral, then the line for 6 s.
+    c.observe(slot("didn't work: no dac~", mcp::AlphiSayPhase::Failed, "t2"), 10000);
+    CHECK(c.dizzy(10000) && c.dizzy(11999) && !c.dizzy(12000));
+    CHECK(c.lineAlpha(11000) == 0.0f);
+    CHECK(c.lineAlpha(12000) == 1.0f && c.lineAlpha(17999) == 1.0f && c.lineAlpha(18600) == 0.0f);
+    CHECK(c.moving(10500));
+    CHECK(c.spiralTurns(10000) == 0.0f && c.spiralTurns(11000) > 0.0f);
+    // The line expired on the board (ttl): gone, no spiral.
+    c.observe(std::nullopt, 10500);
+    CHECK(!c.dizzy(10600) && c.lineAlpha(10600) == 0.0f);
+    // The same text in a new turn is a new line.
+    c.observe(slot("plays at -18 dB", mcp::AlphiSayPhase::Idle, "t3"), 20000);
+    CHECK(c.lineAlpha(20000) == 1.0f);
+    c.reset();
+    CHECK(c.lineAlpha(20000) == 0.0f);
+}
+
+static void motionTimer()
+{
+    std::printf("D4: the motion timer and its wake\n");
+    mcp::AlphiMotionInput in;
+    in.shown = true;
+    in.target = 0.5f;
+    in.drawn = 0.5f;
+    CHECK(!mcp::alphiMotionRun(in)); // steady: no timer
+    in.drawn = 0.49f;
+    CHECK(!mcp::alphiMotionRun(in)); // under 0.02: skipped
+    in.drawn = 0.47f;
+    CHECK(mcp::alphiMotionRun(in));
+    in.covered = true;
+    CHECK(!mcp::alphiMotionRun(in)); // covered: not drawn, nothing to move
+    in.covered = false;
+    in.shown = false;
+    CHECK(!mcp::alphiMotionRun(in));
+    in.shown = true;
+    in.drawn = in.target;
+    in.busy = true;
+    CHECK(mcp::alphiMotionRun(in)); // sparks / dots
+    in.busy = false;
+    in.lineMoving = true;
+    CHECK(mcp::alphiMotionRun(in)); // spiral, fade
+    in.lineMoving = false;
+    in.target = 0.0f;
+    in.drawn = 0.01f;
+    CHECK(mcp::alphiMotionRun(in)); // the last step to calm is always drawn
+    // The 10 Hz tick wakes it when the ceiling's block counter moved or the level crossed -60 dBFS.
+    CHECK(mcp::alphiPulseWake(10, 11, 0.0f, 0.0f));
+    CHECK(!mcp::alphiPulseWake(11, 11, 0.0f, 0.0f));
+    CHECK(mcp::alphiPulseWake(11, 11, 0.3f, 0.0f));
+    CHECK(mcp::alphiPulseWake(11, 11, 0.0f, 0.3f));
+    CHECK(!mcp::alphiPulseWake(11, 11, 0.3f, 0.4f));
+}
+
+static void sayExpiryRepaint()
+{
+    std::printf("D4: a say's expiry repaints (the board's visible key changes)\n");
+    mcp::AlphiSayBoard board;
+    auto const k0 = mcp::alphiSayKey(board, 1000);
+    auto say = mcp::alphiSayFrom("placed lop~", "busy", "building", "t1", 3000);
+    CHECK(say.has_value());
+    board.apply(*say, 1000);
+    auto const k1 = mcp::alphiSayKey(board, 1000);
+    CHECK(k1 != k0);
+    CHECK(mcp::alphiSayKey(board, 3999) == k1);
+    CHECK(mcp::alphiSayKey(board, 4000) == k0); // expired: the key changes, the tick repaints
+    auto fin = mcp::alphiSayFrom("built, not heard yet", "plain", "idle", "t1", 9000);
+    board.apply(*fin, 5000);
+    auto const k2 = mcp::alphiSayKey(board, 5000);
+    CHECK(k2 != k0 && k2 != k1);
+}
+
 int main()
 {
+    lineClock();
+    motionTimer();
+    sayExpiryRepaint();
     pulseAndSayKeepGate();
     alphiOnlyPaintRule();
     whatRestartsTheGate();

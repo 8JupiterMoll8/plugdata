@@ -414,4 +414,95 @@ private:
     int tries = 0;
 };
 
+// Alphi drop 1, F3 (D11, owner 2026-11-04): with no free corner Alphi no longer folds onto boxes; he becomes a 28 x 56
+// tab behind the view's right edge (one eye showing), at the first edge spot free of padded boxes, searching outward
+// from the middle; no free spot: the middle, drawn under the boxes' layer. A click on the tab brings him out over the
+// edge (the normal face, same flow-click rules: shown 400 ms before a click counts); the next click sends him back.
+// The tab itself is never a flow click (it has no hit frame of Alphi's). Tests/mcp/alphi_dock_test.cpp.
+struct AlphiTabMetrics {
+    static constexpr int w = 28; // design px (one eye showing)
+    static constexpr int h = 56;
+    static constexpr int step = 8; // design px between the edge spots tried
+};
+
+struct AlphiEdgeTab {
+    ApprovalRect rect;       // canvas coordinates, flush with the view's right edge
+    bool underBoxes = false; // no free spot: drawn under the boxes (their clicks stay theirs)
+};
+
+// No free corner for the mini face (chooseCorner folded it onto boxes or covers): the edge tab instead.
+inline bool alphiUseTab(AlphiDockChoice const& c) { return c.folded && c.covered > 0; }
+
+inline AlphiEdgeTab alphiEdgeTab(ApprovalRect view, float zoom, std::vector<ApprovalRect> const& boxes)
+{
+    using T = AlphiTabMetrics;
+    float const k = 1.0f / alphidock::safeZoom(zoom);
+    int const w = static_cast<int>(std::ceil(T::w * k));
+    int const h = static_cast<int>(std::ceil(T::h * k));
+    int const m = static_cast<int>(std::lround(AlphiMetrics::margin * k));
+    int const step = std::max(1, static_cast<int>(std::lround(T::step * k)));
+    int const pad = static_cast<int>(std::ceil(AlphiDockMetrics::boxPad * k));
+    int const x = view.x + view.w - w;
+    int const yMin = view.y + m, yMax = view.y + view.h - m - h;
+    int const mid = view.y + (view.h - h) / 2;
+    // Only boxes near the right edge can lie under the tab.
+    std::vector<ApprovalRect> near;
+    ApprovalRect const column { x - pad, view.y - pad, w + 2 * pad, view.h + 2 * pad };
+    for (auto const& b : boxes)
+        if (rectsIntersect(b, column))
+            near.push_back(alphidock::grown(b, pad));
+    auto const freeAt = [&](int y) {
+        ApprovalRect const r { x, y, w, h };
+        for (auto const& b : near)
+            if (rectsIntersect(r, b))
+                return false;
+        return true;
+    };
+    if (yMax >= yMin) {
+        for (int d = 0; mid - d >= yMin || mid + d <= yMax; d += step) {
+            if (mid - d >= yMin && mid - d <= yMax && freeAt(mid - d))
+                return { { x, mid - d, w, h }, false };
+            if (d > 0 && mid + d <= yMax && mid + d >= yMin && freeAt(mid + d))
+                return { { x, mid + d, w, h }, false };
+        }
+    }
+    return { { x, mid, w, h }, true };
+}
+
+// The face while out: the normal 48 x 56 face at the right edge (12 design px in), at the tab's height.
+inline ApprovalRect alphiOutRect(ApprovalRect view, float zoom, ApprovalRect tab)
+{
+    float const k = 1.0f / alphidock::safeZoom(zoom);
+    int const w = static_cast<int>(std::ceil(AlphiMetrics::w * k));
+    int const h = static_cast<int>(std::ceil(AlphiMetrics::h * k));
+    int const m = static_cast<int>(std::lround(AlphiMetrics::margin * k));
+    int const y = std::max(view.y + m, std::min(tab.y, view.y + view.h - m - h));
+    return { std::max(view.x + m, view.x + view.w - m - w), y, w, h };
+}
+
+// Tab or out. A click while tabbed: on the tab -> out (consumed, never flow); elsewhere -> nothing. Any click while out
+// sends him back; only a click on his face may then be a flow click (judged by the normal face path and its gate).
+class AlphiPeek {
+public:
+    struct Click {
+        bool consumed = false; // the tab took the click
+        bool mayFlow = false;  // the click lands on his out face: the normal face path judges it
+    };
+    Click click(bool onTab, bool onFace)
+    {
+        if (!isOut) {
+            if (!onTab) return {};
+            isOut = true;
+            return { true, false };
+        }
+        isOut = false;
+        return { false, onFace };
+    }
+    bool out() const { return isOut; }
+    void reset() { isOut = false; }
+
+private:
+    bool isOut = false;
+};
+
 } // namespace mcp

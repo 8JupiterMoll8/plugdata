@@ -17,9 +17,13 @@
 // (updateAlphiDock walks every box); the dock keeps its 10 Hz tick and every other paint.
 
 #include "McpAlphiDock.h"
+#include "McpAlphiSay.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <optional>
+#include <string>
 
 namespace mcp {
 
@@ -64,5 +68,126 @@ inline bool alphiOnlyPaint(ApprovalRect region, bool motionAsked, ApprovalRect f
         strip.w > 0 && strip.h > 0 ? alphidock::grown(strip, pad) : ApprovalRect {});
     return alphiRectContains(own, region);
 }
+
+// D4: the light ~30 Hz motion timer runs only while Alphi is drawn (shown, uncovered) and something on him moves:
+// the pulse level differs from the drawn one by minStep or more (or the last step to calm), sparks / dots (busy), or
+// the line's spiral or fade. It repaints his own rect (alphiMotionArea) and never touches the gate or the dock.
+struct AlphiMotionInput {
+    bool shown = false;      // drawn this paint (alphiShown, placed, not the edge tab)
+    bool covered = false;    // a chip stack / the pill covers him
+    float target = 0.0f;     // the pulse level the ceiling asks for (alphiPulse)
+    float drawn = 0.0f;      // the level last drawn
+    bool busy = false;       // sparks (building) or dots (measuring)
+    bool lineMoving = false; // the dizzy spiral or the line's fade (AlphiLineClock::moving)
+};
+
+struct AlphiMotionTiming {
+    static constexpr int intervalMs = 33;   // ~30 Hz
+    static constexpr float minStep = 0.02f; // smaller level changes are not repainted
+};
+
+inline bool alphiMotionRun(AlphiMotionInput const& in)
+{
+    if (!in.shown || in.covered) return false;
+    if (in.busy || in.lineMoving) return true;
+    float const d = std::fabs(in.target - in.drawn);
+    return d >= AlphiMotionTiming::minStep || (in.target <= 0.0f && in.drawn > 0.0f);
+}
+
+// The 10 Hz tick wakes the motion timer when the ceiling published a new block or the level crossed -60 dBFS
+// (level 0 <-> above 0).
+inline bool alphiPulseWake(std::uint64_t lastBlocks, std::uint64_t blocks, float lastLevel, float level)
+{
+    return blocks != lastBlocks || ((lastLevel > 0.0f) != (level > 0.0f));
+}
+
+// What the say board shows right now, as one key: a change (a new say, or a slot's ttl ran out; step W repaints only
+// on a new say) makes the 10 Hz tick repaint Alphi and his strip.
+inline std::string alphiSayKey(AlphiSayBoard const& board, std::int64_t nowMs)
+{
+    std::string k;
+    auto const add = [&k](std::optional<AlphiSaySlot> const& s) {
+        if (!s) {
+            k += "-|";
+            return;
+        }
+        k += std::to_string(static_cast<int>(s->phase)) + ":" + std::to_string(static_cast<int>(s->kind)) + ":" + s->turn
+            + ":" + s->text + "|";
+    };
+    add(board.activity(nowMs));
+    add(board.line(nowMs));
+    return k;
+}
+
+// D6 / D8: the line slot's clock. A new final line shows at once for showMs, then fades over fadeMs; a failed one
+// first spins him dizzy for dizzyMs (the fork shows the spiral whenever a failed final arrives; the server times the
+// quiet over stdio), then shows the line. Seeing the same line again never restarts it (no re-show).
+struct AlphiLineTiming {
+    static constexpr std::int64_t dizzyMs = 2000;
+    static constexpr std::int64_t showMs = 6000;
+    static constexpr std::int64_t fadeMs = 500;
+    static constexpr float spiralTurnsPerSecond = 1.5f;
+};
+
+class AlphiLineClock {
+public:
+    void observe(std::optional<AlphiSaySlot> const& line, std::int64_t nowMs)
+    {
+        if (!line) {
+            has = false;
+            return;
+        }
+        auto const key = std::to_string(static_cast<int>(line->phase)) + ":" + std::to_string(static_cast<int>(line->kind))
+            + ":" + line->turn + ":" + line->text;
+        if (!has || key != lastKey) {
+            startMs = nowMs;
+            failed = line->phase == AlphiSayPhase::Failed;
+            lastKey = key;
+        }
+        has = true;
+    }
+
+    bool dizzy(std::int64_t nowMs) const
+    {
+        return has && failed && nowMs >= startMs && nowMs - startMs < AlphiLineTiming::dizzyMs;
+    }
+
+    float spiralTurns(std::int64_t nowMs) const
+    {
+        if (!dizzy(nowMs)) return 0.0f;
+        return static_cast<float>(nowMs - startMs) / 1000.0f * AlphiLineTiming::spiralTurnsPerSecond;
+    }
+
+    float lineAlpha(std::int64_t nowMs) const
+    {
+        using T = AlphiLineTiming;
+        if (!has) return 0.0f;
+        std::int64_t const t0 = startMs + (failed ? T::dizzyMs : 0);
+        if (nowMs < t0) return 0.0f;
+        std::int64_t const dt = nowMs - t0;
+        if (dt < T::showMs) return 1.0f;
+        if (dt < T::showMs + T::fadeMs) return 1.0f - static_cast<float>(dt - T::showMs) / static_cast<float>(T::fadeMs);
+        return 0.0f;
+    }
+
+    // The spiral turns or the line fades: the motion timer keeps running.
+    bool moving(std::int64_t nowMs) const
+    {
+        float const a = lineAlpha(nowMs);
+        return dizzy(nowMs) || (a > 0.0f && a < 1.0f);
+    }
+
+    void reset()
+    {
+        has = false;
+        lastKey.clear();
+    }
+
+private:
+    bool has = false;
+    bool failed = false;
+    std::int64_t startMs = 0;
+    std::string lastKey;
+};
 
 } // namespace mcp
