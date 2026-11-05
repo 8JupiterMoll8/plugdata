@@ -32,6 +32,11 @@
 // gain, counters); setEnabled / setStandalone / requestBreakerReset / read from any thread. Counters are cumulative
 // since construction (startedAtMs, wall clock); readers work in deltas. clampBuffer() is the clamp alone, for other
 // device callbacks (MCPBridge::playVoiceTake).
+//
+// Alphi drop 1 (D2): once per block process() also publishes the block mean square of what LEAVES it (after the clamp
+// and the breaker gain), the loudest channel, plus a block counter (relaxed stores; readPulse() from any thread). The
+// canvas makes Alphi's eyes pulse from it (attack/release and dB on the GUI side). Inactive: 0 and no new block, so a
+// reader sees "stale" (nothing measured), never a last loud value. The breaker's own loudness is untouched.
 
 #include <algorithm>
 #include <atomic>
@@ -95,6 +100,17 @@ public:
     bool isActive() const noexcept { return isEnabled() && isStandalone(); }
     void requestBreakerReset() noexcept { resetRequested.store(true, std::memory_order_relaxed); }
 
+    // Alphi's pulse (D2): the loudest channel's mean square over the last block leaving the ceiling, and the count of
+    // blocks published so far (a reader that sees no new block for a while knows nothing was measured).
+    struct Pulse {
+        float meanSquare = 0.0f;
+        uint64_t blocks = 0;
+    };
+    Pulse readPulse() const noexcept
+    {
+        return { pulseMeanSquare.load(std::memory_order_relaxed), pulseBlocks.load(std::memory_order_relaxed) };
+    }
+
     Telemetry read() const noexcept
     {
         Telemetry t;
@@ -116,6 +132,7 @@ public:
         if (!isActive()) {
             if (wasActive) resetBreakerState();
             wasActive = false;
+            pulseMeanSquare.store(0.0f, std::memory_order_relaxed); // nothing measured: no new block either
             return;
         }
         if (!wasActive) resetBreakerState();
@@ -140,6 +157,7 @@ public:
         // the breaker gain, whose ramp is the same on every channel (same start, same step).
         uint64_t overs = 0, nonFinite = 0;
         double loudest = 0.0; // the highest mean square any channel reached in this block
+        double pulseLoudest = 0.0; // Alphi (D2): the loudest channel's block mean square AFTER the breaker gain
         double sharedEnd = 0.0;
         float gainEnd = gain;
         for (int ch = 0; ch < numChannels; ++ch) {
@@ -149,6 +167,7 @@ public:
             double ms = meanSquare[slot];
             double peakMs = ms;
             float g = gain;
+            double sumOut = 0.0;
             for (int i = 0; i < numSamples; ++i) {
                 clampSample(d[i], overs, nonFinite);
                 double const x = d[i];
@@ -158,7 +177,10 @@ public:
                     g = g > target ? std::fmax(target, g - step) : std::fmin(target, g + step);
                     d[i] *= g;
                 }
+                double const y = d[i];
+                sumOut += y * y;
             }
+            pulseLoudest = std::max(pulseLoudest, sumOut / static_cast<double>(numSamples));
             if (ms < 1e-30) ms = 0.0; // no denormals after long silence
             if (ch < kMaxChannels - 1)
                 meanSquare[slot] = ms;
@@ -178,6 +200,8 @@ public:
             lastClampMs.store(static_cast<int64_t>(nowMs), std::memory_order_relaxed);
         }
         breakerEngaged.store(engaged, std::memory_order_relaxed);
+        pulseMeanSquare.store(static_cast<float>(pulseLoudest), std::memory_order_relaxed);
+        pulseBlocks.store(++pulseBlockCount, std::memory_order_relaxed);
     }
 
 private:
@@ -240,9 +264,11 @@ private:
     std::atomic<uint64_t> breakerReleases { 0 };
     std::atomic<bool> breakerEngaged { false };
     std::atomic<int64_t> lastClampMs { -1 };
+    std::atomic<float> pulseMeanSquare { 0.0f }; // Alphi (D2)
+    std::atomic<uint64_t> pulseBlocks { 0 };
     int64_t const startedAtMs;
     static_assert(std::atomic<uint64_t>::is_always_lock_free && std::atomic<int64_t>::is_always_lock_free
-            && std::atomic<bool>::is_always_lock_free,
+            && std::atomic<bool>::is_always_lock_free && std::atomic<float>::is_always_lock_free,
         "the ceiling's counters must be lock-free (audio thread)");
 
     // Audio-thread state.
@@ -250,6 +276,7 @@ private:
     bool engaged = false;
     float gain = 1.0f;
     uint64_t framesCalm = 0;
+    uint64_t pulseBlockCount = 0; // Alphi (D2): blocks published (audio thread; pulseBlocks mirrors it)
     int lastNumChannels = 0;
     double meanSquare[kMaxChannels] = {};
     double alpha = 0.0, alphaRate = 0.0;

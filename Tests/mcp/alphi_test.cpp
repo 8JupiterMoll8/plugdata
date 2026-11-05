@@ -213,8 +213,86 @@ static void look()
     CHECK(on.glow && !off.glow);
 }
 
+// Alphi drop 1 F1 (D2, D3): the eyes pulse with the real output. alphiPulse maps the smoothed loudness (mean square)
+// to a level 0..1 (-60 dBFS -> 0, -6 dBFS -> 1) and the eye per look; calm (the resting look) below -60 dBFS, on
+// silence, NaN, and when no new block came for 200 ms ("nothing measured", never a claim of silence).
+static void pulse()
+{
+    std::printf("Alphi pulse\n");
+    auto const off = mcp::alphiLook(false);
+    auto const on = mcp::alphiLook(true);
+    using P = mcp::AlphiPulseMetrics;
+    auto const ms = [](double db) { return static_cast<float>(std::pow(10.0, db / 10.0)); };
+    // The curve: dB-linear, -60 -> 0, -6 -> 1, monotonic, clamped.
+    CHECK(mcp::alphiPulse(ms(-60.0), 0, off).level == 0.0f);
+    CHECK(std::fabs(mcp::alphiPulse(ms(-6.0), 0, off).level - 1.0f) < 1e-4f);
+    CHECK(mcp::alphiPulse(1.0f, 0, off).level == 1.0f);
+    CHECK(mcp::alphiPulse(4.0f, 0, off).level == 1.0f);
+    CHECK(std::fabs(mcp::alphiPulse(ms(-33.0), 0, off).level - 0.5f) < 1e-3f);
+    float prev = -1.0f;
+    for (int db = -80; db <= 0; db += 2) {
+        float const l = mcp::alphiPulse(ms(db), 10, on).level;
+        CHECK(l >= prev && l >= 0.0f && l <= 1.0f);
+        prev = l;
+    }
+    // Silence, NaN, inf, negative: calm.
+    for (float bad : { 0.0f, -1.0f, std::nanf(""), INFINITY, -INFINITY }) {
+        auto const p = mcp::alphiPulse(bad, 0, on);
+        CHECK(p.level == 0.0f && p.calm);
+    }
+    CHECK(mcp::alphiPulse(ms(-61.0), 0, on).calm);
+    CHECK(!mcp::alphiPulse(ms(-18.0), 0, on).calm);
+    // Stale: no new block for 200 ms (device stopped, ceiling off, plugin build) -> calm; a negative age too.
+    CHECK(!mcp::alphiPulse(ms(-18.0), P::staleMs, on).calm);
+    CHECK(mcp::alphiPulse(ms(-18.0), P::staleMs + 1, on).calm);
+    CHECK(mcp::alphiPulse(ms(-18.0), 5000, on).level == 0.0f);
+    CHECK(mcp::alphiPulse(ms(-18.0), -1, on).calm);
+    // The off look: the flat dash grows from 2.2 to ~5 design px; the on look: the eye radius grows; calm = resting.
+    auto const offRest = mcp::alphiPulse(0.0f, 0, off);
+    auto const offFull = mcp::alphiPulse(1.0f, 0, off);
+    CHECK(std::fabs(offRest.dashHeight - 2.2f) < 1e-4f && std::fabs(offFull.dashHeight - 5.0f) < 1e-4f);
+    CHECK(offRest.eyeRadius == off.eyeRadius && offFull.eyeRadius == off.eyeRadius);
+    auto const onRest = mcp::alphiPulse(0.0f, 0, on);
+    auto const onFull = mcp::alphiPulse(1.0f, 0, on);
+    CHECK(onRest.eyeRadius == on.eyeRadius);
+    CHECK(onFull.eyeRadius > on.eyeRadius * 1.3f && onFull.eyeRadius < on.eyeRadius * 1.6f);
+    CHECK(onRest.dashHeight == onFull.dashHeight);
+    auto const onMid = mcp::alphiPulse(ms(-33.0), 0, on);
+    CHECK(onMid.eyeRadius > onRest.eyeRadius && onMid.eyeRadius < onFull.eyeRadius);
+    // From a level: the same mapping the canvas uses after its attack/release.
+    CHECK(mcp::alphiEyesAt(0.0f, on).eyeRadius == on.eyeRadius);
+    CHECK(mcp::alphiEyesAt(1.0f, off).dashHeight == offFull.dashHeight);
+}
+
+// The canvas's attack / release (D2: 30 ms / 150 ms, on the GUI side): the shown level moves toward the target by at
+// most dt/30 up and dt/150 down per ms, so a stop is calm within 150 ms (+ the 200 ms stale wait when nothing comes).
+static void pulseFollow()
+{
+    std::printf("Alphi pulse attack / release\n");
+    using P = mcp::AlphiPulseMetrics;
+    CHECK(P::attackMs == 30.0f && P::releaseMs == 150.0f);
+    CHECK(std::fabs(mcp::alphiPulseFollow(0.0f, 1.0f, 15.0f) - 0.5f) < 1e-5f);
+    CHECK(mcp::alphiPulseFollow(0.0f, 1.0f, 30.0f) == 1.0f);
+    CHECK(mcp::alphiPulseFollow(0.0f, 1.0f, 100.0f) == 1.0f); // never past the target
+    CHECK(std::fabs(mcp::alphiPulseFollow(1.0f, 0.0f, 75.0f) - 0.5f) < 1e-5f);
+    CHECK(mcp::alphiPulseFollow(1.0f, 0.0f, 150.0f) == 0.0f);
+    CHECK(mcp::alphiPulseFollow(0.4f, 0.4f, 33.0f) == 0.4f);
+    // Bad input: NaN / negative dt keeps the level; a bad level or target is calm.
+    CHECK(mcp::alphiPulseFollow(0.4f, 1.0f, std::nanf("")) == 0.4f);
+    CHECK(mcp::alphiPulseFollow(0.4f, 1.0f, -5.0f) == 0.4f);
+    CHECK(mcp::alphiPulseFollow(std::nanf(""), 1.0f, 10.0f) >= 0.0f);
+    CHECK(mcp::alphiPulseFollow(0.4f, std::nanf(""), 1000.0f) == 0.0f);
+    // L1: a stop (target 0 from full) is at rest within 0.5 s, even with the 200 ms stale wait first.
+    float l = 1.0f;
+    for (int t = 0; t < 300; t += 33)
+        l = mcp::alphiPulseFollow(l, 0.0f, 33.0f);
+    CHECK(l == 0.0f);
+}
+
 int main()
 {
+    pulse();
+    pulseFollow();
     placement();
     chipsKeepClear();
     docked();

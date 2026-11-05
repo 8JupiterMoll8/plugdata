@@ -565,6 +565,67 @@ int main()
         CHECK(c.read().clampedBlocks == 0);
     }
 
+    // Alphi drop 1 F1 (D2): once per block the ceiling publishes the block mean square of what leaves it (after the
+    // clamp AND the breaker gain), the loudest channel, plus a block counter; the inactive ceiling publishes 0 and
+    // counts nothing (= stale: Alphi calm, "nothing measured").
+    {
+        OutputCeiling c;
+        turnOn(c);
+        CHECK(c.readPulse().blocks == 0);
+        CHECK(c.readPulse().meanSquare == 0.0f);
+        Feed f(c, 2, kBlock);
+        f.oneBlock(sine(0.5f, 441.0), 0, kBlock); // ch 0 at 0.5 peak (mean square 0.125), ch 1 silent
+        auto p = c.readPulse();
+        CHECK(p.blocks == 1);
+        CHECK(std::fabs(p.meanSquare - 0.125f) < 0.003f); // the loudest channel, not the mean of the two
+        f.oneBlock(sine(0.25f, 441.0), -1, kBlock);
+        p = c.readPulse();
+        CHECK(p.blocks == 2);
+        CHECK(std::fabs(p.meanSquare - 0.03125f) < 0.001f); // this block only (no smoothing on the audio thread)
+        f.oneBlock(silence(), -1, kBlock);
+        CHECK(c.readPulse().meanSquare == 0.0f);
+        CHECK(c.readPulse().blocks == 3);
+        // A hot block: what leaves the ceiling is clamped to +-1, so the mean square never exceeds 1.
+        f.oneBlock(square(kPlus12Db), -1, kBlock);
+        CHECK(c.readPulse().meanSquare <= 1.0f && c.readPulse().meanSquare > 0.95f);
+    }
+    {
+        // After the breaker gain: engaged, the output (and so the pulse) is ~-20 dB under the full-scale input.
+        OutputCeiling c;
+        turnOn(c);
+        Feed f(c, 2, kBlock);
+        CHECK(f.untilEngaged(square(1.0f), -1, 2000.0) > 0.0);
+        f.run(square(1.0f), -1, 100.0); // past the 20 ms attack
+        float const g2 = OutputCeiling::kBreakerGain * OutputCeiling::kBreakerGain;
+        CHECK(std::fabs(c.readPulse().meanSquare - g2) < 0.002f);
+        CHECK(f.lastPeak <= OutputCeiling::kBreakerGain + 1e-6f); // the breaker itself is unchanged
+    }
+    {
+        // Inactive (switched off, or a plugin build): 0 and no new block; null channels publish nothing.
+        OutputCeiling c;
+        turnOn(c);
+        Feed f(c, 1, kBlock);
+        f.oneBlock(sine(0.5f, 441.0), -1, kBlock);
+        CHECK(c.readPulse().meanSquare > 0.1f);
+        auto const before = c.readPulse().blocks;
+        c.setEnabled(false);
+        f.oneBlock(sine(0.5f, 441.0), -1, kBlock);
+        CHECK(c.readPulse().meanSquare == 0.0f);
+        CHECK(c.readPulse().blocks == before);
+        CHECK(f.lastBitEqual); // inactive: the output is untouched, as before
+        c.setEnabled(true);
+        c.setStandalone(false);
+        f.oneBlock(sine(0.5f, 441.0), -1, kBlock);
+        CHECK(c.readPulse().meanSquare == 0.0f && c.readPulse().blocks == before);
+        c.setStandalone(true);
+        c.process(nullptr, 2, kBlock, kRate, 0);
+        CHECK(c.readPulse().blocks == before);
+        f.oneBlock(sine(0.5f, 441.0), -1, kBlock);
+        CHECK(c.readPulse().blocks == before + 1);
+        // Idle breaker: a signal inside +-1 still leaves bit-identical with the pulse publish in the loop.
+        CHECK(f.lastBitEqual);
+    }
+
     std::printf(failures ? "output_ceiling_test: %d FAILED\n" : "output_ceiling_test: OK\n", failures);
     return failures ? 1 : 0;
 }

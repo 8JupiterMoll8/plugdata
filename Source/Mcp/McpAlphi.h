@@ -117,4 +117,73 @@ inline AlphiLook alphiLook(bool on)
     return { { 120, 135, 150, 170 }, 2.6f, true, false, false, { 150, 150, 146, 255 }, false, "" };
 }
 
+// Alphi drop 1, F1 (D2, D3; docs/plans/alphi-drop1-alive-steps.md in the MCP repo): the eyes pulse with the sound
+// that really leaves PlugData. The output ceiling publishes the loudest channel's block mean square after its breaker
+// gain and a block counter (OutputCeiling::readPulse, audio thread, no AI); the canvas follows it with a 30 ms attack /
+// 150 ms release (alphiPulseFollow) and draws the eyes from the level (alphiEyesAt). Calm eyes mean "nothing
+// measured" (silence, below -60 dBFS, no new block for 200 ms: device stopped, ceiling off, plugin build), never a
+// claim that it is silent.
+struct AlphiPulseMetrics {
+    static constexpr float floorDb = -60.0f;    // at or below: the resting look
+    static constexpr float topDb = -6.0f;       // at or above: the full pulse
+    static constexpr std::int64_t staleMs = 200; // no new block for longer: calm
+    static constexpr float attackMs = 30.0f;    // level 0 -> 1 at most this fast
+    static constexpr float releaseMs = 150.0f;  // level 1 -> 0 at most this fast
+    static constexpr float dashRest = 2.2f;     // off look: the flat dash's height (design px) at rest ...
+    static constexpr float dashFull = 5.0f;     // ... and at the full pulse
+    static constexpr float radiusGrow = 1.45f;  // on look: the eye radius at the full pulse, times the resting one
+};
+
+struct AlphiEyes {
+    float level = 0.0f;      // 0..1
+    float eyeRadius = 0.0f;  // design px (the on look's dots; the off look keeps its own)
+    float dashHeight = AlphiPulseMetrics::dashRest; // design px (the off look's flat dashes)
+    bool calm = true;        // the resting look
+};
+
+// The eyes at a level 0..1 for this look (D3): off = the dash grows 2.2 -> 5 px, on = the radius grows.
+inline AlphiEyes alphiEyesAt(float level, AlphiLook const& look)
+{
+    using P = AlphiPulseMetrics;
+    if (!(level > 0.0f)) level = 0.0f; // NaN and below 0
+    if (level > 1.0f) level = 1.0f;
+    AlphiEyes e;
+    e.level = level;
+    e.calm = level <= 0.0f;
+    e.eyeRadius = look.sleepy ? look.eyeRadius : look.eyeRadius * (1.0f + (P::radiusGrow - 1.0f) * level);
+    e.dashHeight = look.sleepy ? P::dashRest + (P::dashFull - P::dashRest) * level : P::dashRest;
+    return e;
+}
+
+// The level a mean square (`ms`, 0..1 = 0 dBFS) stands for: dB-linear from -60 dBFS (0) to -6 dBFS (1); 0 when the
+// value is not a positive finite number.
+inline float alphiPulseLevel(float ms)
+{
+    using P = AlphiPulseMetrics;
+    if (!(ms > 0.0f) || !std::isfinite(ms)) return 0.0f;
+    float const db = 10.0f * std::log10(ms);
+    float const l = (db - P::floorDb) / (P::topDb - P::floorDb);
+    return l <= 0.0f ? 0.0f : (l >= 1.0f ? 1.0f : l);
+}
+
+// The eyes for a mean square that is `ageMs` old (since the ceiling's block counter last moved).
+inline AlphiEyes alphiPulse(float ms, std::int64_t ageMs, AlphiLook const& look)
+{
+    bool const fresh = ageMs >= 0 && ageMs <= AlphiPulseMetrics::staleMs;
+    return alphiEyesAt(fresh ? alphiPulseLevel(ms) : 0.0f, look);
+}
+
+// The canvas's attack / release: from `level` toward `target` (both 0..1) over `dtMs`, linear in the level (= in dB).
+inline float alphiPulseFollow(float level, float target, float dtMs)
+{
+    using P = AlphiPulseMetrics;
+    if (!(level >= 0.0f)) level = 0.0f;
+    if (level > 1.0f) level = 1.0f;
+    if (!(target >= 0.0f)) target = 0.0f;
+    if (target > 1.0f) target = 1.0f;
+    if (!(dtMs > 0.0f) || !std::isfinite(dtMs)) return level;
+    if (target > level) return std::fmin(target, level + dtMs / P::attackMs);
+    return std::fmax(target, level - dtMs / P::releaseMs);
+}
+
 } // namespace mcp
