@@ -5,7 +5,7 @@
 */
 
 // Alphi drop 1: what Alphi says (the say board, Source/Mcp/McpAlphiSay.h). Step W stores the say and asks for a
-// repaint; F3 adds the strip and the say drawing to this file. The server's services/alphi-bubble.ts is the only
+// repaint; F3 draws it (the strip, sparks, dots, spiral and the motion timer) in CanvasMcpAlphiStrip.cpp. The server's services/alphi-bubble.ts is the only
 // sender of /pd/alphi_say. Display only: this file never touches the patch, the Pd lock or flow mode, and never
 // names the flow switch or the click on Alphi (scripts/test-bridge-safety.sh).
 

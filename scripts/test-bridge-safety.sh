@@ -148,9 +148,11 @@ if [ -n "$callers" ]; then
   exit 1
 fi
 # Alphi drop 1 (W): what Alphi says is display only. The say code (the board McpAlphiSay.h and CanvasMcpAlphiSay.cpp,
-# which holds the /pd/alphi_say handler and, from F3, the strip and say drawing) never names the flow switch or the
+# which holds the /pd/alphi_say handler; from F3 also the strip, motion and say drawing: CanvasMcpAlphiStrip.cpp,
+# McpAlphiStrip.h, McpAlphiMotion.h) never names the flow switch or the
 # click on Alphi, comments included, and never takes the Pd lock or queues Pd work. Only the handler writes the board.
-sayFiles=("$root/Source/Mcp/McpAlphiSay.h" "$root/Source/Mcp/CanvasMcpAlphiSay.cpp")
+sayFiles=("$root/Source/Mcp/McpAlphiSay.h" "$root/Source/Mcp/CanvasMcpAlphiSay.cpp" "$root/Source/Mcp/CanvasMcpAlphiStrip.cpp" \
+  "$root/Source/Mcp/McpAlphiStrip.h" "$root/Source/Mcp/McpAlphiMotion.h")
 for f in "${sayFiles[@]}"; do
   if [ ! -f "$f" ]; then
     echo "test-bridge-safety: $f is missing (the say code moved: update this check)" >&2

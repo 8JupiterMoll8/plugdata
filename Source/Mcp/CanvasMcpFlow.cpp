@@ -26,6 +26,7 @@
 #include "Mcp/McpAlphi.h"
 #include "Mcp/McpAlphiDock.h"
 #include "Mcp/McpAlphiMotion.h"
+#include "Mcp/McpAlphiStrip.h"
 
 namespace {
 
@@ -72,8 +73,12 @@ void CanvasMcpLayer::alphiVisibilityTick()
         }
         return;
     }
-    if (!showing || !alphiShown())
+    if (!showing || !alphiShown()) {
+        alphiMotionStop();
         return;
+    }
+    // Alphi drop 1 D4: the 10 Hz tick wakes the motion timer (a new block, a say, its expiry, the gaze).
+    alphiMotionWake();
     // 1a0 review H2: the move is DECIDED here, never inside a paint (a partial NVG render redraws only the damaged
     // area). A staged move asks for a full repaint; paintOverObjects applies it only when the render covers both the
     // old and the new frame (AlphiDock::apply), and asks at most maxApplyTries times (review L1).
@@ -179,12 +184,34 @@ std::optional<mcp::ApprovalRect> CanvasMcpLayer::alphiKeepOut(mcp::ApprovalRect 
 {
     if (!alphiShown())
         return std::nullopt;
+    // Alphi drop 1 D11: tabbed or out, the chips keep clear of what is drawn (the tab or the out face).
+    if (mcpAlphiDock.folded()) {
+        if (!mcpAlphiTabFrame.isEmpty())
+            return toApproval(mcpAlphiTabFrame);
+        if (!mcpAlphiFrame.isEmpty())
+            return toApproval(mcpAlphiFrame);
+    }
     return mcp::alphiCornerRect(view, zoom, mcpAlphiDock.corner());
+}
+
+bool CanvasMcpLayer::alphiDockPassNeeded()
+{
+    // Review N3 / D4: a paint the motion timer asked for that stays near Alphi (and his strip) skips the dock pass
+    // (updateAlphiDock walks every box); mcpAlphiPaintBoxes from the last full pass stay. Any other paint runs it.
+    bool const asked = mcpAlphiMotionAsked;
+    mcpAlphiMotionAsked = false;
+    if (!asked || mcpAlphiFrame.isEmpty() || !alphiShown())
+        return true;
+    auto const [view, zoom] = alphiView();
+    auto const face = toApproval(mcpAlphiFrame);
+    auto const strip = mcp::alphiStripRect(face, mcpAlphiFaceCorner, view, zoom);
+    return !mcp::alphiOnlyPaint(toApproval(mcpAlphiRenderRegion), true, face, strip, zoom);
 }
 
 void CanvasMcpLayer::paintAlphi(NVGcontext* nvg)
 {
     mcpAlphiFrame = {};
+    mcpAlphiTabFrame = {};
     auto const region = toApproval(mcpAlphiRenderRegion);
     mcpAlphiRenderRegion = {}; // used once: a paint that skipped paintUnderObjects never reuses a stale full region
     if (!mcpAlphiVisibilityTimer && alphiShown()) {
@@ -194,10 +221,43 @@ void CanvasMcpLayer::paintAlphi(NVGcontext* nvg)
     }
     if (!alphiShown() || !mcpAlphiDock.placed()) {
         mcpAlphiShownSinceMs = 0;
+        mcpAlphiTabUnder = false;
+        mcpAlphiTabFrameUnder = {};
+        mcpAlphiPeek.reset();
         return;
     }
     auto const [view, zoom] = alphiView();
-    auto const r = mcp::alphiCornerRect(view, zoom, mcpAlphiDock.corner());
+    auto r = mcp::alphiCornerRect(view, zoom, mcpAlphiDock.corner());
+    mcpAlphiFaceCorner = mcpAlphiDock.corner();
+    // Alphi drop 1 D11: no free corner (the dock folded him onto boxes or covers) -> the edge tab at the right edge, never
+    // a flow click (it has no face frame; its click brings him out, CanvasMcpLayer::handleAlphiClick). Out: the normal
+    // face at the right edge, with the normal 400 ms gate (0 while tabbed, so it starts at his first full paint out).
+    if (!mcpAlphiDock.folded())
+        mcpAlphiPeek.reset();
+    if (mcpAlphiDock.folded()) {
+        auto const tab = mcp::alphiEdgeTab(view, zoom, mcpAlphiPaintBoxes);
+        if (!mcpAlphiPeek.out()) {
+            mcpAlphiShownSinceMs = 0;
+            juce::Rectangle<int> const tabFrame(tab.rect.x, tab.rect.y, tab.rect.w, tab.rect.h);
+            // Under the boxes it is drawn in paintUnderObjects from this frame: one repaint when it arrives or moves.
+            bool const newUnder = tab.underBoxes && (!mcpAlphiTabUnder || mcpAlphiTabFrameUnder != tabFrame);
+            mcpAlphiTabUnder = tab.underBoxes;
+            mcpAlphiTabFrameUnder = tab.underBoxes ? tabFrame : juce::Rectangle<int> {};
+            mcpAlphiTabFrame = tabFrame;
+            if (newUnder) {
+                auto const area = tabFrame.expanded(2);
+                canvas.repaint(area);
+                if (canvas.editor) canvas.editor->nvgSurface.invalidateArea(canvas.editor->nvgSurface.getLocalArea(&canvas, area));
+            }
+            if (!tab.underBoxes)
+                paintAlphiTab(nvg);
+            return;
+        }
+        r = mcp::alphiOutRect(view, zoom, tab.rect);
+        mcpAlphiFaceCorner = mcp::AlphiCorner::topRight; // his strip sits left of the out face, top-aligned
+    }
+    mcpAlphiTabUnder = false;
+    mcpAlphiTabFrameUnder = {};
     juce::Rectangle<int> const frame(r.x, r.y, r.w, r.h);
 
     // The 400 ms click gate (mcp::alphiGateAfterPaint): a chip stack that could not move off it (a tiny or split view),
@@ -267,23 +327,36 @@ void CanvasMcpLayer::paintAlphi(NVGcontext* nvg)
     // Screen: dark glass.
     nanovg::nvgDrawRoundedRect(nvg, 8.0f, 17.0f, 32.0f, 21.0f, nanovg::nvgRGBA(24, 26, 31, 255), nanovg::nvgRGBA(10, 11, 14, 255), 6.0f);
 
-    // Eyes.
+    // Eyes. Alphi drop 1: they pulse with the real output (D2/D3: the off look's dash grows, the on look's radius),
+    // look toward the selection (D5) and spin dizzy for 2 s after a failed turn (D8); CanvasMcpAlphiSay.cpp.
+    auto const sayNow = mcp::alphiSayNowMs();
+    alphiMotionSample(sayNow);
+    auto const eyes = alphiEyesNow(look);
+    auto const gaze = alphiGazeNow(r);
+    mcpAlphiGazeDrawn = gaze;
+    bool const dizzy = mcpAlphiLineClock.dizzy(sayNow);
     float const eyeY = 27.5f;
-    for (float ex : { cx - 7.0f, cx + 7.0f }) {
+    for (float ex0 : { cx - 7.0f, cx + 7.0f }) {
+        if (dizzy) {
+            paintAlphiDizzyEye(nvg, ex0, eyeY, look.eye, sayNow);
+            continue;
+        }
+        float const ex = ex0 + gaze.dx, ey = eyeY + gaze.dy;
         if (look.glow) {
             nanovg::nvgBeginPath(nvg);
-            nanovg::nvgCircle(nvg, ex, eyeY, look.eyeRadius * 2.1f);
+            nanovg::nvgCircle(nvg, ex, ey, eyes.eyeRadius * 2.1f);
             nanovg::nvgFillColor(nvg, rgba(look.eye, 0.22f));
             nanovg::nvgFill(nvg);
         }
         nanovg::nvgBeginPath(nvg);
         if (look.sleepy)
-            nanovg::nvgRoundedRect(nvg, ex - look.eyeRadius * 1.3f, eyeY - 1.1f, look.eyeRadius * 2.6f, 2.2f, 1.1f);
+            nanovg::nvgRoundedRect(nvg, ex - look.eyeRadius * 1.3f, ey - eyes.dashHeight * 0.5f, look.eyeRadius * 2.6f, eyes.dashHeight, eyes.dashHeight * 0.5f);
         else
-            nanovg::nvgCircle(nvg, ex, eyeY, look.eyeRadius);
+            nanovg::nvgCircle(nvg, ex, ey, eyes.eyeRadius);
         nanovg::nvgFillColor(nvg, rgba(look.eye));
         nanovg::nvgFill(nvg);
     }
+    paintAlphiFx(nvg, sayNow); // sparks (building), dots (measuring)
 
     // Chin: "FLOW" while on.
     if (look.label) {
@@ -297,7 +370,30 @@ void CanvasMcpLayer::paintAlphi(NVGcontext* nvg)
 
 bool CanvasMcpLayer::handleAlphiClick(juce::Point<int> canvasPt)
 {
-    if (!alphiShown() || mcpAlphiFrame.isEmpty() || !mcpAlphiFrame.contains(canvasPt))
+    if (!alphiShown())
+        return false;
+    // Alphi drop 1 D6: a click on his strip (as drawn) is swallowed: never his (no flow), never the canvas's.
+    if (mcp::alphiStripTakesClick(toApproval(mcpAlphiStripFrame), canvasPt.x, canvasPt.y))
+        return true;
+    // D11: the edge tab. A click on it brings him out and is never flow; while out, the next click sends him back, and
+    // only a click on his out face goes on to the face rules below (frame, boxes, 400 ms gate).
+    if (mcpAlphiDock.folded()) {
+        auto const noBoxes = std::vector<mcp::ApprovalRect> {};
+        bool const onTab = !mcpAlphiTabFrame.isEmpty()
+            && mcp::alphiOwnsPoint(toApproval(mcpAlphiTabFrame), mcpAlphiTabUnder ? alphiBoxes() : noBoxes, canvasPt.x, canvasPt.y, alphiView().second);
+        bool const onFace = !mcpAlphiFrame.isEmpty() && mcpAlphiFrame.contains(canvasPt);
+        bool const wasOut = mcpAlphiPeek.out();
+        auto const peek = mcpAlphiPeek.click(onTab, onFace);
+        if (wasOut != mcpAlphiPeek.out()) {
+            canvas.repaint();
+            if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+        }
+        if (peek.consumed)
+            return true;
+        if (!peek.mayFlow)
+            return false;
+    }
+    if (mcpAlphiFrame.isEmpty() || !mcpAlphiFrame.contains(canvasPt))
         return false;
     // Covered right now (review L2: the pill or a chip arrived since the last paint) or on a hidden tab: not Alphi's
     // click at all; what covers it takes it.

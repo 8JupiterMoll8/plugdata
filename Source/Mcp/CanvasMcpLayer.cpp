@@ -62,6 +62,9 @@ void CanvasMcpLayer::paintUnderObjects(NVGcontext* nvg, Rectangle<int> invalidRe
 {
     // Big Alphi 1a0 review H2: what this render redraws (canvas coordinates), for Alphi's move and click gate.
     mcpAlphiRenderRegion = invalidRegion;
+    // Alphi drop 1 D11: with no free spot on the right edge his tab is drawn under the boxes (CanvasMcpAlphiSay.cpp).
+    if (mcpAlphiTabUnder && !mcpAlphiTabFrameUnder.isEmpty())
+        paintAlphiTab(nvg);
     // PRD overlay: titled regions drawn BEHIND the objects (structure at a glance).
     if (canvas.pd && shouldShowAIRegions() && !canvas.pd->getMcp()->session.getMcpRegions().empty()) {
         for (auto const& r : canvas.pd->getMcp()->session.getMcpRegions()) {
@@ -1041,12 +1044,16 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
 
     // Big Alphi 1a0: Alphi's corner first (no box, chip stack, pill or drawer under it), so the chips are laid out
     // around the corner it takes (CanvasMcpFlow.cpp, McpAlphiDock.h).
-    updateAlphiDock();
+    // Alphi drop 1 (review N3): a paint that is only Alphi's own motion skips the dock pass (CanvasMcpFlow.cpp).
+    if (alphiDockPassNeeded())
+        updateAlphiDock();
     // P12c approval chips: one per pending record, clamped inside the visible viewport (CanvasMcpApproval.cpp).
     paintApprovalChips(nvg);
     // P12a.1: Alphi, the flow-mode switch, in its corner of the view (CanvasMcpFlow.cpp). After the chips: they are laid
     // out around it, and when one could not move off it (a tiny view) Alphi is not drawn at all (review M2).
     paintAlphi(nvg);
+    // Alphi drop 1 D6: his one line (or the busy text) beside the face, where it is free (CanvasMcpAlphiSay.cpp).
+    paintAlphiStrip(nvg);
     // Multimodal Pen / Sketch Ink Overlay (Rendered directly on GPU in canvas coords)
     renderSketchOverlay(nvg);
 

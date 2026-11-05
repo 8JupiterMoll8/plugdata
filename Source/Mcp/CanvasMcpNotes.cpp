@@ -11,6 +11,7 @@
 
 #include "Mcp/CanvasMcpLayer.h"
 #include "Mcp/McpAlphi.h"
+#include "Mcp/McpAlphiStrip.h"
 #include "Sidebar/Sidebar.h"
 #include "Sidebar/CopilotPanel.h"
 #include "Canvas.h"
@@ -211,6 +212,12 @@ bool CanvasMcpLayer::isPointOverNote(Point<int> canvasPt) const
     // round 3: per point: a point inside a box under Alphi (8 px pad) is the box's / the canvas's.
     if (!mcpAlphiFrame.isEmpty() && canvas.viewport
         && mcp::alphiOwnsPoint(mcp::ApprovalRect { mcpAlphiFrame.getX(), mcpAlphiFrame.getY(), mcpAlphiFrame.getWidth(), mcpAlphiFrame.getHeight() }, alphiBoxes(), canvasPt.x, canvasPt.y, alphiView().second))
+        return true;
+    // Alphi drop 1: his strip (as drawn) and his edge tab (unless it lies under the boxes) are his spot too: a double
+    // click there makes no box (D6, D11).
+    if (mcp::alphiStripTakesClick(mcp::ApprovalRect { mcpAlphiStripFrame.getX(), mcpAlphiStripFrame.getY(), mcpAlphiStripFrame.getWidth(), mcpAlphiStripFrame.getHeight() }, canvasPt.x, canvasPt.y))
+        return true;
+    if (!mcpAlphiTabUnder && mcpAlphiTabFrame.contains(canvasPt))
         return true;
     if (mcpSelectionPill && mcpSelectionPill->isVisible()) {
         auto const panel = mcpSelectionPillFrame.isEmpty() ? mcpSelectionPill->getBounds() : mcpSelectionPillFrame;

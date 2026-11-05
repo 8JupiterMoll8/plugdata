@@ -21,6 +21,7 @@
 #include "Utility/NVGUtils.h"
 #include "Mcp/McpApprovalState.h" // P12c / P12a.1: ApprovalRect for the chips and Alphi
 #include "Mcp/McpAlphiDock.h"     // big Alphi 1a0: where Alphi docks
+#include "Mcp/McpAlphiMotion.h"   // Alphi drop 1: motion repaints, the line clock
 struct NVGcontext;
 
 class Canvas;
@@ -359,6 +360,50 @@ public:
         CanvasMcpLayer* layer;
     };
     std::unique_ptr<AlphiVisibilityTimer> mcpAlphiVisibilityTimer;
+
+    // Alphi drop 1 (docs/plans/alphi-drop1-alive-steps.md in the MCP repo). Display only: none of this reaches the
+    // flow switch, the click gate or the dock (scripts/test-bridge-safety.sh).
+    // D11 (CanvasMcpFlow.cpp): no free corner -> the edge tab; a click on it brings him out, the next click back.
+    mcp::AlphiPeek mcpAlphiPeek;
+    juce::Rectangle<int> mcpAlphiTabFrame; // the tab as drawn in the last paint (empty: not tabbed)
+    bool mcpAlphiTabUnder = false;         // no free edge spot: the tab is drawn under the boxes (paintUnderObjects)
+    juce::Rectangle<int> mcpAlphiTabFrameUnder; // where paintUnderObjects draws that tab (from the last paint)
+    mcp::AlphiCorner mcpAlphiFaceCorner = mcp::AlphiCorner::bottomRight; // where the drawn face sits (for the strip)
+    // Review N3: the dock pass is skipped in a paint that is Alphi's own (the motion timer asked, the region stays
+    // near him); CanvasMcpFlow.cpp.
+    bool alphiDockPassNeeded();
+    // CanvasMcpAlphiSay.cpp: the pulse (D2/D3), the gaze (D5), sparks / dots / spiral, the strip (D6) and the D4
+    // motion timer. It repaints only Alphi's rect and strip, and never touches the gate or the dock.
+    void alphiMotionSample(std::int64_t nowMs); // the ceiling's pulse and the say board's line clock, now
+    mcp::AlphiEyes alphiEyesNow(mcp::AlphiLook const& look);
+    mcp::AlphiGaze alphiGazeNow(mcp::ApprovalRect face) const;
+    void paintAlphiFx(NVGcontext* nvg, std::int64_t nowMs);
+    void paintAlphiDizzyEye(NVGcontext* nvg, float x, float y, mcp::AlphiRgba colour, std::int64_t nowMs);
+    void paintAlphiStrip(NVGcontext* nvg);
+    void paintAlphiTab(NVGcontext* nvg);
+    void alphiMotionWake();
+    void alphiMotionTick();
+    void alphiMotionRepaint();
+    void alphiMotionStop();
+    mcp::AlphiLineClock mcpAlphiLineClock;
+    float mcpAlphiPulseLevel = 0.0f;  // the followed level (alphiPulseFollow)
+    float mcpAlphiPulseTarget = 0.0f; // what the ceiling asks for now (alphiPulse)
+    float mcpAlphiPulseDrawn = 0.0f;  // the level last drawn
+    std::uint64_t mcpAlphiPulseBlocks = 0;
+    std::int64_t mcpAlphiPulseFreshMs = 0;  // when the ceiling's block counter last moved (GUI clock)
+    std::int64_t mcpAlphiPulseSampleMs = 0; // the last follow step
+    mcp::AlphiGaze mcpAlphiGazeDrawn;
+    std::string mcpAlphiSayKeyDrawn;
+    bool mcpAlphiDizzyDrawn = false;
+    float mcpAlphiLineAlphaDrawn = 0.0f;
+    juce::Rectangle<int> mcpAlphiStripFrame; // the strip as drawn in the last paint (empty: not shown); swallows its click
+    bool mcpAlphiMotionAsked = false;        // the motion timer asked for the next paint (N3)
+    struct AlphiMotionTimer : public juce::Timer {
+        explicit AlphiMotionTimer(CanvasMcpLayer* c) : layer(c) {}
+        void timerCallback() override { layer->alphiMotionTick(); }
+        CanvasMcpLayer* layer;
+    };
+    std::unique_ptr<AlphiMotionTimer> mcpAlphiMotionTimer;
 
 private:
     void renderSketchOverlay(NVGcontext* nvg);
