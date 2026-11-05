@@ -328,7 +328,7 @@ void CanvasMcpLayer::paintAlphi(NVGcontext* nvg)
     nanovg::nvgDrawRoundedRect(nvg, 8.0f, 17.0f, 32.0f, 21.0f, nanovg::nvgRGBA(24, 26, 31, 255), nanovg::nvgRGBA(10, 11, 14, 255), 6.0f);
 
     // Eyes. Alphi drop 1: they pulse with the real output (D2/D3: the off look's dash grows, the on look's radius),
-    // look toward the selection (D5) and spin dizzy for 2 s after a failed turn (D8); CanvasMcpAlphiSay.cpp.
+    // look toward the selection (D5) and spin dizzy for 2 s after a failed turn (D8); CanvasMcpAlphiStrip.cpp.
     auto const sayNow = mcp::alphiSayNowMs();
     alphiMotionSample(sayNow);
     auto const eyes = alphiEyesNow(look);
