@@ -4,7 +4,7 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 out="$(mktemp -d)"
 trap 'rm -rf "$out"' EXIT
-for t in bridge_safety_test handoff_test json_escape_test identity_rename_test identity_service_test registry_test worker_test v2_codec_test v2_router_test v2_store_test trace_taps_test output_ceiling_test ceiling_console_test tab_token_test approval_state_test flow_provenance_test visible_tab_test alphi_test alphi_dock_test; do
+for t in bridge_safety_test handoff_test json_escape_test identity_rename_test identity_service_test registry_test worker_test v2_codec_test v2_router_test v2_store_test trace_taps_test output_ceiling_test ceiling_console_test tab_token_test approval_state_test flow_provenance_test visible_tab_test alphi_test alphi_dock_test alphi_say_test; do
   "${CXX:-g++}" -std=c++17 -Wall -Wextra -Werror -pthread -o "$out/$t" "$root/Tests/mcp/$t.cpp"
   "$out/$t"
 done
@@ -145,6 +145,32 @@ callers="$(grep -rnw "answerApprovalChip" "$root"/Source --include=*.cpp --inclu
 if [ -n "$callers" ]; then
   echo "$callers" >&2
   echo "test-bridge-safety: answerApprovalChip is named outside the canvas input (CanvasMcpApproval.cpp)" >&2
+  exit 1
+fi
+# Alphi drop 1 (W): what Alphi says is display only. The say code (the board McpAlphiSay.h and CanvasMcpAlphiSay.cpp,
+# which holds the /pd/alphi_say handler and, from F3, the strip and say drawing) never names the flow switch or the
+# click on Alphi, comments included, and never takes the Pd lock or queues Pd work. Only the handler writes the board.
+sayFiles=("$root/Source/Mcp/McpAlphiSay.h" "$root/Source/Mcp/CanvasMcpAlphiSay.cpp")
+for f in "${sayFiles[@]}"; do
+  if [ ! -f "$f" ]; then
+    echo "test-bridge-safety: $f is missing (the say code moved: update this check)" >&2
+    exit 1
+  fi
+done
+if grep -nwE "alphiClicked|artistTurnOn|handleAlphiClick" "${sayFiles[@]}"; then
+  echo "test-bridge-safety: the say/strip code names the flow switch or the click on Alphi (display only: it never may)" >&2
+  exit 1
+fi
+if grep -nwE "sys_lock|lockAudioThread|pdWait|enqueuePd|enqueueFunctionAsync" "${sayFiles[@]}" | codeOnly | grep -q .; then
+  grep -nwE "sys_lock|lockAudioThread|pdWait|enqueuePd|enqueueFunctionAsync" "${sayFiles[@]}" >&2
+  echo "test-bridge-safety: the say code takes the Pd lock or queues Pd work (/pd/alphi_say never touches Pd)" >&2
+  exit 1
+fi
+sayWriters="$(grep -rn "alphiSay\.apply(" "$root"/Source --include=*.cpp --include=*.h --include=*.inc | codeOnly \
+  | grep -v "Source/Mcp/CanvasMcpAlphiSay.cpp:" || true)"
+if [ -n "$sayWriters" ]; then
+  echo "$sayWriters" >&2
+  echo "test-bridge-safety: the say board is written outside the /pd/alphi_say handler (CanvasMcpAlphiSay.cpp)" >&2
   exit 1
 fi
 bash "$root/Tests/mcp/check_seam_test.sh"

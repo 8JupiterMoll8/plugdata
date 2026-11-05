@@ -190,6 +190,20 @@ can send any verb to the bridge's UDP port, destructive ones included, and can r
 and see an answer event. That was already so before P12c and is no worse now: the approval gate guards what the
 server's tools do, not a process that bypasses the server. v2 (token in the discovery file) is the default transport.
 
+## Alphi drop 1: what Alphi says (`/pd/alphi_say`, display only)
+
+Fork-only code, no upstream hunk. `/pd/alphi_say <json {text, kind: plain|busy|fail, state: idle|building|measuring|failed,
+turn, ttlMs}>` (class mutate, effect ui, replyMode none, capability `alphi_say`) is sent only by the MCP server's
+`services/alphi-bubble.ts`. The handler (`MCPBridge::pdAlphiSay`, `Source/Mcp/CanvasMcpAlphiSay.cpp`) checks the say
+(`mcp::alphiSayFrom`, `Source/Mcp/McpAlphiSay.h`, unit-tested in `Tests/mcp/alphi_say_test.cpp`), writes the session's
+`alphiSay` board and asks for a repaint; it takes no lease, sends no reply, takes no Pd lock, never touches the patch
+and has no flow effect. Two slots: a busy say sets only the activity slot; a final say (idle|failed) sets the line slot,
+clears activity and drops later busy says of its turn (the last 8 turns). Plain text: control, line-separator and
+bidi characters become spaces, invalid UTF-8 is dropped, cut at 90 whole code points; nothing is interpreted. Each slot
+drops itself after its ttlMs (100..60000, steady clock). `scripts/test-bridge-safety.sh`: the say code never names
+`alphiClicked`, `artistTurnOn` or `handleAlphiClick` (comments included), takes no Pd lock, and only the handler
+writes the board. **Residue (as P12c v1):** a local v1 client can put a line on Alphi. Display only.
+
 ## Known upstream behaviour
 
 - **`PluginProcessor::updateSearchPaths` removes from the `libraries` array inside a range-for (finding L24, P3.4 S8).** Heap-use-after-free under ASan on every start with the default settings (the `juce_Array.h:806` assertion of the handler tests). Not fixed in the fork (decision 15); the ASan clone carries a local fix so `mcp_bridge_tests` runs clean there.

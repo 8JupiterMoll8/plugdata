@@ -22,6 +22,7 @@
 #include "Mcp/McpApprovalState.h"
 #include "Mcp/McpFlowMode.h"
 #include "Mcp/McpAlphi.h"
+#include "Mcp/McpAlphiSay.h"
 
 extern "C" {
 #include <m_pd.h>
@@ -284,6 +285,9 @@ struct McpSession {
     // P12c: the canvas approval chips (one per pending record of the server, keyed by its nonce). Set ONLY by
     // /pd/approval_show and /pd/approval_clear; HUD text never shows chips. Own lock (any thread).
     mcp::ApprovalState approvals;
+    // Alphi drop 1: what Alphi says (activity + line slots). Written ONLY by /pd/alphi_say (CanvasMcpAlphiSay.cpp);
+    // display only, no flow effect. Own lock (any thread); read with mcp::alphiSayNowMs().
+    mcp::AlphiSayBoard alphiSay;
     // P12a A3: flow mode, off at every start; on only through the artist's click on Alphi (P12a.1, McpFlowMode.h).
     mcp::FlowMode flowMode;
     McpHud getMcpHud() const { juce::ScopedLock sl(mcpOverlayLock); return mcpHud; }

@@ -390,6 +390,8 @@ std::vector<std::string> MCPBridge::capabilityList() const
         "midi_devices",
         // P12c: /pd/approval_show|clear <corrId> ..., the canvas approval chips (answer: event /pd/approval/answer)
         "approval_ui",
+        // Alphi drop 1: /pd/alphi_say <json {text, kind, state, turn, ttlMs}>, what Alphi says (no reply, display only)
+        "alphi_say",
         // P12a: /pd/flow_mode_get|off (the switch lives in C++; no verb turns it on: the artist clicks Alphi) and /pd/ownership (A2)
         "flow_mode",
         "ownership",

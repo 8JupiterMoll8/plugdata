@@ -8,7 +8,7 @@
 
 namespace mcp::v2schema {
 
-inline constexpr char kSchemaHash[] = "931ad84fc4b8c837";
+inline constexpr char kSchemaHash[] = "d4d752b882f73f86";
 inline constexpr int kProtocol = 2;
 
 enum class VerbClass : std::uint8_t { Read, Mutate, Heavy, Long, Realtime };
@@ -243,6 +243,7 @@ inline constexpr VerbMeta kVerbs[] = {
     { "pd", "ai_overlay", VerbClass::Mutate, true, Effect::Ui, false, true, ReplyMode::Async, 1, 10000, 1, 45, 1 },
     { "pd", "ai_region", VerbClass::Mutate, true, Effect::Ui, false, true, ReplyMode::Async, 1, 10000, 1, 46, 1 },
     { "pd", "align", VerbClass::Mutate, true, Effect::Patch, true, true, ReplyMode::Async, kCorrLast, 10000, 0, 47, 1 },
+    { "pd", "alphi_say", VerbClass::Mutate, true, Effect::Ui, false, true, ReplyMode::None, kCorrNone, 10000, 1, 48, 0 },
     { "pd", "approval_clear", VerbClass::Mutate, true, Effect::Ui, false, true, ReplyMode::Async, 0, 10000, 2, 48, 1 },
     { "pd", "approval_show", VerbClass::Mutate, true, Effect::Ui, false, true, ReplyMode::Async, 0, 10000, 2, 49, 1 },
     { "pd", "batch_atomic", VerbClass::Mutate, true, Effect::Patch, true, true, ReplyMode::Sync, 1, 12000, 0, 50, 2 },

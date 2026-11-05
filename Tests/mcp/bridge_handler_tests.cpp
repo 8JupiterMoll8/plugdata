@@ -4491,7 +4491,86 @@ void runZeroArgCases(Harness& h)
         auto const* e = f ? f->find("error") : nullptr;
         refused += (f && field(*f, "outcome") == "rejected" && e && field(*e, "code") == "bad_frame") ? 1 : 0;
     }
-    CHECK(guarded == 26 && refused == guarded); // 19 since /pd/midi_devices (minArgs 1); +2 P11 /pd/bound, /pd/selection_get; +2 P12c approval_show/clear (minArgs 2); +3 P12a flow_mode_get/off, ownership (P12a.1: the offer verb is gone)
+    CHECK(guarded == 27 && refused == guarded); // 19 since /pd/midi_devices (minArgs 1); +2 P11 /pd/bound, /pd/selection_get; +2 P12c approval_show/clear (minArgs 2); +3 P12a flow_mode_get/off, ownership (P12a.1: the offer verb is gone); +1 Alphi drop 1 alphi_say (minArgs 1)
+}
+
+// Alphi drop 1, step W: /pd/alphi_say <json {text, kind, state, turn, ttlMs}>. No reply on v1 (nothing at all comes
+// back), over v2 only the router's final unknown{no_reply_verb}; two slots on the session's board (N4): busy -> the
+// activity slot only, a final say -> the line slot and activity cleared, a later busy refresh of that turn dropped;
+// cut at 90 code points; dropped after ttlMs; a say that breaks the contract changes nothing.
+void runAlphiSayCases(Harness& h, PluginProcessor& processor)
+{
+    std::printf("Alphi says (alphi drop 1 W)\n");
+    auto& board = processor.getMcp()->session.alphiSay;
+    auto const now = [] { return mcp::alphiSayNowMs(); };
+    auto const say = [&](std::string const& json) { h.fire("/pd/alphi_say", { juce::String(json) }); };
+    // The handler runs on the command worker: wait for the board to show what was sent.
+    auto const until = [](auto pred, int ms) {
+        for (int waited = 0; waited < ms; waited += 10) {
+            if (pred()) return true;
+            sleepMs(10);
+        }
+        return pred();
+    };
+    auto const nothingCameBack = [&] {
+        sleepMs(300);
+        return h.replies.describe().find("alphi_say") == std::string::npos;
+    };
+
+    CHECK(hasCap(h, "alphi_say", "as0"));
+
+    // busy: the activity slot only, and no reply
+    say(R"({"text":"placed lop~","kind":"busy","state":"building","turn":"asT1","ttlMs":3000})");
+    CHECK(until([&] { return board.activity(now()).has_value(); }, 2000));
+    auto a = board.activity(now());
+    CHECK(a && a->text == "placed lop~" && a->phase == mcp::AlphiSayPhase::Building && a->turn == "asT1");
+    CHECK(!board.line(now()).has_value() || board.line(now())->turn != "asT1");
+    CHECK(nothingCameBack());
+
+    // the final line: the line slot, activity cleared
+    say(R"({"text":"plays at -18 dB","kind":"plain","state":"idle","turn":"asT1","ttlMs":6000})");
+    CHECK(until([&] { auto l = board.line(now()); return l && l->turn == "asT1"; }, 2000));
+    CHECK(!board.activity(now()).has_value());
+    CHECK(board.line(now())->text == "plays at -18 dB");
+    CHECK(nothingCameBack());
+
+    // a late busy refresh of the same turn revives nothing and leaves the line
+    say(R"({"text":"placed lop~","kind":"busy","state":"building","turn":"asT1","ttlMs":3000})");
+    sleepMs(300);
+    CHECK(!board.activity(now()).has_value());
+    CHECK(board.line(now()) && board.line(now())->text == "plays at -18 dB");
+
+    // cut at 90 code points (3-byte U+2212 each: never inside one)
+    std::string minus;
+    for (int i = 0; i < 120; ++i) minus += "\xe2\x88\x92";
+    say(R"({"text":")" + minus + R"(","kind":"fail","state":"failed","turn":"asT2","ttlMs":6000})");
+    CHECK(until([&] { auto l = board.line(now()); return l && l->turn == "asT2"; }, 2000));
+    auto l = board.line(now());
+    CHECK(l && l->text.size() == 270 && l->kind == mcp::AlphiSayKind::Fail && l->phase == mcp::AlphiSayPhase::Failed);
+
+    // contract breaks change nothing (and get no reply): bad JSON, kind/state disagree, bad turn, ttl out of range
+    for (auto const* bad : { "not json", R"({"text":"x","kind":"busy","state":"idle","turn":"asT3","ttlMs":3000})",
+             R"({"text":"x","kind":"plain","state":"idle","turn":"a b","ttlMs":3000})",
+             R"({"text":"x","kind":"plain","state":"idle","turn":"asT3","ttlMs":5})",
+             R"({"text":"\n","kind":"plain","state":"idle","turn":"asT3","ttlMs":3000})" })
+        say(bad);
+    CHECK(nothingCameBack());
+    l = board.line(now());
+    CHECK(l && l->turn == "asT2");
+
+    // ttl: dropped once ttlMs has passed
+    say(R"({"text":"short","kind":"plain","state":"idle","turn":"asT4","ttlMs":200})");
+    CHECK(until([&] { auto x = board.line(now()); return x && x->turn == "asT4"; }, 2000));
+    CHECK(until([&] { return !board.line(now()).has_value(); }, 2000));
+
+    // v2: a keyed fire-and-forget request ends with the router's unknown{no_reply_verb}, nothing else
+    auto link = v2Connect();
+    link->sendReq("AS1", "/pd/alphi_say", R"([{"t":"s","v":"{\"text\":\"v2 say\",\"kind\":\"plain\",\"state\":\"idle\",\"turn\":\"asT5\",\"ttlMs\":3000}"}])");
+    auto const f = finalFor(*link, "AS1", 3000);
+    auto const* e = f ? f->find("error") : nullptr;
+    CHECK(f && field(*f, "outcome") == "unknown" && e && field(*e, "code") == "no_reply_verb");
+    CHECK(until([&] { auto x = board.line(now()); return x && x->text == "v2 say"; }, 2000));
+    CHECK(!link->take([](auto const& v) { return field(v, "t") == "rep" && field(v, "id") == "AS1"; }, 300).has_value());
 }
 
 // S6.6 (audit A20): the live props of an IEM GUI carry its label, so a control the builder named (`hsl ... morph_s
@@ -4862,6 +4941,7 @@ int main()
             runOutputCeilingCases(harness, processor, audioControl);
             runMidiDevicesCases(harness, processor);
             runApprovalCases(harness, processor);
+            runAlphiSayCases(harness, processor);
             runLimiterPatchCases(processor);
             runVolumeGuardCases(processor);
             runIndexRefCases(harness, processor);
