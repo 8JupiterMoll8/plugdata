@@ -215,7 +215,8 @@ bool CanvasMcpLayer::isPointOverNote(Point<int> canvasPt) const
         return true;
     // Alphi drop 1: his strip (as drawn) and his edge tab (unless it lies under the boxes) are his spot too: a double
     // click there makes no box (D6, D11).
-    if (mcp::alphiStripTakesClick(mcp::ApprovalRect { mcpAlphiStripFrame.getX(), mcpAlphiStripFrame.getY(), mcpAlphiStripFrame.getWidth(), mcpAlphiStripFrame.getHeight() }, canvasPt.x, canvasPt.y))
+    if (!mcpAlphiStripFrame.isEmpty() && canvas.viewport
+        && mcp::alphiStripTakesClick(mcp::ApprovalRect { mcpAlphiStripFrame.getX(), mcpAlphiStripFrame.getY(), mcpAlphiStripFrame.getWidth(), mcpAlphiStripFrame.getHeight() }, alphiBoxes(), canvasPt.x, canvasPt.y, alphiView().second))
         return true;
     if (!mcpAlphiTabUnder && mcpAlphiTabFrame.contains(canvasPt))
         return true;

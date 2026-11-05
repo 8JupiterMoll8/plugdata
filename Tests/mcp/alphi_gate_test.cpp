@@ -12,6 +12,7 @@
 //  - what does restart the gate: covered (chip stack / pill), a move, a screen move; never a plain repaint.
 // Build + run: scripts/test-bridge-safety.sh
 #include "../../Source/Mcp/McpAlphiMotion.h"
+#include "../../Source/Mcp/McpAlphiStrip.h"
 
 #include <cmath>
 #include <cstdint>
@@ -87,7 +88,7 @@ static void pulseAndSayKeepGate()
             now += 5; // 100 repaints within the first 500 ms (worst case: faster than the 30 Hz timer)
             auto const region = renderRegionOf(motion, view, zoom);
             CHECK(mcp::alphiRectContains(region, frame)); // the whole frame is redrawn: never a half-drawn Alphi
-            CHECK(mcp::alphiOnlyPaint(region, true, frame, strip, zoom));
+            CHECK(mcp::alphiOnlyPaint(region, true, frame, strip, zoom, true));
             p.paint(region, now);
             if (i % 10 == 9) { // a say: the handler repaints all; its expiry repaints the strip only
                 p.paint(view, now);
@@ -109,15 +110,15 @@ static void alphiOnlyPaintRule()
     auto const frame = mcp::alphiCornerRect(view, zoom, AlphiCorner::bottomRight);
     auto const motion = mcp::alphiMotionArea(frame, zoom);
     // Only a repaint the motion timer asked for, and only when it stays near Alphi (or his strip).
-    CHECK(mcp::alphiOnlyPaint(motion, true, frame, {}, zoom));
-    CHECK(!mcp::alphiOnlyPaint(motion, false, frame, {}, zoom)); // a box moved under Alphi: the dock must look
-    CHECK(!mcp::alphiOnlyPaint(view, true, frame, {}, zoom));    // coalesced with a canvas repaint
-    CHECK(!mcp::alphiOnlyPaint({}, true, frame, {}, zoom));
-    CHECK(!mcp::alphiOnlyPaint(motion, true, {}, {}, zoom));     // Alphi not drawn
+    CHECK(mcp::alphiOnlyPaint(motion, true, frame, {}, zoom, true));
+    CHECK(!mcp::alphiOnlyPaint(motion, false, frame, {}, zoom, true)); // a box moved under Alphi: the dock must look
+    CHECK(!mcp::alphiOnlyPaint(view, true, frame, {}, zoom, true));    // coalesced with a canvas repaint
+    CHECK(!mcp::alphiOnlyPaint({}, true, frame, {}, zoom, true));
+    CHECK(!mcp::alphiOnlyPaint(motion, true, {}, {}, zoom, true));     // Alphi not drawn
     ApprovalRect const strip { frame.x - 240, frame.y + 10, 230, 36 };
     auto const both = ApprovalRect { strip.x - 3, frame.y - 3, frame.x + frame.w - strip.x + 6, frame.h + 6 };
-    CHECK(mcp::alphiOnlyPaint(both, true, frame, strip, zoom));
-    CHECK(!mcp::alphiOnlyPaint(both, true, frame, {}, zoom));
+    CHECK(mcp::alphiOnlyPaint(both, true, frame, strip, zoom, true));
+    CHECK(!mcp::alphiOnlyPaint(both, true, frame, {}, zoom, true));
     // The motion area grows the frame by 3 design px at any zoom.
     for (float z : { 0.25f, 0.5f, 1.0f, 2.39f }) {
         auto const f = mcp::alphiCornerRect(viewOf(0, 0, z), z, AlphiCorner::topLeft);
@@ -125,6 +126,88 @@ static void alphiOnlyPaintRule()
         int const pad = static_cast<int>(std::ceil(3.0f / z));
         CHECK(m.x == f.x - pad && m.y == f.y - pad && m.w == f.w + 2 * pad && m.h == f.h + 2 * pad);
     }
+}
+
+// Review HIGH (the reviewer's skip_test.cpp): the dock pass is never skipped for a real layout change near Alphi.
+static void skipNeverHidesALayoutChange()
+{
+    std::printf("review HIGH: a box created / moved near Alphi always gets the dock pass\n");
+    float const zoom = 1.0f;
+    ApprovalRect const view { 0, 0, 1200, 800 };
+    auto const face = mcp::alphiCornerRect(view, zoom, AlphiCorner::bottomRight);
+    auto const stripSpot = mcp::alphiStripRect(face, AlphiCorner::bottomRight, view, zoom);
+    auto const motion = mcp::alphiMotionArea(face, zoom);
+    // (a) No strip drawn: a box moved from the strip's spot onto the face, coalesced with a motion repaint: no skip.
+    ApprovalRect const boxOld { stripSpot.x + 100, stripSpot.y + 4, 60, 28 }, boxNew { face.x - 10, face.y + 10, 60, 28 };
+    auto const region = mcp::alphimotion::unite(mcp::alphimotion::unite(boxOld, boxNew), motion);
+    CHECK(!mcp::alphiOnlyPaint(region, true, face, {}, zoom, true));
+    // (b) The layout key near Alphi: a box created on the face, or moved inside his zone, changes it.
+    auto const zone = mcp::alphiZone(face, {}, zoom);
+    std::vector<ApprovalRect> boxes { { 100, 100, 60, 28 }, { 400, 300, 60, 28 } };
+    auto const keyOf = [&](std::vector<ApprovalRect> const& bs, bool button) {
+        mcp::AlphiZoneKey k(zone);
+        for (auto const& b : bs)
+            k.add(b);
+        return k.value(button);
+    };
+    auto const k0 = keyOf(boxes, false);
+    CHECK(keyOf(boxes, false) == k0);
+    auto withCreated = boxes;
+    withCreated.push_back({ face.x + 2, face.y + 20, 40, 24 }); // the AI creates a box on the face
+    CHECK(keyOf(withCreated, false) != k0);
+    auto created = mcp::alphiOnlyPaint(ApprovalRect { face.x + 2, face.y + 20, 40, 24 }, true, face, {}, zoom,
+        keyOf(withCreated, false) == k0);
+    CHECK(!created);
+    auto moved = withCreated;
+    moved.back().x -= 3; // dragged inside the zone
+    CHECK(keyOf(moved, false) != keyOf(withCreated, false));
+    auto far = boxes;
+    far[0].x += 50; // a box far away moved: the zone key does not care (that paint is not Alphi-only anyway)
+    CHECK(keyOf(far, false) == k0);
+    CHECK(keyOf(boxes, true) != k0); // a button held (a drag, a lasso): never skipped
+    // A box just outside the face but inside its 8 px pad counts.
+    auto padded = boxes;
+    padded.push_back({ face.x - 30, face.y, 25, 20 });
+    CHECK(keyOf(padded, false) != k0);
+    // The zone grows with a drawn strip.
+    auto const z2 = mcp::alphiZone(face, stripSpot, zoom);
+    CHECK(z2.x < zone.x);
+}
+
+// Review M (strip frame): the strip's hit frame changes only in a render that redrew it (and where it was).
+static void stripFrameAfterPaint()
+{
+    std::printf("review M: the strip's frame follows only full renders of it\n");
+    ApprovalRect const view { 0, 0, 1200, 800 };
+    ApprovalRect const st { 900, 700, 250, 36 };
+    auto u = mcp::alphiStripAfterPaint({}, st, view);
+    CHECK(u.frame.w == st.w && !u.repaint);
+    // A partial render elsewhere: the drawn strip stays a click target and a repaint is asked.
+    u = mcp::alphiStripAfterPaint(st, {}, ApprovalRect { 0, 0, 100, 100 });
+    CHECK(u.frame.x == st.x && u.frame.w == st.w && u.repaint);
+    u = mcp::alphiStripAfterPaint({}, st, ApprovalRect { 0, 0, 100, 100 });
+    CHECK(u.frame.w == 0 && u.repaint); // never an invisible click sink
+    u = mcp::alphiStripAfterPaint(st, {}, view);
+    CHECK(u.frame.w == 0 && !u.repaint);
+    u = mcp::alphiStripAfterPaint({}, {}, ApprovalRect { 0, 0, 10, 10 });
+    CHECK(u.frame.w == 0 && !u.repaint);
+}
+
+// Review L6: the motion repaint takes the strip's spot only while a strip is drawn or the say changed.
+static void motionRepaintArea()
+{
+    std::printf("review L6: the motion repaint area\n");
+    float const zoom = 1.0f;
+    ApprovalRect const view { 0, 0, 1200, 800 };
+    auto const face = mcp::alphiCornerRect(view, zoom, AlphiCorner::bottomRight);
+    auto const spot = mcp::alphiStripRect(face, AlphiCorner::bottomRight, view, zoom);
+    auto const m = mcp::alphiMotionArea(face, zoom);
+    auto a = mcp::alphiMotionRepaintArea(face, spot, false, false, zoom);
+    CHECK(a.x == m.x && a.w == m.w);
+    a = mcp::alphiMotionRepaintArea(face, spot, true, false, zoom);
+    CHECK(a.x < spot.x + 1 && a.x + a.w >= face.x + face.w);
+    a = mcp::alphiMotionRepaintArea(face, spot, false, true, zoom);
+    CHECK(a.x < spot.x + 1);
 }
 
 static void whatRestartsTheGate()
@@ -221,11 +304,13 @@ static void motionTimer()
     in.drawn = 0.01f;
     CHECK(mcp::alphiMotionRun(in)); // the last step to calm is always drawn
     // The 10 Hz tick wakes it when the ceiling's block counter moved or the level crossed -60 dBFS.
-    CHECK(mcp::alphiPulseWake(10, 11, 0.0f, 0.0f));
-    CHECK(!mcp::alphiPulseWake(11, 11, 0.0f, 0.0f));
-    CHECK(mcp::alphiPulseWake(11, 11, 0.3f, 0.0f));
-    CHECK(mcp::alphiPulseWake(11, 11, 0.0f, 0.3f));
-    CHECK(!mcp::alphiPulseWake(11, 11, 0.3f, 0.4f));
+    // Review L7: not on every block; on a level change of minStep or more, or a -60 dBFS crossing.
+    CHECK(!mcp::alphiPulseWake(0.0f, 0.0f));
+    CHECK(!mcp::alphiPulseWake(0.40f, 0.41f));
+    CHECK(mcp::alphiPulseWake(0.40f, 0.43f));
+    CHECK(mcp::alphiPulseWake(0.3f, 0.0f));
+    CHECK(mcp::alphiPulseWake(0.0f, 0.01f)); // crossing, however small
+    CHECK(mcp::alphiPulseWake(0.01f, 0.0f));
 }
 
 static void sayExpiryRepaint()
@@ -253,6 +338,9 @@ int main()
     sayExpiryRepaint();
     pulseAndSayKeepGate();
     alphiOnlyPaintRule();
+    skipNeverHidesALayoutChange();
+    stripFrameAfterPaint();
+    motionRepaintArea();
     whatRestartsTheGate();
     if (failures == 0)
         std::printf("alphi_gate_test: all passed\n");

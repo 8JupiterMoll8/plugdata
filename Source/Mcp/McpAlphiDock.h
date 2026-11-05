@@ -29,6 +29,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <optional>
 #include <vector>
@@ -433,7 +434,10 @@ struct AlphiEdgeTab {
 // No free corner for the mini face (chooseCorner folded it onto boxes or covers): the edge tab instead.
 inline bool alphiUseTab(AlphiDockChoice const& c) { return c.folded && c.covered > 0; }
 
-inline AlphiEdgeTab alphiEdgeTab(ApprovalRect view, float zoom, std::vector<ApprovalRect> const& boxes)
+// Boxes and covers (the pill, chips, drawers, minimap; review L5) count alike, padded. Tried in the order of the
+// distance from the middle: the 8 px grid plus the spots just past each padded box (review L3: a gap off the grid).
+inline AlphiEdgeTab alphiEdgeTab(ApprovalRect view, float zoom, std::vector<ApprovalRect> const& boxes,
+    std::vector<ApprovalRect> const& covers = {})
 {
     using T = AlphiTabMetrics;
     float const k = 1.0f / alphidock::safeZoom(zoom);
@@ -448,9 +452,10 @@ inline AlphiEdgeTab alphiEdgeTab(ApprovalRect view, float zoom, std::vector<Appr
     // Only boxes near the right edge can lie under the tab.
     std::vector<ApprovalRect> near;
     ApprovalRect const column { x - pad, view.y - pad, w + 2 * pad, view.h + 2 * pad };
-    for (auto const& b : boxes)
-        if (rectsIntersect(b, column))
-            near.push_back(alphidock::grown(b, pad));
+    for (auto const* list : { &boxes, &covers })
+        for (auto const& b : *list)
+            if (rectsIntersect(b, column))
+                near.push_back(alphidock::grown(b, pad));
     auto const freeAt = [&](int y) {
         ApprovalRect const r { x, y, w, h };
         for (auto const& b : near)
@@ -459,14 +464,35 @@ inline AlphiEdgeTab alphiEdgeTab(ApprovalRect view, float zoom, std::vector<Appr
         return true;
     };
     if (yMax >= yMin) {
+        std::vector<int> ys;
         for (int d = 0; mid - d >= yMin || mid + d <= yMax; d += step) {
-            if (mid - d >= yMin && mid - d <= yMax && freeAt(mid - d))
-                return { { x, mid - d, w, h }, false };
-            if (d > 0 && mid + d <= yMax && mid + d >= yMin && freeAt(mid + d))
-                return { { x, mid + d, w, h }, false };
+            ys.push_back(mid - d);
+            if (d > 0) ys.push_back(mid + d);
         }
+        for (auto const& b : near) {
+            ys.push_back(b.y + b.h); // just below a padded box
+            ys.push_back(b.y - h);   // just above it
+        }
+        std::vector<int> cand;
+        for (int y : ys)
+            if (y >= yMin && y <= yMax) cand.push_back(y);
+        std::stable_sort(cand.begin(), cand.end(), [mid](int a, int b) {
+            int const da = std::abs(a - mid), db = std::abs(b - mid);
+            return da != db ? da < db : a < b; // ties: the upper one
+        });
+        for (int y : cand)
+            if (freeAt(y)) return { { x, y, w, h }, false };
     }
     return { { x, mid, w, h }, true };
+}
+
+// Review L4: a tab drawn under the boxes that moved or stopped being under them: its old spot (grown by 2) is
+// repainted, or a ghost stays under the boxes. Empty when nothing to repaint.
+inline ApprovalRect alphiTabGhost(ApprovalRect oldUnder, ApprovalRect newUnder)
+{
+    if (oldUnder.w <= 0 || oldUnder.h <= 0) return {};
+    if (oldUnder.x == newUnder.x && oldUnder.y == newUnder.y && oldUnder.w == newUnder.w && oldUnder.h == newUnder.h) return {};
+    return alphidock::grown(oldUnder, 2);
 }
 
 // The face while out: the normal 48 x 56 face at the right edge (12 design px in), at the tab's height.

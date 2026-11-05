@@ -57,16 +57,76 @@ inline ApprovalRect alphiMotionArea(ApprovalRect frame, float zoom)
     return alphidock::grown(frame, alphimotion::padUnits(AlphiMotionMetrics::repaintPad, zoom));
 }
 
-// Review N3: this paint (`region`, canvas coordinates) is Alphi's own: the motion timer asked for it and it stays
-// inside Alphi's frame and strip (grown by scopePad). Then the paint skips the dock pass. Any other paint (a box moved
-// under Alphi, a canvas repaint coalesced with his) is not.
-inline bool alphiOnlyPaint(ApprovalRect region, bool motionAsked, ApprovalRect frame, ApprovalRect strip, float zoom)
+// Review N3: this paint (`region`, canvas coordinates) is Alphi's own: the motion timer asked for it, it stays inside
+// Alphi's frame and his strip AS DRAWN (`strip`, empty when none; grown by scopePad), and nothing changed near him
+// since the last full pass (`layoutSame`: AlphiZoneKey; review HIGH: a box created or dragged onto his face or strip
+// in a paint coalesced with a motion repaint). Then the paint skips the dock pass. Any other paint does not.
+inline bool alphiOnlyPaint(ApprovalRect region, bool motionAsked, ApprovalRect frame, ApprovalRect strip, float zoom,
+    bool layoutSame)
 {
-    if (!motionAsked || region.w <= 0 || region.h <= 0 || frame.w <= 0 || frame.h <= 0) return false;
+    if (!layoutSame || !motionAsked || region.w <= 0 || region.h <= 0 || frame.w <= 0 || frame.h <= 0) return false;
     int const pad = alphimotion::padUnits(AlphiMotionMetrics::scopePad, zoom);
     auto const own = alphimotion::unite(alphidock::grown(frame, pad),
         strip.w > 0 && strip.h > 0 ? alphidock::grown(strip, pad) : ApprovalRect {});
     return alphiRectContains(own, region);
+}
+
+// Review HIGH: the zone near Alphi whose boxes the layout key watches: his frame and his drawn strip, grown by
+// scopePad plus the dock's box pad (a box whose 8 px pad reaches him counts).
+inline ApprovalRect alphiZone(ApprovalRect frame, ApprovalRect strip, float zoom)
+{
+    int const pad = alphimotion::padUnits(AlphiMotionMetrics::scopePad + AlphiDockMetrics::boxPad, zoom);
+    return alphimotion::unite(frame.w > 0 && frame.h > 0 ? alphidock::grown(frame, pad) : ApprovalRect {},
+        strip.w > 0 && strip.h > 0 ? alphidock::grown(strip, pad) : ApprovalRect {});
+}
+
+// A cheap layout key (no allocation, no full signature): the box count, every box inside `zone`, and whether a mouse
+// button is held (a drag or a lasso is never skipped). Taken at each full dock pass and compared before a skip.
+class AlphiZoneKey {
+public:
+    explicit AlphiZoneKey(ApprovalRect zone) : zone(zone) {}
+    void add(ApprovalRect box)
+    {
+        ++count;
+        if (rectsIntersect(box, zone)) {
+            h = mix(h, static_cast<std::uint32_t>(box.x));
+            h = mix(h, static_cast<std::uint32_t>(box.y));
+            h = mix(h, static_cast<std::uint32_t>(box.w));
+            h = mix(h, static_cast<std::uint32_t>(box.h));
+        }
+    }
+    std::uint64_t value(bool buttonDown) const { return mix(mix(h, count), buttonDown ? 2u : 1u); }
+
+private:
+    static std::uint64_t mix(std::uint64_t a, std::uint64_t v) { return a ^ (v + 0x9e3779b97f4a7c15ULL + (a << 6) + (a >> 2)); }
+    ApprovalRect zone;
+    std::uint64_t h = 1469598103934665603ULL;
+    std::uint64_t count = 0;
+};
+
+// Review M: the strip's hit frame after a paint. It changes only when the render redrew the old and the new strip
+// (`region` holds both); otherwise the drawn one stays (no click falls through a visible strip, no invisible click
+// sink appears) and one more repaint is asked.
+struct AlphiStripUpdate {
+    ApprovalRect frame;
+    bool repaint = false;
+};
+inline AlphiStripUpdate alphiStripAfterPaint(ApprovalRect prev, ApprovalRect next, ApprovalRect region)
+{
+    bool const nextOk = next.w <= 0 || next.h <= 0 || alphiRectContains(region, next);
+    bool const prevOk = prev.w <= 0 || prev.h <= 0 || alphiRectContains(region, prev);
+    if (nextOk && prevOk) return { next, false };
+    return { prev, true };
+}
+
+// Review L6: what a motion repaint invalidates: his face, plus the strip's spot only while a strip is drawn or the
+// say board changed (a line may appear or go).
+inline ApprovalRect alphiMotionRepaintArea(ApprovalRect face, ApprovalRect stripSpot, bool stripDrawn, bool sayChanged, float zoom)
+{
+    auto area = alphiMotionArea(face, zoom);
+    if ((stripDrawn || sayChanged) && stripSpot.w > 0 && stripSpot.h > 0)
+        area = alphimotion::unite(area, alphiMotionArea(stripSpot, zoom));
+    return area;
 }
 
 // D4: the light ~30 Hz motion timer runs only while Alphi is drawn (shown, uncovered) and something on him moves:
@@ -94,11 +154,11 @@ inline bool alphiMotionRun(AlphiMotionInput const& in)
     return d >= AlphiMotionTiming::minStep || (in.target <= 0.0f && in.drawn > 0.0f);
 }
 
-// The 10 Hz tick wakes the motion timer when the ceiling published a new block or the level crossed -60 dBFS
-// (level 0 <-> above 0).
-inline bool alphiPulseWake(std::uint64_t lastBlocks, std::uint64_t blocks, float lastLevel, float level)
+// The 10 Hz tick wakes the motion timer when the level moved by minStep or more from what was drawn, or crossed
+// -60 dBFS (level 0 <-> above 0). Review L7: not on every new block.
+inline bool alphiPulseWake(float drawnLevel, float level)
 {
-    return blocks != lastBlocks || ((lastLevel > 0.0f) != (level > 0.0f));
+    return std::fabs(level - drawnLevel) >= AlphiMotionTiming::minStep || ((drawnLevel > 0.0f) != (level > 0.0f));
 }
 
 // What the say board shows right now, as one key: a change (a new say, or a slot's ttl ran out; step W repaints only

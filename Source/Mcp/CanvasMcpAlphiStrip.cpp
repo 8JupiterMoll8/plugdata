@@ -158,9 +158,27 @@ void CanvasMcpLayer::paintAlphiFx(NVGcontext* nvg, std::int64_t nowMs)
 
 void CanvasMcpLayer::paintAlphiStrip(NVGcontext* nvg)
 {
-    mcpAlphiStripFrame = {};
-    if (mcpAlphiFrame.isEmpty() || !canvas.pd || !canvas.viewport || !alphiShown())
+    // Review M: the strip's hit frame follows only a render that redrew the old and the new strip; otherwise the drawn
+    // one stays and one more repaint of both spots is asked (alphiStripAfterPaint).
+    auto const prev = asRect(mcpAlphiStripFrame);
+    auto const shown = paintAlphiStripNow(nvg);
+    auto const u = mcp::alphiStripAfterPaint(prev, shown, asRect(mcpAlphiStripRegion));
+    mcpAlphiStripFrame = juce::Rectangle<int>(u.frame.x, u.frame.y, u.frame.w, u.frame.h);
+    if (!u.repaint)
         return;
+    auto area = mcp::alphimotion::unite(prev, shown);
+    if (area.w <= 0 || area.h <= 0)
+        return;
+    juce::Rectangle<int> const r = juce::Rectangle<int>(area.x, area.y, area.w, area.h).expanded(2);
+    canvas.repaint(r);
+    if (canvas.editor)
+        canvas.editor->nvgSurface.invalidateArea(canvas.editor->nvgSurface.getLocalArea(&canvas, r));
+}
+
+mcp::ApprovalRect CanvasMcpLayer::paintAlphiStripNow(NVGcontext* nvg)
+{
+    if (mcpAlphiFrame.isEmpty() || !canvas.pd || !canvas.viewport || !alphiShown())
+        return {};
     auto const now = mcp::alphiSayNowMs();
     auto const& board = canvas.pd->getMcp()->session.alphiSay;
     auto const line = board.line(now);
@@ -183,7 +201,7 @@ void CanvasMcpLayer::paintAlphiStrip(NVGcontext* nvg)
         colour = stripColour(mcp::AlphiSayKind::Busy);
     }
     if (text.empty())
-        return;
+        return {};
 
     auto const [view, zoom] = alphiView();
     auto const face = asRect(mcpAlphiFrame);
@@ -195,14 +213,13 @@ void CanvasMcpLayer::paintAlphiStrip(NVGcontext* nvg)
     in.faceShown = true;
     // Never a dock input, never a cover, never in the chips' keep-out: it only reads them (N1).
     if (!mcp::alphiStripShown(in, mcpAlphiPaintBoxes, alphiDockCovers()))
-        return;
+        return {};
     auto const& s = in.strip;
-    mcpAlphiStripFrame = juce::Rectangle<int>(s.x, s.y, s.w, s.h);
 
     using S = mcp::AlphiStripMetrics;
     auto const lines = mcp::alphiStripLines(text);
     if (lines.empty())
-        return;
+        return {};
     float const k = static_cast<float>(s.w) / static_cast<float>(S::w); // canvas units per design px
     NVGScopedState scoped(nvg);
     nanovg::nvgTranslate(nvg, static_cast<float>(s.x), static_cast<float>(s.y));
@@ -228,6 +245,7 @@ void CanvasMcpLayer::paintAlphiStrip(NVGcontext* nvg)
     float const y0 = static_cast<float>(S::h) * 0.5f - (static_cast<float>(lines.size()) - 1.0f) * lineH * 0.5f;
     for (std::size_t i = 0; i < lines.size(); ++i)
         mcpnvg::nvgText(nvg, bgX + 10.0f, y0 + static_cast<float>(i) * lineH, lines[i].c_str(), nullptr);
+    return s;
 }
 
 void CanvasMcpLayer::paintAlphiTab(NVGcontext* nvg)
@@ -254,16 +272,15 @@ void CanvasMcpLayer::paintAlphiTab(NVGcontext* nvg)
     nanovg::nvgFill(nvg);
 }
 
-void CanvasMcpLayer::alphiMotionRepaint()
+void CanvasMcpLayer::alphiMotionRepaint(bool sayChanged)
 {
     if (mcpAlphiFrame.isEmpty() || !canvas.viewport)
         return;
     auto const [view, zoom] = alphiView();
     auto const face = asRect(mcpAlphiFrame);
-    auto area = mcp::alphiMotionArea(face, zoom);
-    auto const strip = mcp::alphiStripRect(face, mcpAlphiFaceCorner, view, zoom);
-    if (strip.w > 0 && strip.h > 0)
-        area = mcp::alphimotion::unite(area, mcp::alphiMotionArea(strip, zoom));
+    // Review L6: the strip's spot only while a strip is drawn or the say board changed.
+    auto const spot = mcp::alphiStripRect(face, mcpAlphiFaceCorner, view, zoom);
+    auto const area = mcp::alphiMotionRepaintArea(face, spot, !mcpAlphiStripFrame.isEmpty(), sayChanged, zoom);
     juce::Rectangle<int> const r(area.x, area.y, area.w, area.h);
     mcpAlphiMotionAsked = true; // N3: this paint is Alphi's own (CanvasMcpLayer::alphiDockPassNeeded)
     canvas.repaint(r);
@@ -286,17 +303,14 @@ void CanvasMcpLayer::alphiMotionWake()
         return;
     }
     auto const now = mcp::alphiSayNowMs();
-    auto const lastBlocks = mcpAlphiPulseBlocks;
-    float const lastTarget = mcpAlphiPulseTarget;
     alphiMotionSample(now);
     auto const& board = canvas.pd->getMcp()->session.alphiSay;
     auto const gaze = alphiGazeNow(asRect(mcpAlphiFrame));
     bool const gazeMoved = std::fabs(gaze.dx - mcpAlphiGazeDrawn.dx) > 0.25f || std::fabs(gaze.dy - mcpAlphiGazeDrawn.dy) > 0.25f;
-    bool const wake = mcp::alphiPulseWake(lastBlocks, mcpAlphiPulseBlocks, lastTarget, mcpAlphiPulseTarget)
+    bool const wake = mcp::alphiPulseWake(mcpAlphiPulseDrawn, mcpAlphiPulseLevel)
         || mcp::alphiSayKey(board, now) != mcpAlphiSayKeyDrawn || mcpAlphiLineClock.moving(now)
         || mcpAlphiLineClock.dizzy(now) != mcpAlphiDizzyDrawn || mcpAlphiLineClock.lineAlpha(now) != mcpAlphiLineAlphaDrawn
-        || board.activity(now).has_value() || gazeMoved
-        || std::fabs(mcpAlphiPulseLevel - mcpAlphiPulseDrawn) >= mcp::AlphiMotionTiming::minStep;
+        || board.activity(now).has_value() || gazeMoved;
     if (!wake)
         return;
     if (!mcpAlphiMotionTimer)
@@ -323,11 +337,11 @@ void CanvasMcpLayer::alphiMotionTick()
     in.lineMoving = mcpAlphiLineClock.moving(now);
     auto const gaze = alphiGazeNow(asRect(mcpAlphiFrame));
     bool const gazeMoved = std::fabs(gaze.dx - mcpAlphiGazeDrawn.dx) > 0.25f || std::fabs(gaze.dy - mcpAlphiGazeDrawn.dy) > 0.25f;
-    bool const changed = mcp::alphiSayKey(board, now) != mcpAlphiSayKeyDrawn || mcpAlphiLineClock.dizzy(now) != mcpAlphiDizzyDrawn
-        || mcpAlphiLineClock.lineAlpha(now) != mcpAlphiLineAlphaDrawn || gazeMoved;
-    if (!in.covered && (mcp::alphiMotionRun(in) || changed)) {
+    bool const sayChanged = mcp::alphiSayKey(board, now) != mcpAlphiSayKeyDrawn || mcpAlphiLineClock.dizzy(now) != mcpAlphiDizzyDrawn
+        || mcpAlphiLineClock.lineAlpha(now) != mcpAlphiLineAlphaDrawn;
+    if (!in.covered && (mcp::alphiMotionRun(in) || sayChanged || gazeMoved)) {
         mcpAlphiGazeDrawn = gaze;
-        alphiMotionRepaint();
+        alphiMotionRepaint(sayChanged);
         return;
     }
     // Nothing to draw: keep following while the level still moves toward the ceiling's value, else stop (the 10 Hz

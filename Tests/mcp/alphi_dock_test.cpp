@@ -509,9 +509,14 @@ static void strip()
             int const px = st.x + st.w / 2, py = st.y + st.h / 2;
             CHECK(!mcp::alphiOwnsPoint(face, {}, px, py, zoom));
             CHECK(!mcp::alphiHit(face, px, py));
-            CHECK(mcp::alphiStripTakesClick(st, px, py));
-            CHECK(!mcp::alphiStripTakesClick({}, px, py)); // not shown: the click goes on (to the canvas)
-            CHECK(!mcp::alphiStripTakesClick(st, face.x + 1, face.y + 1));
+            CHECK(mcp::alphiStripTakesClick(st, {}, px, py, zoom));
+            CHECK(!mcp::alphiStripTakesClick({}, {}, px, py, zoom)); // not shown: the click goes on (to the canvas)
+            CHECK(!mcp::alphiStripTakesClick(st, {}, face.x + 1, face.y + 1, zoom));
+            // Review HIGH (c): a live box (8 px pad) under the strip keeps its clicks, even if the strip is stale.
+            Rects live { { px - 5, py - 5, 10, 10 } };
+            CHECK(!mcp::alphiStripTakesClick(st, live, px, py, zoom));
+            CHECK(!mcp::alphiStripTakesClick(st, live, px + 5 + static_cast<int>(std::ceil(8 / zoom)) - 1, py, zoom));
+            CHECK(mcp::alphiStripTakesClick(st, live, st.x + 1, st.y + 1, zoom) == !meets({ st.x + 1, st.y + 1, 1, 1 }, mcp::alphidock::grown(live[0], static_cast<int>(std::ceil(8 / zoom)))));
             // Free: shown.
             mcp::AlphiStripInput in { st, view, zoom };
             CHECK(mcp::alphiStripShown(in, {}, {}));
@@ -650,6 +655,34 @@ static void edgeTab()
         auto const t2 = mcp::alphiEdgeTab(view, zoom, wall);
         CHECK(t2.underBoxes);
         CHECK(t2.rect.y == t0.rect.y && t2.rect.x == t0.rect.x);
+    }
+    // Review L3 (the reviewer's tab_test.cpp): a free spot off the 8 px grid is found.
+    for (int g0 = 100; g0 < 108; ++g0) {
+        ApprovalRect const view { 0, 0, 1200, 800 };
+        Rects boxes;
+        for (int y = 0; y + 20 <= g0 - 8; y += 20)
+            boxes.push_back({ 1150, y, 40, 20 });
+        boxes.push_back({ 1150, g0 - 8 - 20, 40, 20 });
+        for (int y = g0 + 56 + 8; y < 800; y += 20)
+            boxes.push_back({ 1150, y, 40, 20 });
+        auto const t = mcp::alphiEdgeTab(view, 1.0f, boxes);
+        CHECK(!t.underBoxes && t.rect.y == g0);
+    }
+    // Review L5: covers (the pill, chips, drawers, minimap) count like boxes.
+    {
+        ApprovalRect const view { 0, 0, 1200, 800 };
+        auto const t0 = mcp::alphiEdgeTab(view, 1.0f, {});
+        Rects covers { { 1100, t0.rect.y - 10, 100, 80 } };
+        auto const t1 = mcp::alphiEdgeTab(view, 1.0f, {}, covers);
+        CHECK(!t1.underBoxes && !meets(t1.rect, mcp::alphidock::grown(covers[0], 8)));
+    }
+    // Review L4: a tab that stops being under the boxes (or moves) leaves no ghost: its old spot is repainted.
+    {
+        ApprovalRect const a { 1172, 372, 28, 56 }, b { 1172, 300, 28, 56 };
+        CHECK(mcp::alphiTabGhost(a, {}).w > a.w);
+        CHECK(mcp::alphiTabGhost(a, b).y < a.y + 1);
+        CHECK(mcp::alphiTabGhost(a, a).w == 0);
+        CHECK(mcp::alphiTabGhost({}, b).w == 0);
     }
     // The tab's clicks: out, back; the tab is never a flow click.
     {

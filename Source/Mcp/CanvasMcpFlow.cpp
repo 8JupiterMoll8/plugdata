@@ -198,14 +198,51 @@ bool CanvasMcpLayer::alphiDockPassNeeded()
 {
     // Review N3 / D4: a paint the motion timer asked for that stays near Alphi (and his strip) skips the dock pass
     // (updateAlphiDock walks every box); mcpAlphiPaintBoxes from the last full pass stay. Any other paint runs it.
+    // Review HIGH: only inside his face and his strip AS DRAWN, and only while the layout key near him (box count,
+    // the boxes in his zone, a held button) is the one of the last paint.
     bool const asked = mcpAlphiMotionAsked;
     mcpAlphiMotionAsked = false;
-    if (!asked || mcpAlphiFrame.isEmpty() || !alphiShown())
+    if (!asked || mcpAlphiFrame.isEmpty() || !alphiShown() || !mcpAlphiZoneKnown)
         return true;
-    auto const [view, zoom] = alphiView();
+    auto const zoom = alphiView().second;
     auto const face = toApproval(mcpAlphiFrame);
-    auto const strip = mcp::alphiStripRect(face, mcpAlphiFaceCorner, view, zoom);
-    return !mcp::alphiOnlyPaint(toApproval(mcpAlphiRenderRegion), true, face, strip, zoom);
+    auto const strip = toApproval(mcpAlphiStripFrame);
+    auto const zone = mcp::alphiZone(face, strip, zoom);
+    bool const zoneSame = zone.x == mcpAlphiZoneRect.x && zone.y == mcpAlphiZoneRect.y && zone.w == mcpAlphiZoneRect.w
+        && zone.h == mcpAlphiZoneRect.h;
+    mcp::AlphiZoneKey key(zone);
+    for (auto* o : canvas.objects)
+        if (o && o->isVisible())
+            key.add(toApproval(o->getBounds().reduced(Object::margin)));
+    bool const same = zoneSame && key.value(juce::ModifierKeys::currentModifiers.isAnyMouseButtonDown()) == mcpAlphiZoneKey;
+    return !mcp::alphiOnlyPaint(toApproval(mcpAlphiRenderRegion), true, face, strip, zoom, same);
+}
+
+void CanvasMcpLayer::alphiRememberZone()
+{
+    // After each paint: the layout key near Alphi from this paint's boxes (live when the dock pass ran; when it was
+    // skipped the key was the same, so the boxes near him were too).
+    mcpAlphiZoneKnown = false;
+    if (mcpAlphiFrame.isEmpty() || !alphiShown())
+        return;
+    auto const zoom = alphiView().second;
+    mcpAlphiZoneRect = mcp::alphiZone(toApproval(mcpAlphiFrame), toApproval(mcpAlphiStripFrame), zoom);
+    mcp::AlphiZoneKey key(mcpAlphiZoneRect);
+    for (auto const& b : mcpAlphiPaintBoxes)
+        key.add(b);
+    mcpAlphiZoneKey = key.value(juce::ModifierKeys::currentModifiers.isAnyMouseButtonDown());
+    mcpAlphiZoneKnown = true;
+}
+
+void CanvasMcpLayer::alphiSetTabUnder(juce::Rectangle<int> next)
+{
+    auto const ghost = mcp::alphiTabGhost(toApproval(mcpAlphiTabFrameUnder), toApproval(next));
+    mcpAlphiTabFrameUnder = next;
+    if (ghost.w <= 0)
+        return;
+    juce::Rectangle<int> const area(ghost.x, ghost.y, ghost.w, ghost.h);
+    canvas.repaint(area);
+    if (canvas.editor) canvas.editor->nvgSurface.invalidateArea(canvas.editor->nvgSurface.getLocalArea(&canvas, area));
 }
 
 void CanvasMcpLayer::paintAlphi(NVGcontext* nvg)
@@ -213,6 +250,7 @@ void CanvasMcpLayer::paintAlphi(NVGcontext* nvg)
     mcpAlphiFrame = {};
     mcpAlphiTabFrame = {};
     auto const region = toApproval(mcpAlphiRenderRegion);
+    mcpAlphiStripRegion = mcpAlphiRenderRegion; // review M: the strip's frame follows only renders that redrew it
     mcpAlphiRenderRegion = {}; // used once: a paint that skipped paintUnderObjects never reuses a stale full region
     if (!mcpAlphiVisibilityTimer && alphiShown()) {
         mcpAlphiVisibilityTimer = std::make_unique<AlphiVisibilityTimer>(this);
@@ -222,7 +260,7 @@ void CanvasMcpLayer::paintAlphi(NVGcontext* nvg)
     if (!alphiShown() || !mcpAlphiDock.placed()) {
         mcpAlphiShownSinceMs = 0;
         mcpAlphiTabUnder = false;
-        mcpAlphiTabFrameUnder = {};
+        alphiSetTabUnder({});
         mcpAlphiPeek.reset();
         return;
     }
@@ -235,14 +273,14 @@ void CanvasMcpLayer::paintAlphi(NVGcontext* nvg)
     if (!mcpAlphiDock.folded())
         mcpAlphiPeek.reset();
     if (mcpAlphiDock.folded()) {
-        auto const tab = mcp::alphiEdgeTab(view, zoom, mcpAlphiPaintBoxes);
+        auto const tab = mcp::alphiEdgeTab(view, zoom, mcpAlphiPaintBoxes, alphiDockCovers());
         if (!mcpAlphiPeek.out()) {
             mcpAlphiShownSinceMs = 0;
             juce::Rectangle<int> const tabFrame(tab.rect.x, tab.rect.y, tab.rect.w, tab.rect.h);
             // Under the boxes it is drawn in paintUnderObjects from this frame: one repaint when it arrives or moves.
             bool const newUnder = tab.underBoxes && (!mcpAlphiTabUnder || mcpAlphiTabFrameUnder != tabFrame);
             mcpAlphiTabUnder = tab.underBoxes;
-            mcpAlphiTabFrameUnder = tab.underBoxes ? tabFrame : juce::Rectangle<int> {};
+            alphiSetTabUnder(tab.underBoxes ? tabFrame : juce::Rectangle<int> {});
             mcpAlphiTabFrame = tabFrame;
             if (newUnder) {
                 auto const area = tabFrame.expanded(2);
@@ -257,7 +295,7 @@ void CanvasMcpLayer::paintAlphi(NVGcontext* nvg)
         mcpAlphiFaceCorner = mcp::AlphiCorner::topRight; // his strip sits left of the out face, top-aligned
     }
     mcpAlphiTabUnder = false;
-    mcpAlphiTabFrameUnder = {};
+    alphiSetTabUnder({});
     juce::Rectangle<int> const frame(r.x, r.y, r.w, r.h);
 
     // The 400 ms click gate (mcp::alphiGateAfterPaint): a chip stack that could not move off it (a tiny or split view),
@@ -373,7 +411,7 @@ bool CanvasMcpLayer::handleAlphiClick(juce::Point<int> canvasPt)
     if (!alphiShown())
         return false;
     // Alphi drop 1 D6: a click on his strip (as drawn) is swallowed: never his (no flow), never the canvas's.
-    if (mcp::alphiStripTakesClick(toApproval(mcpAlphiStripFrame), canvasPt.x, canvasPt.y))
+    if (mcp::alphiStripTakesClick(toApproval(mcpAlphiStripFrame), alphiBoxes(), canvasPt.x, canvasPt.y, alphiView().second))
         return true;
     // D11: the edge tab. A click on it brings him out and is never flow; while out, the next click sends him back, and
     // only a click on his out face goes on to the face rules below (frame, boxes, 400 ms gate).

@@ -380,10 +380,13 @@ public:
     void paintAlphiFx(NVGcontext* nvg, std::int64_t nowMs);
     void paintAlphiDizzyEye(NVGcontext* nvg, float x, float y, mcp::AlphiRgba colour, std::int64_t nowMs);
     void paintAlphiStrip(NVGcontext* nvg);
+    mcp::ApprovalRect paintAlphiStripNow(NVGcontext* nvg); // draws the strip when shown; its rect, else empty
     void paintAlphiTab(NVGcontext* nvg);
     void alphiMotionWake();
     void alphiMotionTick();
-    void alphiMotionRepaint();
+    void alphiMotionRepaint(bool sayChanged);
+    void alphiRememberZone(); // review HIGH: the layout key near Alphi after each paint (CanvasMcpFlow.cpp)
+    void alphiSetTabUnder(juce::Rectangle<int> next); // review L4: repaints the old spot of a tab under the boxes
     void alphiMotionStop();
     mcp::AlphiLineClock mcpAlphiLineClock;
     float mcpAlphiPulseLevel = 0.0f;  // the followed level (alphiPulseFollow)
@@ -398,6 +401,10 @@ public:
     float mcpAlphiLineAlphaDrawn = 0.0f;
     juce::Rectangle<int> mcpAlphiStripFrame; // the strip as drawn in the last paint (empty: not shown); swallows its click
     bool mcpAlphiMotionAsked = false;        // the motion timer asked for the next paint (N3)
+    juce::Rectangle<int> mcpAlphiStripRegion; // review M: this paint's render region, for the strip's frame
+    mcp::ApprovalRect mcpAlphiZoneRect;       // review HIGH: the zone and layout key of the last paint
+    std::uint64_t mcpAlphiZoneKey = 0;
+    bool mcpAlphiZoneKnown = false;
     struct AlphiMotionTimer : public juce::Timer {
         explicit AlphiMotionTimer(CanvasMcpLayer* c) : layer(c) {}
         void timerCallback() override { layer->alphiMotionTick(); }

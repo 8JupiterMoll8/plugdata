@@ -73,8 +73,16 @@ inline bool alphiStripShown(AlphiStripInput const& in, std::vector<ApprovalRect>
     return true;
 }
 
-// A click at (x, y) on the strip as drawn in the last paint (`shownStrip`, empty when not shown) is swallowed.
-inline bool alphiStripTakesClick(ApprovalRect shownStrip, int x, int y) { return alphiHit(shownStrip, x, y); }
+// A click at (x, y) on the strip as drawn in the last paint (`shownStrip`, empty when not shown) is swallowed, except
+// inside a live box (8 design px pad, as alphiOwnsPoint): a box that arrived under a stale strip keeps its clicks.
+inline bool alphiStripTakesClick(ApprovalRect shownStrip, std::vector<ApprovalRect> const& liveBoxes, int x, int y, float zoom)
+{
+    if (!alphiHit(shownStrip, x, y)) return false;
+    int const pad = static_cast<int>(std::ceil(AlphiDockMetrics::boxPad / alphidock::safeZoom(zoom)));
+    for (auto const& b : liveBoxes)
+        if (alphiHit(alphidock::grown(b, pad), x, y)) return false;
+    return true;
+}
 
 namespace alphistrip {
 

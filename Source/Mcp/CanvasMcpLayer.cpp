@@ -1054,6 +1054,7 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
     paintAlphi(nvg);
     // Alphi drop 1 D6: his one line (or the busy text) beside the face, where it is free (CanvasMcpAlphiSay.cpp).
     paintAlphiStrip(nvg);
+    alphiRememberZone();
     // Multimodal Pen / Sketch Ink Overlay (Rendered directly on GPU in canvas coords)
     renderSketchOverlay(nvg);
 
