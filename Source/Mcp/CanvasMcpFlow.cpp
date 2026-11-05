@@ -25,6 +25,7 @@
 #include "Mcp/McpHost.h"
 #include "Mcp/McpAlphi.h"
 #include "Mcp/McpAlphiDock.h"
+#include "Mcp/McpAlphiMotion.h"
 
 namespace {
 
@@ -217,7 +218,8 @@ void CanvasMcpLayer::paintAlphi(NVGcontext* nvg)
     // Review N2: a box arrived under Alphi or left, or his gate is still 0, and this render missed his frame: repaint
     // just his frame once (mcp::alphiAfterPaint never asks twice for one state).
     if (mcp::alphiAfterPaint(mcpAlphiRepaint, underBox, mcpAlphiShownSinceMs, gate.frameInRegion, gate.covered)) {
-        auto const area = frame.expanded(2);
+        auto const m = mcp::alphiMotionArea(r, zoom); // F0: grown by 3 design px, so the rounding never cuts his frame
+        juce::Rectangle<int> const area(m.x, m.y, m.w, m.h);
         canvas.repaint(area);
         if (canvas.editor) canvas.editor->nvgSurface.invalidateArea(canvas.editor->nvgSurface.getLocalArea(&canvas, area));
     }

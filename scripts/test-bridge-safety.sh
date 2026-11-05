@@ -4,7 +4,7 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 out="$(mktemp -d)"
 trap 'rm -rf "$out"' EXIT
-for t in bridge_safety_test handoff_test json_escape_test identity_rename_test identity_service_test registry_test worker_test v2_codec_test v2_router_test v2_store_test trace_taps_test output_ceiling_test ceiling_console_test tab_token_test approval_state_test flow_provenance_test visible_tab_test alphi_test alphi_dock_test alphi_say_test; do
+for t in bridge_safety_test handoff_test json_escape_test identity_rename_test identity_service_test registry_test worker_test v2_codec_test v2_router_test v2_store_test trace_taps_test output_ceiling_test ceiling_console_test tab_token_test approval_state_test flow_provenance_test visible_tab_test alphi_test alphi_dock_test alphi_say_test alphi_gate_test; do
   "${CXX:-g++}" -std=c++17 -Wall -Wextra -Werror -pthread -o "$out/$t" "$root/Tests/mcp/$t.cpp"
   "$out/$t"
 done
@@ -164,6 +164,13 @@ fi
 if grep -nwE "sys_lock|lockAudioThread|pdWait|enqueuePd|enqueueFunctionAsync" "${sayFiles[@]}" | codeOnly | grep -q .; then
   grep -nwE "sys_lock|lockAudioThread|pdWait|enqueuePd|enqueueFunctionAsync" "${sayFiles[@]}" >&2
   echo "test-bridge-safety: the say code takes the Pd lock or queues Pd work (/pd/alphi_say never touches Pd)" >&2
+  exit 1
+fi
+# Alphi drop 1 F0: the say, strip and motion code (pulse, sparks, the D4 timer) never touches the 400 ms click gate or
+# the dock: a repaint never restarts the gate and never moves Alphi (Tests/mcp/alphi_gate_test.cpp).
+if grep -nE "mcpAlphiShownSinceMs|mcpAlphiDock|alphiGateAfterPaint" "${sayFiles[@]}" | codeOnly | grep -q .; then
+  grep -nE "mcpAlphiShownSinceMs|mcpAlphiDock|alphiGateAfterPaint" "${sayFiles[@]}" | codeOnly >&2
+  echo "test-bridge-safety: the say/strip/motion code touches Alphi's click gate or the dock (a repaint never may)" >&2
   exit 1
 fi
 sayWriters="$(grep -rn "alphiSay\.apply(" "$root"/Source --include=*.cpp --include=*.h --include=*.inc | codeOnly \
