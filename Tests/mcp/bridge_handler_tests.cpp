@@ -1783,6 +1783,273 @@ void runAcTapCases(Harness& h, PluginProcessor& processor, AudioControl& audio)
     h.fire("/pd/dsp", { 0 });
 }
 
+// V1 /pd/inlet_values: the live value each inlet holds (capability inlet_values). [lop~ 300] with a signal on inlet
+// 0 and nothing on inlet 1 reads 300, then 0 after a float 0; [*~ 0.15]'s float inlet 0.15; [osc~ 440]'s main
+// inlet 440 and its phase inlet null (forwarded, Pd keeps no copy); a signal-connected inlet null.
+double inletValue(juce::var const& json, char const* id, int inlet, juce::String* kind = nullptr, juce::String* connected = nullptr, bool* isNull = nullptr)
+{
+    auto const* arr = json["objects"][id]["inlets"].getArray();
+    if (!arr || inlet >= arr->size()) return -1e9;
+    auto const& e = (*arr)[inlet];
+    if (kind) *kind = e["kind"].toString();
+    if (connected) *connected = e["connected"].toString();
+    if (isNull) *isNull = e["value"].isVoid() || e["value"].isUndefined();
+    return e["value"].isDouble() || e["value"].isInt() ? static_cast<double>(e["value"]) : -1e9;
+}
+
+void runInletValueCases(Harness& h)
+{
+    std::printf("inlet values (V1)\n");
+    CHECK(hasCap(h, "inlet_values", "iv0"));
+    auto made = h.call("/pd/batch_atomic",
+        { "main", "iv1", 0, 0, 0, 3, 1,
+            "iv_osc", 1500, 40, "obj", "osc~", 1, "440",
+            "iv_lop", 1500, 100, "obj", "lop~", 1, "300",
+            "iv_mul", 1600, 100, "obj", "*~", 1, "0.15",
+            "iv_osc", 0, "iv_lop", 0,
+            0, 5, 10, 0 },
+        "/pd/batch_atomic/reply/iv1");
+    CHECK(made.has_value() && made->num(0) == 3);
+    auto read = [&](char const* corr) {
+        auto r = h.call("/pd/inlet_values", { "main", corr, 4, "iv_osc", "iv_lop", "iv_mul", "iv_nope" }, std::string("/pd/inlet_values/reply/") + corr);
+        CHECK(r.has_value());
+        return r ? parseJson(*r) : juce::var();
+    };
+    {
+        auto const json = read("iv2");
+        juce::String kind, connected;
+        bool isNull = false;
+        CHECK(std::abs(inletValue(json, "iv_lop", 1, &kind, &connected) - 300.0) < 1e-4);
+        CHECK(kind == "signal" && connected == "none");
+        inletValue(json, "iv_lop", 0, &kind, &connected, &isNull);
+        CHECK(kind == "signal" && connected == "signal" && isNull);
+        CHECK(std::abs(inletValue(json, "iv_mul", 1, &kind) - 0.15) < 1e-4);
+        CHECK(kind == "float");
+        CHECK(std::abs(inletValue(json, "iv_osc", 0, &kind, &connected) - 440.0) < 1e-3);
+        CHECK(kind == "signal" && connected == "none");
+        inletValue(json, "iv_osc", 1, &kind, &connected, &isNull);
+        CHECK(isNull && json["objects"]["iv_osc"]["inlets"][1]["reason"].toString().contains("forwarded"));
+        CHECK(json["objects"]["iv_nope"]["error"].toString() == "unknown tempId");
+        std::printf("  lop~ inlet 1 = %.1f, *~ inlet 1 = %.3f, osc~ inlet 0 = %.1f\n",
+            inletValue(json, "iv_lop", 1), inletValue(json, "iv_mul", 1), inletValue(json, "iv_osc", 0));
+    }
+    auto set = h.call("/pd/obj_set", { "main", "iv3", "iv_lop", 1, "float", 1, 0.0 }, "/pd/obj_set/reply/iv3");
+    CHECK(set.has_value());
+    {
+        auto const json = read("iv4");
+        CHECK(std::abs(inletValue(json, "iv_lop", 1)) < 1e-6);
+    }
+    auto none = h.call("/pd/inlet_values", { "main", "iv5", 0 }, "/pd/inlet_values/reply/iv5");
+    CHECK(none.has_value() && parseJson(*none).hasProperty("error"));
+    h.call("/pd/batch_atomic", { "main", "iv6", 3, 0, 0, 0, 0, "iv_osc", "iv_lop", "iv_mul", 0, 5, 10, 0 }, "/pd/batch_atomic/reply/iv6");
+}
+
+// V1 /pd/wire_activity: control-wire traffic in an armed window (capability wire_activity). A message box sent during
+// the window counts once with its value; a slider moved counts with its value; an idle wire reads 0; signal wires are
+// skipped.
+void runWireActivityCases(Harness& h)
+{
+    std::printf("wire activity (V1)\n");
+    CHECK(hasCap(h, "wire_activity", "wa0"));
+    auto made = h.call("/pd/batch_atomic",
+        { "main", "wa1", 0, 0, 0, 8, 4,
+            "wa_msg", 1700, 40, "msg", "0.5", 0,
+            "wa_f", 1700, 80, "obj", "f", 0,
+            "wa_hsl", 1800, 40, "obj", "hsl", 0,
+            "wa_f2", 1800, 80, "obj", "f", 0,
+            "wa_idle", 1900, 40, "obj", "f", 0,
+            "wa_f3", 1900, 80, "obj", "f", 0,
+            "wa_osc", 2000, 40, "obj", "osc~", 1, "220",
+            "wa_mul", 2000, 80, "obj", "*~", 1, "0",
+            "wa_msg", 0, "wa_f", 0,
+            "wa_hsl", 0, "wa_f2", 0,
+            "wa_idle", 0, "wa_f3", 0,
+            "wa_osc", 0, "wa_mul", 0,
+            0, 5, 10, 0 },
+        "/pd/batch_atomic/reply/wa1");
+    CHECK(made.has_value() && made->num(0) == 8);
+    auto arm = h.call("/pd/wire_activity", { "main", "wa2", "arm", 1500, "all" }, "/pd/wire_activity/reply/wa2");
+    CHECK(arm.has_value());
+    if (arm) {
+        auto const json = parseJson(*arm);
+        CHECK(static_cast<bool>(json["armed"]));
+        CHECK(static_cast<int>(json["wires"]) >= 3);
+        CHECK(static_cast<int>(json["skippedSignal"]) >= 1);
+    }
+    h.call("/pd/obj_set", { "main", "wa3", "wa_msg", 0, "bang", 0 }, "/pd/obj_set/reply/wa3");
+    h.call("/pd/obj_set", { "main", "wa4", "wa_hsl", 0, "float", 1, 64.0 }, "/pd/obj_set/reply/wa4");
+    sleepMs(50);
+    auto rd = h.call("/pd/wire_activity", { "main", "wa5", "read" }, "/pd/wire_activity/reply/wa5");
+    CHECK(rd.has_value());
+    if (rd) {
+        auto const json = parseJson(*rd);
+        bool sawMsg = false, sawHsl = false, sawIdle = false;
+        if (auto* arr = json["wires"].getArray())
+            for (auto const& w : *arr) {
+                auto const src = w["src"].toString();
+                if (src == "wa_msg") {
+                    sawMsg = true;
+                    CHECK(static_cast<int>(w["messageCount"]) == 1);
+                    CHECK(std::abs(static_cast<double>(w["lastValue"]) - 0.5) < 1e-6);
+                    CHECK(w["lastSelector"].toString() == "float");
+                    CHECK(!w["lastAtMs"].isVoid());
+                } else if (src == "wa_hsl") {
+                    sawHsl = true;
+                    CHECK(static_cast<int>(w["messageCount"]) >= 1);
+                    CHECK(std::abs(static_cast<double>(w["lastValue"]) - 64.0) < 1e-3);
+                } else if (src == "wa_idle") {
+                    sawIdle = true;
+                    CHECK(static_cast<int>(w["messageCount"]) == 0);
+                    CHECK(w["lastValue"].isVoid() && w["lastAtMs"].isVoid());
+                }
+                CHECK(src != "wa_osc"); // a signal wire is never listed
+            }
+        CHECK(sawMsg && sawHsl && sawIdle);
+    }
+    // A second read has no window; an arm naming one wire watches only that one.
+    auto again = h.call("/pd/wire_activity", { "main", "wa6", "read" }, "/pd/wire_activity/reply/wa6");
+    CHECK(again.has_value() && parseJson(*again).hasProperty("error"));
+    auto one = h.call("/pd/wire_activity", { "main", "wa7", "arm", 300, 2, "wa_msg", 0, "wa_f", 0, "wa_nope", 0, "wa_f", 0 }, "/pd/wire_activity/reply/wa7");
+    CHECK(one.has_value());
+    if (one) {
+        auto const json = parseJson(*one);
+        CHECK(static_cast<int>(json["wires"]) == 1);
+        CHECK(json["unresolved"].getArray() && json["unresolved"].getArray()->size() == 1);
+    }
+    h.call("/pd/wire_activity", { "main", "wa8", "read" }, "/pd/wire_activity/reply/wa8");
+    std::vector<A> cleanup { "main", "wa9", 8, 0, 0, 0, 0 };
+    for (char const* id : { "wa_msg", "wa_f", "wa_hsl", "wa_f2", "wa_idle", "wa_f3", "wa_osc", "wa_mul" })
+        cleanup.push_back(id);
+    for (int v : { 0, 5, 10, 0 })
+        cleanup.push_back(v);
+    h.callList("/pd/batch_atomic", cleanup, "/pd/batch_atomic/reply/wa9");
+}
+
+// V1 read-only facts: /pd/audio_device, a switched-off subpatch and a dac~ channel the device does not have
+// (diagnose + census), red boxes (/pd/broken + census `broken`), /pd/console_history with tempIds.
+void runFactCases(Harness& h, PluginProcessor& processor)
+{
+    std::printf("read-only facts (V1)\n");
+    auto* host = processor.getMcp();
+    for (char const* cap : { "audio_device", "broken_objects", "console_history", "container_switch", "dac_channels" })
+        CHECK(hasCap(h, cap, "fa0"));
+    auto dev = h.call("/pd/audio_device", { "fa1" }, "/pd/audio_device/reply/fa1");
+    CHECK(dev.has_value());
+    if (dev) {
+        auto const json = parseJson(*dev);
+        CHECK(static_cast<double>(json["pd"]["sampleRate"]) > 0.0);
+        CHECK(json["pd"].hasProperty("outChannels") && json["pd"].hasProperty("variableBlockSize"));
+        CHECK(json.hasProperty("device")); // the headless test has no standalone device: null with a reason
+        CHECK(json["lastSetupError"].isVoid());
+        std::printf("  audio_device: %s\n", dev->str(0).substr(0, 200).c_str());
+    }
+    // A subpatch [pd acsw] holding [switch~] (off until told), [dac~ 3] and a red box.
+    t_canvas* sub = nullptr;
+    CHECK(host->pdWait([&] {
+        t_canvas* cnv = host->getCanvasBySymbol("main");
+        if (!cnv) return;
+        t_atom a[4];
+        SETFLOAT(a, 1500);
+        SETFLOAT(a + 1, 700);
+        SETSYMBOL(a + 2, gensym("pd"));
+        SETSYMBOL(a + 3, gensym("acsw"));
+        pd_typedmess(&cnv->gl_pd, gensym("obj"), 4, a);
+        sub = reinterpret_cast<t_canvas*>(pd::Interface::getNewest(cnv));
+        auto add = [&](std::vector<t_atom> atoms) { pd_typedmess(&sub->gl_pd, gensym("obj"), static_cast<int>(atoms.size()), atoms.data()); };
+        t_atom x, y, s1, s2;
+        SETFLOAT(&x, 10); SETFLOAT(&y, 10); SETSYMBOL(&s1, gensym("switch~"));
+        add({ x, y, s1 });
+        SETFLOAT(&y, 40); SETSYMBOL(&s1, gensym("dac~")); SETFLOAT(&s2, 3);
+        add({ x, y, s1, s2 });
+        SETFLOAT(&y, 70); SETSYMBOL(&s1, gensym("acsw_no_such_class"));
+        add({ x, y, s1 });
+    }, 3000));
+    CHECK(sub != nullptr);
+    if (!sub) return;
+    auto diag = h.call("/pd/diagnose", { "pd-acsw", "fa2" }, "/pd/diagnose/reply/fa2");
+    CHECK(diag.has_value());
+    if (diag) {
+        auto const json = parseJson(*diag);
+        CHECK(!static_cast<bool>(json["switchedOn"]));
+        CHECK(static_cast<int>(json["blockSize"]) > 0 && static_cast<double>(json["sampleRate"]) > 0.0);
+        bool flagged = false;
+        if (auto* arr = json["dac_channels_missing"].getArray())
+            for (auto const& d : *arr)
+                flagged = flagged || static_cast<int>(d["channel"]) == 3;
+        CHECK(flagged == (static_cast<int>(json["deviceOutChannels"]) < 3));
+        std::printf("  diagnose pd-acsw: switchedOn %d, outs %d, dac~ 3 flagged %d\n", static_cast<int>(static_cast<bool>(json["switchedOn"])),
+            static_cast<int>(json["deviceOutChannels"]), static_cast<int>(flagged));
+    }
+    auto mainDiag = h.call("/pd/diagnose", { "main", "fa3" }, "/pd/diagnose/reply/fa3");
+    CHECK(mainDiag.has_value());
+    if (mainDiag) {
+        bool listed = false;
+        juce::var const md = parseJson(*mainDiag);
+        if (auto* arr = md["switched_off"].getArray())
+            for (auto const& s : *arr) listed = listed || s["name"].toString() == "acsw";
+        CHECK(listed);
+    }
+    auto census = h.call("/pd/census", { "main", "fa4" }, "/pd/census/reply/fa4");
+    CHECK(census.has_value());
+    if (census) {
+        auto const json = parseJson(*census);
+        bool saw = false;
+        if (auto* rows = json["objects"].getArray())
+          for (auto const& o : *rows)
+            if (o["type"].toString() == "pd" && o["args"][0].toString() == "acsw") {
+                saw = true;
+                CHECK(o.hasProperty("switchedOn") && !static_cast<bool>(o["switchedOn"]));
+                CHECK(static_cast<int>(o["brokenInside"]) == 1);
+                CHECK(static_cast<int>(o["blockSize"]) > 0);
+            }
+        CHECK(saw);
+    }
+    auto subCensus = h.call("/pd/census", { "pd-acsw", "fa5" }, "/pd/census/reply/fa5");
+    if (subCensus) {
+        bool redRow = false;
+        auto const sj = parseJson(*subCensus);
+        if (auto* arr = sj["objects"].getArray())
+            for (auto const& o : *arr)
+                if (static_cast<bool>(o["broken"])) redRow = true;
+        CHECK(redRow);
+    }
+    auto broken = h.call("/pd/broken", { "main", "fa6" }, "/pd/broken/reply/fa6");
+    CHECK(broken.has_value());
+    if (broken) {
+        auto const json = parseJson(*broken);
+        bool found = false;
+        if (auto* arr = json["broken"].getArray())
+            for (auto const& b : *arr) found = found || b["text"].toString() == "acsw_no_such_class";
+        CHECK(found);
+    }
+    // Console history: an error raised by an object carries its tempId.
+    auto made = h.call("/pd/batch_atomic", { "main", "fa7", 0, 0, 0, 1, 0, "fa_add", 1500, 800, "obj", "+", 1, "1", 0, 5, 10, 0 }, "/pd/batch_atomic/reply/fa7");
+    CHECK(made.has_value() && made->num(0) == 1);
+    h.fire("/pd/obj_set", { "main", "fa8", "fa_add", 0, "facts_unknown_selector", 0 });
+    h.replies.waitForConsoleLine("facts_unknown_selector", 3000);
+    sleepMs(150); // plugdata's console store fills on its 30 Hz timer
+    auto hist = h.call("/pd/console_history", { "fa9", -1, 50 }, "/pd/console_history/reply/fa9");
+    CHECK(hist.has_value());
+    if (hist) {
+        auto const json = parseJson(*hist);
+        bool found = false;
+        if (auto* arr = json["lines"].getArray())
+            for (auto const& l : *arr)
+                if (l["text"].toString().contains("facts_unknown_selector")) {
+                    found = true;
+                    CHECK(l["type"].toString() == "error");
+                    CHECK(l["tempId"].toString() == "fa_add");
+                }
+        CHECK(found);
+        int const last = static_cast<int>(json["last"]);
+        auto none = h.call("/pd/console_history", { "fa10", last, 50 }, "/pd/console_history/reply/fa10");
+        juce::var const nj = none ? parseJson(*none) : juce::var();
+        CHECK(none.has_value() && nj["lines"].getArray() && nj["lines"].getArray()->isEmpty());
+    }
+    h.call("/pd/batch_atomic", { "main", "fa11", 1, 0, 0, 0, 0, "fa_add", 0, 5, 10, 0 }, "/pd/batch_atomic/reply/fa11");
+    host->pdWait([&] { if (auto* cnv = host->getCanvasBySymbol("main")) glist_delete(cnv, &sub->gl_gobj); }, 3000);
+}
+
 // P11.2 V10: /pd/load_patch reads and checks the file BEFORE it clears the canvas. An unreadable file or one that is
 // not a Pd patch is an error and the canvas keeps every object; a valid empty patch is a valid load. Reply: arg0 the
 // object count (-1 on an error, old clients read only this), arg1 1 (undo reset) or "error: ...", arg2 the JSON
@@ -5205,6 +5472,9 @@ int main()
             runMeterWindowGenCases(harness, processor);
             runMeterTapCases(harness, processor, audioControl);
             runAcTapCases(harness, processor, audioControl);
+            runInletValueCases(harness);
+            runWireActivityCases(harness);
+            runFactCases(harness, processor);
             runOutputCeilingCases(harness, processor, audioControl);
             runMidiDevicesCases(harness, processor);
             runApprovalCases(harness, processor);

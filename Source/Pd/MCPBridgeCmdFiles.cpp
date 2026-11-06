@@ -9,6 +9,7 @@
 #include "MCPBridgeCmdCommon.h"
 #include "Mcp/McpPdFile.h" // P11.8: the file a root canvas is bound to
 #include "MCPBridgeSaveTarget.h" // P11.8: what a save would overwrite
+#include "MCPBridgeBroken.h" // red boxes (V1: shared with /pd/broken)
 
 #include <cstring>
 
@@ -134,39 +135,8 @@ int countWires(t_canvas* c)
     return n;
 }
 
-// Pd's red boxes after a paste: text_class objects of type T_OBJECT (a class that could not be created). Top-level
-// entries carry their index; ones inside subpatches/abstractions/clone instances the top-level container's index and
-// a path. Review L8: an empty box ("[ ]", no atoms) is not a failed create; clone instances are walked.
-void collectFailedCreates(t_canvas* c, int topIndex, juce::String const& path, juce::Array<juce::var>& out, int depth)
-{
-    if (!c || depth > 32) return;
-    int index = 0;
-    for (t_gobj* g = c->gl_list; g; g = g->g_next, ++index) {
-        int const top = depth == 0 ? index : topIndex;
-        if (pd_class(&g->g_pd) == text_class && reinterpret_cast<t_text*>(g)->te_type == T_OBJECT
-            && reinterpret_cast<t_text*>(g)->te_binbuf && binbuf_getnatom(reinterpret_cast<t_text*>(g)->te_binbuf) > 0) {
-            char* buf = nullptr;
-            int len = 0;
-            binbuf_gettext(reinterpret_cast<t_text*>(g)->te_binbuf, &buf, &len);
-            auto* o = new juce::DynamicObject();
-            o->setProperty("index", top);
-            o->setProperty("text", buf && len > 0 ? juce::String::fromUTF8(buf, len).trim() : juce::String());
-            if (depth > 0) o->setProperty("path", path + "/" + juce::String(index));
-            if (buf) freebytes(buf, len);
-            out.add(juce::var(o));
-        } else if (pd_class(&g->g_pd) == canvas_class) {
-            auto* sub = reinterpret_cast<t_canvas*>(g);
-            juce::String const name = sub->gl_name ? juce::String::fromUTF8(sub->gl_name->s_name) : juce::String("pd");
-            collectFailedCreates(sub, top, (path.isEmpty() ? juce::String() : path + "/") + juce::String(index) + ":" + name, out, depth + 1);
-        } else if (pd_class(&g->g_pd) == clone_class) {
-            int const n = clone_get_n(g);
-            for (int i = 0; i < n; ++i)
-                if (auto* inst = clone_get_instance(g, i))
-                    collectFailedCreates(reinterpret_cast<t_canvas*>(inst), top,
-                        (path.isEmpty() ? juce::String() : path + "/") + juce::String(index) + ":clone#" + juce::String(i), out, depth + 1);
-        }
-    }
-}
+// Pd's red boxes after a paste: mcp::broken::collectFailedCreates (MCPBridgeBroken.h, shared with /pd/broken).
+using mcp::broken::collectFailedCreates;
 
 // P11.8 review: the "#A saved ..." lines are NOT stray: they are the state an abstraction's [savestate] writes into
 // its parent's file (g_readwrite.c savestate_list; MERDA's MIDI-learn keeps its mappings that way), and Pd's own save

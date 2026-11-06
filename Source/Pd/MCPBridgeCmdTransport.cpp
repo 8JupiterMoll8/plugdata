@@ -287,6 +287,16 @@ std::vector<std::string> MCPBridge::capabilityList() const
         // blocker: a DC drone has a loud peak and no tone. tone is 0/1, except the one-block snapshots /meter/master
         // and /meter/query: 1 tone, 0 no sound, -1 unknown (a bass the block cannot see; use the armed read)
         "meter_ac",
+        // V1 read-only facts (MCPBridgeCmdFacts.cpp): /pd/inlet_values, /pd/wire_activity, /pd/audio_device,
+        // /pd/broken, /pd/console_history; census rows carry switchedOn/blockSize/sampleRate (containers) and
+        // broken/brokenInside; /pd/diagnose carries switchedOn and dac_channels_missing
+        "inlet_values",
+        "wire_activity",
+        "audio_device",
+        "broken_objects",
+        "console_history",
+        "container_switch",
+        "dac_channels",
         "meter_trace",
         // T2b: /meter/trace ... arm <windowMs> [focus] / read: the trace of a window's peaks (a triggered voice)
         "meter_trace_armed",

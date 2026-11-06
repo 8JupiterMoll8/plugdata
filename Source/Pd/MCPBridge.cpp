@@ -404,6 +404,61 @@ juce::String MCPBridge::canonicalCanvasKey(t_canvas* cnv)
 
 // Compute native diagnostic graph facts under sys_lock(). Shared by standalone
 // /pd/diagnose and inline conditional X-ray in batch_atomic.
+extern "C" {
+int canvas_getswitchedon(t_canvas* x);  // d_ugen.c: the nearest [switch~]/[block~] up the owners is on (1 when none)
+t_float canvas_getsr(t_canvas* x);      // d_ugen.c: the canvas's sample rate after up/downsampling
+int canvas_getsignallength(t_canvas* x); // d_ugen.c: the canvas's block size
+}
+
+namespace {
+// V1 (diagnose): `,"switchedOn":..,"blockSize":..,"sampleRate":..,"deviceOutChannels":N,"switched_off":[...],
+// "dac_channels_missing":[...]`. switched_off = subpatches on this canvas whose [switch~] is off (their DSP does not
+// run). A [dac~] channel above Pd's output channel count is silent ("dac~ channel 3 does not exist on this 2-out
+// device"); channels come from the box's own args (default 1 2). Read only; caller holds the Pd lock.
+juce::String mcpDiagnoseDeviceFacts(t_canvas* cnv, std::vector<t_gobj*> const& objs, std::vector<juce::String> const& names,
+    std::vector<juce::String> const& classNames)
+{
+    int const outs = sys_get_outchannels();
+    juce::String json = ",\"switchedOn\":" + juce::String(canvas_getswitchedon(cnv) ? "true" : "false")
+        + ",\"blockSize\":" + juce::String(canvas_getsignallength(cnv))
+        + ",\"sampleRate\":" + juce::String(static_cast<double>(canvas_getsr(cnv)))
+        + ",\"deviceOutChannels\":" + juce::String(outs) + ",\"switched_off\":[";
+    bool first = true;
+    for (size_t i = 0; i < objs.size(); ++i) {
+        if (pd_class(&objs[i]->g_pd) != canvas_class) continue;
+        auto* sub = reinterpret_cast<t_canvas*>(objs[i]);
+        if (canvas_getswitchedon(sub)) continue;
+        if (!first) json += ",";
+        first = false;
+        json += "{\"tempId\":\"" + jsonEscape(names[i]) + "\",\"name\":\""
+            + jsonEscape(sub->gl_name ? juce::String::fromUTF8(sub->gl_name->s_name) : juce::String()) + "\",\"note\":\"subpatch "
+            + jsonEscape(names[i]) + " is switched off by [switch~]: its DSP does not run\"}";
+    }
+    json += "],\"dac_channels_missing\":[";
+    first = true;
+    for (size_t i = 0; i < objs.size(); ++i) {
+        if (classNames[i] != "dac~") continue;
+        t_object* ob = pd::Interface::checkObject(objs[i]);
+        if (!ob || !ob->te_binbuf) continue;
+        int const n = binbuf_getnatom(ob->te_binbuf);
+        t_atom const* av = binbuf_getvec(ob->te_binbuf);
+        std::vector<int> channels;
+        for (int k = 1; k < n; ++k)
+            if (av[k].a_type == A_FLOAT) channels.push_back(static_cast<int>(av[k].a_w.w_float));
+        if (n <= 1) channels = { 1, 2 };
+        for (int ch : channels) {
+            if (ch >= 1 && ch <= outs) continue;
+            if (!first) json += ",";
+            first = false;
+            json += "{\"tempId\":\"" + jsonEscape(names[i]) + "\",\"channel\":" + juce::String(ch) + ",\"outputs\":" + juce::String(outs)
+                + ",\"note\":\"dac~ channel " + juce::String(ch) + " does not exist on this " + juce::String(outs) + "-out device: silent\"}";
+        }
+    }
+    json += "]";
+    return json;
+}
+} // namespace
+
 juce::String MCPBridge::computeDiagnoseFacts(PluginProcessor* processor, t_canvas* cnv, const juce::String& canvasName)
 {
     if (!processor || !cnv) return {};
@@ -651,7 +706,9 @@ juce::String MCPBridge::computeDiagnoseFacts(PluginProcessor* processor, t_canva
             first = false;
         }
     }
-    json += "]}";
+    json += "]";
+    json += mcpDiagnoseDeviceFacts(cnv, objs, names, classNames); // V1: switch~ state, dac~ channels the device lacks
+    json += "}";
     return json;
 }
 
