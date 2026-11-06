@@ -191,6 +191,12 @@ int main()
         AcStats n;
         accumulateBlockMean(n, nanBlock, 4);
         CHECK(n.count == 3 && snapshotTone(n) == 0);
+        // Review (TS note): a DC step inside one block has AC but no full cycle: unknown (-1), never a tone (1).
+        std::vector<float> step(kBlock, 0.0f);
+        for (int i = kBlock / 2; i < kBlock; ++i) step[static_cast<size_t>(i)] = 0.1f;
+        AcStats st;
+        accumulateBlockMean(st, step.data(), kBlock);
+        CHECK(snapshotTone(st) == -1);
         AcStats silent;
         std::vector<float> zeros(kBlock, 0.0f);
         accumulateBlockMean(silent, zeros.data(), kBlock);

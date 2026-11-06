@@ -6,6 +6,8 @@
 #pragma once
 
 #include <array>
+#include <deque>
+#include <mutex>
 #include <atomic>
 #include <functional>
 #include <concurrentqueue.h>
@@ -25,6 +27,7 @@
 #include "Mcp/McpAlphi.h"
 #include "Mcp/McpAlphiSay.h"
 #include "Pd/MCPBridgeAcLevel.h" // V1 AC taps (JUCE-free)
+#include "Pd/MCPBridgeWireActivity.h" // V1 wire_activity: one window per instance
 
 extern "C" {
 #include <m_pd.h>
@@ -463,6 +466,35 @@ struct McpSession {
         for (size_t c = 0; c < channels.size(); ++c) channels[c] = mcpArmFinalAc[c].read();
         return mcp::ac::levelsOfChannels(channels.data(), kAcChannels);
     }
+    // V1 /pd/wire_activity (review 2026-11-06: one window per instance, not per process). The table is written by
+    // record() on the thread running this instance's Pd, under its Pd lock; the bridge arms and reads it under the
+    // same lock. wireWires/wireCanvas/wireArmedAtMs/wireOpen/wireForwardingAtArm describe the open window (Pd lock).
+    mcp::wire::Table wireTable;
+    struct WireWatched {
+        void const* oc = nullptr;
+        juce::String src, dst;
+        int outlet = 0, inlet = 0;
+    };
+    std::vector<WireWatched> wireWires;
+    juce::String wireCanvas;
+    uint32_t wireArmedAtMs = 0;
+    bool wireOpen = false;
+    bool wireForwardingAtArm = false;
+
+    // V1 /pd/console_history (review: a monotonic cursor). McpHost::consoleMessage appends every line with the next
+    // sequence number; a repeat of the last line bumps its count and its seq. At most kConsoleLines kept. Its own lock
+    // (never the Pd lock), held only to append or copy.
+    struct ConsoleLine {
+        uint64_t firstSeq = 0, seq = 0;
+        juce::String text, tempId;
+        bool error = false;
+        int repeats = 1;
+    };
+    static constexpr size_t kConsoleLines = 800;
+    std::mutex consoleLock;
+    std::deque<ConsoleLine> consoleLines;
+    uint64_t consoleSeq = 0;
+
     // Review L3: every arm bumps the epoch; the audio thread empties the window's accumulators itself at the first
     // block of a new epoch, so a sum it stored for the old window after the arm's reset cannot leak into the new one.
     std::atomic<uint32_t> mcpArmEpoch { 0 };

@@ -1696,7 +1696,8 @@ void runAcTapCases(Harness& h, PluginProcessor& processor, AudioControl& audio)
         CHECK(std::abs(probeTone->num(6) - (-6.0)) < 0.5);
     }
     auto masterTone = h.call("/meter/master", { "main", "ac14" }, "/meter/master/reply/ac14");
-    CHECK(masterTone.has_value() && masterTone->args.size() >= 8 && masterTone->num(7) == 1.0);
+    // A 110 Hz phasor has less than a cycle in one 64-sample block: the snapshot says "tone" or "unknown", never "none".
+    CHECK(masterTone.has_value() && masterTone->args.size() >= 8 && masterTone->num(7) != 0.0);
     // The armed trace on the tone: the phasor's tap reads tone true at its AC level.
     {
         auto arm = h.call("/meter/trace", { "main", "ac16", "arm", 300, "" }, "/meter/trace/reply/ac16");
@@ -1868,11 +1869,16 @@ void runWireActivityCases(Harness& h)
             0, 5, 10, 0 },
         "/pd/batch_atomic/reply/wa1");
     CHECK(made.has_value() && made->num(0) == 8);
+    int const debuggingBefore = plugdata_debugging_enabled();
     auto arm = h.call("/pd/wire_activity", { "main", "wa2", "arm", 1500, "all" }, "/pd/wire_activity/reply/wa2");
     CHECK(arm.has_value());
+    // Review M3: the window forwards through the bridge's own flag; plugdata's debugging flag is untouched.
+    CHECK(plugdata_debugging_enabled() == debuggingBefore);
+    CHECK(mcp::wire::windows().open.load() >= 1);
     if (arm) {
         auto const json = parseJson(*arm);
         CHECK(static_cast<bool>(json["armed"]));
+        CHECK(static_cast<bool>(json["forwarding"]));
         CHECK(static_cast<int>(json["wires"]) >= 3);
         CHECK(static_cast<int>(json["skippedSignal"]) >= 1);
     }
@@ -1881,8 +1887,11 @@ void runWireActivityCases(Harness& h)
     sleepMs(50);
     auto rd = h.call("/pd/wire_activity", { "main", "wa5", "read" }, "/pd/wire_activity/reply/wa5");
     CHECK(rd.has_value());
+    CHECK(mcp::wire::windows().open.load() == 0); // the read closed it: forwarding for the bridge is off again
+    CHECK(plugdata_debugging_enabled() == debuggingBefore);
     if (rd) {
         auto const json = parseJson(*rd);
+        CHECK(static_cast<bool>(json["forwarding"]));
         bool sawMsg = false, sawHsl = false, sawIdle = false;
         if (auto* arr = json["wires"].getArray())
             for (auto const& w : *arr) {
@@ -1917,6 +1926,20 @@ void runWireActivityCases(Harness& h)
         CHECK(json["unresolved"].getArray() && json["unresolved"].getArray()->size() == 1);
     }
     h.call("/pd/wire_activity", { "main", "wa8", "read" }, "/pd/wire_activity/reply/wa8");
+    // Review M4: a window closes itself at its end (the first message past it); a message after the end is not counted.
+    auto shortArm = h.call("/pd/wire_activity", { "main", "wa10", "arm", 100, 1, "wa_msg", 0, "wa_f", 0 }, "/pd/wire_activity/reply/wa10");
+    CHECK(shortArm.has_value() && static_cast<int>(parseJson(*shortArm)["wires"]) == 1);
+    sleepMs(250);
+    h.call("/pd/obj_set", { "main", "wa11", "wa_msg", 0, "bang", 0 }, "/pd/obj_set/reply/wa11");
+    CHECK(mcp::wire::windows().open.load() == 0);
+    auto late = h.call("/pd/wire_activity", { "main", "wa12", "read" }, "/pd/wire_activity/reply/wa12");
+    CHECK(late.has_value());
+    if (late) {
+        auto const json = parseJson(*late);
+        CHECK(static_cast<bool>(json["forwarding"]));
+        auto const* arr = json["wires"].getArray();
+        CHECK(arr && arr->size() == 1 && static_cast<int>((*arr)[0]["messageCount"]) == 0);
+    }
     std::vector<A> cleanup { "main", "wa9", 8, 0, 0, 0, 0 };
     for (char const* id : { "wa_msg", "wa_f", "wa_hsl", "wa_f2", "wa_idle", "wa_f3", "wa_osc", "wa_mul" })
         cleanup.push_back(id);
@@ -1963,6 +1986,9 @@ void runFactCases(Harness& h, PluginProcessor& processor)
         add({ x, y, s1, s2 });
         SETFLOAT(&y, 70); SETSYMBOL(&s1, gensym("acsw_no_such_class"));
         add({ x, y, s1 });
+        // Review L8: a subpatch with no [switch~] of its own inside the switched-off one: off through its parent.
+        SETFLOAT(&y, 100); SETSYMBOL(&s1, gensym("pd")); SETSYMBOL(&s2, gensym("acinner"));
+        add({ x, y, s1, s2 });
     }, 3000));
     CHECK(sub != nullptr);
     if (!sub) return;
@@ -2005,13 +2031,18 @@ void runFactCases(Harness& h, PluginProcessor& processor)
         CHECK(saw);
     }
     auto subCensus = h.call("/pd/census", { "pd-acsw", "fa5" }, "/pd/census/reply/fa5");
+    CHECK(subCensus.has_value());
     if (subCensus) {
-        bool redRow = false;
+        bool redRow = false, innerOff = false;
         auto const sj = parseJson(*subCensus);
         if (auto* arr = sj["objects"].getArray())
-            for (auto const& o : *arr)
+            for (auto const& o : *arr) {
                 if (static_cast<bool>(o["broken"])) redRow = true;
+                if (o["type"].toString() == "pd" && o["args"][0].toString() == "acinner")
+                    innerOff = o.hasProperty("switchedOn") && !static_cast<bool>(o["switchedOn"]);
+            }
         CHECK(redRow);
+        CHECK(innerOff);
     }
     auto broken = h.call("/pd/broken", { "main", "fa6" }, "/pd/broken/reply/fa6");
     CHECK(broken.has_value());
@@ -2027,7 +2058,8 @@ void runFactCases(Harness& h, PluginProcessor& processor)
     CHECK(made.has_value() && made->num(0) == 1);
     h.fire("/pd/obj_set", { "main", "fa8", "fa_add", 0, "facts_unknown_selector", 0 });
     h.replies.waitForConsoleLine("facts_unknown_selector", 3000);
-    sleepMs(150); // plugdata's console store fills on its 30 Hz timer
+    h.fire("/pd/obj_set", { "main", "fa8b", "fa_add", 0, "facts_unknown_selector", 0 }); // the same line again: a repeat
+    h.replies.waitForConsoleLine("facts_unknown_selector", 3000);
     auto hist = h.call("/pd/console_history", { "fa9", -1, 50 }, "/pd/console_history/reply/fa9");
     CHECK(hist.has_value());
     if (hist) {
@@ -2039,9 +2071,11 @@ void runFactCases(Harness& h, PluginProcessor& processor)
                     found = true;
                     CHECK(l["type"].toString() == "error");
                     CHECK(l["tempId"].toString() == "fa_add");
+                    CHECK(static_cast<int>(l["repeats"]) >= 2); // review: repeats are visible
+                    CHECK(static_cast<juce::int64>(l["seq"]) > static_cast<juce::int64>(l["firstSeq"])); // and move the seq
                 }
         CHECK(found);
-        int const last = static_cast<int>(json["last"]);
+        int const last = static_cast<int>(static_cast<juce::int64>(json["lastSeq"]));
         auto none = h.call("/pd/console_history", { "fa10", last, 50 }, "/pd/console_history/reply/fa10");
         juce::var const nj = none ? parseJson(*none) : juce::var();
         CHECK(none.has_value() && nj["lines"].getArray() && nj["lines"].getArray()->isEmpty());

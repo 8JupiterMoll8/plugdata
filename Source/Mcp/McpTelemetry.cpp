@@ -96,6 +96,22 @@ void McpHost::consoleMessage(String const& message, bool const isError, void* co
         SETSYMBOL(&atoms[1], gensym(message.toRawUTF8()));
         pd_typedmess(s->s_thing, gensym("list"), 2, atoms);
     }
+    // V1 /pd/console_history: every line with a monotonic sequence number (a repeat of the last line bumps its
+    // count and its seq), and the tempId of the object that raised it (pointer compared only, never dereferenced).
+    {
+        juce::String const tempId = object ? getStableId(static_cast<t_gobj*>(object)) : juce::String();
+        std::lock_guard<std::mutex> const lock(session.consoleLock);
+        uint64_t const seq = ++session.consoleSeq;
+        auto& lines = session.consoleLines;
+        if (!lines.empty() && lines.back().text == message && lines.back().error == isError && lines.back().tempId == tempId) {
+            lines.back().seq = seq;
+            ++lines.back().repeats;
+        } else {
+            lines.push_back({ seq, seq, message, tempId, isError, 1 });
+            if (lines.size() > McpSession::kConsoleLines)
+                lines.pop_front();
+        }
+    }
     if (mcpBridge) {
         // T2b: the object that printed the line (an error, or a warning such as "inlet: expected ..."), as its
         // tempId. The pointer is only compared with the registry's (never dereferenced: the object may be

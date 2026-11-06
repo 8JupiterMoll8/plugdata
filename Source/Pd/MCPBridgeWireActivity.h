@@ -15,6 +15,12 @@
 // per wire a message count, the last selector, the last value (the first atom when it is a float or a symbol) and the
 // time. JUCE-free and Pd-free, so Tests/mcp/wire_activity_test.cpp runs it with g++ alone.
 //
+// One Table per plugdata instance (it lives in McpSession; review 2026-11-06: a process-wide table relied on one
+// instance's Pd lock while two instances in a DAW run on their own). Windows() maps each instance (the pd::Instance
+// pointer enqueueMessage receives) to its table and counts the open windows: with none open the hook returns after one
+// relaxed load. The count's changes call a hook (the bridge turns Pd's message forwarding on and off with it). A window
+// closes at its read, or by itself at the first message past its end.
+//
 // RT cost: with no window armed, one relaxed atomic load per message (`armed()`), nothing else. Armed: a binary search
 // over the watched keys; a hit adds one to a counter and copies the value into the slot's preallocated atomics. No
 // lock, no allocation, no exceptions. record() runs on the thread that runs Pd (the audio thread, or the message
@@ -57,6 +63,73 @@ struct Reading {
 };
 
 using Clock = uint32_t (*)();
+using OpenHook = void (*)(bool anyOpen); // called when the number of open windows changes (any thread; atomics only)
+constexpr int kMaxInstances = 32;
+
+class Table;
+
+/** Which instance owns which table, and how many windows are open (process-wide, lock-free). */
+struct Windows {
+    std::atomic<int> open { 0 };
+    std::atomic<OpenHook> hook { nullptr };
+    std::array<std::atomic<void const*>, kMaxInstances> owners {};
+    std::array<std::atomic<Table*>, kMaxInstances> tables {};
+};
+
+inline Windows& windows()
+{
+    static Windows w;
+    return w;
+}
+
+inline void windowOpened()
+{
+    int const n = windows().open.fetch_add(1, std::memory_order_acq_rel) + 1;
+    if (auto h = windows().hook.load(std::memory_order_acquire)) h(n > 0);
+}
+
+inline void windowClosed()
+{
+    int const n = windows().open.fetch_sub(1, std::memory_order_acq_rel) - 1;
+    if (auto h = windows().hook.load(std::memory_order_acquire)) h(n > 0);
+}
+
+/** Registers `table` for `owner` (an instance). False when every slot is taken. Message thread, at startup. */
+inline bool attach(void const* owner, Table* table)
+{
+    auto& w = windows();
+    for (int i = 0; i < kMaxInstances; ++i) {
+        void const* expected = nullptr;
+        if (w.owners[static_cast<size_t>(i)].load(std::memory_order_acquire) == owner) {
+            w.tables[static_cast<size_t>(i)].store(table, std::memory_order_release);
+            return true;
+        }
+        if (w.owners[static_cast<size_t>(i)].compare_exchange_strong(expected, owner, std::memory_order_acq_rel)) {
+            w.tables[static_cast<size_t>(i)].store(table, std::memory_order_release);
+            return true;
+        }
+    }
+    return false;
+}
+
+/** Forgets `owner`'s table (its session is going away). Under that instance's Pd lock, so no record() is running. */
+inline void detach(void const* owner)
+{
+    auto& w = windows();
+    for (int i = 0; i < kMaxInstances; ++i)
+        if (w.owners[static_cast<size_t>(i)].load(std::memory_order_acquire) == owner)
+            w.tables[static_cast<size_t>(i)].store(nullptr, std::memory_order_release);
+}
+
+/** The table of `owner`, or null. Any thread. */
+inline Table* tableFor(void const* owner) noexcept
+{
+    auto& w = windows();
+    for (int i = 0; i < kMaxInstances; ++i)
+        if (w.owners[static_cast<size_t>(i)].load(std::memory_order_acquire) == owner)
+            return w.tables[static_cast<size_t>(i)].load(std::memory_order_acquire);
+    return nullptr;
+}
 
 class Table {
 public:
@@ -66,7 +139,7 @@ public:
      */
     int arm(void const* const* keys, int n, uint32_t nowMs, uint32_t windowMs, Clock clock)
     {
-        armedFlag.store(false, std::memory_order_release);
+        disarm();
         size = 0;
         for (int i = 0; i < n && size < kMaxWires; ++i)
             if (keys[i]) order[static_cast<size_t>(size++)] = keys[i];
@@ -85,12 +158,21 @@ public:
         armedAtMs = nowMs;
         windowLenMs = std::clamp(windowMs, kMinWindowMs, kMaxWindowMs);
         now = clock;
-        armedFlag.store(size > 0 && clock != nullptr, std::memory_order_release);
+        if (size > 0 && clock != nullptr) {
+            armedFlag.store(true, std::memory_order_release);
+            windowOpened();
+        }
         return size;
     }
 
-    /** Closes the window; the readings stay until the next arm. Caller holds the Pd lock. */
-    void disarm() { armedFlag.store(false, std::memory_order_release); }
+    /** Closes the window (once); the readings stay until the next arm. Under the Pd lock. */
+    void disarm() noexcept
+    {
+        if (armedFlag.exchange(false, std::memory_order_acq_rel))
+            windowClosed();
+    }
+
+    ~Table() { disarm(); }
 
     bool armed() const noexcept { return armedFlag.load(std::memory_order_relaxed); }
     uint32_t windowMs() const { return windowLenMs; }
@@ -103,7 +185,10 @@ public:
         int const at = find(key);
         if (at < 0) return;
         uint32_t const elapsed = now() - armedAtMs;
-        if (elapsed > windowLenMs) return; // past the window: the read may come later, the window does not grow
+        if (elapsed > windowLenMs) { // past the window: it closes itself (forwarding off); the read comes later
+            disarm();
+            return;
+        }
         auto& s = slots[static_cast<size_t>(at)];
         s.count.store(s.count.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed); // one writer (Pd lock)
         s.lastSelector.store(selector, std::memory_order_relaxed);
@@ -152,12 +237,5 @@ private:
     std::array<void const*, kMaxWires> order {};
     std::array<Slot, kMaxWires> slots {};
 };
-
-/** The one window of the process (one wire window at a time, like the armed trace). */
-inline Table& table()
-{
-    static Table t;
-    return t;
-}
 
 } // namespace mcp::wire

@@ -404,11 +404,7 @@ juce::String MCPBridge::canonicalCanvasKey(t_canvas* cnv)
 
 // Compute native diagnostic graph facts under sys_lock(). Shared by standalone
 // /pd/diagnose and inline conditional X-ray in batch_atomic.
-extern "C" {
-int canvas_getswitchedon(t_canvas* x);  // d_ugen.c: the nearest [switch~]/[block~] up the owners is on (1 when none)
-t_float canvas_getsr(t_canvas* x);      // d_ugen.c: the canvas's sample rate after up/downsampling
-int canvas_getsignallength(t_canvas* x); // d_ugen.c: the canvas's block size
-}
+#include "MCPBridgePdAccessors.h" // V1: mcp_canvas_switchedon_chain, canvas_getsr, canvas_getsignallength
 
 namespace {
 // V1 (diagnose): `,"switchedOn":..,"blockSize":..,"sampleRate":..,"deviceOutChannels":N,"switched_off":[...],
@@ -419,7 +415,7 @@ juce::String mcpDiagnoseDeviceFacts(t_canvas* cnv, std::vector<t_gobj*> const& o
     std::vector<juce::String> const& classNames)
 {
     int const outs = sys_get_outchannels();
-    juce::String json = ",\"switchedOn\":" + juce::String(canvas_getswitchedon(cnv) ? "true" : "false")
+    juce::String json = ",\"switchedOn\":" + juce::String(mcp_canvas_switchedon_chain(cnv) ? "true" : "false")
         + ",\"blockSize\":" + juce::String(canvas_getsignallength(cnv))
         + ",\"sampleRate\":" + juce::String(static_cast<double>(canvas_getsr(cnv)))
         + ",\"deviceOutChannels\":" + juce::String(outs) + ",\"switched_off\":[";
@@ -427,7 +423,7 @@ juce::String mcpDiagnoseDeviceFacts(t_canvas* cnv, std::vector<t_gobj*> const& o
     for (size_t i = 0; i < objs.size(); ++i) {
         if (pd_class(&objs[i]->g_pd) != canvas_class) continue;
         auto* sub = reinterpret_cast<t_canvas*>(objs[i]);
-        if (canvas_getswitchedon(sub)) continue;
+        if (mcp_canvas_switchedon_chain(sub)) continue; // off here or in a parent
         if (!first) json += ",";
         first = false;
         json += "{\"tempId\":\"" + jsonEscape(names[i]) + "\",\"name\":\""

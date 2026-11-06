@@ -18,8 +18,9 @@
 //
 // `tone` of a one-block SNAPSHOT (/meter/master, /meter/query: the last 64-sample block, no history) is three-valued,
 // because the block mean cannot see a bass whose period is longer than the block (a 55 Hz sine at -20 dBFS reads -58):
-// 1 = AC above -60; 0 = no sound (the block is exactly flat, or quiet raw as well); -1 = unknown, the raw level is up
-// but the block cannot say whether it is DC or a deep bass: use an armed read.
+// 1 = AC above -60 AND a full cycle in the block (2 swings, as the blocker taps' rule); 0 = no sound (the block is
+// exactly flat, or quiet raw as well); -1 = unknown: the raw level is up, or there is AC without a full cycle (a DC step
+// inside the block, or a tone below ~700 Hz), and one block cannot tell: use an armed read.
 //
 // JUCE-free and Pd-free, so Tests/mcp/ac_level_test.cpp runs it with g++ alone. Realtime-safe: no allocation, no
 // locks, no exceptions; every call is O(samples). The OUTPUT is never touched: the blocker reads samples and keeps its
@@ -219,12 +220,20 @@ inline void accumulateBlockMean(AcStats& stats, float const* vec, int n)
     double const mean = sum / static_cast<double>(counted);
     double acSq = 0.0;
     float peak = stats.acPeak;
+    int side = 0;
+    uint64_t swings = 0;
     for (int i = 0; i < n; ++i) {
         if (!usable(vec[i])) continue;
         double const y = vec[i] - mean;
         acSq += y * y;
         peak = std::max(peak, static_cast<float>(std::fabs(y)));
+        int const now = y >= kSwingLevel ? 1 : (y <= -kSwingLevel ? -1 : 0); // the same swing rule as the blocker taps
+        if (now != 0) {
+            if (side != 0 && now != side) ++swings;
+            side = now;
+        }
     }
+    stats.swings += swings;
     stats.acSumSq += acSq;
     stats.sum += sum;
     stats.rawSumSq += rawSq;
@@ -284,7 +293,9 @@ inline int snapshotTone(AcStats const& s)
 {
     if (s.count == 0) return 0;
     double const n = static_cast<double>(s.count);
-    if (ampToDb(std::sqrt(std::max(0.0, s.acSumSq) / n)) > kToneFloorDb) return 1;
+    bool const acUp = ampToDb(std::sqrt(std::max(0.0, s.acSumSq) / n)) > kToneFloorDb;
+    if (acUp && s.swings >= 2) return 1;
+    if (acUp) return -1; // AC without a full cycle in the block: a step or a low tone, one block cannot tell
     if (s.acPeak <= kFlatRatio * s.maxAbs || s.acPeak < 1.0e-9f) return 0; // exactly flat: DC, not a bass
     if (ampToDb(std::sqrt(std::max(0.0, s.rawSumSq) / n)) > kToneFloorDb) return -1;
     return 0;

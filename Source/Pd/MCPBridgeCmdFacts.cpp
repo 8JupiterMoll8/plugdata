@@ -14,6 +14,7 @@
 #include "MCPBridgeWireActivity.h"
 #include "MCPBridgeBroken.h"
 #include "MCPBridgeObjectValues.h" // mcpGobjIsLive
+#include "MCPBridgePdAccessors.h"
 
 namespace {
 
@@ -29,24 +30,6 @@ juce::String errorJson(juce::String const& text)
 }
 
 uint32_t wireClock() { return juce::Time::getMillisecondCounter(); }
-
-// The open wire window's wires, for the read (message thread, under the Pd lock: arm and read run there).
-struct WatchedWire {
-    void const* oc = nullptr;
-    juce::String src, dst;
-    int outlet = 0, inlet = 0;
-};
-struct WireWindowInfo {
-    juce::String canvas;
-    std::vector<WatchedWire> wires;
-    uint32_t armedAtMs = 0;
-    bool open = false;
-};
-WireWindowInfo& wireWindow()
-{
-    static WireWindowInfo w;
-    return w;
-}
 
 } // namespace
 
@@ -134,7 +117,6 @@ void MCPBridge::pdWireActivity(const juce::String& action, const juce::OSCMessag
             sendReply(address, errorJson("no wire given (arm <windowMs> all | <count> <srcId> <outlet> <dstId> <inlet> ...)"));
             return;
         }
-        activateProbing(); // plugdata forwards wire messages only while its debugging/activity flag is on
         juce::String json;
         bool const ran = host->pdWait([&] {
             t_canvas* cnv = host->getCanvasBySymbol(canvasName);
@@ -142,40 +124,56 @@ void MCPBridge::pdWireActivity(const juce::String& action, const juce::OSCMessag
                 json = errorJson("canvas not found: " + canvasName);
                 return;
             }
-            auto& info = wireWindow();
-            mcp::wire::table().disarm();
-            info = {};
-            info.canvas = canvasName;
+            auto& session = host->session;
+            session.wireTable.disarm();
+            session.wireWires.clear();
+            session.wireOpen = false;
+            session.wireCanvas = canvasName;
             std::vector<bool> matched(wants.size(), false);
+            std::unordered_map<t_object*, juce::String> ids; // review L7: one registry lookup per object
+            auto idOf = [&](t_object* ob) -> juce::String const& {
+                auto it = ids.find(ob);
+                if (it == ids.end()) it = ids.emplace(ob, host->getStableId(&ob->ob_g)).first;
+                return it->second;
+            };
+            std::unordered_map<std::string, std::vector<size_t>> wanted; // "src:outlet>dst:inlet" -> request rows
+            for (size_t k = 0; k < wants.size(); ++k)
+                wanted[(wants[k].src + ":" + juce::String(wants[k].outlet) + ">" + wants[k].dst + ":" + juce::String(wants[k].inlet)).toStdString()].push_back(k);
             int skippedSignal = 0;
             t_linetraverser lt;
             t_outconnect* oc = nullptr;
             linetraverser_start(&lt, cnv);
             while ((oc = linetraverser_next_nosize(&lt))) {
-                juce::String const src = host->getStableId(&lt.tr_ob->ob_g);
-                juce::String const dst = host->getStableId(&lt.tr_ob2->ob_g);
+                juce::String const& src = idOf(lt.tr_ob);
+                juce::String const& dst = idOf(lt.tr_ob2);
                 bool take = all;
-                for (size_t k = 0; !all && k < wants.size(); ++k)
-                    if (wants[k].src == src && wants[k].dst == dst && wants[k].outlet == lt.tr_outno && wants[k].inlet == lt.tr_inno) {
+                if (!all) {
+                    auto const hit = wanted.find((src + ":" + juce::String(lt.tr_outno) + ">" + dst + ":" + juce::String(lt.tr_inno)).toStdString());
+                    if (hit != wanted.end()) {
                         take = true;
-                        matched[k] = true;
+                        for (size_t k : hit->second) matched[k] = true;
                     }
+                }
                 if (!take) continue;
                 if (obj_issignaloutlet(lt.tr_ob, lt.tr_outno)) {
                     ++skippedSignal; // the AC taps cover signal wires
                     continue;
                 }
-                if (static_cast<int>(info.wires.size()) < mcp::wire::kMaxWires)
-                    info.wires.push_back({ oc, src, dst, lt.tr_outno, lt.tr_inno });
+                if (static_cast<int>(session.wireWires.size()) < mcp::wire::kMaxWires)
+                    session.wireWires.push_back({ oc, src, dst, lt.tr_outno, lt.tr_inno });
             }
             std::vector<void const*> keys;
-            for (auto const& w : info.wires) keys.push_back(w.oc);
-            info.armedAtMs = wireClock();
-            int const watched = mcp::wire::table().arm(keys.data(), static_cast<int>(keys.size()), info.armedAtMs, static_cast<uint32_t>(std::max(0, windowMs)), &wireClock);
-            info.open = watched > 0;
+            for (auto const& w : session.wireWires) keys.push_back(w.oc);
+            session.wireArmedAtMs = wireClock();
+            // Opening the window turns Pd's forwarding on through the bridge's own flag (McpHost's hook): plugdata's
+            // debugging flag, the DSP graph and the artist's display stay as they are.
+            int const watched = session.wireTable.arm(keys.data(), static_cast<int>(keys.size()), session.wireArmedAtMs, static_cast<uint32_t>(std::max(0, windowMs)), &wireClock);
+            session.wireOpen = watched > 0;
+            session.wireForwardingAtArm = session.wireOpen && plugdata_debugging_or_activity_enabled() != 0;
             auto* root = new juce::DynamicObject();
-            root->setProperty("armed", info.open);
-            root->setProperty("windowMs", static_cast<int>(mcp::wire::table().windowMs()));
+            root->setProperty("armed", session.wireOpen);
+            root->setProperty("forwarding", session.wireForwardingAtArm);
+            root->setProperty("windowMs", static_cast<int>(session.wireTable.windowMs()));
             root->setProperty("wires", watched);
             root->setProperty("skippedSignal", skippedSignal);
             juce::Array<juce::var> unresolved;
@@ -183,7 +181,7 @@ void MCPBridge::pdWireActivity(const juce::String& action, const juce::OSCMessag
                 if (!matched[k])
                     unresolved.add(wants[k].src + ":" + juce::String(wants[k].outlet) + ">" + wants[k].dst + ":" + juce::String(wants[k].inlet));
             root->setProperty("unresolved", unresolved);
-            if (!info.open) root->setProperty("error", "no control wire to watch");
+            if (!session.wireOpen) root->setProperty("error", "no control wire to watch");
             json = toJson(root);
         }, kPdWaitMs);
         sendReply(address, ran ? json : errorJson("the Pd context did not answer in time"));
@@ -193,20 +191,26 @@ void MCPBridge::pdWireActivity(const juce::String& action, const juce::OSCMessag
     if (mode == "read") {
         juce::String json;
         bool const ran = host->pdWait([&] {
-            auto& info = wireWindow();
-            if (!info.open) {
+            auto& session = host->session;
+            if (!session.wireOpen) {
                 json = errorJson("no wire window armed (arm one first)");
                 return;
             }
-            auto& table = mcp::wire::table();
+            auto& table = session.wireTable;
+            // Review: forwarding sampled at the arm and now (before the close). Off at either: the counts are unknown
+            // (null), never 0. A window that already closed itself at its end had forwarding until then.
+            bool const stillOpen = table.armed();
+            bool const forwarding = session.wireForwardingAtArm && (!stillOpen || plugdata_debugging_or_activity_enabled() != 0);
             table.disarm(); // under the Pd lock: no record() is running now
-            info.open = false;
+            session.wireOpen = false;
             auto* root = new juce::DynamicObject();
-            root->setProperty("canvas", info.canvas);
+            root->setProperty("canvas", session.wireCanvas);
             root->setProperty("windowMs", static_cast<int>(table.windowMs()));
-            root->setProperty("ms", static_cast<int>(wireClock() - info.armedAtMs));
+            root->setProperty("ms", static_cast<int>(wireClock() - session.wireArmedAtMs));
+            root->setProperty("forwarding", forwarding);
+            if (!forwarding) root->setProperty("reason", "Pd did not forward wire messages for the whole window: the counts are unknown");
             juce::Array<juce::var> list;
-            for (auto const& w : info.wires) {
+            for (auto const& w : session.wireWires) {
                 mcp::wire::Reading r;
                 table.read(w.oc, r);
                 auto* o = new juce::DynamicObject();
@@ -214,6 +218,12 @@ void MCPBridge::pdWireActivity(const juce::String& action, const juce::OSCMessag
                 o->setProperty("outlet", w.outlet);
                 o->setProperty("dst", w.dst);
                 o->setProperty("inlet", w.inlet);
+                if (!forwarding) {
+                    for (char const* k : { "messageCount", "lastSelector", "lastValue", "lastAtMs" })
+                        o->setProperty(k, juce::var());
+                    list.add(juce::var(o));
+                    continue;
+                }
                 o->setProperty("messageCount", static_cast<int>(r.count));
                 auto const* sel = static_cast<t_symbol const*>(r.lastSelector);
                 o->setProperty("lastSelector", sel && sel->s_name ? juce::var(juce::String::fromUTF8(sel->s_name)) : juce::var());
@@ -244,6 +254,7 @@ void MCPBridge::pdAudioDevice(const juce::String& action, const juce::OSCMessage
     auto* proc = processor;
     auto* host = proc->getMcp();
     auto json = host->onMessageThread([proc] {
+        proc->setThis(); // review L6: sys_getsr/sys_get_outchannels read the current Pd instance
         auto* root = new juce::DynamicObject();
         auto* pd = new juce::DynamicObject();
         int const pdBlock = pd::Instance::getBlockSize();
@@ -329,40 +340,48 @@ void MCPBridge::pdBroken(const juce::String& action, const juce::OSCMessage& msg
 }
 
 // ── /pd/console_history <corrId> [since] [max] ──────────────────────────────────────────────────────────────────
+// `since` = the last `seq` the caller saw (-1 or absent: from the start). Lines come from McpHost::consoleMessage with
+// a monotonic seq (review: the old store index broke at 800 lines and hid repeats); a repeat bumps its line's seq.
 void MCPBridge::pdConsoleHistory(const juce::String& action, const juce::OSCMessage& msg)
 {
     juce::ignoreUnused(action);
     if (!processor) return;
     auto const corr = msg.size() > 0 ? getArgString(msg[0]) : juce::String("0");
-    int const since = msg.size() > 1 ? static_cast<int>(getArgFloat(msg[1])) : -1;
+    // An int32 arg keeps every seq exact (a float32 loses steps past 2^24); text works too.
+    double sinceArg = -1.0;
+    if (msg.size() > 1) {
+        if (msg[1].isInt32()) sinceArg = msg[1].getInt32();
+        else if (msg[1].isString()) sinceArg = getArgString(msg[1]).getDoubleValue();
+        else sinceArg = getArgFloat(msg[1]);
+    }
+    uint64_t const since = sinceArg < 0 ? 0 : static_cast<uint64_t>(sinceArg);
     int const maxLines = juce::jlimit(1, 800, msg.size() > 2 ? static_cast<int>(getArgFloat(msg[2])) : 100);
-    auto* host = processor->getMcp();
-    juce::String json;
-    // The console store is a message-thread deque; the tempId lookup needs the Pd lock: pdWait gives both.
-    bool const ran = host->pdWait([&] {
-        auto& lines = processor->getConsoleMessages();
-        int const total = static_cast<int>(lines.size());
-        int const first = std::max({ 0, since + 1, total - maxLines });
-        juce::Array<juce::var> list;
-        for (int i = first; i < total; ++i) {
-            auto const& [object, text, type, width, repeats] = lines[static_cast<size_t>(i)];
-            juce::ignoreUnused(width);
-            auto* o = new juce::DynamicObject();
-            o->setProperty("index", i);
-            o->setProperty("type", type ? "error" : "print");
-            o->setProperty("text", text);
-            o->setProperty("repeats", repeats);
-            // The pointer is only compared with the registry's, never dereferenced (the object may be gone).
-            juce::String const id = object ? host->getStableId(static_cast<t_gobj*>(object)) : juce::String();
-            o->setProperty("tempId", id.isNotEmpty() ? juce::var(id) : juce::var());
-            list.add(juce::var(o));
-        }
-        auto* root = new juce::DynamicObject();
-        root->setProperty("total", total);
-        root->setProperty("last", total - 1);
-        root->setProperty("lines", list);
-        root->setProperty("note", "index = position in plugdata's console store (the last 800 lines, repeats merged); warnings are stored as errors");
-        json = toJson(root);
-    }, kPdWaitMs);
-    sendReply("/pd/console_history/reply/" + corr, ran ? json : errorJson("the Pd context did not answer in time"));
+    auto& session = processor->getMcp()->session;
+    std::vector<McpSession::ConsoleLine> copy;
+    uint64_t lastSeq = 0;
+    {
+        std::lock_guard<std::mutex> const lock(session.consoleLock);
+        lastSeq = session.consoleSeq;
+        for (auto const& l : session.consoleLines)
+            if (l.seq > since) copy.push_back(l);
+    }
+    bool const truncated = static_cast<int>(copy.size()) > maxLines;
+    if (truncated) copy.erase(copy.begin(), copy.end() - maxLines);
+    juce::Array<juce::var> list;
+    for (auto const& l : copy) {
+        auto* o = new juce::DynamicObject();
+        o->setProperty("seq", static_cast<juce::int64>(l.seq));
+        o->setProperty("firstSeq", static_cast<juce::int64>(l.firstSeq));
+        o->setProperty("type", l.error ? "error" : "print");
+        o->setProperty("text", l.text);
+        o->setProperty("repeats", l.repeats);
+        o->setProperty("tempId", l.tempId.isNotEmpty() ? juce::var(l.tempId) : juce::var());
+        list.add(juce::var(o));
+    }
+    auto* root = new juce::DynamicObject();
+    root->setProperty("lastSeq", static_cast<juce::int64>(lastSeq));
+    root->setProperty("truncated", truncated);
+    root->setProperty("lines", list);
+    root->setProperty("note", "seq is monotonic (a repeated line keeps one entry, its seq and repeats move); the last 800 lines are kept; warnings are stored as errors");
+    sendReply("/pd/console_history/reply/" + corr, toJson(root));
 }

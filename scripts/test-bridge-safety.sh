@@ -47,6 +47,14 @@ if [ -n "$wireRt" ]; then
   echo "test-bridge-safety: the wire-activity hook path must not lock, allocate or use JUCE" >&2
   exit 1
 fi
+# Review 2026-11-06: Pd's private struct _inlet is read through the fork's class-checked accessors (pure-data/0004),
+# never through a mirrored layout.
+inletMirror="$(grep -rnE "InletMirror|struct _inlet *\{|i_floatslot|i_symslot|iu_floatsignalvalue" "$root"/Source/Pd "$root"/Source/Mcp | grep -v ":\s*//" || true)"
+if [ -n "$inletMirror" ]; then
+  echo "$inletMirror" >&2
+  echo "test-bridge-safety: bridge code mirrors Pd's struct _inlet (use the mcp_inlet_* accessors)" >&2
+  exit 1
+fi
 wireCalls="$(grep -rn "mcp::wireMessage(" "$root"/Source --include=*.cpp --include=*.h | grep -v ":\s*//" | grep -c . || true)"
 if [ "$wireCalls" != "1" ]; then
   echo "test-bridge-safety: mcp::wireMessage must be called exactly once (MessageDispatcher::enqueueMessage), found $wireCalls" >&2

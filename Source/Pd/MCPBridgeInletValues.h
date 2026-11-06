@@ -8,38 +8,22 @@
 // cutoff is 0 Hz right now" instead of "the tone stops after the filter". Read only; message thread, caller holds the
 // Pd lock; never on the audio thread.
 //
-// Where Pd keeps a value (m_obj.c at the plugdata-pd pin):
-//   - a signal inlet's scalar (used while no signal is connected): the main inlet's CLASS_MAINSIGNALIN field, a
-//     secondary signal inlet's iu_floatsignalvalue. Both are read through Pd's public obj_findsignalscalar().
-//   - a float inlet made with floatinlet_new(owner, &field): the field it points to (i_floatslot);
-//     a symbol inlet (symbolinlet_new): the symbol it points to.
+// Where Pd keeps a value (m_obj.c at the plugdata-pd pin), read through the fork's accessors
+// (patches/submodules/pure-data/0004, MCPBridgePdAccessors.h), each of which checks the inlet's class first:
+//   - a signal inlet's scalar (used while no signal is connected): the main inlet's CLASS_MAINSIGNALIN field (offset
+//     from the public t_class), a secondary signal inlet's value (mcp_inlet_signalscalar).
+//   - a float inlet made with floatinlet_new(owner, &field): the field it points to (mcp_inlet_floatslot);
+//     a symbol inlet (symbolinlet_new): the symbol it points to (mcp_inlet_symslot).
 //   - an inlet made with inlet_new(owner, dest, s1, s2) only FORWARDS (e.g. osc~'s phase inlet, "ft1"): Pd keeps no
 //     copy, so its value is null with that reason. So is the main inlet of a control object, and a pointer inlet.
-// t_inlet is private to m_obj.c. The bridge already mirrors its prefix (McpInletMirror, MCPBridgeObjectValues.h); this
-// mirrors the whole struct and CHECKS the mirror on every object before trusting a slot: each inlet's owner field must
-// be the object and every secondary signal inlet's scalar address must equal what obj_findsignalscalar() returns. A
-// failed check reads every slot as null ("layout check failed"), never a guess. No Pd patch is needed.
+// No mirrored struct: review 2026-11-06 (a mirror check cannot reject a bad layout for objects without signal
+// inlets; a Pd bump could then read a wrong slot).
 #pragma once
 
 #include "MCPBridgeCmdCommon.h"
+#include "MCPBridgePdAccessors.h"
 
 namespace mcp::inlets {
-
-// Pd's struct _inlet and union inletunion (m_obj.c:33-50), field for field.
-struct InletMirror {
-    t_pd i_pd;
-    InletMirror* i_next;
-    t_object* i_owner;
-    t_pd* i_dest;
-    t_symbol* i_symfrom;
-    union {
-        t_symbol* symto;
-        t_gpointer* pointerslot;
-        t_float* floatslot;
-        t_symbol** symslot;
-        t_float floatsignalvalue;
-    } i_un;
-};
 
 struct Wires {
     int signal = 0;
@@ -68,20 +52,6 @@ inline std::unordered_map<t_object*, std::unordered_map<int, Wires>> wiresInto(t
         else ++w.control;
     }
     return out;
-}
-
-/** The mirror check for one object (see the top of this file). */
-inline bool layoutCheck(t_object* o)
-{
-    int physical = (pd_class(&o->ob_pd)->c_firstin) ? 1 : 0;
-    for (auto* in = reinterpret_cast<InletMirror*>(o->ob_inlet); in; in = in->i_next, ++physical) {
-        if (in->i_owner != o) return false;
-        if (in->i_symfrom == &s_signal) {
-            int const sig = obj_siginletindex(o, physical);
-            if (sig < 0 || obj_findsignalscalar(o, sig) != &in->i_un.floatsignalvalue) return false;
-        }
-    }
-    return true;
 }
 
 inline juce::var number(t_float f) { return std::isfinite(f) ? juce::var(static_cast<double>(f)) : juce::var(); }
@@ -117,7 +87,6 @@ inline juce::var objectInlets(t_object* o, std::unordered_map<int, Wires> const&
     juce::Array<juce::var> list;
     auto wiresOf = [&](int i) { auto it = wires.find(i); return it == wires.end() ? Wires {} : it->second; };
     t_class* cls = pd_class(&o->ob_pd);
-    bool const layoutOk = layoutCheck(o);
     static juce::String const noSignal = "a signal is connected: Pd uses it, not the stored scalar";
     int physical = 0;
     if (cls->c_firstin) {
@@ -132,32 +101,25 @@ inline juce::var objectInlets(t_object* o, std::unordered_map<int, Wires> const&
         }
         physical = 1;
     }
-    for (auto* in = reinterpret_cast<InletMirror*>(o->ob_inlet); in; in = in->i_next, ++physical) {
+    for (t_inlet* in = o->ob_inlet; in; in = mcp_inlet_next(in), ++physical) {
         auto const w = wiresOf(physical);
-        if (!layoutOk) {
-            list.add(inletJson(physical, obj_issignalinlet(o, physical) ? "signal" : "other", w, {}, {}, "inlet layout check failed: not read"));
-            continue;
-        }
-        t_symbol* const from = in->i_symfrom;
-        if (from == &s_signal) {
-            int const sig = obj_siginletindex(o, physical);
-            t_float const f = sig >= 0 ? *obj_findsignalscalar(o, sig) : 0.0f;
-            if (sig < 0) list.add(inletJson(physical, "signal", w, {}, {}, "no signal index for this inlet"));
-            else if (w.signal > 0) list.add(inletJson(physical, "signal", w, {}, "scalar", noSignal));
-            else list.add(inletJson(physical, "signal", w, number(f), "scalar", {}));
-        } else if (in->i_dest == nullptr && from == &s_float) {
-            if (in->i_un.floatslot) list.add(inletJson(physical, "float", w, number(*in->i_un.floatslot), "floatSlot", {}));
-            else list.add(inletJson(physical, "float", w, {}, {}, "float inlet without a slot"));
-        } else if (in->i_dest == nullptr && from == &s_symbol) {
-            t_symbol* const s = in->i_un.symslot ? *in->i_un.symslot : nullptr;
-            if (s && s->s_name) list.add(inletJson(physical, "symbol", w, juce::var(juce::String::fromUTF8(s->s_name)), "symbolSlot", {}));
+        t_symbol* from = nullptr;
+        t_symbol* to = nullptr;
+        if (t_float* scalar = mcp_inlet_signalscalar(in)) {
+            list.add(w.signal > 0 ? inletJson(physical, "signal", w, {}, "scalar", noSignal) : inletJson(physical, "signal", w, number(*scalar), "scalar", {}));
+        } else if (t_float* slot = mcp_inlet_floatslot(in)) {
+            list.add(inletJson(physical, "float", w, number(*slot), "floatSlot", {}));
+        } else if (t_symbol** sym = mcp_inlet_symslot(in)) {
+            if (*sym && (*sym)->s_name) list.add(inletJson(physical, "symbol", w, juce::var(juce::String::fromUTF8((*sym)->s_name)), "symbolSlot", {}));
             else list.add(inletJson(physical, "symbol", w, {}, {}, "symbol inlet without a symbol"));
-        } else if (in->i_dest == nullptr && from == &s_pointer) {
+        } else if (mcp_inlet_ispointer(in)) {
             list.add(inletJson(physical, "pointer", w, {}, {}, "a pointer inlet holds a pointer, not a value"));
-        } else {
-            juce::String const to = (in->i_un.symto && in->i_un.symto->s_name) ? juce::String::fromUTF8(in->i_un.symto->s_name) : juce::String("?");
+        } else if (mcp_inlet_generic(in, &from, &to)) {
+            juce::String const target = (to && to->s_name) ? juce::String::fromUTF8(to->s_name) : juce::String("its own method");
             list.add(inletJson(physical, from ? kindOf(from) : juce::String("other"), w, {}, {},
-                "forwarded to the object as '" + to + "': Pd keeps no copy in the inlet"));
+                "forwarded to the object as '" + target + "': Pd keeps no copy in the inlet"));
+        } else {
+            list.add(inletJson(physical, "other", w, {}, {}, "an inlet kind the bridge does not know: not read"));
         }
     }
     return juce::var(list);

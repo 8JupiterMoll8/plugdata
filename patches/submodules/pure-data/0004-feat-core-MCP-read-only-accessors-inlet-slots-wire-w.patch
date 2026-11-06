@@ -1,0 +1,148 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Alphi <alphi@starchaser.local>
+Date: Fri, 6 Nov 2026 19:59:30 +0100
+Subject: [PATCH 4/4] feat(core): MCP read-only accessors: inlet slots, wire-window
+ forwarding, switch~ chain
+
+Three small fork additions the MCP bridge needs to READ Pd state without
+mirroring private structs (V1 2026-11-06 review):
+
+- m_obj.c: mcp_inlet_next, mcp_inlet_floatslot, mcp_inlet_symslot,
+  mcp_inlet_ispointer, mcp_inlet_generic, mcp_inlet_signalscalar. Each
+  checks the inlet's class (floatinlet_class, symbolinlet_class, ...) and
+  returns 0 for any other kind, so a Pd bump that changes struct _inlet
+  cannot make the bridge read a wrong slot. Used by /pd/inlet_values.
+- s_inter.c: enable_mcp_wire and set_plugdata_mcp_wire_enabled(), OR'ed
+  into enabled_debug_or_activity. The bridge's /pd/wire_activity window
+  turns message forwarding on for itself alone; plugdata's debugging flag
+  (DSP rebuild, signal reuse, debug tooltips) stays as the artist set it.
+- d_ugen.c: mcp_canvas_switchedon_chain(): 1 only when every [switch~]
+  up the owner chain is on (canvas_getswitchedon stops at the nearest).
+
+Depended on by: Source/Pd/MCPBridgeInletValues.h, MCPBridgeCmdFacts.cpp,
+Source/Mcp/McpWireHook.h, McpSysCommands.cpp (census) and the diagnose
+facts in MCPBridge.cpp. Fork feature, no upstream equivalent.
+---
+ src/d_ugen.c  | 17 +++++++++++++++++
+ src/m_obj.c   | 39 +++++++++++++++++++++++++++++++++++++++
+ src/s_inter.c | 16 ++++++++++++++--
+ 3 files changed, 70 insertions(+), 2 deletions(-)
+
+diff --git a/src/d_ugen.c b/src/d_ugen.c
+index ece2b6f..f85b594 100644
+--- a/src/d_ugen.c
++++ b/src/d_ugen.c
+@@ -220,6 +220,23 @@ static void block_set(t_block *x, t_floatarg fcalcsize, t_floatarg foverlap,
+     canvas_resume_dsp(dspstate);
+ }
+ 
++/* MCP fork (V1 census/diagnose): 1 only when every [switch~] from x up its owners is on (canvas_getswitchedon
++   stops at the nearest one, so a switched-off parent read as on) */
++int mcp_canvas_switchedon_chain(t_canvas *x)
++{
++    t_canvas *canvas;
++    t_gobj *g;
++    for (canvas = x; canvas; canvas = canvas->gl_owner)
++        for (g = canvas->gl_list; g; g = g->g_next)
++            if (g->g_pd == block_class)
++            {
++                if (!((t_block *)g)->x_switchon)
++                    return (0);
++                break;
++            }
++    return (1);
++}
++
+ int canvas_getswitchedon(t_canvas *x)
+ {
+     t_canvas *canvas;
+diff --git a/src/m_obj.c b/src/m_obj.c
+index 3e6d3f4..fe3ec7e 100644
+--- a/src/m_obj.c
++++ b/src/m_obj.c
+@@ -1023,6 +1023,45 @@ void obj_sendinlet(t_object *x, int n, t_symbol *s, int argc, t_atom *argv)
+     else bug("obj_sendinlet");
+ }
+ 
++/* MCP fork (V1 inlet_values): read-only accessors for the bridge, which cannot see struct _inlet. Each returns 0
++   unless the inlet is of the kind asked for, so a caller never reads a slot through a guessed layout. */
++t_inlet *mcp_inlet_next(t_inlet *x)
++{
++    return (x ? x->i_next : 0);
++}
++
++t_float *mcp_inlet_floatslot(t_inlet *x)
++{
++    return ((x && x->i_pd == floatinlet_class) ? x->i_floatslot : 0);
++}
++
++t_symbol **mcp_inlet_symslot(t_inlet *x)
++{
++    return ((x && x->i_pd == symbolinlet_class) ? x->i_symslot : 0);
++}
++
++    /* 1 for a pointer inlet (pointerinlet_new), else 0 */
++int mcp_inlet_ispointer(t_inlet *x)
++{
++    return (x && x->i_pd == pointerinlet_class);
++}
++
++    /* a generic inlet (inlet_new): its declared selector (0 = any) and, unless it is a signal inlet, the selector it
++       forwards as; returns 0 for any other inlet kind */
++int mcp_inlet_generic(t_inlet *x, t_symbol **from, t_symbol **to)
++{
++    if (!x || x->i_pd != inlet_class) return (0);
++    if (from) *from = x->i_symfrom;
++    if (to) *to = (x->i_symfrom == &s_signal ? 0 : x->i_symto);
++    return (1);
++}
++
++    /* the scalar a generic signal inlet holds while no signal is connected, or 0 */
++t_float *mcp_inlet_signalscalar(t_inlet *x)
++{
++    return ((x && x->i_pd == inlet_class && x->i_symfrom == &s_signal) ? &x->i_un.iu_floatsignalvalue : 0);
++}
++
+ /* ------------------- setup routine, somewhat misnamed */
+ void obj_init(void)
+ {
+diff --git a/src/s_inter.c b/src/s_inter.c
+index a1de6a5..447b74e 100644
+--- a/src/s_inter.c
++++ b/src/s_inter.c
+@@ -2401,6 +2401,7 @@ static atomic_bool enable_probe = 0;
+ static atomic_bool enable_debugging = 0;
+ static atomic_bool enable_activity = 0;
+ static atomic_bool enabled_debug_or_activity = 0;
++static atomic_bool enable_mcp_wire = 0; /* MCP fork (V1 wire_activity): forwarding for an armed wire window only */
+ 
+ int plugdata_object_probe_enabled() {
+     return atomic_load_explicit(&enable_probe, memory_order_relaxed);
+@@ -2428,11 +2429,22 @@ void set_plugdata_object_probe_enabled(int enabled_probe)
+ void set_plugdata_debugging_enabled(int enabled_debugging)
+ {
+     atomic_store_explicit(&enable_debugging, enabled_debugging, memory_order_relaxed);
+-    atomic_store_explicit(&enabled_debug_or_activity, enabled_debugging || atomic_load_explicit(&enable_activity, memory_order_relaxed), memory_order_relaxed);
++    atomic_store_explicit(&enabled_debug_or_activity, enabled_debugging || atomic_load_explicit(&enable_activity, memory_order_relaxed)
++        || atomic_load_explicit(&enable_mcp_wire, memory_order_relaxed), memory_order_relaxed);
+ }
+ 
+ void set_plugdata_activity_enabled(int enabled_activity)
+ {
+      atomic_store_explicit(&enable_activity, enabled_activity, memory_order_relaxed);
+-     atomic_store_explicit(&enabled_debug_or_activity, enabled_activity || atomic_load_explicit(&enable_debugging, memory_order_relaxed), memory_order_relaxed);
++     atomic_store_explicit(&enabled_debug_or_activity, enabled_activity || atomic_load_explicit(&enable_debugging, memory_order_relaxed)
++        || atomic_load_explicit(&enable_mcp_wire, memory_order_relaxed), memory_order_relaxed);
++}
++
++/* MCP fork (V1 wire_activity): turns message forwarding on for the bridge's wire window alone. It does not touch
++   the debugging flag (no DSP rebuild, no signal-buffer change, no debug tooltips). */
++void set_plugdata_mcp_wire_enabled(int enabled)
++{
++    atomic_store_explicit(&enable_mcp_wire, enabled, memory_order_relaxed);
++    atomic_store_explicit(&enabled_debug_or_activity, enabled || atomic_load_explicit(&enable_debugging, memory_order_relaxed)
++        || atomic_load_explicit(&enable_activity, memory_order_relaxed), memory_order_relaxed);
+ }
+-- 
+2.34.1
+

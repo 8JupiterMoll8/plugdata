@@ -94,6 +94,40 @@ int main()
         CHECK(t.find(&wires[kMaxWires + 1]) < 0);
     }
 
+    // Review: one table per instance, the open-window count and its hook, a window that closes itself.
+    {
+        static int hookCalls = 0;
+        static bool lastAnyOpen = false;
+        windows().hook.store([](bool anyOpen) { ++hookCalls; lastAnyOpen = anyOpen; });
+        int const before = windows().open.load();
+        Table a, b;
+        int ownerA = 0, ownerB = 0;
+        CHECK(attach(&ownerA, &a) && attach(&ownerB, &b));
+        CHECK(tableFor(&ownerA) == &a && tableFor(&ownerB) == &b && tableFor(&fakeNow) == nullptr);
+        void const* keys[] = { &wires[1] };
+        fakeNow = 100;
+        a.arm(keys, 1, fakeNow, 100, clock);
+        CHECK(windows().open.load() == before + 1 && lastAnyOpen);
+        b.arm(keys, 1, fakeNow, 100, clock);
+        CHECK(windows().open.load() == before + 2);
+        // The same wire key in two instances: each table counts its own messages.
+        tableFor(&ownerA)->record(&wires[1], &selFloat, ValueKind::Float, 1.0f, nullptr);
+        Reading r;
+        CHECK(a.read(&wires[1], r) && r.count == 1 && b.read(&wires[1], r) && r.count == 0);
+        // Past its end a window closes itself at the next message.
+        fakeNow = 250;
+        b.record(&wires[1], &selFloat, ValueKind::Float, 1.0f, nullptr);
+        CHECK(!b.armed() && windows().open.load() == before + 1);
+        b.disarm(); // closing twice counts once
+        CHECK(windows().open.load() == before + 1);
+        a.disarm();
+        CHECK(windows().open.load() == before && !lastAnyOpen && hookCalls >= 3);
+        detach(&ownerA);
+        CHECK(tableFor(&ownerA) == nullptr && tableFor(&ownerB) == &b);
+        detach(&ownerB);
+        windows().hook.store(nullptr);
+    }
+
     if (failures == 0)
         std::printf("wire_activity_test: all passed\n");
     return failures == 0 ? 0 : 1;
