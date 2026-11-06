@@ -1539,8 +1539,10 @@ void runMeterTapCases(Harness& h, PluginProcessor& processor, AudioControl& audi
 // dBFS, audible" and the artist heard nothing. Every tap now also reports the level left after a ~10 Hz DC blocker
 // (or the block mean, for the one-block snapshots) and `tone` (AC RMS above -60 dBFS); the old fields stay as they
 // were. Layout: /meter/read args 17-20, /meter/result (probe), /meter/master and /meter/query args 4-7, each
-// acRmsDb, acPeakDb, dcDb, tone (0/1); the armed trace's levels[] and the spectral result JSON carry the same names.
-// Capability `meter_ac`. [sig~ 0.0794] is the DC drone (-22 dBFS); [phasor~ 110] is a tone with a DC of 0.5.
+// acRmsDb, acPeakDb, dcDb, tone (0/1; the one-block snapshots /meter/master and /meter/query: 1 tone, 0 no sound, -1
+// unknown); the armed trace's levels[] and the spectral result JSON carry the same names. Capability `meter_ac`.
+// Review F1-F3: a snapshot never calls a bass "no sound"; a DC step is no tone (header test); the final tap judges
+// each channel alone (unequal L/R here). [sig~ 0.0794] is the DC drone (-22 dBFS); [phasor~ 110] is a tone with a DC of 0.5.
 void runAcTapCases(Harness& h, PluginProcessor& processor, AudioControl& audio)
 {
     std::printf("AC taps: DC is no tone (V1)\n");
@@ -1567,6 +1569,21 @@ void runAcTapCases(Harness& h, PluginProcessor& processor, AudioControl& audio)
         CHECK(probe->num(5) <= -99.0);
         CHECK(std::abs(probe->num(6) - (-22.0)) < 0.5);
         CHECK(probe->num(7) == 0.0);
+    }
+    // The same probe slot again with another DC (0.5 = -6.02 dBFS): the blocker starts fresh, no step from the old one.
+    {
+        auto set = h.call("/pd/obj_set", { "main", "ac2s", "ac_dc", 0, "float", 1, 0.5 }, "/pd/obj_set/reply/ac2s");
+        CHECK(set.has_value());
+        sleepMs(60);
+        auto again = h.call("/meter/start", { "main", "ac_dc", 0, 300, "ac2b" }, "/meter/result/ac2b", 3000);
+        CHECK(again.has_value() && again->args.size() >= 8);
+        if (again && again->args.size() >= 8) {
+            std::printf("  probe reuse dc 0.5: ac %.1f/%.1f, dc %.2f, tone %d\n", again->num(4), again->num(5), again->num(6), static_cast<int>(again->num(7)));
+            CHECK(again->num(4) <= -99.0 && again->num(5) <= -99.0 && again->num(7) == 0.0);
+            CHECK(std::abs(again->num(6) - (-6.02)) < 0.2);
+        }
+        h.call("/pd/obj_set", { "main", "ac2r", "ac_dc", 0, "float", 1, 0.0794 }, "/pd/obj_set/reply/ac2r");
+        sleepMs(60);
     }
     // The snapshots: /meter/master and /meter/query.
     auto master = h.call("/meter/master", { "main", "ac3" }, "/meter/master/reply/ac3");
@@ -1680,9 +1697,90 @@ void runAcTapCases(Harness& h, PluginProcessor& processor, AudioControl& audio)
     }
     auto masterTone = h.call("/meter/master", { "main", "ac14" }, "/meter/master/reply/ac14");
     CHECK(masterTone.has_value() && masterTone->args.size() >= 8 && masterTone->num(7) == 1.0);
+    // The armed trace on the tone: the phasor's tap reads tone true at its AC level.
+    {
+        auto arm = h.call("/meter/trace", { "main", "ac16", "arm", 300, "" }, "/meter/trace/reply/ac16");
+        CHECK(arm.has_value());
+        sleepMs(350);
+        auto rd = h.call("/meter/trace", { "main", "ac17", "read" }, "/meter/trace/reply/ac17");
+        CHECK(rd.has_value());
+        bool seen = false;
+        juce::var const json = rd ? parseJson(*rd) : juce::var();
+        if (rd)
+            if (auto* arr = json["levels"].getArray())
+                for (auto const& l : *arr)
+                    if (l["tempId"].toString() == "ac_ph") {
+                        seen = true;
+                        CHECK(static_cast<bool>(l["tone"]));
+                        CHECK(std::abs(static_cast<double>(l["acRmsDb"]) - (-10.8)) < 1.0);
+                        CHECK(std::abs(static_cast<double>(l["dcDb"]) - (-6.0)) < 0.5);
+                    }
+        CHECK(seen);
+    }
+    // Review F1: a 30 Hz sine in one 64-sample block: the snapshot cannot see it, but never says "no sound" (0).
+    {
+        auto bass = h.call("/pd/batch_atomic",
+            { "main", "ac18", 0, 0, 0, 2, 1,
+                "ac_bass", 1400, 40, "obj", "osc~", 1, "30",
+                "ac_sink", 1400, 80, "obj", "*~", 1, "0",
+                "ac_bass", 0, "ac_sink", 0,
+                0, 5, 10, 0 },
+            "/pd/batch_atomic/reply/ac18");
+        CHECK(bass.has_value() && bass->num(0) == 2);
+        sleepMs(150); // let the new oscillator run (a fresh signal vector is all zeros: rightly "no sound")
+        int unknown = 0, sounding = 0;
+        for (int k = 0; k < 8; ++k) {
+            auto const corr = std::string("ac19_") + std::to_string(k);
+            auto q = h.call("/meter/query", { "main", "ac_bass", 0, corr.c_str() }, "/meter/query/reply/" + corr);
+            CHECK(q.has_value() && q->args.size() >= 8);
+            if (q && q->args.size() >= 8) {
+                CHECK(q->num(7) != 0.0);
+                unknown += q->num(7) == -1.0;
+                sounding += q->num(7) == 1.0;
+            }
+            sleepMs(7);
+        }
+        std::printf("  snapshot 30 Hz osc: tone 1 x%d, -1 x%d\n", sounding, unknown);
+        h.call("/pd/batch_atomic", { "main", "ac20", 2, 0, 0, 0, 0, "ac_bass", "ac_sink", 0, 5, 10, 0 }, "/pd/batch_atomic/reply/ac20");
+    }
 
-    h.fire("/pd/dsp", { 0 });
     h.call("/pd/batch_atomic", { "main", "ac15", 3, 0, 0, 0, 0, "ac_ph", "ac_half", "ac_dac", 0, 5, 10, 0 }, "/pd/batch_atomic/reply/ac15");
+
+    // Review F3: unequal L/R at the final tap. The tone on the left (-16.8 dBFS AC), DC alone on the right: the reply
+    // carries the left channel's AC level (not the two channels averaged, -19.8) and the louder DC (left, -12).
+    audio.paused = true;
+    sleepMs(60);
+    processor.setEnableLimiter(false);
+    if (volume) volume->setUnscaledValueNotifyingHost(0.8f);
+    auto lr = h.call("/pd/batch_atomic",
+        { "main", "ac21", 0, 0, 0, 4, 3,
+            "ac_lph", 1200, 40, "obj", "phasor~", 1, "110",
+            "ac_lhalf", 1200, 80, "obj", "*~", 1, "0.5",
+            "ac_rdc", 1300, 80, "obj", "sig~", 1, "0.0794",
+            "ac_lrdac", 1200, 140, "obj", "dac~", 0,
+            "ac_lph", 0, "ac_lhalf", 0,
+            "ac_lhalf", 0, "ac_lrdac", 0,
+            "ac_rdc", 0, "ac_lrdac", 1,
+            0, 5, 10, 0 },
+        "/pd/batch_atomic/reply/ac21");
+    CHECK(lr.has_value() && lr->num(0) == 4);
+    render(20);
+    {
+        auto r = window("ac22", "ac23", 60);
+        CHECK(r.has_value() && r->args.size() >= 21);
+        if (r && r->args.size() >= 21) {
+            std::printf("  final L tone / R dc: ac %.1f/%.1f, dc %.1f, tone %d\n", r->num(17), r->num(18), r->num(19), static_cast<int>(r->num(20)));
+            CHECK(r->num(20) == 1.0);
+            CHECK(std::abs(r->num(17) - (-16.8)) < 0.7);
+            CHECK(std::abs(r->num(19) - (-12.0)) < 0.7);
+        }
+    }
+    if (volume) volume->setUnscaledValueNotifyingHost(volumeBefore);
+    processor.setEnableLimiter(limiterBefore);
+    h.call("/pd/batch_atomic", { "main", "ac24", 4, 0, 0, 0, 0, "ac_lph", "ac_lhalf", "ac_rdc", "ac_lrdac", 0, 5, 10, 0 }, "/pd/batch_atomic/reply/ac24");
+    render(4);
+    audio.paused = false;
+    h.fire("/pd/dsp", { 0 });
 }
 
 // P11.2 V10: /pd/load_patch reads and checks the file BEFORE it clears the canvas. An unreadable file or one that is

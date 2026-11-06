@@ -171,22 +171,11 @@ void McpHost::audioBlockFinished(AudioBuffer<float>& buffer)
         }
         bool const armed = session.mcpArmActive.load(std::memory_order_relaxed);
         int const acChannels = std::min(outputs, McpSession::kAcChannels);
-        mcp::ac::AcStats total;
         for (int ch = 0; ch < acChannels; ++ch) {
             mcp::ac::AcStats channel;
             mcp::ac::accumulate(session.mcpAcBlockers[static_cast<size_t>(ch)], channel, buffer.getReadPointer(ch), buffer.getNumSamples());
-            if (!armed) continue;
-            auto& chSum = session.mcpArmFinalChSum[static_cast<size_t>(ch)];
-            auto& chCount = session.mcpArmFinalChCount[static_cast<size_t>(ch)];
-            chSum.store(chSum.load(std::memory_order_relaxed) + channel.sum, std::memory_order_relaxed);
-            chCount.store(chCount.load(std::memory_order_relaxed) + channel.count, std::memory_order_relaxed);
-            total.add(channel);
-        }
-        if (armed) {
-            session.mcpArmFinalAcSumSq.store(session.mcpArmFinalAcSumSq.load(std::memory_order_relaxed) + total.acSumSq, std::memory_order_relaxed);
-            session.mcpArmFinalAcCount.store(session.mcpArmFinalAcCount.load(std::memory_order_relaxed) + total.count, std::memory_order_relaxed);
-            if (total.acPeak > session.mcpArmFinalAcPeak.load(std::memory_order_relaxed))
-                session.mcpArmFinalAcPeak.store(total.acPeak, std::memory_order_relaxed);
+            if (armed)
+                session.mcpArmFinalAc[static_cast<size_t>(ch)].add(channel); // each channel on its own (review F3)
         }
     }
 

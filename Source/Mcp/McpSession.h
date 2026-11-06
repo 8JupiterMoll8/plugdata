@@ -412,39 +412,56 @@ struct McpSession {
     float mcpBlockPreLimiterPeak = -1.0f; // audio thread only: this block's pre-limiter peak (-1 = not taken)
     // V1 AC taps (2026-11-06: a DC drone read "-22 dBFS, audible"): the FINAL tap through a DC blocker per output
     // channel. The blockers run on every block (read only, a few flops per sample), so a window opens on a settled
-    // blocker; the sums below count only while armed. Channels past kAcChannels are not in the AC sums. DC = the mean
-    // of each channel over the window (RMS over the channels). Single writer (the audio thread); read after the window
-    // closed, emptied with the others at a new arm epoch.
+    // blocker; the sums below count only while armed. Channels past kAcChannels are not in the AC sums. Each channel
+    // keeps its own sums and is judged alone (review F3: a mono voice on one of 16 outputs is not diluted); the reply
+    // carries the loudest channel's levels. Single writer (the audio thread); read after the window closed, emptied
+    // with the others at a new arm epoch.
     static constexpr int kAcChannels = 16;
     std::array<mcp::ac::DcBlocker, kAcChannels> mcpAcBlockers {}; // audio thread only
     double mcpAcRate = 0.0;                                       // audio thread only: the rate the poles are for
-    std::atomic<double> mcpArmFinalAcSumSq { 0.0 };
-    std::atomic<float> mcpArmFinalAcPeak { 0.0f };
-    std::atomic<uint64_t> mcpArmFinalAcCount { 0 };
-    std::array<std::atomic<double>, kAcChannels> mcpArmFinalChSum {};
-    std::array<std::atomic<uint64_t>, kAcChannels> mcpArmFinalChCount {};
+    struct ArmChannelAc {
+        std::atomic<double> acSumSq { 0.0 };
+        std::atomic<double> sum { 0.0 };
+        std::atomic<float> acPeak { 0.0f };
+        std::atomic<uint64_t> count { 0 };
+        std::atomic<uint64_t> swings { 0 };
+        void reset()
+        {
+            acSumSq.store(0.0, std::memory_order_relaxed);
+            sum.store(0.0, std::memory_order_relaxed);
+            acPeak.store(0.0f, std::memory_order_relaxed);
+            count.store(0, std::memory_order_relaxed);
+            swings.store(0, std::memory_order_relaxed);
+        }
+        void add(mcp::ac::AcStats const& s) // audio thread only (the single writer)
+        {
+            acSumSq.store(acSumSq.load(std::memory_order_relaxed) + s.acSumSq, std::memory_order_relaxed);
+            sum.store(sum.load(std::memory_order_relaxed) + s.sum, std::memory_order_relaxed);
+            if (s.acPeak > acPeak.load(std::memory_order_relaxed)) acPeak.store(s.acPeak, std::memory_order_relaxed);
+            count.store(count.load(std::memory_order_relaxed) + s.count, std::memory_order_relaxed);
+            swings.store(swings.load(std::memory_order_relaxed) + s.swings, std::memory_order_relaxed);
+        }
+        mcp::ac::AcStats read() const
+        {
+            mcp::ac::AcStats s;
+            s.acSumSq = acSumSq.load(std::memory_order_relaxed);
+            s.sum = sum.load(std::memory_order_relaxed);
+            s.acPeak = acPeak.load(std::memory_order_relaxed);
+            s.count = count.load(std::memory_order_relaxed);
+            s.swings = swings.load(std::memory_order_relaxed);
+            return s;
+        }
+    };
+    std::array<ArmChannelAc, kAcChannels> mcpArmFinalAc {};
     void resetArmAc() // the window's AC sums (arm and the audio thread's epoch reset)
     {
-        mcpArmFinalAcSumSq.store(0.0, std::memory_order_relaxed);
-        mcpArmFinalAcPeak.store(0.0f, std::memory_order_relaxed);
-        mcpArmFinalAcCount.store(0, std::memory_order_relaxed);
-        for (auto& v : mcpArmFinalChSum) v.store(0.0, std::memory_order_relaxed);
-        for (auto& v : mcpArmFinalChCount) v.store(0, std::memory_order_relaxed);
+        for (auto& c : mcpArmFinalAc) c.reset();
     }
-    mcp::ac::AcLevels readArmAc() const // the window's AC levels (after it closed)
+    mcp::ac::AcLevels readArmAc() const // the window's AC levels (after it closed): the loudest channel's
     {
-        uint64_t const n = mcpArmFinalAcCount.load(std::memory_order_relaxed);
-        if (n == 0) return {};
-        double dcSq = 0.0;
-        int channels = 0;
-        for (int c = 0; c < kAcChannels; ++c)
-            if (uint64_t const cn = mcpArmFinalChCount[static_cast<size_t>(c)].load(std::memory_order_relaxed); cn > 0) {
-                double const mean = mcpArmFinalChSum[static_cast<size_t>(c)].load(std::memory_order_relaxed) / static_cast<double>(cn);
-                dcSq += mean * mean;
-                ++channels;
-            }
-        return mcp::ac::levelsFrom(std::sqrt(std::max(0.0, mcpArmFinalAcSumSq.load(std::memory_order_relaxed)) / static_cast<double>(n)),
-            mcpArmFinalAcPeak.load(std::memory_order_relaxed), channels > 0 ? std::sqrt(dcSq / channels) : 0.0);
+        std::array<mcp::ac::AcStats, kAcChannels> channels {};
+        for (size_t c = 0; c < channels.size(); ++c) channels[c] = mcpArmFinalAc[c].read();
+        return mcp::ac::levelsOfChannels(channels.data(), kAcChannels);
     }
     // Review L3: every arm bumps the epoch; the audio thread empties the window's accumulators itself at the first
     // block of a new epoch, so a sum it stored for the old window after the arm's reset cannot leak into the new one.

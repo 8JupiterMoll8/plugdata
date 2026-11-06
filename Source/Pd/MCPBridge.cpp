@@ -747,6 +747,7 @@ MCPBridge::MasterMeterResult MCPBridge::computeMasterMeter(PluginProcessor* proc
         }
     }
     res.ac = mcp::ac::levelsOf(ac);
+    res.acTone = mcp::ac::snapshotTone(ac);
 
     float rms = (totalSamples > 0) ? (float)std::sqrt(totalSumSq / (double)totalSamples) : 0.0f;
     res.rmsDb = (rms > 1e-7f) ? (20.0f * std::log10(rms)) : -100.0f;
@@ -3341,6 +3342,7 @@ void ProbeManager::audioTick()
             probe.windowSum.store(0.0, std::memory_order_relaxed);
             probe.windowAcPeak.store(0.0f, std::memory_order_relaxed);
             probe.windowAcCount.store(0, std::memory_order_relaxed);
+            probe.windowSwings.store(0, std::memory_order_relaxed);
         }
         mcp::ac::AcStats blockAc;
         mcp::ac::accumulate(probe.acBlocker, blockAc, vec, n);
@@ -3357,6 +3359,7 @@ void ProbeManager::audioTick()
             if (blockAc.acPeak > probe.windowAcPeak.load(std::memory_order_relaxed))
                 probe.windowAcPeak.store(blockAc.acPeak, std::memory_order_relaxed);
             probe.windowAcCount.store(probe.windowAcCount.load(std::memory_order_relaxed) + blockAc.count, std::memory_order_relaxed);
+            probe.windowSwings.store(probe.windowSwings.load(std::memory_order_relaxed) + blockAc.swings, std::memory_order_relaxed);
             probe.windowBlocks.store(probe.windowBlocks.load(std::memory_order_relaxed) + 1, std::memory_order_release);
             continue;
         }
@@ -3370,7 +3373,7 @@ void ProbeManager::audioTick()
         }
         float rms = std::sqrt(sumSq / static_cast<float>(n));
 
-        ProbeResult result { probe.probeId, rms, peak, n, blockAc.acSumSq, blockAc.sum, blockAc.acPeak, static_cast<int>(blockAc.count) };
+        ProbeResult result { probe.probeId, rms, peak, n, blockAc.acSumSq, blockAc.sum, blockAc.acPeak, static_cast<int>(blockAc.count), static_cast<int>(blockAc.swings) };
         probe.resultQueue.try_enqueue(result);
 
         int writePos = probe.ringWritePos.load(std::memory_order_relaxed);
@@ -3406,6 +3409,7 @@ bool ProbeManager::finishWindowTap(uint32_t probeId, WindowTapReading& out)
         out.ac.sum = probe.windowSum.load(std::memory_order_relaxed);
         out.ac.acPeak = probe.windowAcPeak.load(std::memory_order_relaxed);
         out.ac.count = probe.windowAcCount.load(std::memory_order_relaxed);
+        out.ac.swings = probe.windowSwings.load(std::memory_order_relaxed);
         return true;
     }
     return false;
@@ -3425,6 +3429,7 @@ int ProbeManager::startProbe(t_outconnect* oc, int const epoch, const juce::Stri
             probe.windowSum.store(0.0, std::memory_order_relaxed);
             probe.windowAcPeak.store(0.0f, std::memory_order_relaxed);
             probe.windowAcCount.store(0, std::memory_order_relaxed);
+            probe.windowSwings.store(0, std::memory_order_relaxed);
             probe.acCoeff.store(mcp::ac::coefficientFor(bridge && bridge->processor ? bridge->processor->getSampleRate() : 0.0), std::memory_order_relaxed);
             probe.acEpoch.fetch_add(1, std::memory_order_release);
             probe.spectral = false;
@@ -3463,7 +3468,7 @@ void ProbeManager::stopProbe(uint32_t probeId, const juce::String& correlationId
                 probe.accRms += item.rms * item.rms;
                 if (item.peak > probe.accPeak) probe.accPeak = item.peak;
                 probe.accBlocks++;
-                probe.accAc.add({ item.acSumSq, item.sum, item.acPeak, static_cast<uint64_t>(std::max(0, item.acCount)) });
+                probe.accAc.add({ item.acSumSq, item.sum, item.acPeak, static_cast<uint64_t>(std::max(0, item.acCount)), static_cast<uint64_t>(std::max(0, item.swings)) });
             }
 
             float meanRms = (probe.accBlocks > 0) ? std::sqrt(probe.accRms / static_cast<float>(probe.accBlocks)) : 0.0f;
@@ -3565,7 +3570,7 @@ void ProbeManager::collectResults()
             probe.accRms += item.rms * item.rms;
             if (item.peak > probe.accPeak) probe.accPeak = item.peak;
             probe.accBlocks++;
-            probe.accAc.add({ item.acSumSq, item.sum, item.acPeak, static_cast<uint64_t>(std::max(0, item.acCount)) });
+            probe.accAc.add({ item.acSumSq, item.sum, item.acPeak, static_cast<uint64_t>(std::max(0, item.acCount)), static_cast<uint64_t>(std::max(0, item.swings)) });
         }
 
         if (now - probe.startTimeMs >= static_cast<juce::int64>(probe.durationMs)) {

@@ -142,11 +142,12 @@ struct ProbeResult {
     float peak = 0.0f;
     int blockSize = 0;
     // V1 AC taps: this block after the probe's DC blocker (sum of squares, peak) and its signed sum (the DC), over
-    // `acCount` finite samples.
+    // `acCount` finite samples, and the AC swings in the block (review F2: a DC step has none).
     double acSumSq = 0.0;
     double sum = 0.0;
     float acPeak = 0.0f;
     int acCount = 0;
+    int swings = 0;
 };
 
 // Spectral/pitch analysis window (probe ring, armed capture, render tail). 4096 samples (~85 ms at 48 kHz): the
@@ -183,6 +184,7 @@ struct ActiveProbe {
     std::atomic<double> windowSum { 0.0 };
     std::atomic<float> windowAcPeak { 0.0f };
     std::atomic<uint64_t> windowAcCount { 0 };
+    std::atomic<uint64_t> windowSwings { 0 };
 
     // V1 AC taps: the DC blocker belongs to the audio tick alone. startProbe bumps `acEpoch` (and publishes the pole
     // for the sample rate in `acCoeff`); the tick resets its blocker, and the window sums, when it sees a new epoch,
@@ -206,12 +208,17 @@ struct ActiveProbe {
 
 // V1 AC taps on the wire: four trailing OSC args (acRmsDb, acPeakDb, dcDb as floats, tone as int 0/1) and the same
 // names as JSON fields. An older server reads only the args it knows; the capability `meter_ac` says they are there.
-inline void addAcArgs(juce::OSCMessage& rep, mcp::ac::AcLevels const& lv)
+inline void addAcArgs(juce::OSCMessage& rep, mcp::ac::AcLevels const& lv, int tone)
 {
     rep.addArgument(lv.acRmsDb);
     rep.addArgument(lv.acPeakDb);
     rep.addArgument(lv.dcDb);
-    rep.addArgument(static_cast<juce::int32>(lv.tone ? 1 : 0));
+    rep.addArgument(static_cast<juce::int32>(tone));
+}
+
+inline void addAcArgs(juce::OSCMessage& rep, mcp::ac::AcLevels const& lv)
+{
+    addAcArgs(rep, lv, lv.tone ? 1 : 0);
 }
 
 /** `,"acRmsDb":..,"acPeakDb":..,"dcDb":..,"tone":..` (one decimal), to append inside a JSON object. */
@@ -596,6 +603,7 @@ private:
         float peakDb = -100.0f;
         float rmsDb = -100.0f;
         mcp::ac::AcLevels ac; // V1 AC taps: the same block with its mean removed
+        int acTone = 0;       // review F1: the snapshot's three-valued tone (1 tone, 0 none, -1 unknown)
         bool masterFound = false;
         juce::String masterType = "none";
     };

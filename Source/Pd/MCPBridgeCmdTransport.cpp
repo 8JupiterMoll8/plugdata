@@ -283,8 +283,9 @@ std::vector<std::string> MCPBridge::capabilityList() const
         // spectral JSON `gen` name the window read
         "meter_window_gen",
         // V1 AC taps: /meter/read args 17-20, /meter/result, /meter/master and /meter/query args 4-7 (acRmsDb, acPeakDb,
-        // dcDb, tone 0/1), the armed trace's levels[] and the spectral result JSON carry the AC level after a DC
-        // blocker: a DC drone has a loud peak and no tone
+        // dcDb, tone), the armed trace's levels[] and the spectral result JSON carry the AC level after a DC
+        // blocker: a DC drone has a loud peak and no tone. tone is 0/1, except the one-block snapshots /meter/master
+        // and /meter/query: 1 tone, 0 no sound, -1 unknown (a bass the block cannot see; use the armed read)
         "meter_ac",
         "meter_trace",
         // T2b: /meter/trace ... arm <windowMs> [focus] / read: the trace of a window's peaks (a triggered voice)
