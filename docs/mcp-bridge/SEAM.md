@@ -26,6 +26,7 @@ The fork's AI bridge (`Source/Pd/MCPBridge*`, the overlay layer, the moodboard) 
 | overlay paint | `CanvasMcpLayer::paintUnderObjects`, `paintOverObjects`, `paintViewportFrame`, `paintScreenOverlay`, `updateOverlays(state)` (tag `overlayPaint`); `decorateObject` (tag `decorateObject`); `isTargeted(object\|connection)` (tag `overlayTarget`). Done in S7 |
 | canvas input | mouse, key and modifier events, each returning `consumed` |
 | canvas lifecycle | created, destroyed, synchronised, settingsChanged, `undo/redo -> handled` |
+| wire activity | `mcp::wireMessage(type, target, selector, argc, argv)` first in `pd::MessageDispatcher::enqueueMessage` (`Source/Pd/MessageListener.h`, tag `wireActivity`, V1 2026-11-06), plus its tagged `#include "Mcp/McpWireHook.h"`: every control message Pd forwards per connection reaches the `/pd/wire_activity` window before the GUI's blocking and de-duplication. Unarmed it is one relaxed atomic load; armed, a binary search and a counter/value store into preallocated atomics (`Source/Pd/MCPBridgeWireActivity.h`, unit-tested). Two hunks, +2 |
 
 ## Tests
 
