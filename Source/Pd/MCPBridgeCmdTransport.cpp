@@ -282,6 +282,10 @@ std::vector<std::string> MCPBridge::capabilityList() const
         // is refused on /meter/<read|read_spectral>/error/<corrId> ("stale_gen ..."); /meter/read arg 15 and the
         // spectral JSON `gen` name the window read
         "meter_window_gen",
+        // V1 AC taps: /meter/read args 17-20, /meter/result, /meter/master and /meter/query args 4-7 (acRmsDb, acPeakDb,
+        // dcDb, tone 0/1), the armed trace's levels[] and the spectral result JSON carry the AC level after a DC
+        // blocker: a DC drone has a loud peak and no tone
+        "meter_ac",
         "meter_trace",
         // T2b: /meter/trace ... arm <windowMs> [focus] / read: the trace of a window's peaks (a triggered voice)
         "meter_trace_armed",

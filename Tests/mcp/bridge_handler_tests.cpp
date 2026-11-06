@@ -1535,6 +1535,156 @@ void runMeterTapCases(Harness& h, PluginProcessor& processor, AudioControl& audi
     audio.paused = false;
 }
 
+// V1 AC taps (2026-11-06): a [phasor~] through a [lop~] stuck at cutoff 0 put out pure DC; every meter said "-22
+// dBFS, audible" and the artist heard nothing. Every tap now also reports the level left after a ~10 Hz DC blocker
+// (or the block mean, for the one-block snapshots) and `tone` (AC RMS above -60 dBFS); the old fields stay as they
+// were. Layout: /meter/read args 17-20, /meter/result (probe), /meter/master and /meter/query args 4-7, each
+// acRmsDb, acPeakDb, dcDb, tone (0/1); the armed trace's levels[] and the spectral result JSON carry the same names.
+// Capability `meter_ac`. [sig~ 0.0794] is the DC drone (-22 dBFS); [phasor~ 110] is a tone with a DC of 0.5.
+void runAcTapCases(Harness& h, PluginProcessor& processor, AudioControl& audio)
+{
+    std::printf("AC taps: DC is no tone (V1)\n");
+    CHECK(hasCap(h, "meter_ac", "ac0"));
+    auto made = h.call("/pd/batch_atomic",
+        { "main", "ac1", 0, 0, 0, 2, 2,
+            "ac_dc", 1200, 40, "obj", "sig~", 1, "0.0794",
+            "ac_dac", 1200, 120, "obj", "dac~", 0,
+            "ac_dc", 0, "ac_dac", 0,
+            "ac_dc", 0, "ac_dac", 1,
+            0, 5, 10, 0 },
+        "/pd/batch_atomic/reply/ac1");
+    CHECK(made.has_value() && made->num(0) == 2);
+    h.fire("/pd/dsp", { 1 });
+    sleepMs(300);
+
+    // The probe (/meter/start): raw RMS -22 dBFS as before, AC at the floor, DC -22, no tone.
+    auto probe = h.call("/meter/start", { "main", "ac_dc", 0, 300, "ac2" }, "/meter/result/ac2", 3000);
+    CHECK(probe.has_value() && probe->args.size() >= 8);
+    if (probe && probe->args.size() >= 8) {
+        std::printf("  probe dc: rms %.1f, ac %.1f/%.1f, dc %.1f, tone %d\n", probe->num(0), probe->num(4), probe->num(5), probe->num(6), static_cast<int>(probe->num(7)));
+        CHECK(std::abs(probe->num(0) - (-22.0)) < 0.5); // the old field, unchanged: it reads the DC
+        CHECK(probe->num(4) <= -99.0);
+        CHECK(probe->num(5) <= -99.0);
+        CHECK(std::abs(probe->num(6) - (-22.0)) < 0.5);
+        CHECK(probe->num(7) == 0.0);
+    }
+    // The snapshots: /meter/master and /meter/query.
+    auto master = h.call("/meter/master", { "main", "ac3" }, "/meter/master/reply/ac3");
+    CHECK(master.has_value() && master->args.size() >= 8);
+    if (master && master->args.size() >= 8) {
+        CHECK(master->num(0) > -60.0); // the old verdict: "audible"
+        CHECK(master->num(4) <= -99.0 && master->num(7) == 0.0);
+        CHECK(std::abs(master->num(6) - (-22.0)) < 0.5);
+    }
+    auto query = h.call("/meter/query", { "main", "ac_dc", 0, "ac4" }, "/meter/query/reply/ac4");
+    CHECK(query.has_value() && query->args.size() >= 8);
+    if (query && query->args.size() >= 8)
+        CHECK(query->num(4) <= -99.0 && query->num(7) == 0.0 && std::abs(query->num(6) - (-22.0)) < 0.5);
+    // The armed trace: the tap's level entry.
+    auto armed = h.call("/meter/trace", { "main", "ac5", "arm", 300, "" }, "/meter/trace/reply/ac5");
+    CHECK(armed.has_value());
+    sleepMs(350);
+    auto read = h.call("/meter/trace", { "main", "ac6", "read" }, "/meter/trace/reply/ac6");
+    CHECK(read.has_value());
+    if (read) {
+        auto const json = parseJson(*read);
+        bool seen = false;
+        if (auto* arr = json["levels"].getArray())
+            for (auto const& l : *arr)
+                if (l["tempId"].toString() == "ac_dc") {
+                    seen = true;
+                    CHECK(static_cast<double>(l["peakDb"]) > -23.0); // unchanged
+                    CHECK(static_cast<double>(l["acRmsDb"]) <= -99.0);
+                    CHECK(static_cast<double>(l["acPeakDb"]) <= -99.0);
+                    CHECK(std::abs(static_cast<double>(l["dcDb"]) - (-22.0)) < 0.5);
+                    CHECK(l.hasProperty("tone") && !static_cast<bool>(l["tone"]));
+                }
+        CHECK(seen);
+    }
+
+    // The final tap (/meter/read), rendered through processBlock: limiter off, unity master.
+    PlugDataParameter* volume = nullptr;
+    for (auto* p : processor.getParameters())
+        if (auto* param = dynamic_cast<PlugDataParameter*>(p); param && param->getTitle().toString() == "volume")
+            volume = param;
+    CHECK(volume != nullptr);
+    float const volumeBefore = volume ? volume->getUnscaledValue() : 0.8f;
+    bool const limiterBefore = processor.getEnableLimiter();
+    audio.paused = true;
+    sleepMs(60);
+    processor.setEnableLimiter(false);
+    if (volume) volume->setUnscaledValueNotifyingHost(0.8f);
+    juce::AudioBuffer<float> buffer(std::max(2, processor.getTotalNumOutputChannels()), 512);
+    juce::MidiBuffer midi;
+    auto render = [&](int blocks) {
+        for (int k = 0; k < blocks; ++k) {
+            buffer.clear();
+            midi.clear();
+            processor.processBlock(buffer, midi);
+        }
+    };
+    auto window = [&](char const* armCorr, char const* readCorr, int blocks) -> std::optional<Reply> {
+        auto arm = h.call("/meter/arm", { armCorr }, std::string("/meter/arm/reply/") + armCorr);
+        int const gen = arm && !arm->args.empty() ? static_cast<int>(arm->num(0)) : 0;
+        render(blocks);
+        return h.call("/meter/read", { readCorr, gen }, std::string("/meter/read/reply/") + readCorr, 2000);
+    };
+    render(20);
+    {
+        auto r = window("ac7", "ac8", 40);
+        CHECK(r.has_value() && r->args.size() >= 21);
+        if (r && r->args.size() >= 21) {
+            std::printf("  final dc: peak %.1f, ac %.1f/%.1f, dc %.1f, tone %d\n", r->num(0), r->num(17), r->num(18), r->num(19), static_cast<int>(r->num(20)));
+            CHECK(std::abs(r->num(0) - (-22.0)) < 0.5); // the old peak: still reads the DC
+            CHECK(r->num(17) <= -99.0);
+            CHECK(r->num(18) <= -99.0);
+            CHECK(std::abs(r->num(19) - (-22.0)) < 0.5);
+            CHECK(r->num(20) == 0.0);
+        }
+    }
+    // The same window with a tone: [phasor~ 110] (saw 0..1: AC RMS 0.2887 = -10.8 dBFS, DC 0.5 = -6 dBFS), through
+    // [*~ 0.5] to the dac~ (-16.8 / -12 dBFS there, well under the output ceiling).
+    h.call("/pd/batch_atomic", { "main", "ac9", 1, 0, 0, 0, 0, "ac_dc", 0, 5, 10, 0 }, "/pd/batch_atomic/reply/ac9");
+    auto tone = h.call("/pd/batch_atomic",
+        { "main", "ac10", 0, 0, 0, 2, 3,
+            "ac_ph", 1200, 40, "obj", "phasor~", 1, "110",
+            "ac_half", 1200, 80, "obj", "*~", 1, "0.5",
+            "ac_ph", 0, "ac_half", 0,
+            "ac_half", 0, "ac_dac", 0,
+            "ac_half", 0, "ac_dac", 1,
+            0, 5, 10, 0 },
+        "/pd/batch_atomic/reply/ac10");
+    CHECK(tone.has_value() && tone->num(0) == 2);
+    render(20);
+    {
+        auto r = window("ac11", "ac12", 60);
+        CHECK(r.has_value() && r->args.size() >= 21);
+        if (r && r->args.size() >= 21) {
+            std::printf("  final phasor: peak %.1f, ac %.1f/%.1f, dc %.1f, tone %d\n", r->num(0), r->num(17), r->num(18), r->num(19), static_cast<int>(r->num(20)));
+            CHECK(r->num(20) == 1.0);
+            CHECK(std::abs(r->num(17) - (-16.8)) < 1.0);
+            CHECK(std::abs(r->num(19) - (-12.0)) < 1.0);
+        }
+    }
+    if (volume) volume->setUnscaledValueNotifyingHost(volumeBefore);
+    processor.setEnableLimiter(limiterBefore);
+    audio.paused = false;
+    sleepMs(100);
+    // The probe on the tone.
+    auto probeTone = h.call("/meter/start", { "main", "ac_ph", 0, 300, "ac13" }, "/meter/result/ac13", 3000);
+    CHECK(probeTone.has_value() && probeTone->args.size() >= 8);
+    if (probeTone && probeTone->args.size() >= 8) {
+        CHECK(probeTone->num(7) == 1.0);
+        CHECK(std::abs(probeTone->num(4) - (-10.8)) < 1.0);
+        CHECK(std::abs(probeTone->num(6) - (-6.0)) < 0.5);
+    }
+    auto masterTone = h.call("/meter/master", { "main", "ac14" }, "/meter/master/reply/ac14");
+    CHECK(masterTone.has_value() && masterTone->args.size() >= 8 && masterTone->num(7) == 1.0);
+
+    h.fire("/pd/dsp", { 0 });
+    h.call("/pd/batch_atomic", { "main", "ac15", 3, 0, 0, 0, 0, "ac_ph", "ac_half", "ac_dac", 0, 5, 10, 0 }, "/pd/batch_atomic/reply/ac15");
+}
+
 // P11.2 V10: /pd/load_patch reads and checks the file BEFORE it clears the canvas. An unreadable file or one that is
 // not a Pd patch is an error and the canvas keeps every object; a valid empty patch is a valid load. Reply: arg0 the
 // object count (-1 on an error, old clients read only this), arg1 1 (undo reset) or "error: ...", arg2 the JSON
@@ -4956,6 +5106,7 @@ int main()
             runLimiterCases(harness, processor);
             runMeterWindowGenCases(harness, processor);
             runMeterTapCases(harness, processor, audioControl);
+            runAcTapCases(harness, processor, audioControl);
             runOutputCeilingCases(harness, processor, audioControl);
             runMidiDevicesCases(harness, processor);
             runApprovalCases(harness, processor);

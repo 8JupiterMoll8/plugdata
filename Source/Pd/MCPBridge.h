@@ -31,6 +31,7 @@
 #include "Pd/MCPBridgeWorker.h"   // command worker and reply queue (Plan 3 P3.4)
 #include "Pd/MCPBridgeV2Server.h" // v2 TCP listener (Plan 4 P4.1)
 #include "Pd/MCPBridgeV2Router.h" // v2 reply routing (P4.1 S3)
+#include "Pd/MCPBridgeAcLevel.h"  // V1 AC taps: DC blocker + AC/DC levels (JUCE-free)
 
 class PluginProcessor;
 class MCPBridge;
@@ -140,6 +141,12 @@ struct ProbeResult {
     float rms = 0.0f;
     float peak = 0.0f;
     int blockSize = 0;
+    // V1 AC taps: this block after the probe's DC blocker (sum of squares, peak) and its signed sum (the DC), over
+    // `acCount` finite samples.
+    double acSumSq = 0.0;
+    double sum = 0.0;
+    float acPeak = 0.0f;
+    int acCount = 0;
 };
 
 // Spectral/pitch analysis window (probe ring, armed capture, render tail). 4096 samples (~85 ms at 48 kHz): the
@@ -170,6 +177,20 @@ struct ActiveProbe {
     std::atomic<bool> windowMode { false };
     std::atomic<float> windowPeak { 0.0f };
     std::atomic<int> windowBlocks { 0 };
+    // V1 AC taps of a window tap: the AC sum of squares and peak, the signed input sum (DC) and the samples counted.
+    // Same single writer (the audio tick); read by finishWindowTap after the window closed.
+    std::atomic<double> windowAcSumSq { 0.0 };
+    std::atomic<double> windowSum { 0.0 };
+    std::atomic<float> windowAcPeak { 0.0f };
+    std::atomic<uint64_t> windowAcCount { 0 };
+
+    // V1 AC taps: the DC blocker belongs to the audio tick alone. startProbe bumps `acEpoch` (and publishes the pole
+    // for the sample rate in `acCoeff`); the tick resets its blocker, and the window sums, when it sees a new epoch,
+    // so a tick still running on a slot's previous use can never leak into the new one.
+    std::atomic<uint32_t> acEpoch { 0 };
+    std::atomic<float> acCoeff { mcp::ac::coefficientFor(mcp::ac::kDefaultRate) };
+    uint32_t acEpochSeen = 0; // audio tick only
+    mcp::ac::DcBlocker acBlocker; // audio tick only
 
     moodycamel::ReaderWriterQueue<ProbeResult> resultQueue { 256 };
 
@@ -180,6 +201,31 @@ struct ActiveProbe {
     float accRms = 0.0f;
     float accPeak = 0.0f;
     int accBlocks = 0;
+    mcp::ac::AcStats accAc; // V1 AC taps: the blocks collected so far (message thread, like accRms)
+};
+
+// V1 AC taps on the wire: four trailing OSC args (acRmsDb, acPeakDb, dcDb as floats, tone as int 0/1) and the same
+// names as JSON fields. An older server reads only the args it knows; the capability `meter_ac` says they are there.
+inline void addAcArgs(juce::OSCMessage& rep, mcp::ac::AcLevels const& lv)
+{
+    rep.addArgument(lv.acRmsDb);
+    rep.addArgument(lv.acPeakDb);
+    rep.addArgument(lv.dcDb);
+    rep.addArgument(static_cast<juce::int32>(lv.tone ? 1 : 0));
+}
+
+/** `,"acRmsDb":..,"acPeakDb":..,"dcDb":..,"tone":..` (one decimal), to append inside a JSON object. */
+inline juce::String acJsonFields(mcp::ac::AcLevels const& lv)
+{
+    return ",\"acRmsDb\":" + juce::String(lv.acRmsDb, 1) + ",\"acPeakDb\":" + juce::String(lv.acPeakDb, 1)
+        + ",\"dcDb\":" + juce::String(lv.dcDb, 1) + ",\"tone\":" + (lv.tone ? "true" : "false");
+}
+
+// V1 AC taps: what a window tap measured when its window closed.
+struct WindowTapReading {
+    float peak = 0.0f;
+    int blocks = 0;
+    mcp::ac::AcStats ac;
 };
 
 class ProbeManager {
@@ -191,6 +237,7 @@ public:
     // T2b: close the window tap `probeId` and hand back its peak (linear) and the blocks it saw; false when the slot
     // was reused or the tap ended (then nothing was measured for it). Message/command thread, never the audio thread.
     bool finishWindowTap(uint32_t probeId, float& peakOut, int& blocksOut);
+    bool finishWindowTap(uint32_t probeId, WindowTapReading& out); // V1: the same with the tap's AC levels
     // T2b: a window tap lives at most this long past its window if nobody reads it (a lost read must not hold slots).
     static constexpr int WINDOW_TAP_GRACE_MS = 4000;
     void stopProbe(uint32_t probeId, const juce::String& correlationId = {});
@@ -548,6 +595,7 @@ private:
     struct MasterMeterResult {
         float peakDb = -100.0f;
         float rmsDb = -100.0f;
+        mcp::ac::AcLevels ac; // V1 AC taps: the same block with its mean removed
         bool masterFound = false;
         juce::String masterType = "none";
     };
