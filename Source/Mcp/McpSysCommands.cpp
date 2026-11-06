@@ -9,6 +9,8 @@
  */
 #include "Mcp/McpSysCommon.h"
 #include "Mcp/McpNativeUndo.h"
+#include "Pd/MCPBridgeBroken.h" // V1: red boxes on census rows
+#include "Pd/MCPBridgePdAccessors.h" // V1: the switch~ chain, the canvas block size and rate
 
 extern "C" {
 extern t_class* clone_class; // g_clone.c: P11.2 V15a counts clone instances as container content
@@ -634,6 +636,20 @@ void McpHost::sysCensus(SmallString const& selector, mcp::SysList const& list)
                         o->setProperty("cloneInstances", clones);
                         o->setProperty("childCount", inside);
                     }
+                }
+                // V1: a container's DSP state (switchedOn false = a [switch~] inside it or in any parent is off: its DSP does not
+                // run) with its block size and sample rate, the red boxes inside it, and whether this row IS one.
+                {
+                    if (cl == canvas_class) {
+                        auto* sub = reinterpret_cast<t_canvas*>(y_obj);
+                        o->setProperty("switchedOn", mcp_canvas_switchedon_chain(sub) != 0); // every [switch~] up the chain
+                        o->setProperty("blockSize", canvas_getsignallength(sub));
+                        o->setProperty("sampleRate", static_cast<double>(canvas_getsr(sub)));
+                    }
+                    if (cl == canvas_class || cl == clone_class)
+                        o->setProperty("brokenInside", mcp::broken::countInside(y_obj));
+                    if (mcp::broken::isRedBox(y_obj))
+                        o->setProperty("broken", true);
                 }
 
                 // ── GUI send/receive for lint (orphan knob detection) ──

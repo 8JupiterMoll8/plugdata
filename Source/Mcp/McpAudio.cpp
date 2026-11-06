@@ -61,6 +61,7 @@ void McpHost::audioBlockStarted()
         session.mcpArmFinalCount.store(0, std::memory_order_relaxed);
         session.mcpArmLimiterReductionDbMax.store(0.0f, std::memory_order_relaxed);
         session.mcpArmPdOutPeak.store(0.0f, std::memory_order_relaxed);
+        session.resetArmAc(); // V1 AC taps
     }
     // P3.4 S11 test-only: a forced stall, as a very heavy DSP block would hold the Pd lock (never set otherwise).
     // The value turns -1 once the lock is held (the verb answers then) and -2 when the stall ends.
@@ -156,6 +157,26 @@ void McpHost::audioBlockFinished(AudioBuffer<float>& buffer)
         while (p > prevTail && !session.mcpArmedTailPeak.compare_exchange_weak(prevTail, p, std::memory_order_relaxed)) {}
         float prev = session.mcpArmPeak.load(std::memory_order_relaxed);
         while (p > prev && !session.mcpArmPeak.compare_exchange_weak(prev, p, std::memory_order_relaxed)) {}
+    }
+
+    // V1 AC taps: the FINAL output through each channel's DC blocker (reads the buffer, never writes it). The blockers
+    // run on every block so a window opens settled (a fresh blocker would prime mid-tone); the sums count while armed.
+    {
+        double const rate = processor.getSampleRate();
+        if (rate != session.mcpAcRate) {
+            session.mcpAcRate = rate;
+            float const coeff = mcp::ac::coefficientFor(rate);
+            for (auto& blocker : session.mcpAcBlockers)
+                blocker.reset(coeff);
+        }
+        bool const armed = session.mcpArmActive.load(std::memory_order_relaxed);
+        int const acChannels = std::min(outputs, McpSession::kAcChannels);
+        for (int ch = 0; ch < acChannels; ++ch) {
+            mcp::ac::AcStats channel;
+            mcp::ac::accumulate(session.mcpAcBlockers[static_cast<size_t>(ch)], channel, buffer.getReadPointer(ch), buffer.getNumSamples());
+            if (armed)
+                session.mcpArmFinalAc[static_cast<size_t>(ch)].add(channel); // each channel on its own (review F3)
+        }
     }
 
     // Armed spectral capture (Phase 5): append the FINAL output into the mono

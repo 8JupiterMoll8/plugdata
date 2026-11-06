@@ -11,6 +11,7 @@
 #include "PluginProcessor.h"
 #include "Mcp/McpHost.h"
 #include "Pd/MCPBridge.h"
+#include "Pd/MCPBridgePdAccessors.h" // V1: the wire-window forwarding flag
 #include "Mcp/McpGuiFields.h" // review M2: GUI send/receive/range into the content stamp
 #include "Utility/SettingsFile.h"
 #include "Canvas.h"
@@ -51,6 +52,10 @@ McpHost::McpHost(PluginProcessor& p)
         return std::function<bool()>([ref] { return ref.isValid(); });
     };
     identity.setHooks(std::move(hooks));
+    // V1 /pd/wire_activity: this instance's window, found by the pd::Instance enqueueMessage receives; Pd forwards
+    // wire messages while any window is open (its own flag, never plugdata's debugging flag).
+    mcp::wire::windows().hook.store([](bool anyOpen) { set_plugdata_mcp_wire_enabled(anyOpen ? 1 : 0); });
+    mcp::wire::attach(static_cast<pd::Instance const*>(&processor), &session.wireTable);
 }
 
 // P3.5 S4: the prefix of a minted id (owner decision O1: type + number): an abstraction's file name, "pd" for
@@ -344,6 +349,11 @@ void McpHost::shutdown()
     ceilingTimer.stopTimer();
     if (mcpBridge)
         mcpBridge->shutdown();
+    {
+        PdLockScope const lock(processor); // no record() of this instance runs while its table goes
+        session.wireTable.disarm();
+        mcp::wire::detach(static_cast<pd::Instance const*>(&processor));
+    }
     std::function<void()> job;
     while (session.mcpPdQueue.try_dequeue(job))
         job = nullptr; // never run: the patches they would touch are about to go

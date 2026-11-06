@@ -10,19 +10,17 @@
 #pragma once
 
 #include "MCPBridgeCmdCommon.h"
+#include "MCPBridgePdAccessors.h"
 
-// Prefix-only mirror of Pd's private struct _inlet (m_obj.c:42) — we read
-// i_next only. Needed to address a specific physical inlet (>=1) without
-// pulling in m_obj internals. Inlet 0 is the object itself (not in ob_inlet).
-struct McpInletMirror { t_pd i_pd; McpInletMirror *i_next; };
-
-// Resolve the pd target for a given inlet index. <=0 -> the object itself.
+// Resolve the pd target for a given inlet index. <=0 -> the object itself. Walks Pd's inlet list through the fork's
+// accessor (patches/submodules/pure-data/0004; review 2026-11-06: no mirrored struct _inlet). Inlet 0 is the object
+// itself (not in ob_inlet).
 inline t_pd *mcpResolveInlet(t_object *o, int inletIndex)
 {
     if (!o) return nullptr;
     if (inletIndex <= 0) return reinterpret_cast<t_pd *>(o);
-    auto *in = reinterpret_cast<McpInletMirror *>(o->ob_inlet);
-    for (int i = 1; in && i < inletIndex; ++i) in = in->i_next;
+    t_inlet *in = o->ob_inlet;
+    for (int i = 1; in && i < inletIndex; ++i) in = mcp_inlet_next(in);
     return in ? reinterpret_cast<t_pd *>(in) : nullptr;
 }
 

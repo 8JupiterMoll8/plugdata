@@ -76,6 +76,12 @@ MCP_VERB(pd, "typeof", pdTypeof)
 MCP_VERB(pd, "ports", pdPorts)
 MCP_VERB(pd, "connections", pdConnections)
 MCP_VERB(pd, "dump", pdDump)
+// V1 read-only facts for the doctor (MCPBridgeCmdFacts.cpp)
+MCP_VERB(pd, "inlet_values", pdInletValues)
+MCP_VERB(pd, "wire_activity", pdWireActivity)
+MCP_VERB(pd, "audio_device", pdAudioDevice)
+MCP_VERB(pd, "broken", pdBroken)
+MCP_VERB(pd, "console_history", pdConsoleHistory)
 
 // ── pd: docs ──
 MCP_VERB(pd, "doc_get", pdDocGet)

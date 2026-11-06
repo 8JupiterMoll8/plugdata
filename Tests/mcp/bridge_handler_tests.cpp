@@ -1535,6 +1535,555 @@ void runMeterTapCases(Harness& h, PluginProcessor& processor, AudioControl& audi
     audio.paused = false;
 }
 
+// V1 AC taps (2026-11-06): a [phasor~] through a [lop~] stuck at cutoff 0 put out pure DC; every meter said "-22
+// dBFS, audible" and the artist heard nothing. Every tap now also reports the level left after a ~10 Hz DC blocker
+// (or the block mean, for the one-block snapshots) and `tone` (AC RMS above -60 dBFS); the old fields stay as they
+// were. Layout: /meter/read args 17-20, /meter/result (probe), /meter/master and /meter/query args 4-7, each
+// acRmsDb, acPeakDb, dcDb, tone (0/1; the one-block snapshots /meter/master and /meter/query: 1 tone, 0 no sound, -1
+// unknown); the armed trace's levels[] and the spectral result JSON carry the same names. Capability `meter_ac`.
+// Review F1-F3: a snapshot never calls a bass "no sound"; a DC step is no tone (header test); the final tap judges
+// each channel alone (unequal L/R here). [sig~ 0.0794] is the DC drone (-22 dBFS); [phasor~ 110] is a tone with a DC of 0.5.
+void runAcTapCases(Harness& h, PluginProcessor& processor, AudioControl& audio)
+{
+    std::printf("AC taps: DC is no tone (V1)\n");
+    CHECK(hasCap(h, "meter_ac", "ac0"));
+    auto made = h.call("/pd/batch_atomic",
+        { "main", "ac1", 0, 0, 0, 2, 2,
+            "ac_dc", 1200, 40, "obj", "sig~", 1, "0.0794",
+            "ac_dac", 1200, 120, "obj", "dac~", 0,
+            "ac_dc", 0, "ac_dac", 0,
+            "ac_dc", 0, "ac_dac", 1,
+            0, 5, 10, 0 },
+        "/pd/batch_atomic/reply/ac1");
+    CHECK(made.has_value() && made->num(0) == 2);
+    h.fire("/pd/dsp", { 1 });
+    sleepMs(300);
+
+    // The probe (/meter/start): raw RMS -22 dBFS as before, AC at the floor, DC -22, no tone.
+    auto probe = h.call("/meter/start", { "main", "ac_dc", 0, 300, "ac2" }, "/meter/result/ac2", 3000);
+    CHECK(probe.has_value() && probe->args.size() >= 8);
+    if (probe && probe->args.size() >= 8) {
+        std::printf("  probe dc: rms %.1f, ac %.1f/%.1f, dc %.1f, tone %d\n", probe->num(0), probe->num(4), probe->num(5), probe->num(6), static_cast<int>(probe->num(7)));
+        CHECK(std::abs(probe->num(0) - (-22.0)) < 0.5); // the old field, unchanged: it reads the DC
+        CHECK(probe->num(4) <= -99.0);
+        CHECK(probe->num(5) <= -99.0);
+        CHECK(std::abs(probe->num(6) - (-22.0)) < 0.5);
+        CHECK(probe->num(7) == 0.0);
+    }
+    // The same probe slot again with another DC (0.5 = -6.02 dBFS): the blocker starts fresh, no step from the old one.
+    {
+        auto set = h.call("/pd/obj_set", { "main", "ac2s", "ac_dc", 0, "float", 1, 0.5 }, "/pd/obj_set/reply/ac2s");
+        CHECK(set.has_value());
+        sleepMs(60);
+        auto again = h.call("/meter/start", { "main", "ac_dc", 0, 300, "ac2b" }, "/meter/result/ac2b", 3000);
+        CHECK(again.has_value() && again->args.size() >= 8);
+        if (again && again->args.size() >= 8) {
+            std::printf("  probe reuse dc 0.5: ac %.1f/%.1f, dc %.2f, tone %d\n", again->num(4), again->num(5), again->num(6), static_cast<int>(again->num(7)));
+            CHECK(again->num(4) <= -99.0 && again->num(5) <= -99.0 && again->num(7) == 0.0);
+            CHECK(std::abs(again->num(6) - (-6.02)) < 0.2);
+        }
+        h.call("/pd/obj_set", { "main", "ac2r", "ac_dc", 0, "float", 1, 0.0794 }, "/pd/obj_set/reply/ac2r");
+        sleepMs(60);
+    }
+    // The snapshots: /meter/master and /meter/query.
+    auto master = h.call("/meter/master", { "main", "ac3" }, "/meter/master/reply/ac3");
+    CHECK(master.has_value() && master->args.size() >= 8);
+    if (master && master->args.size() >= 8) {
+        CHECK(master->num(0) > -60.0); // the old verdict: "audible"
+        CHECK(master->num(4) <= -99.0 && master->num(7) == 0.0);
+        CHECK(std::abs(master->num(6) - (-22.0)) < 0.5);
+    }
+    auto query = h.call("/meter/query", { "main", "ac_dc", 0, "ac4" }, "/meter/query/reply/ac4");
+    CHECK(query.has_value() && query->args.size() >= 8);
+    if (query && query->args.size() >= 8)
+        CHECK(query->num(4) <= -99.0 && query->num(7) == 0.0 && std::abs(query->num(6) - (-22.0)) < 0.5);
+    // The armed trace: the tap's level entry.
+    auto armed = h.call("/meter/trace", { "main", "ac5", "arm", 300, "" }, "/meter/trace/reply/ac5");
+    CHECK(armed.has_value());
+    sleepMs(350);
+    auto read = h.call("/meter/trace", { "main", "ac6", "read" }, "/meter/trace/reply/ac6");
+    CHECK(read.has_value());
+    if (read) {
+        auto const json = parseJson(*read);
+        bool seen = false;
+        if (auto* arr = json["levels"].getArray())
+            for (auto const& l : *arr)
+                if (l["tempId"].toString() == "ac_dc") {
+                    seen = true;
+                    CHECK(static_cast<double>(l["peakDb"]) > -23.0); // unchanged
+                    CHECK(static_cast<double>(l["acRmsDb"]) <= -99.0);
+                    CHECK(static_cast<double>(l["acPeakDb"]) <= -99.0);
+                    CHECK(std::abs(static_cast<double>(l["dcDb"]) - (-22.0)) < 0.5);
+                    CHECK(l.hasProperty("tone") && !static_cast<bool>(l["tone"]));
+                }
+        CHECK(seen);
+    }
+
+    // The final tap (/meter/read), rendered through processBlock: limiter off, unity master.
+    PlugDataParameter* volume = nullptr;
+    for (auto* p : processor.getParameters())
+        if (auto* param = dynamic_cast<PlugDataParameter*>(p); param && param->getTitle().toString() == "volume")
+            volume = param;
+    CHECK(volume != nullptr);
+    float const volumeBefore = volume ? volume->getUnscaledValue() : 0.8f;
+    bool const limiterBefore = processor.getEnableLimiter();
+    audio.paused = true;
+    sleepMs(60);
+    processor.setEnableLimiter(false);
+    if (volume) volume->setUnscaledValueNotifyingHost(0.8f);
+    juce::AudioBuffer<float> buffer(std::max(2, processor.getTotalNumOutputChannels()), 512);
+    juce::MidiBuffer midi;
+    auto render = [&](int blocks) {
+        for (int k = 0; k < blocks; ++k) {
+            buffer.clear();
+            midi.clear();
+            processor.processBlock(buffer, midi);
+        }
+    };
+    auto window = [&](char const* armCorr, char const* readCorr, int blocks) -> std::optional<Reply> {
+        auto arm = h.call("/meter/arm", { armCorr }, std::string("/meter/arm/reply/") + armCorr);
+        int const gen = arm && !arm->args.empty() ? static_cast<int>(arm->num(0)) : 0;
+        render(blocks);
+        return h.call("/meter/read", { readCorr, gen }, std::string("/meter/read/reply/") + readCorr, 2000);
+    };
+    render(20);
+    {
+        auto r = window("ac7", "ac8", 40);
+        CHECK(r.has_value() && r->args.size() >= 21);
+        if (r && r->args.size() >= 21) {
+            std::printf("  final dc: peak %.1f, ac %.1f/%.1f, dc %.1f, tone %d\n", r->num(0), r->num(17), r->num(18), r->num(19), static_cast<int>(r->num(20)));
+            CHECK(std::abs(r->num(0) - (-22.0)) < 0.5); // the old peak: still reads the DC
+            CHECK(r->num(17) <= -99.0);
+            CHECK(r->num(18) <= -99.0);
+            CHECK(std::abs(r->num(19) - (-22.0)) < 0.5);
+            CHECK(r->num(20) == 0.0);
+        }
+    }
+    // The same window with a tone: [phasor~ 110] (saw 0..1: AC RMS 0.2887 = -10.8 dBFS, DC 0.5 = -6 dBFS), through
+    // [*~ 0.5] to the dac~ (-16.8 / -12 dBFS there, well under the output ceiling).
+    h.call("/pd/batch_atomic", { "main", "ac9", 1, 0, 0, 0, 0, "ac_dc", 0, 5, 10, 0 }, "/pd/batch_atomic/reply/ac9");
+    auto tone = h.call("/pd/batch_atomic",
+        { "main", "ac10", 0, 0, 0, 2, 3,
+            "ac_ph", 1200, 40, "obj", "phasor~", 1, "110",
+            "ac_half", 1200, 80, "obj", "*~", 1, "0.5",
+            "ac_ph", 0, "ac_half", 0,
+            "ac_half", 0, "ac_dac", 0,
+            "ac_half", 0, "ac_dac", 1,
+            0, 5, 10, 0 },
+        "/pd/batch_atomic/reply/ac10");
+    CHECK(tone.has_value() && tone->num(0) == 2);
+    render(20);
+    {
+        auto r = window("ac11", "ac12", 60);
+        CHECK(r.has_value() && r->args.size() >= 21);
+        if (r && r->args.size() >= 21) {
+            std::printf("  final phasor: peak %.1f, ac %.1f/%.1f, dc %.1f, tone %d\n", r->num(0), r->num(17), r->num(18), r->num(19), static_cast<int>(r->num(20)));
+            CHECK(r->num(20) == 1.0);
+            CHECK(std::abs(r->num(17) - (-16.8)) < 1.0);
+            CHECK(std::abs(r->num(19) - (-12.0)) < 1.0);
+        }
+    }
+    if (volume) volume->setUnscaledValueNotifyingHost(volumeBefore);
+    processor.setEnableLimiter(limiterBefore);
+    audio.paused = false;
+    sleepMs(100);
+    // The probe on the tone.
+    auto probeTone = h.call("/meter/start", { "main", "ac_ph", 0, 300, "ac13" }, "/meter/result/ac13", 3000);
+    CHECK(probeTone.has_value() && probeTone->args.size() >= 8);
+    if (probeTone && probeTone->args.size() >= 8) {
+        CHECK(probeTone->num(7) == 1.0);
+        CHECK(std::abs(probeTone->num(4) - (-10.8)) < 1.0);
+        CHECK(std::abs(probeTone->num(6) - (-6.0)) < 0.5);
+    }
+    auto masterTone = h.call("/meter/master", { "main", "ac14" }, "/meter/master/reply/ac14");
+    // A 110 Hz phasor has less than a cycle in one 64-sample block: the snapshot says "tone" or "unknown", never "none".
+    CHECK(masterTone.has_value() && masterTone->args.size() >= 8 && masterTone->num(7) != 0.0);
+    // The armed trace on the tone: the phasor's tap reads tone true at its AC level.
+    {
+        auto arm = h.call("/meter/trace", { "main", "ac16", "arm", 300, "" }, "/meter/trace/reply/ac16");
+        CHECK(arm.has_value());
+        sleepMs(350);
+        auto rd = h.call("/meter/trace", { "main", "ac17", "read" }, "/meter/trace/reply/ac17");
+        CHECK(rd.has_value());
+        bool seen = false;
+        juce::var const json = rd ? parseJson(*rd) : juce::var();
+        if (rd)
+            if (auto* arr = json["levels"].getArray())
+                for (auto const& l : *arr)
+                    if (l["tempId"].toString() == "ac_ph") {
+                        seen = true;
+                        CHECK(static_cast<bool>(l["tone"]));
+                        CHECK(std::abs(static_cast<double>(l["acRmsDb"]) - (-10.8)) < 1.0);
+                        CHECK(std::abs(static_cast<double>(l["dcDb"]) - (-6.0)) < 0.5);
+                    }
+        CHECK(seen);
+    }
+    // Review F1: a 30 Hz sine in one 64-sample block: the snapshot cannot see it, but never says "no sound" (0).
+    {
+        auto bass = h.call("/pd/batch_atomic",
+            { "main", "ac18", 0, 0, 0, 2, 1,
+                "ac_bass", 1400, 40, "obj", "osc~", 1, "30",
+                "ac_sink", 1400, 80, "obj", "*~", 1, "0",
+                "ac_bass", 0, "ac_sink", 0,
+                0, 5, 10, 0 },
+            "/pd/batch_atomic/reply/ac18");
+        CHECK(bass.has_value() && bass->num(0) == 2);
+        sleepMs(150); // let the new oscillator run (a fresh signal vector is all zeros: rightly "no sound")
+        int unknown = 0, sounding = 0;
+        for (int k = 0; k < 8; ++k) {
+            auto const corr = std::string("ac19_") + std::to_string(k);
+            auto q = h.call("/meter/query", { "main", "ac_bass", 0, corr.c_str() }, "/meter/query/reply/" + corr);
+            CHECK(q.has_value() && q->args.size() >= 8);
+            if (q && q->args.size() >= 8) {
+                CHECK(q->num(7) != 0.0);
+                unknown += q->num(7) == -1.0;
+                sounding += q->num(7) == 1.0;
+            }
+            sleepMs(7);
+        }
+        std::printf("  snapshot 30 Hz osc: tone 1 x%d, -1 x%d\n", sounding, unknown);
+        h.call("/pd/batch_atomic", { "main", "ac20", 2, 0, 0, 0, 0, "ac_bass", "ac_sink", 0, 5, 10, 0 }, "/pd/batch_atomic/reply/ac20");
+    }
+
+    h.call("/pd/batch_atomic", { "main", "ac15", 3, 0, 0, 0, 0, "ac_ph", "ac_half", "ac_dac", 0, 5, 10, 0 }, "/pd/batch_atomic/reply/ac15");
+
+    // Review F3: unequal L/R at the final tap. The tone on the left (-16.8 dBFS AC), DC alone on the right: the reply
+    // carries the left channel's AC level (not the two channels averaged, -19.8) and the louder DC (left, -12).
+    audio.paused = true;
+    sleepMs(60);
+    processor.setEnableLimiter(false);
+    if (volume) volume->setUnscaledValueNotifyingHost(0.8f);
+    auto lr = h.call("/pd/batch_atomic",
+        { "main", "ac21", 0, 0, 0, 4, 3,
+            "ac_lph", 1200, 40, "obj", "phasor~", 1, "110",
+            "ac_lhalf", 1200, 80, "obj", "*~", 1, "0.5",
+            "ac_rdc", 1300, 80, "obj", "sig~", 1, "0.0794",
+            "ac_lrdac", 1200, 140, "obj", "dac~", 0,
+            "ac_lph", 0, "ac_lhalf", 0,
+            "ac_lhalf", 0, "ac_lrdac", 0,
+            "ac_rdc", 0, "ac_lrdac", 1,
+            0, 5, 10, 0 },
+        "/pd/batch_atomic/reply/ac21");
+    CHECK(lr.has_value() && lr->num(0) == 4);
+    render(20);
+    {
+        auto r = window("ac22", "ac23", 60);
+        CHECK(r.has_value() && r->args.size() >= 21);
+        if (r && r->args.size() >= 21) {
+            std::printf("  final L tone / R dc: ac %.1f/%.1f, dc %.1f, tone %d\n", r->num(17), r->num(18), r->num(19), static_cast<int>(r->num(20)));
+            CHECK(r->num(20) == 1.0);
+            CHECK(std::abs(r->num(17) - (-16.8)) < 0.7);
+            CHECK(std::abs(r->num(19) - (-12.0)) < 0.7);
+        }
+    }
+    if (volume) volume->setUnscaledValueNotifyingHost(volumeBefore);
+    processor.setEnableLimiter(limiterBefore);
+    h.call("/pd/batch_atomic", { "main", "ac24", 4, 0, 0, 0, 0, "ac_lph", "ac_lhalf", "ac_rdc", "ac_lrdac", 0, 5, 10, 0 }, "/pd/batch_atomic/reply/ac24");
+    render(4);
+    audio.paused = false;
+    h.fire("/pd/dsp", { 0 });
+}
+
+// V1 /pd/inlet_values: the live value each inlet holds (capability inlet_values). [lop~ 300] with a signal on inlet
+// 0 and nothing on inlet 1 reads 300, then 0 after a float 0; [*~ 0.15]'s float inlet 0.15; [osc~ 440]'s main
+// inlet 440 and its phase inlet null (forwarded, Pd keeps no copy); a signal-connected inlet null.
+double inletValue(juce::var const& json, char const* id, int inlet, juce::String* kind = nullptr, juce::String* connected = nullptr, bool* isNull = nullptr)
+{
+    auto const* arr = json["objects"][id]["inlets"].getArray();
+    if (!arr || inlet >= arr->size()) return -1e9;
+    auto const& e = (*arr)[inlet];
+    if (kind) *kind = e["kind"].toString();
+    if (connected) *connected = e["connected"].toString();
+    if (isNull) *isNull = e["value"].isVoid() || e["value"].isUndefined();
+    return e["value"].isDouble() || e["value"].isInt() ? static_cast<double>(e["value"]) : -1e9;
+}
+
+void runInletValueCases(Harness& h)
+{
+    std::printf("inlet values (V1)\n");
+    CHECK(hasCap(h, "inlet_values", "iv0"));
+    auto made = h.call("/pd/batch_atomic",
+        { "main", "iv1", 0, 0, 0, 3, 1,
+            "iv_osc", 1500, 40, "obj", "osc~", 1, "440",
+            "iv_lop", 1500, 100, "obj", "lop~", 1, "300",
+            "iv_mul", 1600, 100, "obj", "*~", 1, "0.15",
+            "iv_osc", 0, "iv_lop", 0,
+            0, 5, 10, 0 },
+        "/pd/batch_atomic/reply/iv1");
+    CHECK(made.has_value() && made->num(0) == 3);
+    auto read = [&](char const* corr) {
+        auto r = h.call("/pd/inlet_values", { "main", corr, 4, "iv_osc", "iv_lop", "iv_mul", "iv_nope" }, std::string("/pd/inlet_values/reply/") + corr);
+        CHECK(r.has_value());
+        return r ? parseJson(*r) : juce::var();
+    };
+    {
+        auto const json = read("iv2");
+        juce::String kind, connected;
+        bool isNull = false;
+        CHECK(std::abs(inletValue(json, "iv_lop", 1, &kind, &connected) - 300.0) < 1e-4);
+        CHECK(kind == "signal" && connected == "none");
+        inletValue(json, "iv_lop", 0, &kind, &connected, &isNull);
+        CHECK(kind == "signal" && connected == "signal" && isNull);
+        CHECK(std::abs(inletValue(json, "iv_mul", 1, &kind) - 0.15) < 1e-4);
+        CHECK(kind == "float");
+        CHECK(std::abs(inletValue(json, "iv_osc", 0, &kind, &connected) - 440.0) < 1e-3);
+        CHECK(kind == "signal" && connected == "none");
+        inletValue(json, "iv_osc", 1, &kind, &connected, &isNull);
+        CHECK(isNull && json["objects"]["iv_osc"]["inlets"][1]["reason"].toString().contains("forwarded"));
+        CHECK(json["objects"]["iv_nope"]["error"].toString() == "unknown tempId");
+        std::printf("  lop~ inlet 1 = %.1f, *~ inlet 1 = %.3f, osc~ inlet 0 = %.1f\n",
+            inletValue(json, "iv_lop", 1), inletValue(json, "iv_mul", 1), inletValue(json, "iv_osc", 0));
+    }
+    auto set = h.call("/pd/obj_set", { "main", "iv3", "iv_lop", 1, "float", 1, 0.0 }, "/pd/obj_set/reply/iv3");
+    CHECK(set.has_value());
+    {
+        auto const json = read("iv4");
+        CHECK(std::abs(inletValue(json, "iv_lop", 1)) < 1e-6);
+    }
+    auto none = h.call("/pd/inlet_values", { "main", "iv5", 0 }, "/pd/inlet_values/reply/iv5");
+    CHECK(none.has_value() && parseJson(*none).hasProperty("error"));
+    h.call("/pd/batch_atomic", { "main", "iv6", 3, 0, 0, 0, 0, "iv_osc", "iv_lop", "iv_mul", 0, 5, 10, 0 }, "/pd/batch_atomic/reply/iv6");
+}
+
+// V1 /pd/wire_activity: control-wire traffic in an armed window (capability wire_activity). A message box sent during
+// the window counts once with its value; a slider moved counts with its value; an idle wire reads 0; signal wires are
+// skipped.
+void runWireActivityCases(Harness& h)
+{
+    std::printf("wire activity (V1)\n");
+    CHECK(hasCap(h, "wire_activity", "wa0"));
+    auto made = h.call("/pd/batch_atomic",
+        { "main", "wa1", 0, 0, 0, 8, 4,
+            "wa_msg", 1700, 40, "msg", "0.5", 0,
+            "wa_f", 1700, 80, "obj", "f", 0,
+            "wa_hsl", 1800, 40, "obj", "hsl", 0,
+            "wa_f2", 1800, 80, "obj", "f", 0,
+            "wa_idle", 1900, 40, "obj", "f", 0,
+            "wa_f3", 1900, 80, "obj", "f", 0,
+            "wa_osc", 2000, 40, "obj", "osc~", 1, "220",
+            "wa_mul", 2000, 80, "obj", "*~", 1, "0",
+            "wa_msg", 0, "wa_f", 0,
+            "wa_hsl", 0, "wa_f2", 0,
+            "wa_idle", 0, "wa_f3", 0,
+            "wa_osc", 0, "wa_mul", 0,
+            0, 5, 10, 0 },
+        "/pd/batch_atomic/reply/wa1");
+    CHECK(made.has_value() && made->num(0) == 8);
+    int const debuggingBefore = plugdata_debugging_enabled();
+    auto arm = h.call("/pd/wire_activity", { "main", "wa2", "arm", 1500, "all" }, "/pd/wire_activity/reply/wa2");
+    CHECK(arm.has_value());
+    // Review M3: the window forwards through the bridge's own flag; plugdata's debugging flag is untouched.
+    CHECK(plugdata_debugging_enabled() == debuggingBefore);
+    CHECK(mcp::wire::windows().open.load() >= 1);
+    if (arm) {
+        auto const json = parseJson(*arm);
+        CHECK(static_cast<bool>(json["armed"]));
+        CHECK(static_cast<bool>(json["forwarding"]));
+        CHECK(static_cast<int>(json["wires"]) >= 3);
+        CHECK(static_cast<int>(json["skippedSignal"]) >= 1);
+    }
+    h.call("/pd/obj_set", { "main", "wa3", "wa_msg", 0, "bang", 0 }, "/pd/obj_set/reply/wa3");
+    h.call("/pd/obj_set", { "main", "wa4", "wa_hsl", 0, "float", 1, 64.0 }, "/pd/obj_set/reply/wa4");
+    sleepMs(50);
+    auto rd = h.call("/pd/wire_activity", { "main", "wa5", "read" }, "/pd/wire_activity/reply/wa5");
+    CHECK(rd.has_value());
+    CHECK(mcp::wire::windows().open.load() == 0); // the read closed it: forwarding for the bridge is off again
+    CHECK(plugdata_debugging_enabled() == debuggingBefore);
+    if (rd) {
+        auto const json = parseJson(*rd);
+        CHECK(static_cast<bool>(json["forwarding"]));
+        bool sawMsg = false, sawHsl = false, sawIdle = false;
+        if (auto* arr = json["wires"].getArray())
+            for (auto const& w : *arr) {
+                auto const src = w["src"].toString();
+                if (src == "wa_msg") {
+                    sawMsg = true;
+                    CHECK(static_cast<int>(w["messageCount"]) == 1);
+                    CHECK(std::abs(static_cast<double>(w["lastValue"]) - 0.5) < 1e-6);
+                    CHECK(w["lastSelector"].toString() == "float");
+                    CHECK(!w["lastAtMs"].isVoid());
+                } else if (src == "wa_hsl") {
+                    sawHsl = true;
+                    CHECK(static_cast<int>(w["messageCount"]) >= 1);
+                    CHECK(std::abs(static_cast<double>(w["lastValue"]) - 64.0) < 1e-3);
+                } else if (src == "wa_idle") {
+                    sawIdle = true;
+                    CHECK(static_cast<int>(w["messageCount"]) == 0);
+                    CHECK(w["lastValue"].isVoid() && w["lastAtMs"].isVoid());
+                }
+                CHECK(src != "wa_osc"); // a signal wire is never listed
+            }
+        CHECK(sawMsg && sawHsl && sawIdle);
+    }
+    // A second read has no window; an arm naming one wire watches only that one.
+    auto again = h.call("/pd/wire_activity", { "main", "wa6", "read" }, "/pd/wire_activity/reply/wa6");
+    CHECK(again.has_value() && parseJson(*again).hasProperty("error"));
+    auto one = h.call("/pd/wire_activity", { "main", "wa7", "arm", 300, 2, "wa_msg", 0, "wa_f", 0, "wa_nope", 0, "wa_f", 0 }, "/pd/wire_activity/reply/wa7");
+    CHECK(one.has_value());
+    if (one) {
+        auto const json = parseJson(*one);
+        CHECK(static_cast<int>(json["wires"]) == 1);
+        CHECK(json["unresolved"].getArray() && json["unresolved"].getArray()->size() == 1);
+    }
+    h.call("/pd/wire_activity", { "main", "wa8", "read" }, "/pd/wire_activity/reply/wa8");
+    // Review M4: a window closes itself at its end (the first message past it); a message after the end is not counted.
+    auto shortArm = h.call("/pd/wire_activity", { "main", "wa10", "arm", 100, 1, "wa_msg", 0, "wa_f", 0 }, "/pd/wire_activity/reply/wa10");
+    CHECK(shortArm.has_value() && static_cast<int>(parseJson(*shortArm)["wires"]) == 1);
+    sleepMs(250);
+    h.call("/pd/obj_set", { "main", "wa11", "wa_msg", 0, "bang", 0 }, "/pd/obj_set/reply/wa11");
+    CHECK(mcp::wire::windows().open.load() == 0);
+    auto late = h.call("/pd/wire_activity", { "main", "wa12", "read" }, "/pd/wire_activity/reply/wa12");
+    CHECK(late.has_value());
+    if (late) {
+        auto const json = parseJson(*late);
+        CHECK(static_cast<bool>(json["forwarding"]));
+        auto const* arr = json["wires"].getArray();
+        CHECK(arr && arr->size() == 1 && static_cast<int>((*arr)[0]["messageCount"]) == 0);
+    }
+    std::vector<A> cleanup { "main", "wa9", 8, 0, 0, 0, 0 };
+    for (char const* id : { "wa_msg", "wa_f", "wa_hsl", "wa_f2", "wa_idle", "wa_f3", "wa_osc", "wa_mul" })
+        cleanup.push_back(id);
+    for (int v : { 0, 5, 10, 0 })
+        cleanup.push_back(v);
+    h.callList("/pd/batch_atomic", cleanup, "/pd/batch_atomic/reply/wa9");
+}
+
+// V1 read-only facts: /pd/audio_device, a switched-off subpatch and a dac~ channel the device does not have
+// (diagnose + census), red boxes (/pd/broken + census `broken`), /pd/console_history with tempIds.
+void runFactCases(Harness& h, PluginProcessor& processor)
+{
+    std::printf("read-only facts (V1)\n");
+    auto* host = processor.getMcp();
+    for (char const* cap : { "audio_device", "broken_objects", "console_history", "container_switch", "dac_channels" })
+        CHECK(hasCap(h, cap, "fa0"));
+    auto dev = h.call("/pd/audio_device", { "fa1" }, "/pd/audio_device/reply/fa1");
+    CHECK(dev.has_value());
+    if (dev) {
+        auto const json = parseJson(*dev);
+        CHECK(static_cast<double>(json["pd"]["sampleRate"]) > 0.0);
+        CHECK(json["pd"].hasProperty("outChannels") && json["pd"].hasProperty("variableBlockSize"));
+        CHECK(json.hasProperty("device")); // the headless test has no standalone device: null with a reason
+        CHECK(json["lastSetupError"].isVoid());
+        std::printf("  audio_device: %s\n", dev->str(0).substr(0, 200).c_str());
+    }
+    // A subpatch [pd acsw] holding [switch~] (off until told), [dac~ 3] and a red box.
+    t_canvas* sub = nullptr;
+    CHECK(host->pdWait([&] {
+        t_canvas* cnv = host->getCanvasBySymbol("main");
+        if (!cnv) return;
+        t_atom a[4];
+        SETFLOAT(a, 1500);
+        SETFLOAT(a + 1, 700);
+        SETSYMBOL(a + 2, gensym("pd"));
+        SETSYMBOL(a + 3, gensym("acsw"));
+        pd_typedmess(&cnv->gl_pd, gensym("obj"), 4, a);
+        sub = reinterpret_cast<t_canvas*>(pd::Interface::getNewest(cnv));
+        auto add = [&](std::vector<t_atom> atoms) { pd_typedmess(&sub->gl_pd, gensym("obj"), static_cast<int>(atoms.size()), atoms.data()); };
+        t_atom x, y, s1, s2;
+        SETFLOAT(&x, 10); SETFLOAT(&y, 10); SETSYMBOL(&s1, gensym("switch~"));
+        add({ x, y, s1 });
+        SETFLOAT(&y, 40); SETSYMBOL(&s1, gensym("dac~")); SETFLOAT(&s2, 3);
+        add({ x, y, s1, s2 });
+        SETFLOAT(&y, 70); SETSYMBOL(&s1, gensym("acsw_no_such_class"));
+        add({ x, y, s1 });
+        // Review L8: a subpatch with no [switch~] of its own inside the switched-off one: off through its parent.
+        SETFLOAT(&y, 100); SETSYMBOL(&s1, gensym("pd")); SETSYMBOL(&s2, gensym("acinner"));
+        add({ x, y, s1, s2 });
+    }, 3000));
+    CHECK(sub != nullptr);
+    if (!sub) return;
+    auto diag = h.call("/pd/diagnose", { "pd-acsw", "fa2" }, "/pd/diagnose/reply/fa2");
+    CHECK(diag.has_value());
+    if (diag) {
+        auto const json = parseJson(*diag);
+        CHECK(!static_cast<bool>(json["switchedOn"]));
+        CHECK(static_cast<int>(json["blockSize"]) > 0 && static_cast<double>(json["sampleRate"]) > 0.0);
+        bool flagged = false;
+        if (auto* arr = json["dac_channels_missing"].getArray())
+            for (auto const& d : *arr)
+                flagged = flagged || static_cast<int>(d["channel"]) == 3;
+        CHECK(flagged == (static_cast<int>(json["deviceOutChannels"]) < 3));
+        std::printf("  diagnose pd-acsw: switchedOn %d, outs %d, dac~ 3 flagged %d\n", static_cast<int>(static_cast<bool>(json["switchedOn"])),
+            static_cast<int>(json["deviceOutChannels"]), static_cast<int>(flagged));
+    }
+    auto mainDiag = h.call("/pd/diagnose", { "main", "fa3" }, "/pd/diagnose/reply/fa3");
+    CHECK(mainDiag.has_value());
+    if (mainDiag) {
+        bool listed = false;
+        juce::var const md = parseJson(*mainDiag);
+        if (auto* arr = md["switched_off"].getArray())
+            for (auto const& s : *arr) listed = listed || s["name"].toString() == "acsw";
+        CHECK(listed);
+    }
+    auto census = h.call("/pd/census", { "main", "fa4" }, "/pd/census/reply/fa4");
+    CHECK(census.has_value());
+    if (census) {
+        auto const json = parseJson(*census);
+        bool saw = false;
+        if (auto* rows = json["objects"].getArray())
+          for (auto const& o : *rows)
+            if (o["type"].toString() == "pd" && o["args"][0].toString() == "acsw") {
+                saw = true;
+                CHECK(o.hasProperty("switchedOn") && !static_cast<bool>(o["switchedOn"]));
+                CHECK(static_cast<int>(o["brokenInside"]) == 1);
+                CHECK(static_cast<int>(o["blockSize"]) > 0);
+            }
+        CHECK(saw);
+    }
+    auto subCensus = h.call("/pd/census", { "pd-acsw", "fa5" }, "/pd/census/reply/fa5");
+    CHECK(subCensus.has_value());
+    if (subCensus) {
+        bool redRow = false, innerOff = false;
+        auto const sj = parseJson(*subCensus);
+        if (auto* arr = sj["objects"].getArray())
+            for (auto const& o : *arr) {
+                if (static_cast<bool>(o["broken"])) redRow = true;
+                if (o["type"].toString() == "pd" && o["args"][0].toString() == "acinner")
+                    innerOff = o.hasProperty("switchedOn") && !static_cast<bool>(o["switchedOn"]);
+            }
+        CHECK(redRow);
+        CHECK(innerOff);
+    }
+    auto broken = h.call("/pd/broken", { "main", "fa6" }, "/pd/broken/reply/fa6");
+    CHECK(broken.has_value());
+    if (broken) {
+        auto const json = parseJson(*broken);
+        bool found = false;
+        if (auto* arr = json["broken"].getArray())
+            for (auto const& b : *arr) found = found || b["text"].toString() == "acsw_no_such_class";
+        CHECK(found);
+    }
+    // Console history: an error raised by an object carries its tempId.
+    auto made = h.call("/pd/batch_atomic", { "main", "fa7", 0, 0, 0, 1, 0, "fa_add", 1500, 800, "obj", "+", 1, "1", 0, 5, 10, 0 }, "/pd/batch_atomic/reply/fa7");
+    CHECK(made.has_value() && made->num(0) == 1);
+    h.fire("/pd/obj_set", { "main", "fa8", "fa_add", 0, "facts_unknown_selector", 0 });
+    h.replies.waitForConsoleLine("facts_unknown_selector", 3000);
+    h.fire("/pd/obj_set", { "main", "fa8b", "fa_add", 0, "facts_unknown_selector", 0 }); // the same line again: a repeat
+    h.replies.waitForConsoleLine("facts_unknown_selector", 3000);
+    auto hist = h.call("/pd/console_history", { "fa9", -1, 50 }, "/pd/console_history/reply/fa9");
+    CHECK(hist.has_value());
+    if (hist) {
+        auto const json = parseJson(*hist);
+        bool found = false;
+        if (auto* arr = json["lines"].getArray())
+            for (auto const& l : *arr)
+                if (l["text"].toString().contains("facts_unknown_selector")) {
+                    found = true;
+                    CHECK(l["type"].toString() == "error");
+                    CHECK(l["tempId"].toString() == "fa_add");
+                    CHECK(static_cast<int>(l["repeats"]) >= 2); // review: repeats are visible
+                    CHECK(static_cast<juce::int64>(l["seq"]) > static_cast<juce::int64>(l["firstSeq"])); // and move the seq
+                }
+        CHECK(found);
+        int const last = static_cast<int>(static_cast<juce::int64>(json["lastSeq"]));
+        auto none = h.call("/pd/console_history", { "fa10", last, 50 }, "/pd/console_history/reply/fa10");
+        juce::var const nj = none ? parseJson(*none) : juce::var();
+        CHECK(none.has_value() && nj["lines"].getArray() && nj["lines"].getArray()->isEmpty());
+    }
+    h.call("/pd/batch_atomic", { "main", "fa11", 1, 0, 0, 0, 0, "fa_add", 0, 5, 10, 0 }, "/pd/batch_atomic/reply/fa11");
+    host->pdWait([&] { if (auto* cnv = host->getCanvasBySymbol("main")) glist_delete(cnv, &sub->gl_gobj); }, 3000);
+}
+
 // P11.2 V10: /pd/load_patch reads and checks the file BEFORE it clears the canvas. An unreadable file or one that is
 // not a Pd patch is an error and the canvas keeps every object; a valid empty patch is a valid load. Reply: arg0 the
 // object count (-1 on an error, old clients read only this), arg1 1 (undo reset) or "error: ...", arg2 the JSON
@@ -4956,6 +5505,10 @@ int main()
             runLimiterCases(harness, processor);
             runMeterWindowGenCases(harness, processor);
             runMeterTapCases(harness, processor, audioControl);
+            runAcTapCases(harness, processor, audioControl);
+            runInletValueCases(harness);
+            runWireActivityCases(harness);
+            runFactCases(harness, processor);
             runOutputCeilingCases(harness, processor, audioControl);
             runMidiDevicesCases(harness, processor);
             runApprovalCases(harness, processor);

@@ -4,7 +4,7 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 out="$(mktemp -d)"
 trap 'rm -rf "$out"' EXIT
-for t in bridge_safety_test handoff_test json_escape_test identity_rename_test identity_service_test registry_test worker_test v2_codec_test v2_router_test v2_store_test trace_taps_test output_ceiling_test ceiling_console_test tab_token_test approval_state_test flow_provenance_test visible_tab_test alphi_test alphi_dock_test alphi_say_test alphi_gate_test; do
+for t in bridge_safety_test handoff_test json_escape_test identity_rename_test identity_service_test registry_test worker_test v2_codec_test v2_router_test v2_store_test trace_taps_test ac_level_test wire_activity_test output_ceiling_test ceiling_console_test tab_token_test approval_state_test flow_provenance_test visible_tab_test alphi_test alphi_dock_test alphi_say_test alphi_gate_test; do
   "${CXX:-g++}" -std=c++17 -Wall -Wextra -Werror -pthread -o "$out/$t" "$root/Tests/mcp/$t.cpp"
   "$out/$t"
 done
@@ -33,6 +33,33 @@ if [ -n "$bare" ]; then
 fi
 # P11 (take files): no fork source writes to a hard-coded user path (the bridge wrote midi-take.json / voice-take.json
 # into one developer's checkout; the TS persists both from the /pd/midi/event and /pd/voice/event replies).
+# V1 read-only facts: the fact verbs never change the patch, the device or the audio.
+factWrites="$(grep -nE "pd_typedmess|pd_float\(|pd_bang\(|glist_delete|obj_connect|obj_disconnect|canvas_undo|setAudioDeviceSetup|binbuf_eval|sys_vgui|mcpObjSetCore" "$root/Source/Pd/MCPBridgeCmdFacts.cpp" "$root/Source/Pd/MCPBridgeInletValues.h" "$root/Source/Pd/MCPBridgeBroken.h" | grep -v ":\s*//" || true)"
+if [ -n "$factWrites" ]; then
+  echo "$factWrites" >&2
+  echo "test-bridge-safety: a V1 fact verb writes (the fact verbs are read only)" >&2
+  exit 1
+fi
+# V1 wire window: the hook runs on Pd's thread inside every outlet call: no lock, no allocation, no JUCE.
+wireRt="$(grep -nE "std::mutex|lock_guard|unique_lock|ScopedLock|new |malloc|std::vector|std::string|juce::|std::function" "$root/Source/Pd/MCPBridgeWireActivity.h" "$root/Source/Mcp/McpWireHook.h" | grep -v ":\s*//" | grep -v "^[^:]*:[0-9]*: \*\|^[^:]*:[0-9]*://" || true)"
+if [ -n "$wireRt" ]; then
+  echo "$wireRt" >&2
+  echo "test-bridge-safety: the wire-activity hook path must not lock, allocate or use JUCE" >&2
+  exit 1
+fi
+# Review 2026-11-06: Pd's private struct _inlet is read through the fork's class-checked accessors (pure-data/0004),
+# never through a mirrored layout.
+inletMirror="$(grep -rnE "InletMirror|struct _inlet *\{|i_floatslot|i_symslot|iu_floatsignalvalue" "$root"/Source/Pd "$root"/Source/Mcp | grep -v ":\s*//" || true)"
+if [ -n "$inletMirror" ]; then
+  echo "$inletMirror" >&2
+  echo "test-bridge-safety: bridge code mirrors Pd's struct _inlet (use the mcp_inlet_* accessors)" >&2
+  exit 1
+fi
+wireCalls="$(grep -rn "mcp::wireMessage(" "$root"/Source --include=*.cpp --include=*.h | grep -v ":\s*//" | grep -c . || true)"
+if [ "$wireCalls" != "1" ]; then
+  echo "test-bridge-safety: mcp::wireMessage must be called exactly once (MessageDispatcher::enqueueMessage), found $wireCalls" >&2
+  exit 1
+fi
 userPaths="$(grep -rnE '"/(home|Users)/[^"]*' "$root"/Source/Pd "$root"/Source/Mcp | grep -v ":\s*//" || true)"
 if [ -n "$userPaths" ]; then
   echo "$userPaths" >&2

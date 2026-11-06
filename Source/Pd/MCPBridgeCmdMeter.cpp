@@ -197,6 +197,8 @@ void MCPBridge::meterQuery(const juce::String& meterAction, const juce::OSCMessa
         sumSq += s * s;
         if (abs_s > peak) peak = abs_s;
     }
+    mcp::ac::AcStats ac; // V1 AC taps: the block with its mean removed
+    mcp::ac::accumulateBlockMean(ac, vec, n);
     sys_unlock();
 
     float rms = (n > 0) ? std::sqrt(sumSq / static_cast<float>(n)) : 0.0f;
@@ -208,6 +210,7 @@ void MCPBridge::meterQuery(const juce::String& meterAction, const juce::OSCMessa
     rep.addArgument(peakDb);
     rep.addArgument(static_cast<int32>(nchans));
     rep.addArgument(static_cast<int32>(n));
+    addAcArgs(rep, mcp::ac::levelsOf(ac), mcp::ac::snapshotTone(ac)); // V1 args 4-7; tone 1/0/-1 (snapshot)
     sender.send(rep);
     return;
 }
@@ -321,6 +324,7 @@ void MCPBridge::meterArm(const juce::String& meterAction, const juce::OSCMessage
         s.mcpArmFinalCount.store(0, std::memory_order_relaxed);
         s.mcpArmLimiterReductionDbMax.store(0.0f, std::memory_order_relaxed);
         s.mcpArmPdOutPeak.store(0.0f, std::memory_order_relaxed);
+        s.resetArmAc(); // V1 AC taps
         s.mcpArmEpoch.fetch_add(1, std::memory_order_release); // review L3: the audio thread empties them again
         // Re-arm race (review L3, kept): a block already past its mcpArmActive check when this re-arm zeroes the
         // peaks can still fold up to one block (~1-10 ms) of pre-arm audio into the new window. Arm comes before the
@@ -429,6 +433,10 @@ void MCPBridge::meterRead(const juce::String& meterAction, const juce::OSCMessag
         rep.addArgument(s.mcpArmLimiterReductionDbMax.load(std::memory_order_relaxed));
         rep.addArgument(gen); // P11 V1 arg 15: the window this read closed
         rep.addArgument(s.mcpArmPdOutPeak.load(std::memory_order_relaxed));
+        // V1 AC taps, args 17-20: the FINAL tap after a ~10 Hz DC blocker per channel, each channel judged alone
+        // (review F3): acRmsDb, acPeakDb, dcDb of the loudest channel, tone (0/1: some channel has acRms above -60 dBFS
+        // and swings, review F2). A DC drone has a loud arg 0 and no tone.
+        addAcArgs(rep, s.readArmAc());
     }
     sender.send(rep);
     return;
@@ -609,6 +617,7 @@ void MCPBridge::meterMaster(const juce::String& meterAction, const juce::OSCMess
         rep.addArgument(-100.0f);
         rep.addArgument(static_cast<int32>(0));
         rep.addArgument(juce::String("canvas_not_found"));
+        addAcArgs(rep, {}); // V1 args 4-7: nothing measured
         sender.send(rep);
         return;
     }
@@ -642,6 +651,8 @@ void MCPBridge::meterMaster(const juce::String& meterAction, const juce::OSCMess
         res.peakDb = -100.0f;
         res.rmsDb = -100.0f;
         res.masterType = "audio_not_running";
+        res.ac = {}; // V1: the stale block is no tone either
+        res.acTone = 0;
     }
 
     juce::OSCMessage rep { juce::OSCAddressPattern("/meter/master/reply/" + correlationId) };
@@ -649,6 +660,11 @@ void MCPBridge::meterMaster(const juce::String& meterAction, const juce::OSCMess
     rep.addArgument(res.rmsDb);
     rep.addArgument(static_cast<int32>(res.masterFound ? 1 : 0));
     rep.addArgument(res.masterType);
+    // V1 AC taps, args 4-7: acRmsDb, acPeakDb, dcDb, tone (the same last block with its mean removed). Review F1: one
+    // block cannot see a bass longer than itself, so tone is 1 (tone), 0 (an exactly flat block or quiet: no sound) or
+    // -1 (unknown: loud raw, no AC in the block; an armed /meter/read decides). This meter reads the dac~ inputs on the
+    // message thread, so a continuous blocker would need an audio-thread hook per dac~; the armed final tap has one.
+    addAcArgs(rep, res.ac, res.acTone);
     sender.send(rep);
     return;
 }
@@ -824,19 +840,21 @@ void MCPBridge::readSignalTrace(const juce::String& correlationId)
     juce::String levels;
     juce::String unread;
     for (auto const& tap : window->taps) {
-        float peak = 0.0f;
-        int blocks = 0;
-        bool const got = probeManager.finishWindowTap(tap.probeId, peak, blocks);
+        WindowTapReading reading;
+        bool const got = probeManager.finishWindowTap(tap.probeId, reading);
+        float const peak = reading.peak;
+        int const blocks = reading.blocks;
         if (!levels.isEmpty()) levels += ",";
         levels += "{\"tempId\":\"" + jsonEscape(juce::String(tap.name)) + "\",\"class\":\"" + jsonEscape(tap.cls) + "\",\"outlet\":" + juce::String(tap.outlet);
         if (got && blocks > 0) {
             view.peaks[tap.name + ":" + std::to_string(tap.outlet)] = peak;
             maxBlocks = std::max(maxBlocks, blocks);
-            levels += ",\"peakDb\":" + juce::String(mcp::trace::peakToDb(peak), 1) + ",\"blocks\":" + juce::String(blocks) + "}";
+            levels += ",\"peakDb\":" + juce::String(mcp::trace::peakToDb(peak), 1) + ",\"blocks\":" + juce::String(blocks)
+                + acJsonFields(mcp::ac::levelsOf(reading.ac)) + "}"; // V1 AC taps
         } else {
             if (!unread.isEmpty()) unread += ",";
             unread += "\"" + jsonEscape(juce::String(tap.name)) + ":" + juce::String(tap.outlet) + "\"";
-            levels += ",\"peakDb\":null,\"blocks\":0}";
+            levels += ",\"peakDb\":null,\"blocks\":0,\"acRmsDb\":null,\"acPeakDb\":null,\"dcDb\":null,\"tone\":null}";
         }
     }
     juce::String untapped;

@@ -404,6 +404,57 @@ juce::String MCPBridge::canonicalCanvasKey(t_canvas* cnv)
 
 // Compute native diagnostic graph facts under sys_lock(). Shared by standalone
 // /pd/diagnose and inline conditional X-ray in batch_atomic.
+#include "MCPBridgePdAccessors.h" // V1: mcp_canvas_switchedon_chain, canvas_getsr, canvas_getsignallength
+
+namespace {
+// V1 (diagnose): `,"switchedOn":..,"blockSize":..,"sampleRate":..,"deviceOutChannels":N,"switched_off":[...],
+// "dac_channels_missing":[...]`. switched_off = subpatches on this canvas whose [switch~] is off (their DSP does not
+// run). A [dac~] channel above Pd's output channel count is silent ("dac~ channel 3 does not exist on this 2-out
+// device"); channels come from the box's own args (default 1 2). Read only; caller holds the Pd lock.
+juce::String mcpDiagnoseDeviceFacts(t_canvas* cnv, std::vector<t_gobj*> const& objs, std::vector<juce::String> const& names,
+    std::vector<juce::String> const& classNames)
+{
+    int const outs = sys_get_outchannels();
+    juce::String json = ",\"switchedOn\":" + juce::String(mcp_canvas_switchedon_chain(cnv) ? "true" : "false")
+        + ",\"blockSize\":" + juce::String(canvas_getsignallength(cnv))
+        + ",\"sampleRate\":" + juce::String(static_cast<double>(canvas_getsr(cnv)))
+        + ",\"deviceOutChannels\":" + juce::String(outs) + ",\"switched_off\":[";
+    bool first = true;
+    for (size_t i = 0; i < objs.size(); ++i) {
+        if (pd_class(&objs[i]->g_pd) != canvas_class) continue;
+        auto* sub = reinterpret_cast<t_canvas*>(objs[i]);
+        if (mcp_canvas_switchedon_chain(sub)) continue; // off here or in a parent
+        if (!first) json += ",";
+        first = false;
+        json += "{\"tempId\":\"" + jsonEscape(names[i]) + "\",\"name\":\""
+            + jsonEscape(sub->gl_name ? juce::String::fromUTF8(sub->gl_name->s_name) : juce::String()) + "\",\"note\":\"subpatch "
+            + jsonEscape(names[i]) + " is switched off by [switch~]: its DSP does not run\"}";
+    }
+    json += "],\"dac_channels_missing\":[";
+    first = true;
+    for (size_t i = 0; i < objs.size(); ++i) {
+        if (classNames[i] != "dac~") continue;
+        t_object* ob = pd::Interface::checkObject(objs[i]);
+        if (!ob || !ob->te_binbuf) continue;
+        int const n = binbuf_getnatom(ob->te_binbuf);
+        t_atom const* av = binbuf_getvec(ob->te_binbuf);
+        std::vector<int> channels;
+        for (int k = 1; k < n; ++k)
+            if (av[k].a_type == A_FLOAT) channels.push_back(static_cast<int>(av[k].a_w.w_float));
+        if (n <= 1) channels = { 1, 2 };
+        for (int ch : channels) {
+            if (ch >= 1 && ch <= outs) continue;
+            if (!first) json += ",";
+            first = false;
+            json += "{\"tempId\":\"" + jsonEscape(names[i]) + "\",\"channel\":" + juce::String(ch) + ",\"outputs\":" + juce::String(outs)
+                + ",\"note\":\"dac~ channel " + juce::String(ch) + " does not exist on this " + juce::String(outs) + "-out device: silent\"}";
+        }
+    }
+    json += "]";
+    return json;
+}
+} // namespace
+
 juce::String MCPBridge::computeDiagnoseFacts(PluginProcessor* processor, t_canvas* cnv, const juce::String& canvasName)
 {
     if (!processor || !cnv) return {};
@@ -651,7 +702,9 @@ juce::String MCPBridge::computeDiagnoseFacts(PluginProcessor* processor, t_canva
             first = false;
         }
     }
-    json += "]}";
+    json += "]";
+    json += mcpDiagnoseDeviceFacts(cnv, objs, names, classNames); // V1: switch~ state, dac~ channels the device lacks
+    json += "}";
     return json;
 }
 
@@ -715,6 +768,7 @@ MCPBridge::MasterMeterResult MCPBridge::computeMasterMeter(PluginProcessor* proc
     float maxPeak = 0.0f;
     double totalSumSq = 0.0;
     int64_t totalSamples = 0;
+    mcp::ac::AcStats ac; // V1 AC taps: each wire's last block with its mean removed (a one-block snapshot)
 
     t_linetraverser lt;
     t_outconnect* oc = nullptr;
@@ -742,8 +796,11 @@ MCPBridge::MasterMeterResult MCPBridge::computeMasterMeter(PluginProcessor* proc
                 if (abs_s > maxPeak) maxPeak = abs_s;
             }
             totalSamples += sig->s_n;
+            mcp::ac::accumulateBlockMean(ac, sig->s_vec, sig->s_n);
         }
     }
+    res.ac = mcp::ac::levelsOf(ac);
+    res.acTone = mcp::ac::snapshotTone(ac);
 
     float rms = (totalSamples > 0) ? (float)std::sqrt(totalSumSq / (double)totalSamples) : 0.0f;
     res.rmsDb = (rms > 1e-7f) ? (20.0f * std::log10(rms)) : -100.0f;
@@ -3328,7 +3385,20 @@ void ProbeManager::audioTick()
 
         int n = signal->s_n;
         if (n <= 0) continue;
-        float* vec = signal->s_vec;
+        float const* vec = signal->s_vec; // read only: the probe never changes the signal
+
+        // V1 AC taps: a new use of this slot starts a fresh blocker (and empty window sums), on this thread.
+        if (uint32_t const acEpoch = probe.acEpoch.load(std::memory_order_acquire); acEpoch != probe.acEpochSeen) {
+            probe.acEpochSeen = acEpoch;
+            probe.acBlocker.reset(probe.acCoeff.load(std::memory_order_relaxed));
+            probe.windowAcSumSq.store(0.0, std::memory_order_relaxed);
+            probe.windowSum.store(0.0, std::memory_order_relaxed);
+            probe.windowAcPeak.store(0.0f, std::memory_order_relaxed);
+            probe.windowAcCount.store(0, std::memory_order_relaxed);
+            probe.windowSwings.store(0, std::memory_order_relaxed);
+        }
+        mcp::ac::AcStats blockAc;
+        mcp::ac::accumulate(probe.acBlocker, blockAc, vec, n);
 
         if (probe.windowMode.load(std::memory_order_relaxed)) {
             // T2b: an armed-trace tap keeps the largest block peak since it started; no queue, no ring.
@@ -3337,6 +3407,12 @@ void ProbeManager::audioTick()
                 blockPeak = std::max(blockPeak, std::abs(vec[i]));
             if (blockPeak > probe.windowPeak.load(std::memory_order_relaxed))
                 probe.windowPeak.store(blockPeak, std::memory_order_relaxed);
+            probe.windowAcSumSq.store(probe.windowAcSumSq.load(std::memory_order_relaxed) + blockAc.acSumSq, std::memory_order_relaxed);
+            probe.windowSum.store(probe.windowSum.load(std::memory_order_relaxed) + blockAc.sum, std::memory_order_relaxed);
+            if (blockAc.acPeak > probe.windowAcPeak.load(std::memory_order_relaxed))
+                probe.windowAcPeak.store(blockAc.acPeak, std::memory_order_relaxed);
+            probe.windowAcCount.store(probe.windowAcCount.load(std::memory_order_relaxed) + blockAc.count, std::memory_order_relaxed);
+            probe.windowSwings.store(probe.windowSwings.load(std::memory_order_relaxed) + blockAc.swings, std::memory_order_relaxed);
             probe.windowBlocks.store(probe.windowBlocks.load(std::memory_order_relaxed) + 1, std::memory_order_release);
             continue;
         }
@@ -3350,7 +3426,7 @@ void ProbeManager::audioTick()
         }
         float rms = std::sqrt(sumSq / static_cast<float>(n));
 
-        ProbeResult result { probe.probeId, rms, peak, n };
+        ProbeResult result { probe.probeId, rms, peak, n, blockAc.acSumSq, blockAc.sum, blockAc.acPeak, static_cast<int>(blockAc.count), static_cast<int>(blockAc.swings) };
         probe.resultQueue.try_enqueue(result);
 
         int writePos = probe.ringWritePos.load(std::memory_order_relaxed);
@@ -3363,14 +3439,30 @@ void ProbeManager::audioTick()
 
 bool ProbeManager::finishWindowTap(uint32_t probeId, float& peakOut, int& blocksOut)
 {
+    WindowTapReading reading;
+    bool const got = finishWindowTap(probeId, reading);
+    if (got) {
+        peakOut = reading.peak;
+        blocksOut = reading.blocks;
+    }
+    return got;
+}
+
+bool ProbeManager::finishWindowTap(uint32_t probeId, WindowTapReading& out)
+{
     for (auto& probe : probes) {
         if (probe.probeId != probeId || !probe.windowMode.load(std::memory_order_acquire)) continue;
         // The tap may have ended by itself (grace period); its peak stays in the slot until the slot is reused.
         probe.active.store(false, std::memory_order_release);
         probe.outconnect.store(nullptr, std::memory_order_release);
         probe.windowMode.store(false, std::memory_order_release);
-        peakOut = probe.windowPeak.load(std::memory_order_relaxed);
-        blocksOut = probe.windowBlocks.load(std::memory_order_acquire);
+        out.blocks = probe.windowBlocks.load(std::memory_order_acquire); // pairs with the tick's release: the sums below are its
+        out.peak = probe.windowPeak.load(std::memory_order_relaxed);
+        out.ac.acSumSq = probe.windowAcSumSq.load(std::memory_order_relaxed);
+        out.ac.sum = probe.windowSum.load(std::memory_order_relaxed);
+        out.ac.acPeak = probe.windowAcPeak.load(std::memory_order_relaxed);
+        out.ac.count = probe.windowAcCount.load(std::memory_order_relaxed);
+        out.ac.swings = probe.windowSwings.load(std::memory_order_relaxed);
         return true;
     }
     return false;
@@ -3385,6 +3477,14 @@ int ProbeManager::startProbe(t_outconnect* oc, int const epoch, const juce::Stri
             while (probe.resultQueue.try_dequeue(discard)) {}
             probe.windowPeak.store(0.0f, std::memory_order_relaxed);
             probe.windowBlocks.store(0, std::memory_order_relaxed);
+            // V1 AC taps: empty for a read before the first block; the tick resets them again at the new epoch.
+            probe.windowAcSumSq.store(0.0, std::memory_order_relaxed);
+            probe.windowSum.store(0.0, std::memory_order_relaxed);
+            probe.windowAcPeak.store(0.0f, std::memory_order_relaxed);
+            probe.windowAcCount.store(0, std::memory_order_relaxed);
+            probe.windowSwings.store(0, std::memory_order_relaxed);
+            probe.acCoeff.store(mcp::ac::coefficientFor(bridge && bridge->processor ? bridge->processor->getSampleRate() : 0.0), std::memory_order_relaxed);
+            probe.acEpoch.fetch_add(1, std::memory_order_release);
             probe.spectral = false;
             probe.windowMode.store(windowMode, std::memory_order_release);
 
@@ -3399,6 +3499,7 @@ int ProbeManager::startProbe(t_outconnect* oc, int const epoch, const juce::Stri
             probe.accRms = 0.0f;
             probe.accPeak = 0.0f;
             probe.accBlocks = 0;
+            probe.accAc = {};
             probe.ringWritePos.store(0, std::memory_order_relaxed);
             for (auto& s : probe.ringBuffer) s.store(0.0f, std::memory_order_relaxed);
             probe.needsResolve.store(false, std::memory_order_relaxed);
@@ -3420,6 +3521,7 @@ void ProbeManager::stopProbe(uint32_t probeId, const juce::String& correlationId
                 probe.accRms += item.rms * item.rms;
                 if (item.peak > probe.accPeak) probe.accPeak = item.peak;
                 probe.accBlocks++;
+                probe.accAc.add({ item.acSumSq, item.sum, item.acPeak, static_cast<uint64_t>(std::max(0, item.acCount)), static_cast<uint64_t>(std::max(0, item.swings)) });
             }
 
             float meanRms = (probe.accBlocks > 0) ? std::sqrt(probe.accRms / static_cast<float>(probe.accBlocks)) : 0.0f;
@@ -3442,6 +3544,7 @@ void ProbeManager::stopProbe(uint32_t probeId, const juce::String& correlationId
                 rep.addArgument(peakDb);
                 rep.addArgument(freq);
                 rep.addArgument(static_cast<int32>(probe.accBlocks));
+                addAcArgs(rep, mcp::ac::levelsOf(probe.accAc)); // V1 args 4-7
                 bridge->sender.send(rep);
             }
 
@@ -3520,6 +3623,7 @@ void ProbeManager::collectResults()
             probe.accRms += item.rms * item.rms;
             if (item.peak > probe.accPeak) probe.accPeak = item.peak;
             probe.accBlocks++;
+            probe.accAc.add({ item.acSumSq, item.sum, item.acPeak, static_cast<uint64_t>(std::max(0, item.acCount)), static_cast<uint64_t>(std::max(0, item.swings)) });
         }
 
         if (now - probe.startTimeMs >= static_cast<juce::int64>(probe.durationMs)) {
@@ -3559,6 +3663,11 @@ void ProbeManager::collectResults()
                     rootObj->setProperty("fundamental", freq);
                     rootObj->setProperty("sampleRate", sampleRate);
                     rootObj->setProperty("blocks", static_cast<int>(probe.accBlocks));
+                    auto const ac = mcp::ac::levelsOf(probe.accAc); // V1 AC taps
+                    rootObj->setProperty("acRmsDb", ac.acRmsDb);
+                    rootObj->setProperty("acPeakDb", ac.acPeakDb);
+                    rootObj->setProperty("dcDb", ac.dcDb);
+                    rootObj->setProperty("tone", ac.tone);
 
                     juce::String jsonString = juce::JSON::toString(specVar, true);
                     juce::OSCMessage rep { juce::OSCAddressPattern("/meter/spectral/result/" + probe.correlationId) };
@@ -3575,6 +3684,7 @@ void ProbeManager::collectResults()
                 rep.addArgument(peakDb);
                 rep.addArgument(freq);
                 rep.addArgument(static_cast<int32>(probe.accBlocks));
+                addAcArgs(rep, mcp::ac::levelsOf(probe.accAc)); // V1 args 4-7
                 bridge->sender.send(rep);
             }
 

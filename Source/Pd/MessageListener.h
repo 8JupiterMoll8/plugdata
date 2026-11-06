@@ -7,6 +7,7 @@
 
 #include "Instance.h"
 #include <readerwriterqueue.h>
+#include "Mcp/McpWireHook.h" // MCP-HOOK(wireActivity)
 
 namespace pd {
 
@@ -141,6 +142,7 @@ public:
 
     static void enqueueMessage(void* instance, int type, void* target, t_symbol* symbol, int const argc, t_atom* argv) noexcept
     {
+        mcp::wireMessage(instance, type, target, symbol, argc, argv); // MCP-HOOK(wireActivity)
         auto const* pd = static_cast<pd::Instance*>(instance);
         auto* dispatcher = pd->messageDispatcher.get();
         if (EXPECT_LIKELY(!dispatcher->block)) {
