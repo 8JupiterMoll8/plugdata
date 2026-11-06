@@ -58,11 +58,11 @@ inline juce::var number(t_float f) { return std::isfinite(f) ? juce::var(static_
 
 inline juce::String kindOf(t_symbol* s)
 {
-    if (s == &s_float) return "float";
-    if (s == &s_symbol) return "symbol";
-    if (s == &s_pointer) return "pointer";
-    if (s == &s_list) return "list";
-    if (s == &s_signal) return "signal";
+    if (s == gensym("float")) return "float";
+    if (s == gensym("symbol")) return "symbol";
+    if (s == gensym("pointer")) return "pointer";
+    if (s == gensym("list")) return "list";
+    if (s == gensym("signal")) return "signal";
     return "other";
 }
 
