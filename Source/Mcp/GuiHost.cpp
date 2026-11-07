@@ -179,6 +179,19 @@ public:
         }
     }
 
+    void refreshObjectText(t_canvas* cnv, t_gobj* g) override
+    {
+        // Live jam 2026-11-07: a relabel updated te_binbuf but the box kept its old text until it was moved or
+        // clicked; updateBounds() is the path a move takes (getPdBounds -> updateTextLayout -> syncTextFromPd).
+        auto* cc = findGuiCanvasFor(proc, cnv);
+        if (!cc) return;
+        if (auto* obj = findObjectComponent(cc, g)) {
+            obj->updateBounds();
+            obj->repaint();
+        }
+        cc->repaint();
+    }
+
     void frameCreatedObjects(t_canvas* cnv, std::vector<t_gobj*> const& ptrs) override
     {
         auto* cc = findGuiCanvasFor(proc, cnv);

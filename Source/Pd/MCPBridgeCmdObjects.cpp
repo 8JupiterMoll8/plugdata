@@ -97,7 +97,17 @@ void MCPBridge::pdObjRelabel(const juce::String& action, const juce::OSCMessage&
     // poke gui objects from the bridge (see 61c0c12f0 crash, reverted in
     // 0b75486d6). A repaint is enough to trigger it; on the message thread
     // (P3.4 S3: repaintView may open a tab: 2 JUCE assertions per call before).
-    mcpRepaintViewLater(processor, cnv);
+    if (ok) {
+        // Re-measure the box on the message thread (a repaint alone left the old text on screen).
+        juce::MessageManager::callAsync([proc = processor, cnv, g] {
+            sys_lock();
+            bool const live = mcpCanvasIsLive(cnv);
+            sys_unlock();
+            if (live) proc->getMcp()->gui().refreshObjectText(cnv, g);
+        });
+    } else {
+        mcpRepaintViewLater(processor, cnv);
+    }
     sendReply("/pd/obj_relabel/reply/" + correlationId, static_cast<float>(ok));
     return;
 }

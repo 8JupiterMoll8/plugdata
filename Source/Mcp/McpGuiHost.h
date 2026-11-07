@@ -53,6 +53,9 @@ public:
     virtual void repaintHud(t_canvas* cnv) = 0;
     // Repaints every canvas of every editor and invalidates the NVG surface.
     virtual void repaintAll() = 0;
+    // Re-measures the box of `g` on `cnv` so a relabel (te_binbuf rewrite) shows its new text. Message thread only;
+    // `g` is only compared, never dereferenced (it may be gone).
+    virtual void refreshObjectText(t_canvas* cnv, t_gobj* g) = 0;
     // Pans (never zooms) the view of `cnv` so freshly created objects are in sight,
     // when one of them landed outside it. Was batch_atomic's frameIfCreateOffscreen.
     virtual void frameCreatedObjects(t_canvas* cnv, std::vector<t_gobj*> const& created) = 0;
