@@ -438,6 +438,7 @@ public:
             juce::String text;
             float width = -1.0f;
             bool dark = false;
+            juce::String typeface; // the default font when built: a font change in Settings rebuilds the bubble
             std::vector<MeasuredBlock> blocks;
             int bubbleH = 0;
         };
@@ -530,8 +531,11 @@ public:
 
             auto& entry = layoutCache[index];
             auto const& text = items[index].text;
-            if (entry.width != innerContentWidth || entry.dark != dark || entry.text != text)
+            auto const typeface = Fonts::getDefaultFont().getTypefaceName();
+            if (entry.width != innerContentWidth || entry.dark != dark || entry.text != text || entry.typeface != typeface) {
                 buildMessageLayout(entry, text, innerContentWidth, dark);
+                entry.typeface = typeface;
+            }
             return entry;
         }
 

@@ -776,13 +776,15 @@ void NVGSurface::recordFrame()
 
         // MCP-CARRIED(repaint-scope): one clipped pass per damage cluster (renderPasses); a full repaint or
         // nearby damage is one pass over the bounding box, as before. Each pass sees its own rect as the
-        // invalid area (the canvas render reads it) and starts from a fresh clip and nvg scissor.
+        // invalid area (the canvas render reads it). The clip is reset ONCE per frame (resetClipRegion bumps the
+        // image cache's frame id; per pass it could drop an image an earlier pass drew); each pass runs inside
+        // saveState/restoreState, which brings back the clip and the nvg scissor.
+        llgc.resetClipRegion(AffineTransform::scale(desktopScale, desktopScale)); // MCP-CARRIED(repaint-scope)
         auto const frameDamage = invalidArea;
         auto const passes = isFullRepaint ? std::vector<Rectangle<int>> { damage } : renderPasses(bounds);
         for (auto const& pass : passes) {
             invalidArea = pass;
-            nanovg::nvgSave(asyncNvg);
-            llgc.resetClipRegion(AffineTransform::scale(desktopScale, desktopScale));
+            llgc.saveState(); // MCP-CARRIED(repaint-scope)
             { // MCP-CARRIED(repaint-scope)
                 Graphics g(llgc);
                 g.reduceClipRegion(pass); // MCP-CARRIED(repaint-scope)
@@ -797,7 +799,7 @@ void NVGSurface::recordFrame()
                                    (uint8) 0x50));
 #endif
             }
-            nanovg::nvgRestore(asyncNvg);
+            llgc.restoreState(); // MCP-CARRIED(repaint-scope)
         }
         invalidArea = frameDamage; // MCP-CARRIED(repaint-scope)
 
