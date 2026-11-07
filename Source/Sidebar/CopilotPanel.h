@@ -892,14 +892,26 @@ public:
 
     void setTab(PanelTab) {}
 
+    // The badge pulse: 10 Hz is smooth enough for a slow sine and costs a badge repaint each tick.
+    static constexpr int thinkingTimerHz = 10;
+    static constexpr float thinkingPhaseStep = 0.5f; // radians per tick (was 0.2 at 25 Hz: the same speed)
+
     void setThinking(bool active, const juce::String& status)
     {
+        bool const wasThinking = chatContent.isThinking;
         chatContent.isThinking = active;
         chatContent.thinkingStatus = status.isNotEmpty() ? status : "Thinking...";
         if (active) {
-            startTimerHz(25);
+            if (!wasThinking || !isTimerRunning())
+                startTimerHz(thinkingTimerHz);
         } else {
             startTimerHz(2);
+        }
+        // Only the status text of a running badge changed ("Thinking... N s" once a second): the badge keeps its
+        // size and place, so repaint just it instead of re-laying-out and repainting the whole chat.
+        if (active && wasThinking && !chatContent.thinkingBadgeBounds.isEmpty()) {
+            chatContent.repaint(chatContent.thinkingBadgeBounds);
+            return;
         }
         updateChatLayout();
     }
@@ -907,7 +919,7 @@ public:
     void timerCallback() override
     {
         if (chatContent.isThinking) {
-            chatContent.thinkingPhase += 0.2f;
+            chatContent.thinkingPhase += thinkingPhaseStep;
             // Only the badge animates; repainting just it lets paint() cull every bubble.
             if (chatContent.thinkingBadgeBounds.isEmpty())
                 chatContent.repaint();

@@ -66,6 +66,7 @@ void CanvasMcpLayer::paintUnderObjects(NVGcontext* nvg, Rectangle<int> invalidRe
         return;
     // Big Alphi 1a0 review H2: what this render redraws (canvas coordinates), for Alphi's move and click gate.
     mcpAlphiRenderRegion = invalidRegion;
+    mcpPaintRegion = invalidRegion; // this render's region for paintOverObjects' culling (never consumed)
     // Alphi drop 1 D11: with no free spot on the right edge his tab is drawn under the boxes (CanvasMcpAlphiSay.cpp).
     if (mcpAlphiTabUnder && !mcpAlphiTabFrameUnder.isEmpty())
         paintAlphiTab(nvg);
@@ -107,6 +108,10 @@ void CanvasMcpLayer::paintUnderObjects(NVGcontext* nvg, Rectangle<int> invalidRe
                 rw = r.w;
                 rh = r.h;
             }
+
+            // Outside what this render redraws: nothing of it would land (its title badge may run past rw).
+            if (!juce::Rectangle<float>(rx, ry, std::max(rw, 640.0f), rh).expanded(4.0f).intersects(invalidRegion.toFloat()))
+                continue;
 
             NVGScopedState scopedRegion(nvg);
             juce::String const k = r.kind.isNotEmpty() ? r.kind : juce::String("group");
@@ -185,6 +190,18 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
 
             auto const tapeBounds = getAnnotationScreenBounds(static_cast<size_t>(noteIdx));
             if (tapeBounds.isEmpty()) continue;
+
+            // Outside what this render redraws: skip the tape, its chips drawer (below, may be wider), the hover
+            // tint around its group and the anchor tick down to it. The index still advances, as when drawn.
+            {
+                auto cull = tapeBounds.withSize(tapeBounds.getWidth() + 240.0f, tapeBounds.getHeight() + 30.0f);
+                if (!grpBounds.isEmpty())
+                    cull = cull.getUnion(grpBounds.toFloat().translated(static_cast<float>(canvas.canvasOrigin.x), static_cast<float>(canvas.canvasOrigin.y)));
+                if (!mcpPaintRegion.isEmpty() && !cull.expanded(12.0f).intersects(mcpPaintRegion.toFloat())) {
+                    ++noteIdx;
+                    continue;
+                }
+            }
 
             NVGScopedState scopedAnn(nvg);
             float const ax = tapeBounds.getX();
@@ -1181,7 +1198,6 @@ void CanvasMcpLayer::repaintHudArea()
         return;
     }
     auto& vp = *canvas.viewport;
-    constexpr int hudBandHeight = 200;
     vp.repaint(juce::Rectangle<int>(0, std::max(0, vp.getHeight() - hudBandHeight), vp.getWidth(), std::min(vp.getHeight(), hudBandHeight)));
 }
 
@@ -1195,7 +1211,16 @@ void CanvasMcpLayer::paintScreenOverlay(NVGcontext* nvg)
     // Rendered in screen coordinates (unscaled/unpanned) — zero cord collisions.
     if (canvas.pd) {
         auto hud = canvas.pd->getMcp()->session.getMcpHud();
-        if (hud.active && shouldShowAIHud()) {
+        // Only when this render redraws the HUD's band (repaintHudArea): a small repaint elsewhere (Alphi, a meter)
+        // skips the card and its text layout.
+        bool hudInRender = true;
+        if (canvas.viewport && canvas.editor) {
+            auto& vp = *canvas.viewport;
+            auto const render = vp.getLocalArea(canvas.editor, canvas.editor->nvgSurface.getInvalidArea());
+            juce::Rectangle<int> const band(0, std::max(0, vp.getHeight() - hudBandHeight), vp.getWidth(), std::min(vp.getHeight(), hudBandHeight));
+            hudInRender = render.intersects(band);
+        }
+        if (hud.active && hudInRender && shouldShowAIHud()) {
             NVGScopedState scopedHud(nvg);
             float const vw = static_cast<float>(canvas.viewport ? canvas.viewport->getWidth() : canvas.getWidth());
             float const vh = static_cast<float>(canvas.viewport ? canvas.viewport->getHeight() : canvas.getHeight());

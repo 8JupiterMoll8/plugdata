@@ -340,6 +340,21 @@ void CanvasMcpLayer::alphiMotionTick()
     bool const sayChanged = mcp::alphiSayKey(board, now) != mcpAlphiSayKeyDrawn || mcpAlphiLineClock.dizzy(now) != mcpAlphiDizzyDrawn
         || mcpAlphiLineClock.lineAlpha(now) != mcpAlphiLineAlphaDrawn;
     if (!in.covered && (mcp::alphiMotionRun(in) || sayChanged || gazeMoved)) {
+        // While busy only the sparks / dots move: at most busyRepaintMs apart (~12 Hz), and the measuring dots only
+        // when the lit dot changes. The pulse, the line, the say and the gaze still repaint at the full rate.
+        bool const onlyBusy = in.busy && !sayChanged && !gazeMoved && !in.lineMoving
+            && std::fabs(in.target - in.drawn) < mcp::AlphiMotionTiming::minStep && !(in.target <= 0.0f && in.drawn > 0.0f);
+        if (onlyBusy) {
+            auto const act = board.activity(now);
+            int const key = act && act->phase == mcp::AlphiSayPhase::Measuring
+                ? static_cast<int>(static_cast<float>(now % 100000) / 1000.0f * 3.0f) % 3 // paintAlphiFx's lit dot
+                : -1;
+            bool const dotsSame = key >= 0 && key == mcpAlphiBusyKeyDrawn;
+            if (dotsSame || now - mcpAlphiBusyRepaintMs < busyRepaintMs)
+                return;
+            mcpAlphiBusyKeyDrawn = key;
+            mcpAlphiBusyRepaintMs = now;
+        }
         mcpAlphiGazeDrawn = gaze;
         alphiMotionRepaint(sayChanged);
         return;

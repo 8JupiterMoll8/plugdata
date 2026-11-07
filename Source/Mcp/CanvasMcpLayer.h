@@ -119,6 +119,8 @@ public:
     juce::String stableIdOfObject(Object const* obj) const;
     void refreshStableIdCache() const;
     void repaintHudArea(); // the band the HUD card is drawn in (paintScreenOverlay), not the whole view
+    static constexpr int hudBandHeight = 200; // the HUD card with its shadow is at most ~190 px high
+    juce::Rectangle<int> mcpPaintRegion; // the current render's region, canvas coordinates (paintUnderObjects)
     std::uint64_t stableIdObjectsKey() const;
     mutable std::unordered_map<std::string, Object*> mcpIdToObject;
     mutable std::unordered_map<Object const*, juce::String> mcpObjectToId;
@@ -426,6 +428,11 @@ public:
         CanvasMcpLayer* layer;
     };
     std::unique_ptr<AlphiMotionTimer> mcpAlphiMotionTimer;
+    // While busy (sparks / dots only) the motion timer repaints at most every busyRepaintMs (~12 Hz), the dots only
+    // when the lit one changes (CanvasMcpAlphiStrip.cpp alphiMotionTick).
+    static constexpr std::int64_t busyRepaintMs = 83;
+    std::int64_t mcpAlphiBusyRepaintMs = 0;
+    int mcpAlphiBusyKeyDrawn = -2;
 
 private:
     void renderSketchOverlay(NVGcontext* nvg);

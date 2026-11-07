@@ -26,7 +26,9 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <nanovg_async.h>
+#include <cstdint>
 #include <cstring>
+#include <string>
 #include <unordered_map>
 
 #include "Utility/Fonts.h"
@@ -62,6 +64,17 @@ inline juce::Font fontFor(TextState const& s)
     return font.withHeight(juce::jmax(1.0f, s.size));
 }
 
+// What a measured width depends on, as one string key (memo caches below).
+inline juce::String fontKey(juce::Font const& font)
+{
+    std::uint32_t heightBits = 0;
+    auto const height = font.getHeight();
+    static_assert(sizeof(heightBits) == sizeof(height), "float is 32 bit");
+    std::memcpy(&heightBits, &height, sizeof(heightBits));
+    return font.getTypefaceName() + "\x1f" + font.getTypefaceStyle() + "\x1f" + juce::String(static_cast<juce::int64>(heightBits))
+        + "\x1f" + juce::String(font.getHorizontalScale()) + "\x1f" + juce::String(font.getExtraKerningFactor());
+}
+
 // Message thread only (like state()). The overlay paint measures the same labels every frame, and each JUCE
 // measure shapes the text (font matching, HarfBuzz); the width depends only on the font and the text, so it is
 // memoised per (typeface, style, height, text). A font change in Settings gives new keys. Bounded: cleared when big.
@@ -69,13 +82,7 @@ inline float textWidth(juce::Font const& font, juce::String const& text)
 {
     static std::unordered_map<std::string, float> widths;
     constexpr size_t maxCachedWidths = 4096;
-    std::uint32_t heightBits = 0;
-    auto const height = font.getHeight();
-    static_assert(sizeof(heightBits) == sizeof(height), "float is 32 bit");
-    std::memcpy(&heightBits, &height, sizeof(heightBits));
-    auto key = (font.getTypefaceName() + "\x1f" + font.getTypefaceStyle() + "\x1f" + juce::String(static_cast<juce::int64>(heightBits))
-        + "\x1f" + juce::String(font.getHorizontalScale()) + "\x1f" + juce::String(font.getExtraKerningFactor()) + "\x1f" + text)
-                   .toStdString();
+    auto key = (fontKey(font) + "\x1f" + text).toStdString();
     if (auto const it = widths.find(key); it != widths.end())
         return it->second;
     auto const width = juce::GlyphArrangement().getStringWidth(font, text);
@@ -148,7 +155,7 @@ inline float nvgTextBounds(NVGcontext* nvg, float x, float y, char const* string
 }
 
 // Word-wrapped lines of `text` at `breakRowWidth`, as (text, width) pairs.
-inline juce::Array<std::pair<juce::String, float>> wrapLines(juce::Font const& font, juce::String const& text, float breakRowWidth)
+inline juce::Array<std::pair<juce::String, float>> wrapLinesUncached(juce::Font const& font, juce::String const& text, float breakRowWidth)
 {
     juce::Array<std::pair<juce::String, float>> lines;
     for (auto const& paragraph : juce::StringArray::fromLines(text)) {
@@ -165,6 +172,23 @@ inline juce::Array<std::pair<juce::String, float>> wrapLines(juce::Font const& f
         lines.add({ line, textWidth(font, line) });
     }
     return lines;
+}
+
+// Message thread only. The HUD wraps the same text twice per frame (bounds, then draw): memoised per (font, width,
+// text), bounded like textWidth's cache.
+inline juce::Array<std::pair<juce::String, float>> const& wrapLines(juce::Font const& font, juce::String const& text, float breakRowWidth)
+{
+    static std::unordered_map<std::string, juce::Array<std::pair<juce::String, float>>> wrapped;
+    constexpr size_t maxCachedWraps = 512;
+    std::uint32_t widthBits = 0;
+    static_assert(sizeof(widthBits) == sizeof(breakRowWidth), "float is 32 bit");
+    std::memcpy(&widthBits, &breakRowWidth, sizeof(widthBits));
+    auto key = (fontKey(font) + "\x1f" + juce::String(static_cast<juce::int64>(widthBits)) + "\x1f" + text).toStdString();
+    if (auto const it = wrapped.find(key); it != wrapped.end())
+        return it->second;
+    if (wrapped.size() >= maxCachedWraps)
+        wrapped.clear();
+    return wrapped.emplace(std::move(key), wrapLinesUncached(font, text, breakRowWidth)).first->second;
 }
 
 inline void nvgTextBox(NVGcontext* nvg, float x, float y, float breakRowWidth, char const* string, char const* end = nullptr)
