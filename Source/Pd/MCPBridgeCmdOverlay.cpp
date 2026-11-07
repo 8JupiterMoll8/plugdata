@@ -392,7 +392,7 @@ void MCPBridge::pdAiHud(const juce::String& action, const juce::OSCMessage& msg)
             proc->getMcp()->session.mcpHud.telemetry = o->getProperty("telemetry").toString();
         }
         if (cnv) {
-            proc->getMcp()->gui().repaintView(cnv);
+            proc->getMcp()->gui().repaintHud(cnv); // only the HUD's band (it updates once a second while thinking)
         }
         bridge->sendReply("/pd/ai_hud/reply/" + correlationId, proc->getMcp()->session.mcpHud.active ? 1.0f : 0.0f);
     });

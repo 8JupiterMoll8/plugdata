@@ -61,9 +61,27 @@ inline juce::Font fontFor(TextState const& s)
     return font.withHeight(juce::jmax(1.0f, s.size));
 }
 
+// Message thread only (like state()). The overlay paint measures the same labels every frame, and each JUCE
+// measure shapes the text (font matching, HarfBuzz); the width depends only on the font and the text, so it is
+// memoised per (typeface, style, height, text). A font change in Settings gives new keys. Bounded: cleared when big.
 inline float textWidth(juce::Font const& font, juce::String const& text)
 {
-    return juce::GlyphArrangement().getStringWidth(font, text);
+    static std::unordered_map<std::string, float> widths;
+    constexpr size_t maxCachedWidths = 4096;
+    std::uint32_t heightBits = 0;
+    auto const height = font.getHeight();
+    static_assert(sizeof(heightBits) == sizeof(height), "float is 32 bit");
+    std::memcpy(&heightBits, &height, sizeof(heightBits));
+    auto key = (font.getTypefaceName() + "\x1f" + font.getTypefaceStyle() + "\x1f" + juce::String(static_cast<juce::int64>(heightBits))
+        + "\x1f" + juce::String(font.getHorizontalScale()) + "\x1f" + juce::String(font.getExtraKerningFactor()) + "\x1f" + text)
+                   .toStdString();
+    if (auto const it = widths.find(key); it != widths.end())
+        return it->second;
+    auto const width = juce::GlyphArrangement().getStringWidth(font, text);
+    if (widths.size() >= maxCachedWidths)
+        widths.clear();
+    widths.emplace(std::move(key), width);
+    return width;
 }
 
 // Baseline y for a nanovg vertical alignment at y.

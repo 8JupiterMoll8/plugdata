@@ -25,18 +25,62 @@
 #include "Pd/MCPBridge.h"
 #include "Mcp/McpHost.h"
 
+std::uint64_t CanvasMcpLayer::stableIdObjectsKey() const
+{
+    // Which objects this canvas shows (the GUI objects and their Pd objects), read on the message thread, no lock.
+    std::uint64_t h = 1469598103934665603ULL ^ static_cast<std::uint64_t>(canvas.objects.size());
+    for (auto* obj : canvas.objects) {
+        auto const mix = [&h](std::uint64_t v) { h ^= v + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2); };
+        mix(reinterpret_cast<std::uintptr_t>(obj));
+        mix(obj ? reinterpret_cast<std::uintptr_t>(obj->getPointer()) : 0);
+    }
+    return h;
+}
+
+void CanvasMcpLayer::refreshStableIdCache() const
+{
+    // Rebuilt only when the identity version or this canvas's objects changed, under ONE Pd lock; the same ids
+    // getStableId gives (McpHost::getStableId = identity.idOf), so the lookups answer exactly as before.
+    if (!canvas.pd)
+        return;
+    auto* host = canvas.pd->getMcp();
+    auto const version = host->identity.version();
+    auto const objectsKey = stableIdObjectsKey();
+    if (mcpIdCacheValid && version == mcpIdCacheVersion && objectsKey == mcpIdCacheObjects)
+        return;
+    mcpIdToObject.clear();
+    mcpObjectToId.clear();
+    {
+        McpHost::PdLockScope lock(*canvas.pd); // P3.5 S2: identity state only under the Pd lock
+        for (auto* obj : canvas.objects) {
+            if (!obj) continue;
+            auto* ptr = obj->getPointer();
+            if (!ptr) continue;
+            auto const id = host->identity.idOf(ptr);
+            if (id.empty()) continue;
+            mcpIdToObject.emplace(id, obj); // the first object in canvas order wins, as the old scan did
+            mcpObjectToId.emplace(obj, juce::String(id));
+        }
+    }
+    mcpIdCacheVersion = version;
+    mcpIdCacheObjects = objectsKey;
+    mcpIdCacheValid = true;
+}
+
 Object* CanvasMcpLayer::findObjectByStableId(juce::String const& targetId) const
 {
     if (targetId.isEmpty() || !canvas.pd) return nullptr;
-    McpHost::PdLockScope lock(*canvas.pd); // P3.5 S2: one lock for the loop (getStableId re-enters it)
-    for (auto* obj : canvas.objects) {
-        if (!obj) continue;
-        if (auto* ptr = obj->getPointer()) {
-            if (canvas.pd->getMcp()->getStableId(ptr) == targetId)
-                return obj;
-        }
-    }
-    return nullptr;
+    refreshStableIdCache();
+    auto const it = mcpIdToObject.find(targetId.toStdString());
+    return it != mcpIdToObject.end() ? it->second : nullptr;
+}
+
+juce::String CanvasMcpLayer::stableIdOfObject(Object const* obj) const
+{
+    if (!obj || !canvas.pd) return {};
+    refreshStableIdCache();
+    auto const it = mcpObjectToId.find(obj);
+    return it != mcpObjectToId.end() ? it->second : juce::String();
 }
 
 bool CanvasMcpLayer::getAnnotationLiveBounds(juce::String const& targetId, juce::StringArray const& targetIds, float fallbackX, float fallbackY, float fallbackLx, float fallbackLy, bool fallbackHasLeader, float& outAx, float& outAy, float& outLx, float& outLy, bool& outHasLeader, juce::Rectangle<int>* outGroupBounds) const

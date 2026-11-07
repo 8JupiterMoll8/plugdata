@@ -11,7 +11,9 @@
  */
 #pragma once
 
+#include <cstdint>
 #include <optional>
+#include <string>
 #include <utility>
 #include <unordered_map>
 #include <vector>
@@ -111,6 +113,18 @@ public:
     bool handleNoteClick(Point<int> canvasPt);
     bool isPointOverNote(Point<int> canvasPt) const;
     Object* findObjectByStableId(juce::String const& targetId) const;
+    // The stable id of an object of this canvas ("" when none). Both read one cache (refreshStableIdCache): the
+    // overlay paint looks ids up per annotation / region / chip target every frame, and each getStableId took the
+    // Pd lock and scanned every identity record (a freeze while the AI's command worker held the lock).
+    juce::String stableIdOfObject(Object const* obj) const;
+    void refreshStableIdCache() const;
+    void repaintHudArea(); // the band the HUD card is drawn in (paintScreenOverlay), not the whole view
+    std::uint64_t stableIdObjectsKey() const;
+    mutable std::unordered_map<std::string, Object*> mcpIdToObject;
+    mutable std::unordered_map<Object const*, juce::String> mcpObjectToId;
+    mutable std::uint64_t mcpIdCacheVersion = 0;
+    mutable std::uint64_t mcpIdCacheObjects = 0;
+    mutable bool mcpIdCacheValid = false;
     bool getAnnotationLiveBounds(juce::String const& targetId, juce::StringArray const& targetIds, float fallbackX, float fallbackY, float fallbackLx, float fallbackLy, bool fallbackHasLeader, float& outAx, float& outAy, float& outLx, float& outLy, bool& outHasLeader, juce::Rectangle<int>* outGroupBounds = nullptr) const;
     bool getAnnotationLiveBounds(juce::String const& targetId, float fallbackX, float fallbackY, float fallbackLx, float fallbackLy, bool fallbackHasLeader, float& outAx, float& outAy, float& outLx, float& outLy, bool& outHasLeader) const;
     juce::Rectangle<float> getAnnotationScreenBounds(size_t annIndex) const;

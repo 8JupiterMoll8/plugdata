@@ -12,6 +12,7 @@
 #include "Toolbar.h"
 #include "Sidebar/Sidebar.h"
 #include "Canvas.h"
+#include "Mcp/CanvasMcpLayer.h"
 #include "CanvasViewport.h"
 #include "TabComponent.h"
 #include "PluginMode.h"
@@ -159,6 +160,11 @@ public:
     void repaintView(t_canvas* cnv) override
     {
         if (auto* cc = getOrCreateCanvasComponent(proc, cnv)) cc->repaint();
+    }
+
+    void repaintHud(t_canvas* cnv) override
+    {
+        if (auto* cc = getOrCreateCanvasComponent(proc, cnv)) cc->getMcpLayer().repaintHudArea();
     }
 
     void repaintAll() override

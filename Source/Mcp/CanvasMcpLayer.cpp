@@ -60,6 +60,10 @@ float CanvasMcpLayer::getChipWidth(const juce::String& label)
 
 void CanvasMcpLayer::paintUnderObjects(NVGcontext* nvg, Rectangle<int> invalidRegion)
 {
+    // A graph-on-parent box renders its inner canvas through this same path (every GOP module, every frame). The
+    // AI overlays belong to the canvas's own view, never to the box drawn inside another one: skip them there.
+    if (canvas.isGraph)
+        return;
     // Big Alphi 1a0 review H2: what this render redraws (canvas coordinates), for Alphi's move and click gate.
     mcpAlphiRenderRegion = invalidRegion;
     // Alphi drop 1 D11: with no free spot on the right edge his tab is drawn under the boxes (CanvasMcpAlphiSay.cpp).
@@ -163,6 +167,10 @@ void CanvasMcpLayer::paintUnderObjects(NVGcontext* nvg, Rectangle<int> invalidRe
 
 void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
 {
+    // A graph-on-parent box renders its inner canvas through this same path (every GOP module, every frame). The
+    // AI overlays belong to the canvas's own view, never to the box drawn inside another one: skip them there.
+    if (canvas.isGraph)
+        return;
     // PRD overlay: Console Tape (Eurorack Scribble Strip) annotations.
     // Pinned directly above the module strip, bounded to column width (0% horizontal spill).
     if (canvas.pd && shouldShowAIAnnotations() && !canvas.pd->getMcp()->session.getMcpAnnotations().empty()) {
@@ -1135,6 +1143,10 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
 
 void CanvasMcpLayer::paintViewportFrame(NVGcontext* nvg, float const zoom)
 {
+    // A graph-on-parent box renders its inner canvas through this same path (every GOP module, every frame). The
+    // AI overlays belong to the canvas's own view, never to the box drawn inside another one: skip them there.
+    if (canvas.isGraph)
+        return;
     // Studio ink mode: a subtle neon frame around the visible viewport so the
     // armed pen is unmistakable — even after you look away. (Crosshair alone is
     // easy to miss.) Screen-constant width via /zoom.
@@ -1160,8 +1172,25 @@ void CanvasMcpLayer::paintViewportFrame(NVGcontext* nvg, float const zoom)
     }
 }
 
+void CanvasMcpLayer::repaintHudArea()
+{
+    // The HUD card sits centred at the bottom of the view (paintScreenOverlay): at most ~190 px high with its shadow
+    // (descH is capped at 85). A HUD update ("Thinking... N s" once a second) repaints that band, not the canvas.
+    if (!canvas.viewport) {
+        canvas.repaint();
+        return;
+    }
+    auto& vp = *canvas.viewport;
+    constexpr int hudBandHeight = 200;
+    vp.repaint(juce::Rectangle<int>(0, std::max(0, vp.getHeight() - hudBandHeight), vp.getWidth(), std::min(vp.getHeight(), hudBandHeight)));
+}
+
 void CanvasMcpLayer::paintScreenOverlay(NVGcontext* nvg)
 {
+    // A graph-on-parent box renders its inner canvas through this same path (every GOP module, every frame). The
+    // AI overlays belong to the canvas's own view, never to the box drawn inside another one: skip them there.
+    if (canvas.isGraph)
+        return;
     // Cinematic Viewport HUD & Subtitle Overlay (Video & Tutorial Mode)
     // Rendered in screen coordinates (unscaled/unpanned) — zero cord collisions.
     if (canvas.pd) {

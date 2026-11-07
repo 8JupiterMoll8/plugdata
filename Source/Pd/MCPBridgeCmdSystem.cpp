@@ -274,8 +274,15 @@ void MCPBridge::pdUndoPeek(const juce::String& action, const juce::OSCMessage& m
             live = mcpCanvasIsLive(cnv); // P3.4 S4: closed since the handler ran
             if (live) {
                 peek = mcp::undo::peek(cnv, mcp::undo::kPeekMaxNames);
-                proc->getMcp()->registerOpenCanvases(); // the canvas key as /pd/identity_version names it
-                key = proc->getMcp()->identity.keyOf(cnv);
+                // The canvas key as /pd/identity_version names it. A canvas with a record already has its key (a
+                // renamed one gets a new key from refreshKey); only an unregistered one needs the full walk of every
+                // open canvas (registerOpenCanvases stamps every object, wire and GUI: far too much per peek).
+                auto& identity = proc->getMcp()->identity;
+                if (identity.findCanvas(cnv))
+                    identity.refreshKey(cnv);
+                else
+                    proc->getMcp()->registerOpenCanvases();
+                key = identity.keyOf(cnv);
             }
         }
         if (!live) {

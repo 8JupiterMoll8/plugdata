@@ -146,9 +146,7 @@ void CanvasMcpLayer::paintApprovalChips(NVGcontext* nvg)
                 first = false;
             }
             if (targets.empty()) continue;
-            auto* ptr = o->getPointer();
-            if (!ptr) continue;
-            auto const id = canvas.pd->getMcp()->getStableId(ptr);
+            auto const id = stableIdOfObject(o); // the cached id (no Pd lock per object per paint)
             if (id.isEmpty() || targets.count(id.toStdString()) == 0) continue;
             auto const r = b.expanded(4).toFloat();
             nanovg::nvgBeginPath(nvg);

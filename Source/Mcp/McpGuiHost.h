@@ -49,6 +49,8 @@ public:
     virtual bool ensureView(t_canvas* cnv) = 0;
     // ensureView, then repaint it.
     virtual void repaintView(t_canvas* cnv) = 0;
+    // ensureView, then repaint only the band its HUD card is drawn in (/pd/ai_hud updates).
+    virtual void repaintHud(t_canvas* cnv) = 0;
     // Repaints every canvas of every editor and invalidates the NVG surface.
     virtual void repaintAll() = 0;
     // Pans (never zooms) the view of `cnv` so freshly created objects are in sight,
