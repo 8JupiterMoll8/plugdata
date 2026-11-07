@@ -22,6 +22,7 @@
 CanvasMcpLayer::CanvasMcpLayer(Canvas& c)
     : canvas(c)
 {
+    mcpAlphiMouseTracker = std::make_unique<AlphiMouseTracker>(*this);
 }
 
 

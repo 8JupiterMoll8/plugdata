@@ -428,6 +428,23 @@ public:
         CanvasMcpLayer* layer;
     };
     std::unique_ptr<AlphiMotionTimer> mcpAlphiMotionTimer;
+    // Alphi's pointer (alphiMouse): from the mouse events of the canvas and every component on it, never queried in
+    // a paint (getMouseXYRelative / isMouseOver are a synchronous XQueryPointer each on Linux).
+    struct AlphiMouseTracker final : public juce::MouseListener {
+        explicit AlphiMouseTracker(CanvasMcpLayer& l);
+        ~AlphiMouseTracker() override;
+        void mouseEnter(juce::MouseEvent const& e) override { seen(e, true); }
+        void mouseMove(juce::MouseEvent const& e) override { seen(e, true); }
+        void mouseDown(juce::MouseEvent const& e) override { seen(e, true); }
+        void mouseDrag(juce::MouseEvent const& e) override { seen(e, true); }
+        void mouseUp(juce::MouseEvent const& e) override { seen(e, true); }
+        void mouseExit(juce::MouseEvent const& e) override { seen(e, false); }
+        void seen(juce::MouseEvent const& e, bool inside);
+        CanvasMcpLayer& layer;
+        bool known = false;
+        juce::Point<int> position; // canvas coordinates
+    };
+    std::unique_ptr<AlphiMouseTracker> mcpAlphiMouseTracker;
     // While busy (sparks / dots only) the motion timer repaints at most every busyRepaintMs (~12 Hz), the dots only
     // when the lit one changes (CanvasMcpAlphiStrip.cpp alphiMotionTick).
     static constexpr std::int64_t busyRepaintMs = 83;

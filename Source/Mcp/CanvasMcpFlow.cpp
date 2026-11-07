@@ -157,9 +157,28 @@ std::vector<mcp::ApprovalRect> CanvasMcpLayer::alphiBoxes() const
 mcp::AlphiMouse CanvasMcpLayer::alphiMouse() const
 {
     // Known only while the mouse is over this canvas (or a button is held on it); else no hover hold, no cover.
-    bool const known = canvas.isMouseOver(true) || canvas.isMouseButtonDown(true);
-    auto const m = canvas.getMouseXYRelative();
-    return { known, m.x, m.y };
+    // From the last mouse event on the canvas or anything on it (AlphiMouseTracker): this runs inside paint, and
+    // isMouseOver / getMouseXYRelative each did a synchronous XQueryPointer there.
+    auto const& t = *mcpAlphiMouseTracker;
+    return { t.known, t.position.x, t.position.y };
+}
+
+CanvasMcpLayer::AlphiMouseTracker::AlphiMouseTracker(CanvasMcpLayer& l)
+    : layer(l)
+{
+    layer.canvas.addMouseListener(this, true); // the canvas and every object, label and editor on it
+}
+
+CanvasMcpLayer::AlphiMouseTracker::~AlphiMouseTracker()
+{
+    layer.canvas.removeMouseListener(this);
+}
+
+void CanvasMcpLayer::AlphiMouseTracker::seen(juce::MouseEvent const& e, bool inside)
+{
+    // A held button keeps the pointer known (a drag that leaves the canvas), as isMouseButtonDown(true) did.
+    known = inside || e.mods.isAnyMouseButtonDown();
+    position = e.getEventRelativeTo(&layer.canvas).getPosition();
 }
 
 void CanvasMcpLayer::updateAlphiDock()

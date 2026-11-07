@@ -57,7 +57,7 @@ public:
             auto const bgCol = findColour(PlugDataColour::sidebarBackgroundColourId);
             auto const activeCol = findColour(PlugDataColour::toolbarActiveColourId);
             bool const dark = (bgCol.getPerceivedBrightness() < 0.5f);
-            bool const over = isMouseOver();
+            bool const over = hovered; // from mouseEnter/Exit: isMouseOver() is an XQueryPointer inside paint
 
             auto cardBg = dark ? juce::Colour(0xff181a1f) : juce::Colour(0xfff6f8fa);
             auto cardBorder = over ? activeCol : (dark ? juce::Colour(0xff333842) : juce::Colour(0xffd0d7de));
@@ -87,11 +87,12 @@ public:
                        juce::Justification::centredLeft, true);
         }
 
-        void mouseEnter(const MouseEvent&) override { repaint(); }
-        void mouseExit(const MouseEvent&) override { repaint(); }
+        void mouseEnter(const MouseEvent&) override { hovered = true; repaint(); }
+        void mouseExit(const MouseEvent&) override { hovered = false; repaint(); }
 
     private:
         PluginEditor* editor;
+        bool hovered = false;
         bool dragStarted = false;
         juce::String widgetName;
         juce::String subText;
