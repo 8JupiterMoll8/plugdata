@@ -54,6 +54,17 @@ class AiMidiObject final : public ObjectBase
     bool isAuditioning = false;
     float pulsePhase = 0.0f;
 
+    // Live jam 2026-11-08 (UX): REC first counts one bar in, with a click, then records from that bar line.
+    static constexpr int countInBeats = 4;
+    static constexpr int panelWidth = 112; // the button panel on the right: two columns of two buttons
+    int countInLeft = 0;          // beats still to count before recording starts (0 = no count-in running)
+    double nextBeatMs = 0.0;      // wall time (JUCE hi-res ms) of the next click
+    double recStartLogical = 0.0; // Pd logical time of the bar line the take starts on
+    int clickBeat = 0;            // beats clicked since the count-in began (accent on each bar's first beat)
+    bool recClickOn = false;      // keep clicking while recording
+
+    enum Button { recButton = 0, playButton, clearButton, aiButton, numButtons };
+
 public:
     AiMidiObject(pd::WeakReference ptr, Object* object)
         : ObjectBase(ptr, object)
@@ -122,15 +133,119 @@ public:
         return getValue<bool>(topLevel->locked) || getValue<bool>(topLevel->commandLocked) || topLevel->isGraph;
     }
 
+    /** The four buttons: REC PLAY on top, CLEAR TO-AI below, in the right panel. */
+    Rectangle<int> buttonRect(int const which) const
+    {
+        int const w = getWidth();
+        int const h = getHeight();
+        int const colW = (panelWidth - 12) / 2;
+        int const btnH = std::max(14, (h - 16) / 2);
+        int const col = which % 2;
+        int const row = which / 2;
+        return { w - panelWidth + 4 + col * (colW + 4), 6 + row * (btnH + 4), colW, btnH };
+    }
+
+    int buttonAt(Point<int> const pos) const
+    {
+        for (int i = 0; i < numButtons; ++i)
+            if (buttonRect(i).contains(pos))
+                return i;
+        return -1;
+    }
+
+    // Live jam 2026-11-07: the buttons only answered in run mode. They now answer in edit mode too; a click anywhere
+    // else on the widget still goes to the canvas (select, drag, resize), because hitTest lets it through.
+    void lock(bool const) override
+    {
+        setInterceptsMouseClicks(true, false);
+    }
+
+    bool hitTest(int const x, int const y) override
+    {
+        return isLocked() || buttonAt({ x, y }) >= 0;
+    }
+
+    /** One beat of the click: a float on the [r aimidi_click] bus (1 = the bar's first beat, 0 = the others). */
+    static void sendClick(bool const accent)
+    {
+        if (auto* thing = gensym("aimidi_click")->s_thing)
+            pd_float(thing, accent ? 1.0f : 0.0f);
+    }
+
+    double beatMs(t_fake_aimidi const* midi) const
+    {
+        float const bpm = midi->x_bpm > 20.0f ? midi->x_bpm : 120.0f;
+        return 60000.0 / static_cast<double>(bpm);
+    }
+
+    void startCountIn(t_fake_aimidi* midi)
+    {
+        isAuditioning = false;
+        midi->x_playing = 0;
+        countInLeft = countInBeats;
+        clickBeat = 0;
+        double const bar = beatMs(midi) * countInBeats;
+        // The take's zero is the bar line after the count-in, in Pd's own clock (the notes are stamped in it).
+        recStartLogical = clock_getsystimeafter(bar);
+        nextBeatMs = juce::Time::getMillisecondCounterHiRes();
+    }
+
+    void stopRecording(t_fake_aimidi* midi)
+    {
+        countInLeft = 0;
+        recClickOn = false;
+        if (!midi->x_recording)
+            return;
+        t_atom off;
+        SETFLOAT(&off, 0.0f);
+        pd_typedmess(&midi->x_obj.ob_pd, gensym("record"), 1, &off); // stops, sends the take id and a bang
+        packageAndRegisterTake();
+    }
+
+    /** Count-in clicks, then recording starts on the bar line; the click goes on while recording. */
+    void tickCountInAndClick(t_fake_aimidi* midi)
+    {
+        if (countInLeft <= 0 && !recClickOn)
+            return;
+        double const now = juce::Time::getMillisecondCounterHiRes();
+        if (now < nextBeatMs)
+            return;
+        if (countInLeft > 0) {
+            sendClick(clickBeat % countInBeats == 0);
+            ++clickBeat;
+            --countInLeft;
+            nextBeatMs += beatMs(midi);
+            if (countInLeft == 0) {
+                t_atom on;
+                SETFLOAT(&on, 1.0f);
+                pd_typedmess(&midi->x_obj.ob_pd, gensym("record"), 1, &on); // new take id, clears the notes
+                midi->x_rec_start_time = recStartLogical;
+                recClickOn = true;
+            }
+            return;
+        }
+        if (!midi->x_recording) { // stopped by a message ([stop(, [record 0()
+            recClickOn = false;
+            return;
+        }
+        sendClick(clickBeat % countInBeats == 0);
+        ++clickBeat;
+        nextBeatMs += beatMs(midi);
+        if (nextBeatMs < now) // the timer fell far behind (window hidden): no burst of clicks
+            nextBeatMs = now + beatMs(midi);
+    }
+
     void timerCallback() override
     {
         auto midi = ptr.get<t_fake_aimidi>();
         if (!midi) return;
 
+        tickCountInAndClick(midi.get());
+
         bool const rec = (midi->x_recording != 0);
         bool const play = isAuditioning || (midi->x_playing != 0);
 
-        if (rec || play) {
+        if (rec || play || countInLeft > 0) {
             reelAngle += 0.12f;
             if (reelAngle > juce::MathConstants<float>::twoPi) {
                 reelAngle -= juce::MathConstants<float>::twoPi;
@@ -180,58 +295,44 @@ public:
 
     void mouseDown(MouseEvent const& e) override
     {
-        if (!isLocked() || !e.mods.isLeftButtonDown()) return;
-
-        int const w = getWidth();
-        int const h = getHeight();
-        auto const pos = e.getPosition();
-
-        // Control buttons live on the right column
-        int const btnX = w - 74;
-        int const btnW = 66;
-        int const btnH = std::max(14, (h - 16) / 3);
-
-        auto recRect  = Rectangle<int>(btnX, 6, btnW, btnH);
-        auto playRect = Rectangle<int>(btnX, 8 + btnH, btnW, btnH);
-        auto aiRect   = Rectangle<int>(btnX, 10 + btnH * 2, btnW, btnH);
+        if (!e.mods.isLeftButtonDown()) return;
+        int const which = buttonAt(e.getPosition());
+        if (which < 0) return;
 
         auto midi = ptr.get<t_fake_aimidi>();
         if (!midi) return;
 
-        if (recRect.contains(pos)) {
-            // Toggle recording
-            if (midi->x_recording) {
-                // Stop recording & package take
-                midi->x_recording = 0;
-                packageAndRegisterTake();
-                outlet_symbol(midi->x_out_id, gensym(midi->x_take_id));
-                outlet_bang(midi->x_out_bang);
-            } else {
-                // Start recording
-                isAuditioning = false;
-                midi->x_playing = 0;
-                midi->x_recording = 1;
-                midi->x_note_count = 0;
-                midi->x_rec_start_time = clock_getlogicaltime();
-            }
-            repaint();
-        } else if (playRect.contains(pos)) {
-            // Toggle audition play
+        switch (which) {
+        case recButton:
+            if (midi->x_recording || countInLeft > 0)
+                stopRecording(midi.get()); // also cancels a count-in
+            else
+                startCountIn(midi.get());
+            break;
+        case playButton:
             if (isAuditioning) {
                 isAuditioning = false;
                 midi->x_playing = 0;
-            } else if (midi->x_note_count > 0) {
-                midi->x_recording = 0;
+            } else if (midi->x_note_count > 0 && !midi->x_recording && countInLeft == 0) {
                 midi->x_playing = 1; // keep the message flag in step with the button
                 isAuditioning = true;
                 playNoteIndex = 0;
                 playStartTime = juce::Time::getMillisecondCounterHiRes();
             }
-            repaint();
-        } else if (aiRect.contains(pos)) {
-            // Transmit take to AI Copilot
+            break;
+        case clearButton:
+            countInLeft = 0;
+            recClickOn = false;
+            isAuditioning = false;
+            pd_typedmess(&midi->x_obj.ob_pd, gensym("clear"), 0, nullptr);
+            break;
+        case aiButton:
             transmitToAi();
+            break;
+        default:
+            break;
         }
+        repaint();
     }
 
     void packageAndRegisterTake()
@@ -325,7 +426,7 @@ public:
 
         // 2. Cassette Label Banner
         nanovg::nvgBeginPath(nvg);
-        nanovg::nvgRoundedRect(nvg, b.getX() + 6.0f, b.getY() + 5.0f, w - 88.0f, 16.0f, 3.0f);
+        nanovg::nvgRoundedRect(nvg, b.getX() + 6.0f, b.getY() + 5.0f, w - static_cast<float>(panelWidth) - 8.0f, 16.0f, 3.0f);
         nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(38, 35, 52, 230));
         nanovg::nvgFill(nvg);
 
@@ -343,7 +444,7 @@ public:
         // 3. Cassette Tape Window & Hubs
         float const winX = b.getX() + 10.0f;
         float const winY = b.getY() + 24.0f;
-        float const winW = w - 96.0f;
+        float const winW = w - static_cast<float>(panelWidth) - 18.0f;
         float const winH = std::max(18.0f, h - 30.0f);
 
         nanovg::nvgBeginPath(nvg);
@@ -398,14 +499,18 @@ public:
         mcpnvg::nvgFontFace(nvg, "Inter-Bold");
         mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
         nanovg::nvgFillColor(nvg, rec ? nanovg::nvgRGBA(255, 100, 100, 240) : (play ? nanovg::nvgRGBA(80, 230, 140, 240) : nanovg::nvgRGBA(180, 180, 205, 220)));
-        juce::String status = rec ? "RECORDING..." : (juce::String(noteCount) + " notes | " + juce::String(bpm) + " BPM");
+        bool const counting = countInLeft > 0;
+        juce::String status = counting ? ("COUNT-IN  " + juce::String(countInLeft))
+            : rec ? ("REC  " + juce::String(noteCount) + " notes")
+            : noteCount > 0 ? (juce::String(noteCount) + " notes | " + juce::String(bpm) + " BPM")
+            : ("empty | " + juce::String(bpm) + " BPM");
+        if (counting) {
+            mcpnvg::nvgFontSize(nvg, 13.0f);
+            nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(255, 120, 90, 250));
+        }
         mcpnvg::nvgText(nvg, winX + winW * 0.5f, hubY, status.toRawUTF8(), nullptr);
 
-        // 4. Action Buttons (Right Column)
-        int const btnX = static_cast<int>(w - 74.0f);
-        int const btnW = 66;
-        int const btnH = std::max(14, static_cast<int>((h - 16.0f) / 3.0f));
-
+        // 4. Action Buttons: REC PLAY / CLEAR TO-AI in the right panel
         auto drawBtn = [&](Rectangle<int> rect, juce::String label, NVGcolor col, bool active, bool isRec) {
             float rx = static_cast<float>(rect.getX());
             float ry = static_cast<float>(rect.getY());
@@ -438,8 +543,10 @@ public:
             mcpnvg::nvgText(nvg, rx + 16.0f, ry + rh * 0.5f, label.toRawUTF8(), nullptr);
         };
 
-        drawBtn(Rectangle<int>(btnX, 6, btnW, btnH), "REC", nanovg::nvgRGBA(255, 60, 60, 255), rec, true);
-        drawBtn(Rectangle<int>(btnX, 8 + btnH, btnW, btnH), "PLAY", nanovg::nvgRGBA(50, 220, 120, 255), play, false);
-        drawBtn(Rectangle<int>(btnX, 10 + btnH * 2, btnW, btnH), "TO AI", nanovg::nvgRGBA(200, 100, 255, 255), false, false);
+        bool const recLit = rec || counting;
+        drawBtn(buttonRect(recButton), counting ? "COUNT" : "REC", nanovg::nvgRGBA(255, 60, 60, 255), recLit, true);
+        drawBtn(buttonRect(playButton), play ? "STOP" : "PLAY", nanovg::nvgRGBA(50, 220, 120, 255), play, false);
+        drawBtn(buttonRect(clearButton), "CLEAR", nanovg::nvgRGBA(240, 190, 70, 255), false, false);
+        drawBtn(buttonRect(aiButton), "TO AI", nanovg::nvgRGBA(200, 100, 255, 255), false, false);
     }
 };
