@@ -1,0 +1,55 @@
+From d8762b012174ce1a2a2ee25fb7bfa2af1f9e2c48 Mon Sep 17 00:00:00 2001
+From: Alphi <alphi@local>
+Date: Sat, 7 Nov 2026 21:05:16 +0100
+Subject: [PATCH] fix(ai.midi): note times in ms (clock_gettimesince), record
+ note-offs, play only sets the flag the widget's timer plays
+
+---
+ Source/Control/ai_midi.c | 15 +++++----------
+ 1 file changed, 5 insertions(+), 10 deletions(-)
+
+diff --git a/Source/Control/ai_midi.c b/Source/Control/ai_midi.c
+index 61e91f3..e5e1afa 100644
+--- a/Source/Control/ai_midi.c
++++ b/Source/Control/ai_midi.c
+@@ -131,8 +131,8 @@ static void aimidi_add_note(t_aimidi *x, int pitch, int vel) {
+         }
+     }
+ 
+-    double now = clock_getlogicaltime();
+-    float elapsed_ms = (float)(now - x->x_rec_start_time);
++    // Live jam 2026-11-07: logical time is in Pd's internal units, not ms; playback waited ~14000x too long.
++    float elapsed_ms = (float)clock_gettimesince(x->x_rec_start_time);
+     if (elapsed_ms < 0.0f) elapsed_ms = 0.0f;
+ 
+     x->x_notes[x->x_note_count].pitch = pitch;
+@@ -148,8 +148,8 @@ static void aimidi_list(t_aimidi *x, t_symbol *s, int argc, t_atom *argv) {
+         int pitch = (int)argv[0].a_w.w_float;
+         int vel = (int)argv[1].a_w.w_float;
+ 
+-        if (x->x_recording && vel > 0) {
+-            aimidi_add_note(x, pitch, vel);
++        if (x->x_recording) {
++            aimidi_add_note(x, pitch, vel); // note-offs too, so playback releases what it played
+         }
+ 
+         t_atom out_at[2];
+@@ -188,14 +188,9 @@ static void aimidi_record(t_aimidi *x, t_floatarg f) {
+ 
+ static void aimidi_play(t_aimidi *x) {
+     if (x->x_note_count <= 0) return;
++    // The widget's timer plays the take while x_playing is set (the same loop as its PLAY button).
+     x->x_playing = 1;
+     x->x_recording = 0;
+-
+-    t_atom out_at[2];
+-    SETFLOAT(&out_at[0], (t_float)x->x_notes[0].pitch);
+-    SETFLOAT(&out_at[1], (t_float)x->x_notes[0].vel);
+-    outlet_list(x->x_out_note, &s_list, 2, out_at);
+-    outlet_bang(x->x_out_bang);
+ }
+ 
+ static void aimidi_stop(t_aimidi *x) {
+-- 
+2.34.1
+
