@@ -139,6 +139,15 @@ public:
             repaint();
         }
 
+        // Live jam 2026-11-07: a [play( / [stop( message (or Claude Code) drives the same loop as the PLAY button.
+        if (midi->x_playing && !isAuditioning && midi->x_note_count > 0) {
+            isAuditioning = true;
+            playNoteIndex = 0;
+            playStartTime = juce::Time::getMillisecondCounterHiRes();
+        } else if (!midi->x_playing && isAuditioning) {
+            isAuditioning = false;
+        }
+
         // Audition playback sequencer
         if (isAuditioning && midi->x_note_count > 0 && midi->x_notes) {
             double const now = juce::Time::getMillisecondCounterHiRes();
@@ -213,6 +222,7 @@ public:
                 midi->x_playing = 0;
             } else if (midi->x_note_count > 0) {
                 midi->x_recording = 0;
+                midi->x_playing = 1; // keep the message flag in step with the button
                 isAuditioning = true;
                 playNoteIndex = 0;
                 playStartTime = juce::Time::getMillisecondCounterHiRes();
