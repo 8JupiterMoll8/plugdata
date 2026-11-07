@@ -67,10 +67,8 @@ void CanvasMcpLayer::alphiVisibilityTick()
         mcpAlphiWasShowing = showing;
         mcpAlphiShownSinceMs = 0; // hidden: off the glass; shown again: the 400 ms start over at the next paint
         mcpAlphiDock.reset();     // 1a0: shown again: placed at once at the next paint
-        if (showing) {
-            canvas.repaint();
-            if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
-        }
+        if (showing)
+            alphiRepaintView();
         return;
     }
     if (!showing || !alphiShown()) {
@@ -93,10 +91,18 @@ void CanvasMcpLayer::alphiVisibilityTick()
             juce::ModifierKeys::currentModifiers.isAnyMouseButtonDown(), mouse);
         wantFull = mcpAlphiDock.decide(view, zoom, boxes, alphiDockCovers(), hold, mouse, alphiNowMs());
     }
-    if (wantFull) {
-        canvas.repaint();
-        if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
-    }
+    if (wantFull)
+        alphiRepaintView();
+}
+
+void CanvasMcpLayer::alphiRepaintView()
+{
+    // A full repaint for Alphi means his whole VIEW (the dock applies a move when the render covers his old and new
+    // frame, both inside the view), never the whole editor: invalidateAll() redrew the sidebars, toolbar and
+    // statusbar too, up to 10 times a second while a staged move retried.
+    canvas.repaint();
+    if (canvas.editor && canvas.viewport)
+        canvas.editor->nvgSurface.invalidateArea(canvas.editor->nvgSurface.getLocalArea(canvas.viewport.get(), canvas.viewport->getLocalBounds()));
 }
 
 std::pair<mcp::ApprovalRect, float> CanvasMcpLayer::alphiView() const

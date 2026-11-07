@@ -416,8 +416,24 @@ bool CanvasMcpLayer::SelectionPillKeyListener::keyPressed(const juce::KeyPress& 
 void CanvasMcpLayer::SelectionPillAnimator::timerCallback()
 {
     if (canvas && canvas->mcpSelectionPill && canvas->mcpSelectionPill->isVisible()) {
-        canvas->canvas.repaint();
-        if (canvas->canvas.editor) canvas->canvas.editor->nvgSurface.invalidateAll();
+        // Only the pill animates here (the caret blink, the record pulse, the hint's expiry): repaint the pill, its
+        // record box above, its hint below, its drawer and palette, not the whole editor (that redrew the sidebars,
+        // toolbar and statusbar 6 times a second while anything was selected).
+        auto& layer = *canvas;
+        auto area = layer.mcpSelectionPillFrame.isEmpty() ? layer.mcpSelectionPill->getBounds() : layer.mcpSelectionPillFrame;
+        for (auto const& f : { layer.mcpPillDrawerFrame, layer.mcpPaletteFrame })
+            if (!f.isEmpty())
+                area = area.getUnion(f);
+        area = area.expanded(200, 56);
+        layer.canvas.repaint(area);
+        if (auto* ed = layer.canvas.editor) {
+            auto& surface = ed->nvgSurface;
+            auto dirty = surface.getLocalArea(&layer.canvas, area);
+            if (layer.canvas.viewport)
+                dirty = dirty.getIntersection(surface.getLocalArea(layer.canvas.viewport.get(), layer.canvas.viewport->getLocalBounds()));
+            if (!dirty.isEmpty())
+                surface.invalidateArea(dirty);
+        }
     } else {
         stopTimer();
     }

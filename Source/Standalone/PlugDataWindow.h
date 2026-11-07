@@ -534,7 +534,15 @@ public:
             return pendingLinuxMaximisedState;
 
         if (auto* peer = getPeer()) {
-            return OSUtils::isLinuxWindowMaximised(peer);
+            // MCP-CARRIED(repaint-scope): isMaximised() runs in every editor paint (wantsRoundedCorners); the X11
+            // query is a synchronous round trip, so it is cached for maximisedCacheMs and refreshed on resize.
+            auto const now = Time::getMillisecondCounter();
+            if (!hasCachedLinuxMaximised || now - cachedLinuxMaximisedMs >= maximisedCacheMs) {
+                cachedLinuxMaximised = OSUtils::isLinuxWindowMaximised(peer);
+                cachedLinuxMaximisedMs = now;
+                hasCachedLinuxMaximised = true;
+            }
+            return cachedLinuxMaximised;
         } else {
             return isFullScreen();
         }
@@ -552,6 +560,7 @@ public:
     {
 #if JUCE_LINUX || JUCE_BSD
         if (auto* peer = getPeer()) {
+            hasCachedLinuxMaximised = false; // MCP-CARRIED(repaint-scope): decide from the live state
             bool shouldBeMaximised = !isMaximised();
 
             // X11 window managers report the new state separately from the resize, so assume the
@@ -623,6 +632,23 @@ public:
 
     void resized() override
     {
+#if JUCE_LINUX || JUCE_BSD
+        // MCP-CARRIED(repaint-scope): a maximise / restore arrives as a resize: re-read the cached state now, and
+        // once more shortly after (X11 may publish _NET_WM_STATE after the resize), repainting only on a change.
+        hasCachedLinuxMaximised = false;
+        Timer::callAfterDelay(maximisedCacheMs, [_this = SafePointer(this), before = isMaximised()] {
+            if (!_this)
+                return;
+            _this->hasCachedLinuxMaximised = false;
+            if (_this->isMaximised() != before) {
+                if (auto* pluginEditor = dynamic_cast<PluginEditor*>(_this->editor)) {
+                    pluginEditor->updateStandaloneWindowControls();
+                    pluginEditor->nvgSurface.invalidateAll();
+                }
+                _this->repaint();
+            }
+        });
+#endif
         ResizableWindow::resized();
 
         Rectangle<int> titleBarArea(0, 7, getWidth() - 6, 23);
@@ -682,6 +708,7 @@ private:
                 return;
 
             _this->hasPendingLinuxMaximisedState = false;
+            _this->hasCachedLinuxMaximised = false; // MCP-CARRIED(repaint-scope)
 
             if (auto* b = _this->getMaximiseButton())
                 b->setToggleState(_this->isMaximised(), dontSendNotification);
@@ -865,6 +892,11 @@ public:
 private:
 #if JUCE_LINUX || JUCE_BSD
     bool hasPendingLinuxMaximisedState = false;
+    // MCP-CARRIED(repaint-scope): the cached X11 maximised state (isMaximised)
+    static constexpr uint32 maximisedCacheMs = 500;
+    mutable bool hasCachedLinuxMaximised = false;
+    mutable bool cachedLinuxMaximised = false;
+    mutable uint32 cachedLinuxMaximisedMs = 0;
     bool pendingLinuxMaximisedState = false;
     int pendingLinuxMaximisedStateSerial = 0;
 #endif

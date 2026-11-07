@@ -513,7 +513,64 @@ void NVGSurface::invalidateAll()
 void NVGSurface::invalidateArea(Rectangle<int> const area)
 {
     invalidArea = invalidArea.getUnion(area);
+    // MCP-CARRIED(repaint-scope): keep the separate rects too (see renderPasses).
+    if (!area.isEmpty()) {
+        if (invalidRects.size() < maxInvalidRects)
+            invalidRects.push_back(area);
+        else
+            invalidRects.assign(1, invalidArea);
+    }
     scheduleRender();
+}
+
+// MCP-CARRIED(repaint-scope): split the frame's damage into a few clusters that are painted as separate clipped
+// passes, so two small repaints far apart no longer redraw the whole bounding box between them. Everything that
+// touches the canvas area (the tab component) stays ONE pass: the canvas render reads getInvalidArea() and the MCP
+// layer keeps per-paint state, so it must see a single region per frame, exactly as before. Overlapping or nearby
+// rects merge; more than maxRenderPasses clusters, plugin mode or a full repaint: one pass (the old behaviour).
+std::vector<Rectangle<int>> NVGSurface::renderPasses(Rectangle<int> const bounds) const
+{
+    auto const single = std::vector<Rectangle<int>> { invalidArea.getIntersection(bounds) };
+    if (invalidRects.size() < 2 || editor->isInPluginMode())
+        return single;
+
+    auto& tabs = editor->getTabComponent();
+    auto const canvasArea = getLocalArea(&tabs, tabs.getLocalBounds());
+
+    std::vector<Rectangle<int>> passes;
+    passes.reserve(invalidRects.size());
+    for (auto const& r : invalidRects) {
+        auto const clipped = r.getIntersection(bounds);
+        if (!clipped.isEmpty())
+            passes.push_back(clipped);
+    }
+
+    auto const area = [](Rectangle<int> const& r) { return static_cast<int64>(r.getWidth()) * r.getHeight(); };
+    constexpr int64 nearSlack = 64 * 64; // tiny rects close together are cheaper as one pass
+
+    bool merged = true;
+    while (merged) {
+        merged = false;
+        for (size_t i = 0; i < passes.size() && !merged; ++i) {
+            for (size_t j = i + 1; j < passes.size(); ++j) {
+                auto const& a = passes[i];
+                auto const& b = passes[j];
+                auto const u = a.getUnion(b);
+                bool const bothOnCanvas = a.intersects(canvasArea) && b.intersects(canvasArea);
+                bool const cheap = area(u) * 2 <= (area(a) + area(b)) * 3 + nearSlack;
+                if (bothOnCanvas || a.intersects(b) || cheap) {
+                    passes[i] = u;
+                    passes.erase(passes.begin() + static_cast<std::ptrdiff_t>(j));
+                    merged = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (passes.empty() || passes.size() > maxRenderPasses)
+        return single;
+    return passes;
 }
 
 void NVGSurface::handleAsyncUpdate()
@@ -686,8 +743,16 @@ void NVGSurface::recordFrame()
         // InvalidationListener. If the previously recorded frame is still pending
         // it will be coalesced away by the publish below, so fold its damage back
         // in to make sure nothing is lost.
-        if (nanovg::hasPendingFrame(asyncNvg))
+        if (nanovg::hasPendingFrame(asyncNvg)) { // MCP-CARRIED(repaint-scope)
             invalidArea = invalidArea.getUnion(inFlightDamage);
+            // MCP-CARRIED(repaint-scope): the coalesced frame's separate rects come back too.
+            for (auto const& r : inFlightRects) {
+                if (invalidRects.size() < maxInvalidRects)
+                    invalidRects.push_back(r);
+                else
+                    invalidRects.assign(1, invalidArea);
+            }
+        }
 
         auto const damage = invalidArea.getIntersection(bounds);
         if (damage.isEmpty())
@@ -708,19 +773,33 @@ void NVGSurface::recordFrame()
         nanovg::nvgScale(asyncNvg, desktopScale, desktopScale);
 
         auto& llgc = editor->getOrCreateNanoLLGC(asyncNvg, lastRenderScale);
-        llgc.resetClipRegion(AffineTransform::scale(desktopScale, desktopScale));
-        Graphics g(llgc);
-        g.reduceClipRegion(invalidArea);
 
-        editor->paintEntireComponent(g, false);
+        // MCP-CARRIED(repaint-scope): one clipped pass per damage cluster (renderPasses); a full repaint or
+        // nearby damage is one pass over the bounding box, as before. Each pass sees its own rect as the
+        // invalid area (the canvas render reads it) and starts from a fresh clip and nvg scissor.
+        auto const frameDamage = invalidArea;
+        auto const passes = isFullRepaint ? std::vector<Rectangle<int>> { damage } : renderPasses(bounds);
+        for (auto const& pass : passes) {
+            invalidArea = pass;
+            nanovg::nvgSave(asyncNvg);
+            llgc.resetClipRegion(AffineTransform::scale(desktopScale, desktopScale));
+            { // MCP-CARRIED(repaint-scope)
+                Graphics g(llgc);
+                g.reduceClipRegion(pass); // MCP-CARRIED(repaint-scope)
+
+                editor->paintEntireComponent(g, false);
 
 #if PLUGDATA_NVG_REPAINT_DEBUG
-        static Random rng;
-        g.fillAll (Colour ((uint8) rng.nextInt (255),
-                           (uint8) rng.nextInt (255),
-                           (uint8) rng.nextInt (255),
-                           (uint8) 0x50));
+                static Random rng;
+                g.fillAll (Colour ((uint8) rng.nextInt (255),
+                                   (uint8) rng.nextInt (255),
+                                   (uint8) rng.nextInt (255),
+                                   (uint8) 0x50));
 #endif
+            }
+            nanovg::nvgRestore(asyncNvg);
+        }
+        invalidArea = frameDamage; // MCP-CARRIED(repaint-scope)
 
         // Restrict the backend flush to the damaged region so the rest of the
         // framebuffer keeps its previous contents (persistence). Coordinates are
@@ -734,6 +813,7 @@ void NVGSurface::recordFrame()
         nanovg::nvgEndFrame(asyncNvg);
 
         inFlightDamage = damage;
+        inFlightRects = passes; // MCP-CARRIED(repaint-scope)
         recordedFramebufferWidth.store(fbWidth);
         recordedFramebufferHeight.store(fbHeight);
         recordedFrameIsFullRepaint.store(isFullRepaint);
@@ -745,6 +825,7 @@ void NVGSurface::recordFrame()
 #endif
 
     invalidArea = {};
+    invalidRects.clear(); // MCP-CARRIED(repaint-scope)
     frameReadyForReplay.store(true);
 
 #if NANOVG_METAL_IMPLEMENTATION

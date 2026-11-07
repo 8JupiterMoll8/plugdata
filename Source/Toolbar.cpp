@@ -228,7 +228,9 @@ public:
         auto const position = Point<float>(margin + value * (getWidth() - margin * 2), getHeight() * 0.5f);
         auto thumb = Rectangle<float>(thumbSize, thumbSize).withCentre(position);
         thumb = thumb.withSizeKeepingCentre(thumb.getWidth() - 12, thumb.getHeight());
-        g.setColour(backgroundColour.darker(thumb.contains(getMouseXYRelative().toFloat()) ? 0.3f : 0.0f).withAlpha(0.9f));
+        // MCP-CARRIED(repaint-scope): the pointer as the mouse callbacks last saw it; getMouseXYRelative() is an
+        // XQueryPointer round trip on Linux, and this paints with every level-meter update.
+        g.setColour(backgroundColour.darker(lastMouseInside && thumb.contains(lastMousePosition.toFloat()) ? 0.3f : 0.0f).withAlpha(0.9f));
         g.fillRoundedRectangle(thumb, thumb.getWidth() * 0.5f);
     }
 
@@ -275,6 +277,8 @@ public:
 
     void mouseEnter(MouseEvent const& e) override
     {
+        lastMouseInside = true;
+        lastMousePosition = e.getPosition(); // MCP-CARRIED(repaint-scope)
         repaint();
         Slider::mouseEnter(e);
         updatePopup(e.getPosition(), false);
@@ -282,6 +286,7 @@ public:
 
     void mouseExit(MouseEvent const& e) override
     {
+        lastMouseInside = false; // MCP-CARRIED(repaint-scope)
         repaint();
         Slider::mouseExit(e);
         updatePopup(e.getPosition(), false);
@@ -289,6 +294,8 @@ public:
 
     void mouseMove(MouseEvent const& e) override
     {
+        lastMouseInside = true;
+        lastMousePosition = e.getPosition(); // MCP-CARRIED(repaint-scope)
         repaint();
         Slider::mouseMove(e);
         updatePopup(e.getPosition(), false);
@@ -296,6 +303,7 @@ public:
 
     void mouseUp(MouseEvent const& e) override
     {
+        lastMousePosition = e.getPosition(); // MCP-CARRIED(repaint-scope)
         repaint();
         Slider::mouseUp(e);
     }
@@ -304,13 +312,23 @@ public:
     {
         if (!e.mods.isLeftButtonDown())
             return;
+        lastMousePosition = e.getPosition(); // MCP-CARRIED(repaint-scope)
         repaint();
         Slider::mouseDown(e);
+    }
+
+    // MCP-CARRIED(repaint-scope): track the pointer while dragging the thumb (paint reads lastMousePosition).
+    void mouseDrag(MouseEvent const& e) override
+    {
+        lastMousePosition = e.getPosition();
+        Slider::mouseDrag(e);
     }
 
 private:
     VolumeSliderDecibelPopup decibelPopup;
     int margin = 14;
+    Point<int> lastMousePosition;  // MCP-CARRIED(repaint-scope)
+    bool lastMouseInside = false; // MCP-CARRIED(repaint-scope)
 
     bool animationFadeIn = false;
     VBlankAnimatorUpdater updater { this };

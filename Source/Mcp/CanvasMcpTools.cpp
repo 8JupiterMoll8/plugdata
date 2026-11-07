@@ -246,9 +246,21 @@ void CanvasMcpLayer::SketchFadeTimer::timerCallback()
         canvas->mcpSketchAlpha = 0.0f;
         canvas->mcpCompletedStrokes.clear();
         stopTimer();
+        // The last tick: the ink is gone and the pill may change with it, one full repaint as before.
+        canvas->canvas.repaint();
+        if (canvas->canvas.editor) canvas->canvas.editor->nvgSurface.invalidateAll();
+        return;
     }
-    canvas->canvas.repaint();
-    if (canvas->canvas.editor) canvas->canvas.editor->nvgSurface.invalidateAll();
+    // While fading (40 Hz for about a second) only the ink changes: repaint its bounds, not the whole editor.
+    juce::Rectangle<float> ink;
+    for (auto const& stroke : canvas->mcpCompletedStrokes)
+        for (auto const& p : stroke)
+            ink = ink.isEmpty() ? juce::Rectangle<float>(p.x, p.y, 1.0f, 1.0f) : ink.getUnion(juce::Rectangle<float>(p.x, p.y, 1.0f, 1.0f));
+    if (ink.isEmpty())
+        return;
+    auto const area = ink.getSmallestIntegerContainer().expanded(12); // the 7 px glow stroke plus antialiasing
+    canvas->canvas.repaint(area);
+    if (canvas->canvas.editor) canvas->canvas.editor->nvgSurface.invalidateArea(canvas->canvas.editor->nvgSurface.getLocalArea(&canvas->canvas, area));
 }
 
 void CanvasMcpLayer::startSketchFadeTimer()

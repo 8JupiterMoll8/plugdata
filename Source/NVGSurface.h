@@ -239,6 +239,15 @@ private:
 
     Rectangle<int> invalidArea;          // damage accumulated since the last recorded frame (message thread)
     Rectangle<int> inFlightDamage;       // damage of the last recorded frame, re-folded if it gets coalesced
+    // MCP-CARRIED(repaint-scope): the separate damaged rects behind invalidArea (its bounding box). Two small
+    // repaints far apart (the toolbar level meter at the top, an animation low on the canvas) used to redraw the
+    // whole bounding box, i.e. most of the window, every frame; recordFrame now paints distant clusters as
+    // separate clipped passes (renderPasses).
+    std::vector<Rectangle<int>> invalidRects;
+    std::vector<Rectangle<int>> inFlightRects;
+    static constexpr size_t maxInvalidRects = 32; // more than this: fall back to the bounding box
+    static constexpr size_t maxRenderPasses = 4;
+    std::vector<Rectangle<int>> renderPasses(Rectangle<int> bounds) const;
     Rectangle<int> currentBounds;
     AtomicValue<bool> frameReadyForReplay { false };
     AtomicValue<int> recordedFramebufferWidth { 0 };

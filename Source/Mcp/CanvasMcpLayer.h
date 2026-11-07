@@ -372,6 +372,7 @@ public:
     // Review N3: the dock pass is skipped in a paint that is Alphi's own (the motion timer asked, the region stays
     // near him); CanvasMcpFlow.cpp.
     bool alphiDockPassNeeded();
+    void alphiRepaintView(); // repaint his view (the canvas viewport), not the whole editor
     // CanvasMcpAlphiSay.cpp: the pulse (D2/D3), the gaze (D5), sparks / dots / spiral, the strip (D6) and the D4
     // motion timer. It repaints only Alphi's rect and strip, and never touches the gate or the dock.
     void alphiMotionSample(std::int64_t nowMs); // the ceiling's pulse and the say board's line clock, now
