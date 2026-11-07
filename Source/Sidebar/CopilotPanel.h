@@ -423,32 +423,152 @@ public:
             items.push_back({ role, sanitizeText(text), juce::Time::getCurrentTime() });
         }
 
-        void paint(Graphics& g) override
+        //======================================================================
+        // Per-message layout cache. Parsing the markdown and shaping the text
+        // (TextLayout::createLayout) is expensive and paint() runs at frame rate,
+        // so each message keeps its parsed, shaped blocks until its key
+        // (text, available width, dark/light theme) changes.
+        struct MeasuredBlock {
+            ContentBlock block;
+            juce::TextLayout layout;
+            float height = 0.0f;
+        };
+
+        struct MessageLayout {
+            juce::String text;
+            float width = -1.0f;
+            bool dark = false;
+            std::vector<MeasuredBlock> blocks;
+            int bubbleH = 0;
+        };
+
+        static constexpr int headerAreaH = 20;
+
+        // Bounds of the thinking badge from the last paint (empty when hidden),
+        // so its animation can repaint just that area.
+        juce::Rectangle<int> thinkingBadgeBounds;
+
+        static float innerContentWidthFor(int width)
         {
-            auto const bgCol = findColour(PlugDataColour::sidebarBackgroundColourId);
-            auto const activeCol = findColour(PlugDataColour::toolbarActiveColourId);
-            bool const dark = (bgCol.getPerceivedBrightness() < 0.5f);
+            int const bubbleMaxWidth = std::max(60, width - 24);
+            return static_cast<float>(bubbleMaxWidth - 28);
+        }
 
-            int y = 8;
-            int const w = getWidth();
-            if (w <= 20) return;
+        bool isDarkTheme() const
+        {
+            return findColour(PlugDataColour::sidebarBackgroundColourId).getPerceivedBrightness() < 0.5f;
+        }
 
+        static void buildMessageLayout(MessageLayout& out, const juce::String& text, float innerContentWidth, bool dark)
+        {
             auto const bodyFont = Fonts::getDefaultFont().withHeight(13.0f);
             auto const boldFont = Fonts::getBoldFont().withHeight(13.0f);
             auto const monoFont = Fonts::getMonospaceFont().withHeight(12.0f);
             auto const titleFont = Fonts::getBoldFont().withHeight(14.5f);
             auto const secHeaderFont = Fonts::getBoldFont().withHeight(13.5f);
-            auto const roleFont = Fonts::getBoldFont().withHeight(11.5f);
 
             juce::Colour const defaultTextCol = dark ? juce::Colour(0xfff0f2f5) : juce::Colour(0xff181a1f);
             juce::Colour const codeCol = dark ? juce::Colour(0xff79c0ff) : juce::Colour(0xff0969da);
 
+            auto const blocks = parseBlocks(text);
+            float contentH = 0.0f;
+            std::vector<MeasuredBlock> measured;
+            measured.reserve(blocks.size());
+
+            for (auto const& b : blocks) {
+                MeasuredBlock mb;
+                mb.block = b;
+
+                if (b.type == ContentBlock::Divider) {
+                    mb.height = 8.0f;
+                } else if (b.type == ContentBlock::CodeBlock) {
+                    mb.height = b.codeLines.size() * 16.0f + 16.0f;
+                } else {
+                    juce::AttributedString as;
+                    as.setWordWrap(juce::AttributedString::WordWrap::byWord);
+
+                    juce::Font baseF = bodyFont;
+                    if (b.type == ContentBlock::Title) baseF = titleFont;
+                    else if (b.type == ContentBlock::SectionHeader) baseF = secHeaderFont;
+                    else if (b.type == ContentBlock::SubHeader) baseF = boldFont;
+
+                    for (auto const& sp : b.spans) {
+                        juce::Font f = sp.isCode ? monoFont : (sp.isBold ? baseF.boldened() : baseF);
+                        if (sp.isItalic) f = f.italicised();
+
+                        juce::Colour c = defaultTextCol;
+                        if (sp.isCode) c = codeCol;
+                        else if (sp.isBold) {
+                            c = (b.type == ContentBlock::SectionHeader) ? codeCol : (dark ? Colours::white : juce::Colour(0xff181a1f));
+                        }
+                        as.append(sp.text, f, c);
+                    }
+
+                    float const availableW = std::max(20.0f, innerContentWidth - b.indentLeft);
+                    mb.layout.createLayout(as, availableW);
+                    mb.height = mb.layout.getHeight();
+                }
+
+                contentH += b.topMargin + mb.height + b.bottomMargin;
+                measured.push_back(std::move(mb));
+            }
+
+            out.text = text;
+            out.width = innerContentWidth;
+            out.dark = dark;
+            out.blocks = std::move(measured);
+            out.bubbleH = static_cast<int>(contentH) + headerAreaH + 16;
+        }
+
+        // Returns the cached layout of items[index], rebuilding it only when the
+        // key changed. The cache is index-aligned with items; a removed or
+        // reordered message simply misses its key and is rebuilt.
+        MessageLayout const& getMessageLayout(size_t index, float innerContentWidth, bool dark) const
+        {
+            if (layoutCache.size() != items.size())
+                layoutCache.resize(items.size());
+
+            auto& entry = layoutCache[index];
+            auto const& text = items[index].text;
+            if (entry.width != innerContentWidth || entry.dark != dark || entry.text != text)
+                buildMessageLayout(entry, text, innerContentWidth, dark);
+            return entry;
+        }
+
+        void paint(Graphics& g) override
+        {
+            auto const activeCol = findColour(PlugDataColour::toolbarActiveColourId);
+            bool const dark = isDarkTheme();
+
+            int y = 8;
+            int const w = getWidth();
+            thinkingBadgeBounds = {};
+            if (layoutCache.size() != items.size())
+                layoutCache.resize(items.size()); // drops entries of removed messages (e.g. after a clear)
+            if (w <= 20) return;
+
+            auto const monoFont = Fonts::getMonospaceFont().withHeight(12.0f);
+            auto const roleFont = Fonts::getBoldFont().withHeight(11.5f);
+
+            juce::Colour const codeCol = dark ? juce::Colour(0xff79c0ff) : juce::Colour(0xff0969da);
+
             int const bubbleMaxWidth = std::max(60, w - 24);
-            float const innerContentWidth = static_cast<float>(bubbleMaxWidth - 28);
+            float const innerContentWidth = innerContentWidthFor(w);
+            auto const clip = g.getClipBounds();
 
             for (size_t i = 0; i < items.size(); ++i) {
                 auto const& m = items[i];
                 if (m.role == "thought") continue; // Thought is displayed as live status bar
+
+                auto const& cached = getMessageLayout(i, innerContentWidth, dark);
+                int const bubbleH = cached.bubbleH;
+                auto bubbleRect = juce::Rectangle<int>(12, y, bubbleMaxWidth, bubbleH);
+
+                // Cull bubbles outside the repainted area: only advance y.
+                if (!bubbleRect.intersects(clip)) {
+                    y += bubbleH + 10;
+                    continue;
+                }
 
                 bool const isUser = (m.role == "user");
                 bool const isError = (m.role == "error");
@@ -463,59 +583,7 @@ public:
                     roleName = "Alert";
                 }
 
-                auto blocks = parseBlocks(m.text);
-
-                // Precompute bubble content height
-                float contentH = 0.0f;
-                struct MeasuredBlock {
-                    ContentBlock block;
-                    juce::TextLayout layout;
-                    float height = 0.0f;
-                };
-                std::vector<MeasuredBlock> measured;
-                measured.reserve(blocks.size());
-
-                for (auto const& b : blocks) {
-                    MeasuredBlock mb;
-                    mb.block = b;
-
-                    if (b.type == ContentBlock::Divider) {
-                        mb.height = 8.0f;
-                    } else if (b.type == ContentBlock::CodeBlock) {
-                        mb.height = b.codeLines.size() * 16.0f + 16.0f;
-                    } else {
-                        juce::AttributedString as;
-                        as.setWordWrap(juce::AttributedString::WordWrap::byWord);
-
-                        juce::Font baseF = bodyFont;
-                        if (b.type == ContentBlock::Title) baseF = titleFont;
-                        else if (b.type == ContentBlock::SectionHeader) baseF = secHeaderFont;
-                        else if (b.type == ContentBlock::SubHeader) baseF = boldFont;
-
-                        for (auto const& sp : b.spans) {
-                            juce::Font f = sp.isCode ? monoFont : (sp.isBold ? baseF.boldened() : baseF);
-                            if (sp.isItalic) f = f.italicised();
-
-                            juce::Colour c = defaultTextCol;
-                            if (sp.isCode) c = codeCol;
-                            else if (sp.isBold) {
-                                c = (b.type == ContentBlock::SectionHeader) ? codeCol : (dark ? Colours::white : juce::Colour(0xff181a1f));
-                            }
-                            as.append(sp.text, f, c);
-                        }
-
-                        float const availableW = std::max(20.0f, innerContentWidth - b.indentLeft);
-                        mb.layout.createLayout(as, availableW);
-                        mb.height = mb.layout.getHeight();
-                    }
-
-                    contentH += b.topMargin + mb.height + b.bottomMargin;
-                    measured.push_back(std::move(mb));
-                }
-
-                int const headerAreaH = 20;
-                int const bubbleH = static_cast<int>(contentH) + headerAreaH + 16;
-                auto bubbleRect = juce::Rectangle<int>(12, y, bubbleMaxWidth, bubbleH);
+                auto const& measured = cached.blocks;
 
                 // Bubble background
                 juce::Colour bubbleBg;
@@ -630,6 +698,7 @@ public:
                 int const badgeW = std::min(180, w - 24);
                 int const badgeH = 26;
                 auto badgeRect = juce::Rectangle<float>(12.0f, static_cast<float>(y), static_cast<float>(badgeW), static_cast<float>(badgeH));
+                thinkingBadgeBounds = badgeRect.getSmallestIntegerContainer();
 
                 g.setColour(dark ? juce::Colour(0xff22272e) : juce::Colour(0xfffff8f0));
                 g.fillRoundedRectangle(badgeRect, 13.0f);
@@ -655,49 +724,13 @@ public:
         {
             if (items.empty() && !isThinking) return 40;
             int total = 16;
-            int const bubbleMaxWidth = std::max(60, width - 24);
-            float const innerContentWidth = static_cast<float>(bubbleMaxWidth - 28);
+            float const innerContentWidth = innerContentWidthFor(width);
+            bool const dark = isDarkTheme();
 
-            auto const bodyFont = Fonts::getDefaultFont().withHeight(13.0f);
-            auto const boldFont = Fonts::getBoldFont().withHeight(13.0f);
-            auto const monoFont = Fonts::getMonospaceFont().withHeight(12.0f);
-            auto const titleFont = Fonts::getBoldFont().withHeight(14.5f);
-            auto const secHeaderFont = Fonts::getBoldFont().withHeight(13.5f);
-
-            for (auto const& m : items) {
-                if (m.role == "thought") continue;
-
-                auto blocks = parseBlocks(m.text);
-                float contentH = 0.0f;
-
-                for (auto const& b : blocks) {
-                    if (b.type == ContentBlock::Divider) {
-                        contentH += b.topMargin + 8.0f + b.bottomMargin;
-                    } else if (b.type == ContentBlock::CodeBlock) {
-                        contentH += b.topMargin + (b.codeLines.size() * 16.0f + 16.0f) + b.bottomMargin;
-                    } else {
-                        juce::AttributedString as;
-                        as.setWordWrap(juce::AttributedString::WordWrap::byWord);
-
-                        juce::Font baseF = bodyFont;
-                        if (b.type == ContentBlock::Title) baseF = titleFont;
-                        else if (b.type == ContentBlock::SectionHeader) baseF = secHeaderFont;
-                        else if (b.type == ContentBlock::SubHeader) baseF = boldFont;
-
-                        for (auto const& sp : b.spans) {
-                            juce::Font f = sp.isCode ? monoFont : (sp.isBold ? baseF.boldened() : baseF);
-                            as.append(sp.text, f, Colours::white);
-                        }
-
-                        juce::TextLayout layout;
-                        float const availableW = std::max(20.0f, innerContentWidth - b.indentLeft);
-                        layout.createLayout(as, availableW);
-                        contentH += b.topMargin + layout.getHeight() + b.bottomMargin;
-                    }
-                }
-
-                int const headerAreaH = 20;
-                total += static_cast<int>(contentH) + headerAreaH + 16 + 10;
+            // Same cached layouts paint() draws, so the measured height matches.
+            for (size_t i = 0; i < items.size(); ++i) {
+                if (items[i].role == "thought") continue;
+                total += getMessageLayout(i, innerContentWidth, dark).bubbleH + 10;
             }
 
             if (isThinking) {
@@ -706,6 +739,9 @@ public:
 
             return total;
         }
+
+    private:
+        mutable std::vector<MessageLayout> layoutCache;
     };
 
     // Antigravity-Style Input Capsule
@@ -868,7 +904,11 @@ public:
     {
         if (chatContent.isThinking) {
             chatContent.thinkingPhase += 0.2f;
-            chatContent.repaint();
+            // Only the badge animates; repainting just it lets paint() cull every bubble.
+            if (chatContent.thinkingBadgeBounds.isEmpty())
+                chatContent.repaint();
+            else
+                chatContent.repaint(chatContent.thinkingBadgeBounds);
         }
 
         if (!pd) return;
