@@ -26,6 +26,7 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <nanovg_async.h>
+#include <cstring>
 #include <unordered_map>
 
 #include "Utility/Fonts.h"
