@@ -42,6 +42,7 @@ void MCPBridge::pdObjSet(const juce::String& action, const juce::OSCMessage& msg
 
         juce::String err, warning;
         {
+            processor->setThis(); // this worker thread may never have selected the Pd instance
             sys_lock();
             t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName);
             t_gobj* g = processor->getMcp()->resolveStableId(canvasName, tempId);

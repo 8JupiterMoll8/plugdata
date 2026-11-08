@@ -1,4 +1,4 @@
-From 972df6282be156fc15d57e883b520ae350a4987a Mon Sep 17 00:00:00 2001
+From e6bc2e2c3dc1e6157da242166e3d3a8eff29ca5c Mon Sep 17 00:00:00 2001
 From: Alphi <fork@localhost>
 Date: Sun, 8 Nov 2026 16:20:54 +0100
 Subject: [PATCH 2/2] fix: gemjucewindow never waits on the message thread
@@ -14,28 +14,36 @@ gemjucewindow::callOnMessageThread <- destroyMess, main thread in
 pthread_mutex_lock <- gemjucewindow::Window::timerCallback.
 
 destroy: the window is cut loose from its owner under the Pd lock (atomic
-m_owner cleared) and deleted later on the message thread (callAsync). Every
-Window callback that reaches the owner takes the Pd lock and checks the
-owner first; the resized() callAsync path no longer captures a raw `this`.
+m_owner cleared) and deleted later on the message thread (callAsync).
 
-create: the Window is built on the message thread by a posted callAsync,
-under the Pd lock, and parked; a Pd clock (Pd lock held) picks it up and does
-the GL half (makeCurrent, createGemWindow, title, size) on the Pd thread.
-create() called on the message thread itself still builds directly.
-Messages before the window exists are safe: dimen/offset reach a parked
-window or are read by the queued construction; render returns early;
-destroy (or freeing the object) drops a queued construction (generation
-ticket, shared so a freed object is never touched) and deletes a parked one;
-a second create while one is pending says "window already made!".
+create: always deferred. The Window is built on the message thread (directly
+when create arrives there, else by a posted callAsync), under the Pd lock,
+and parked; a Pd clock finishes the GL half (makeCurrent, createGemWindow,
+title, size) on the Pd thread, where Gem renders. Messages before the window
+exists are safe: dimen/offset reach a parked window or are read by the queued
+construction; render returns early; destroy (or freeing the object) drops a
+queued construction (atomic generation/alive ticket, checked before any Pd
+call) and deletes a parked one; a second create while pending is refused.
+
+Window callbacks (mouse, keys, timer, resized) go through withOwner(): return
+at once when the window is cut loose (its Pd instance may be gone), else
+select the instance, take the Pd lock, re-check the owner. resized() always
+locks (the lock is recursive), no m_callingSync. The drag-resize flag lives
+in the Window, so a destroy mid-drag cannot leave a later window stuck.
+
+The context is released after every render() and after the GL setup, so a
+frame or a destroy on another thread never meets a context current elsewhere.
+The Pd instance is stored when the object is created and used for the
+window, instead of libpd_this_instance() on whatever thread sends create.
 ---
- src/Output/gemjucewindow.h | 212 ++++++++++++++++++++++++++++---------
- 1 file changed, 161 insertions(+), 51 deletions(-)
+ src/Output/gemjucewindow.h | 276 ++++++++++++++++++++++++-------------
+ 1 file changed, 184 insertions(+), 92 deletions(-)
 
 diff --git a/src/Output/gemjucewindow.h b/src/Output/gemjucewindow.h
-index 815268b..e5a51d6 100644
+index 815268b..2421d85 100644
 --- a/src/Output/gemjucewindow.h
 +++ b/src/Output/gemjucewindow.h
-@@ -237,7 +237,9 @@ class GEM_EXPORT gemjucewindow : public GemWindow
+@@ -237,7 +237,26 @@ class GEM_EXPORT gemjucewindow : public GemWindow
          bool m_shiftDown = false, m_ctrlDown = false, m_altDown = false, m_cmdDown = false;
          float m_lastScale = 1.0f;
          std::atomic<int> m_lastW, m_lastH;;
@@ -43,33 +51,53 @@ index 815268b..e5a51d6 100644
 +        // Cleared (under the Pd lock) by destroyMess(): the window may outlive its owner by one
 +        // message-thread hop, and every callback below checks it after taking the Pd lock.
 +        std::atomic<gemjucewindow*> m_owner;
++        // Set while the user drags the window edge (message thread); read by render on the Pd thread.
++        // It lives in the window, so a destroy mid-drag cannot leave a later window stuck "resizing".
++        std::atomic<bool> m_userResizing { false };
++
++        // Run f(owner) on this thread with the Pd lock held. Returns at once when the window has
++        // been cut loose: then its Pd instance may already be gone, so it is not even selected.
++        template<typename F>
++        void withOwner(F&& f)
++        {
++            if (owner() == nullptr)
++                return;
++            setThis();
++            sys_lock();
++            if (auto* o = owner()) // re-check: destroyMess clears it under the Pd lock
++                f(o);
++            sys_unlock();
++        }
  
      public:
          Window(juce::Rectangle<int> bounds, bool border,
-@@ -286,10 +288,10 @@ class GEM_EXPORT gemjucewindow : public GemWindow
+@@ -285,12 +304,8 @@ class GEM_EXPORT gemjucewindow : public GemWindow
+             setVisible(true);
  
              if (auto* peer = getPeer()) {
-                 m_resizeListener.onBegin = [this] {
+-                m_resizeListener.onBegin = [this] {
 -                    m_owner->m_resizing = true;
-+                    if (auto* o = this->owner()) o->m_resizing = true;
-                 };
-                 m_resizeListener.onEnd = [this] {
+-                };
+-                m_resizeListener.onEnd = [this] {
 -                    m_owner->m_resizing = false;
-+                    if (auto* o = this->owner()) o->m_resizing = false;
-                 };
+-                };
++                m_resizeListener.onBegin = [this] { m_userResizing = true; };
++                m_resizeListener.onEnd = [this] { m_userResizing = false; };
                  peer->setConstrainer(&m_resizeListener);
              }
-@@ -322,6 +324,9 @@ class GEM_EXPORT gemjucewindow : public GemWindow
+ 
+@@ -322,6 +337,10 @@ class GEM_EXPORT gemjucewindow : public GemWindow
  
          juce::OpenGLContext& glContext() { return m_glContext; }
  
 +        gemjucewindow* owner() const { return m_owner.load(); }
++        bool isUserResizing() const { return m_userResizing.load(); }
 +        void detachOwner() { m_owner = nullptr; }
 +
          void setTitle(const std::string& title)
          {
              juce::MessageManager::callAsync(
-@@ -347,8 +352,10 @@ class GEM_EXPORT gemjucewindow : public GemWindow
+@@ -347,8 +366,10 @@ class GEM_EXPORT gemjucewindow : public GemWindow
                  if(oldScale != m_lastScale)
                  {
                    int w = m_lastW * m_lastScale, h = m_lastH * m_lastScale;
@@ -82,32 +110,29 @@ index 815268b..e5a51d6 100644
                  }
              }
          }
-@@ -375,26 +382,36 @@ class GEM_EXPORT gemjucewindow : public GemWindow
+@@ -375,26 +396,22 @@ class GEM_EXPORT gemjucewindow : public GemWindow
              double s = m_lastScale;
              int w = getWidth() * s, h = getHeight() * s;
  
 -            if(m_owner->m_callingSync)
-+            auto* o = owner();
-+            if (o && o->m_callingSync)
-             {
-+              // create() is waiting for us and already holds the Pd lock
-               setThis();
+-            {
+-              setThis();
 -              m_owner->windowsizeCallback(w, h);
 -              m_owner->framebuffersizeCallback(w, h);
-+              o->windowsizeCallback(w, h);
-+              o->framebuffersizeCallback(w, h);
-             }
-             else if(juce::MessageManager::getInstance()->isThisTheMessageThread())
+-            }
+-            else if(juce::MessageManager::getInstance()->isThisTheMessageThread())
++            if (juce::MessageManager::getInstance()->isThisTheMessageThread())
              {
-               sys_lock();
-               setThis();
+-              sys_lock();
+-              setThis();
 -              m_owner->windowsizeCallback(w, h);
 -              m_owner->framebuffersizeCallback(w, h);
-+              if (auto* locked = owner()) {
-+                locked->windowsizeCallback(w, h);
-+                locked->framebuffersizeCallback(w, h);
-+              }
-               sys_unlock();
+-              sys_unlock();
++              // The Pd lock is recursive: this also runs inside constructWindow(), which holds it.
++              withOwner([w, h](gemjucewindow* o) {
++                o->windowsizeCallback(w, h);
++                o->framebuffersizeCallback(w, h);
++              });
              }
              else
              {
@@ -116,100 +141,126 @@ index 815268b..e5a51d6 100644
 -                m_owner->windowsizeCallback(w, h);
 -                m_owner->framebuffersizeCallback(w, h);
 +              juce::MessageManager::callAsync([safe = juce::Component::SafePointer<Window>(this), w, h]{
-+                auto* win = safe.getComponent();
-+                if (!win) return;
-+                win->setThis();
-+                sys_lock();
-+                if (auto* locked = win->owner()) {
-+                  locked->windowsizeCallback(w, h);
-+                  locked->framebuffersizeCallback(w, h);
-+                }
-+                sys_unlock();
++                if (auto* win = safe.getComponent())
++                  win->withOwner([w, h](gemjucewindow* o) {
++                    o->windowsizeCallback(w, h);
++                    o->framebuffersizeCallback(w, h);
++                  });
                });
              }
          }
-@@ -409,7 +426,7 @@ class GEM_EXPORT gemjucewindow : public GemWindow
-                                                   : 0;
-             setThis();
-             sys_lock();
--            m_owner->mousebuttonCallback(btn, 1, 0);
-+            if (auto* o = owner()) o->mousebuttonCallback(btn, 1, 0);
-             sys_unlock();
-         }
+@@ -403,57 +420,42 @@ class GEM_EXPORT gemjucewindow : public GemWindow
  
-@@ -421,7 +438,7 @@ class GEM_EXPORT gemjucewindow : public GemWindow
-                                                   : 0;
-             setThis();
-             sys_lock();
--            m_owner->mousebuttonCallback(btn, 0, 0);
-+            if (auto* o = owner()) o->mousebuttonCallback(btn, 0, 0);
-             sys_unlock();
-         }
- 
-@@ -431,8 +448,9 @@ class GEM_EXPORT gemjucewindow : public GemWindow
-             m_lastMousePos = e.position.toInt();
-             setThis();
-             sys_lock();
--            m_owner->mouseposCallback(static_cast<float>(e.x) * m_lastScale,
--                                      static_cast<float>(e.y) * m_lastScale);
-+            if (auto* o = owner())
-+                o->mouseposCallback(static_cast<float>(e.x) * m_lastScale,
-+                                    static_cast<float>(e.y) * m_lastScale);
-             sys_unlock();
-         }
- 
-@@ -442,8 +460,9 @@ class GEM_EXPORT gemjucewindow : public GemWindow
-             m_lastMousePos = e.position.toInt();
-             setThis();
-             sys_lock();
--            m_owner->mouseposCallback(static_cast<float>(e.x) * m_lastScale,
--                                      static_cast<float>(e.y) * m_lastScale);
-+            if (auto* o = owner())
-+                o->mouseposCallback(static_cast<float>(e.x) * m_lastScale,
-+                                    static_cast<float>(e.y) * m_lastScale);
-             sys_unlock();
-         }
- 
-@@ -452,7 +471,7 @@ class GEM_EXPORT gemjucewindow : public GemWindow
+         void mouseDown(const juce::MouseEvent& e) override
          {
-             setThis();
-             sys_lock();
--            m_owner->scrollCallback(wheel.deltaX, wheel.deltaY);
-+            if (auto* o = owner()) o->scrollCallback(wheel.deltaX, wheel.deltaY);
-             sys_unlock();
+-            setThis();
+             int btn = e.mods.isRightButtonDown()  ? 2
+                     : e.mods.isMiddleButtonDown() ? 1
+                                                   : 0;
+-            setThis();
+-            sys_lock();
+-            m_owner->mousebuttonCallback(btn, 1, 0);
+-            sys_unlock();
++            withOwner([btn](gemjucewindow* o) { o->mousebuttonCallback(btn, 1, 0); });
          }
  
-@@ -540,7 +559,7 @@ class GEM_EXPORT gemjucewindow : public GemWindow
+         void mouseUp(const juce::MouseEvent& e) override
+         {
+-            setThis();
+             int btn = e.mods.isRightButtonDown()  ? 2
+                     : e.mods.isMiddleButtonDown() ? 1
+                                                   : 0;
+-            setThis();
+-            sys_lock();
+-            m_owner->mousebuttonCallback(btn, 0, 0);
+-            sys_unlock();
++            withOwner([btn](gemjucewindow* o) { o->mousebuttonCallback(btn, 0, 0); });
+         }
  
-             setThis();
-             sys_lock();
+         void mouseMove(const juce::MouseEvent& e) override
+         {
+             if(m_lastMousePos == e.position.toInt()) return;
+             m_lastMousePos = e.position.toInt();
+-            setThis();
+-            sys_lock();
+-            m_owner->mouseposCallback(static_cast<float>(e.x) * m_lastScale,
+-                                      static_cast<float>(e.y) * m_lastScale);
+-            sys_unlock();
++            float const x = static_cast<float>(e.x) * m_lastScale;
++            float const y = static_cast<float>(e.y) * m_lastScale;
++            withOwner([x, y](gemjucewindow* o) { o->mouseposCallback(x, y); });
+         }
+ 
+         void mouseDrag(const juce::MouseEvent& e) override
+         {
+             if(m_lastMousePos == e.position.toInt()) return;
+             m_lastMousePos = e.position.toInt();
+-            setThis();
+-            sys_lock();
+-            m_owner->mouseposCallback(static_cast<float>(e.x) * m_lastScale,
+-                                      static_cast<float>(e.y) * m_lastScale);
+-            sys_unlock();
++            float const x = static_cast<float>(e.x) * m_lastScale;
++            float const y = static_cast<float>(e.y) * m_lastScale;
++            withOwner([x, y](gemjucewindow* o) { o->mouseposCallback(x, y); });
+         }
+ 
+         void mouseWheelMove(const juce::MouseEvent&,
+                             const juce::MouseWheelDetails& wheel) override
+         {
+-            setThis();
+-            sys_lock();
+-            m_owner->scrollCallback(wheel.deltaX, wheel.deltaY);
+-            sys_unlock();
++            withOwner([&wheel](gemjucewindow* o) { o->scrollCallback(wheel.deltaX, wheel.deltaY); });
+         }
+ 
+         static void convertKeyCode(int& keynum, std::string& keysym)
+@@ -538,10 +540,7 @@ class GEM_EXPORT gemjucewindow : public GemWindow
+             int keyNum = key.getKeyCode();
+             convertKeyCode(keyNum, keyDescription);
+ 
+-            setThis();
+-            sys_lock();
 -            m_owner->keyCallback(keyNum, 1, keyDescription);
-+            if (auto* o = owner()) o->keyCallback(keyNum, 1, keyDescription);
-             sys_unlock();
+-            sys_unlock();
++            withOwner([&](gemjucewindow* o) { o->keyCallback(keyNum, 1, keyDescription); });
              m_heldKeys.add(key);
              return true;
-@@ -555,7 +574,7 @@ class GEM_EXPORT gemjucewindow : public GemWindow
+         }
+@@ -553,10 +552,7 @@ class GEM_EXPORT gemjucewindow : public GemWindow
+             auto checkModifier = [&](bool& currentState, bool newState, int glfwCode, std::string name) {
+                 if (newState != currentState) {
                      currentState = newState;
-                     setThis();
-                     sys_lock();
+-                    setThis();
+-                    sys_lock();
 -                    m_owner->keyCallback(glfwCode, currentState, name);
-+                    if (auto* o = owner()) o->keyCallback(glfwCode, currentState, name);
-                     sys_unlock();
+-                    sys_unlock();
++                    withOwner([&](gemjucewindow* o) { o->keyCallback(glfwCode, currentState, name); });
                  }
              };
-@@ -575,7 +594,7 @@ class GEM_EXPORT gemjucewindow : public GemWindow
  
-                     setThis();
-                     sys_lock();
+@@ -573,10 +569,7 @@ class GEM_EXPORT gemjucewindow : public GemWindow
+                     auto keyNum = key.getKeyCode();
+                     convertKeyCode(keyNum, keyDescription);
+ 
+-                    setThis();
+-                    sys_lock();
 -                    m_owner->keyCallback(key.getKeyCode(), 0, key.getTextDescription().toStdString());
-+                    if (auto* o = owner()) o->keyCallback(key.getKeyCode(), 0, key.getTextDescription().toStdString());
-                     sys_unlock();
+-                    sys_unlock();
++                    withOwner([&](gemjucewindow* o) { o->keyCallback(key.getKeyCode(), 0, key.getTextDescription().toStdString()); });
                      m_heldKeys.remove(i);
                  }
-@@ -654,16 +673,88 @@ class GEM_EXPORT gemjucewindow : public GemWindow
+             }
+@@ -652,18 +645,91 @@ class GEM_EXPORT gemjucewindow : public GemWindow
+     // ── Desktop window state ─────────────────────────────────────────────
+ 
      Window* m_window = nullptr;
-     std::atomic<bool> m_resizing = false;
-     bool m_callingSync = false;
+-    std::atomic<bool> m_resizing = false;
+-    bool m_callingSync = false;
++    // The Pd instance this object was created in (9): the thread that later sends create may
++    // never have selected one (e.g. a bridge worker), so libpd_this_instance() is not used there.
++    t_pdinstance* m_pdInstance = libpd_this_instance();
 +
 +    // Deferred creation. create() runs inside a Pd message (Pd lock held), so it must not wait
 +    // for the message thread: it posts the window construction there and returns. The message
@@ -218,8 +269,8 @@ index 815268b..e5a51d6 100644
 +    // Every field below is only touched with the Pd lock held.
 +    struct CreateTicket
 +    {
-+        bool alive = true;  // false once this object is being freed
-+        int generation = 0; // bumped by destroy/free: a posted construction that no longer matches is dropped
++        std::atomic<bool> alive { true };  // false once this object is being freed (read before any Pd call)
++        std::atomic<int> generation { 0 }; // bumped by destroy/free: a posted construction that no longer matches is dropped
 +    };
 +    std::shared_ptr<CreateTicket> m_ticket = std::make_shared<CreateTicket>();
 +    bool m_createPending = false;
@@ -295,7 +346,27 @@ index 815268b..e5a51d6 100644
      }
  
      // ── GemWindow interface ──────────────────────────────────────────────
-@@ -752,9 +843,10 @@ public:
+@@ -688,7 +754,7 @@ public:
+ 
+     void render(void) override
+     {
+-      if(!m_window || m_resizing) return; // don't render while we resize, since the resize events come in from the message thread
++      if(!m_window || m_window->isUserResizing()) return; // don't render while the user drags the window edge
+       makeCurrent();
+       m_window->checkScale();
+ 
+@@ -717,6 +783,10 @@ public:
+       if (embedded) {
+           m_activeCanvas->endFrame();
+       }
++
++      // Release the context so no thread keeps it current between frames: the next frame (or a
++      // destroy) may come from another thread, and EGL refuses a context current elsewhere.
++      juce::OpenGLContext::deactivateCurrentContext();
+     }
+ 
+     void renderMess(void)
+@@ -752,9 +822,10 @@ public:
          if (height < 1) { error("height must be greater than 0"); return; }
          m_width  = width;
          m_height = height;
@@ -308,7 +379,7 @@ index 815268b..e5a51d6 100644
                   w = (int)width, h = (int)height] {
                      if (safeWindow) safeWindow->setSize(w, h);
                  });
-@@ -766,7 +858,7 @@ public:
+@@ -766,7 +837,7 @@ public:
          m_fullscreen = on;
  
          juce::MessageManager::callAsync(
@@ -317,7 +388,7 @@ index 815268b..e5a51d6 100644
                if (safeWindow) safeWindow->setFullscreen(on != 0);
              });
      }
-@@ -775,38 +867,55 @@ public:
+@@ -775,38 +846,57 @@ public:
      {
          m_xoffset = x;
          m_yoffset = y;
@@ -339,23 +410,21 @@ index 815268b..e5a51d6 100644
 -        juce::MessageManager::callSync([callback](){
 -          callback();
 -        });
-+        // Message thread, Pd lock held: resized() (from setBounds) calls Gem directly.
-+        juce::ScopedValueSetter<bool> scopedSetter(m_callingSync, true);
++        // Message thread, Pd lock held (resized() from setBounds re-takes it: recursive).
 +        return new Window(
 +            juce::Rectangle<int>(
 +                m_xoffset, m_yoffset,
 +                m_width  ? (int)m_width  : 500,
 +                m_height ? (int)m_height : 500),
 +            m_border != 0,
-+            libpd_this_instance(),
++            m_pdInstance,
 +            this);
      }
  
      bool create(void) override
      {
 -        if (m_window) { error("window already made!"); return false; }
-+        if (m_window || m_createPending) { error("window already made!"); return false; }
- 
+-
 -        callOnMessageThread([this](){
 -          m_window = new Window(
 -              juce::Rectangle<int>(
@@ -366,33 +435,46 @@ index 815268b..e5a51d6 100644
 -              libpd_this_instance(),
 -              this);
 -        });
-+        if (juce::MessageManager::getInstance()->isThisTheMessageThread()) {
-+            m_window = constructWindow();
-+            return finishCreate();
-+        }
- 
-+        // Never wait for the message thread here (it may be waiting for the Pd lock we hold).
++        if (m_window || m_createPending) { error("window already made!"); return false; }
++
++        // The GL half always runs on the Pd thread (from m_createClock), so the context lives
++        // where Gem renders. Never wait for the message thread here: it may want our Pd lock.
 +        m_createPending = true;
-+        juce::MessageManager::callAsync(
-+            [this, ticket = m_ticket, generation = m_ticket->generation, instance = libpd_this_instance()] {
-+                libpd_set_instance(instance);
-+                sys_lock();
-+                // Freed, destroyed or re-created since this was posted: drop it.
-+                if (ticket->alive && ticket->generation == generation && m_createPending && !m_pendingWindow)
-+                    m_pendingWindow = constructWindow();
-+                sys_unlock();
-+            });
-+        clock_delay(m_createClock, 5);
++        if (juce::MessageManager::getInstance()->isThisTheMessageThread()) {
++            // A message delivered on the message thread (GUI, bridge): build now, finish later.
++            m_pendingWindow = constructWindow();
++        } else {
++            juce::MessageManager::callAsync(
++                [this, ticket = m_ticket, generation = m_ticket->generation.load(), instance = m_pdInstance] {
++                    // Freed, destroyed or re-created since this was posted: touch nothing of Pd.
++                    if (!ticket->alive || ticket->generation != generation)
++                        return;
++                    libpd_set_instance(instance);
++                    sys_lock();
++                    if (ticket->alive && ticket->generation == generation && m_createPending && !m_pendingWindow)
++                        m_pendingWindow = constructWindow();
++                    sys_unlock();
++                });
++        }
++        clock_delay(m_createClock, 0);
 +        return true;
 +    }
-+
+ 
 +    // Pd thread, Pd lock held: the GL half of create().
 +    bool finishCreate(void)
 +    {
          if (!m_window) { error("JUCE couldn't create window"); return false; }
  
          if (!makeCurrent()) {
-@@ -840,6 +949,7 @@ public:
+@@ -826,6 +916,7 @@ public:
+         dimension(fw, fh);
+         framebuffersize(fw, fh);
+ 
++        juce::OpenGLContext::deactivateCurrentContext(); // see render()
+         return true;
+     }
+ 
+@@ -840,6 +931,7 @@ public:
  
      void destroyMess(void) override
      {
@@ -400,7 +482,7 @@ index 815268b..e5a51d6 100644
          if (!m_window) return;
  
          if (m_activeCanvas) {
-@@ -853,11 +963,11 @@ public:
+@@ -853,11 +945,11 @@ public:
  
          Window* win = m_window;
          m_window = nullptr;
