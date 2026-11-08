@@ -681,26 +681,23 @@ void McpHost::sysCensus(SmallString const& selector, mcp::SysList const& list)
                             "hsl", "vsl", "tgl", "bng", "vu",
                             "hradio", "vradio", "cnv", "iemgui"
                         };
-                        if (iemGuiClasses.count(type.toStdString()) == 0) {
-                            o->setProperty("kind", kind);
-                            o->setProperty("type", type);
-                            if (abstractName.isNotEmpty()) o->setProperty("node_class", abstractName);
-                            o->setProperty("args", argsList);
-                            objArray.add(var(o));
-                            continue;
+                        // V1 2026-11-08: a non-iemgui GUI (ai.midi, nbx, gatom, ELSE widgets) only skips the iemgui
+                        // read below. It used to `continue` the walk here, past the auto-adoption block: a hand-placed
+                        // [ai.midi] came back with id "" until a batch's PHASE 0 adopted it.
+                        if (iemGuiClasses.count(type.toStdString()) != 0) {
+                            auto* iem = reinterpret_cast<t_iemgui*>(y_obj);
+                            // Guard with x_fsf — raw pointers are garbage when not set (vu bug: "nosndno")
+                            bool hasRcv = iem->x_fsf.x_rcv_able;
+                            bool hasSnd = iem->x_fsf.x_snd_able;
+                            auto valid = [](t_symbol* s) -> bool {
+                                return s && s != gensym("") && s->s_name && s->s_name[0]
+                                    && String::fromUTF8(s->s_name) != "empty";
+                            };
+                            if (hasRcv && valid(iem->x_rcv)) rcvSym = String::fromUTF8(iem->x_rcv->s_name);
+                            if (hasSnd && valid(iem->x_snd)) sndSym = String::fromUTF8(iem->x_snd->s_name);
+                            if (rcvSym.isNotEmpty()) o->setProperty("rcv", rcvSym);
+                            if (sndSym.isNotEmpty()) o->setProperty("snd", sndSym);
                         }
-                        auto* iem = reinterpret_cast<t_iemgui*>(y_obj);
-                        // Guard with x_fsf — raw pointers are garbage when not set (vu bug: "nosndno")
-                        bool hasRcv = iem->x_fsf.x_rcv_able;
-                        bool hasSnd = iem->x_fsf.x_snd_able;
-                        auto valid = [](t_symbol* s) -> bool {
-                            return s && s != gensym("") && s->s_name && s->s_name[0]
-                                && String::fromUTF8(s->s_name) != "empty";
-                        };
-                        if (hasRcv && valid(iem->x_rcv)) rcvSym = String::fromUTF8(iem->x_rcv->s_name);
-                        if (hasSnd && valid(iem->x_snd)) sndSym = String::fromUTF8(iem->x_snd->s_name);
-                        if (rcvSym.isNotEmpty()) o->setProperty("rcv", rcvSym);
-                        if (sndSym.isNotEmpty()) o->setProperty("snd", sndSym);
                     }
                 }
 
