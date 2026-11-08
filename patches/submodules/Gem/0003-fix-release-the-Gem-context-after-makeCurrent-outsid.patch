@@ -1,0 +1,159 @@
+From 8fcad3384927f2053a90a8a69e459b8fb78a9aef Mon Sep 17 00:00:00 2001
+From: Alphi <fork@localhost>
+Date: Sun, 8 Nov 2026 20:11:49 +0100
+Subject: [PATCH] fix: release the Gem context after makeCurrent outside the
+ render cycle
+
+Freeing any Gem object calls GemBase::beforeDeletion -> GemWindow::
+stopInAllContexts(), which makes every window's context current on the
+freeing thread and never switches back (its own doc comment promises to).
+With gemjucewindow the context is released after each frame (0002), so a
+delete or retype from the GUI or the MCP bridge (message thread, Pd lock
+held) takes the context and keeps it on the message thread. From then on
+every frame on the Pd thread fails eglMakeCurrent (a context is current on
+one thread at most): the window shows its last frame forever, audio runs
+on, `0, 1` does not help, `destroy` + `create` does (new context).
+
+Reproduced in a scratch build: a retype on the main thread froze the
+window (eglGetCurrentContext on the main thread = the Gem context, on the
+render thread = none, inside swapBuffers); releasing it on the main thread
+from gdb revived it with the retype visible. The same retype sent from the
+Pd thread never froze.
+
+GemWindow gets a virtual doneCurrent() (default: nothing), called after
+the makeCurrent in stopInAllContexts() and printMess(). gemjucewindow
+releases the context there unless a frame is in progress on that thread
+(an object freed from inside the render chain). makeCurrent() now returns
+whether the context became current; render() reports once when it cannot.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/Base/GemWindow.cpp     |  8 +++++++-
+ src/Base/GemWindow.h       |  7 +++++++
+ src/Output/gemjucewindow.h | 34 +++++++++++++++++++++++++++++-----
+ 3 files changed, 43 insertions(+), 6 deletions(-)
+
+diff --git a/src/Base/GemWindow.cpp b/src/Base/GemWindow.cpp
+index df28445..9680559 100644
+--- a/src/Base/GemWindow.cpp
++++ b/src/Base/GemWindow.cpp
+@@ -451,9 +451,14 @@ void GemWindow::stopInAllContexts(GemBase*obj)
+        it!=GemWindow::PIMPL::s_contexts.end();
+        ++it) {
+     GemWindow*w=(*it);
+-    w->makeCurrent();
++    const bool current = w->makeCurrent();
+     t_pd*x=&obj->x_obj->ob_pd;
+     sendContextDestroyedMsg(x);
++    /* "switch back": an object can be freed on any thread (e.g. a GUI edit on the
++     * main thread); the context must not stay current there */
++    if(current) {
++      w->doneCurrent();
++    }
+   }
+ }
+ 
+@@ -599,6 +604,7 @@ void GemWindow::       printMess(void)
+   while (std::getline(extStream, ext, ' ')) {
+     verbose(0, "\tExtension: %s", ext.c_str());    // Print extension string
+   }
++  doneCurrent();
+ }
+ 
+ void GemWindow:: anyMess(t_symbol*s, int argc, t_atom*argv)
+diff --git a/src/Base/GemWindow.h b/src/Base/GemWindow.h
+index d479626..dd38c17 100644
+--- a/src/Base/GemWindow.h
++++ b/src/Base/GemWindow.h
+@@ -124,6 +124,13 @@ public:
+    */
+   virtual bool makeCurrent(void) = 0;
+ 
++  /*
++   * undo a makeCurrent() that was made outside the render cycle (e.g. while an object is
++   * freed), for backends whose context must not stay bound to the calling thread
++   * (a context can be current on one thread only). default: nothing
++   */
++  virtual void doneCurrent(void) {}
++
+   /*
+    * make the GemWindow current (reset stacks), switch multiContext
+    */
+diff --git a/src/Output/gemjucewindow.h b/src/Output/gemjucewindow.h
+index 2421d85..854374f 100644
+--- a/src/Output/gemjucewindow.h
++++ b/src/Output/gemjucewindow.h
+@@ -318,10 +318,10 @@ class GEM_EXPORT gemjucewindow : public GemWindow
+             m_glContext.detach();
+         }
+ 
+-        void makeContextCurrent()
++        bool makeContextCurrent()
+         {
+             checkThread();
+-            m_glContext.makeActive();
++            return m_glContext.makeActive();
+         }
+ 
+         void shutdownContext()
+@@ -645,6 +645,9 @@ class GEM_EXPORT gemjucewindow : public GemWindow
+     // ── Desktop window state ─────────────────────────────────────────────
+ 
+     Window* m_window = nullptr;
++    // The thread inside render() while a frame is drawn (doneCurrent must not release it there).
++    std::atomic<juce::Thread::ThreadID> m_frameThread { nullptr };
++    bool m_reportedBusy = false; // Pd lock held
+     // The Pd instance this object was created in (9): the thread that later sends create may
+     // never have selected one (e.g. a bridge worker), so libpd_this_instance() is not used there.
+     t_pdinstance* m_pdInstance = libpd_this_instance();
+@@ -737,8 +740,20 @@ public:
+     bool makeCurrent(void) override
+     {
+         if (!m_window) return false;
+-        m_window->makeContextCurrent();
+-        return true;
++        return m_window->makeContextCurrent();
++    }
++
++    // Gem calls makeCurrent() outside the render cycle too: GemBase::beforeDeletion ->
++    // stopInAllContexts() when ANY Gem object is freed, on whatever thread frees it (a retype or
++    // delete from the GUI/bridge runs on the message thread). render() releases the context after
++    // each frame, so it is free there and such a call takes it; if nobody releases it, it stays
++    // current on the message thread and every later frame on the Pd thread fails to make it
++    // current (EGL: one thread at a time): the window keeps its last frame, audio runs on.
++    void doneCurrent(void) override
++    {
++        // Mid-frame on this thread (an object freed from inside the render chain): keep it.
++        if (m_frameThread.load() != juce::Thread::getCurrentThreadId())
++            juce::OpenGLContext::deactivateCurrentContext();
+     }
+ 
+     void swapBuffers(void) override
+@@ -755,7 +770,15 @@ public:
+     void render(void) override
+     {
+       if(!m_window || m_window->isUserResizing()) return; // don't render while the user drags the window edge
+-      makeCurrent();
++      if (!makeCurrent()) {
++          // Current on another thread (see doneCurrent): say so once instead of drawing nothing silently.
++          if (!m_reportedBusy)
++              error("GL context is busy on another thread, the window cannot draw");
++          m_reportedBusy = true;
++      } else {
++          m_reportedBusy = false;
++      }
++      m_frameThread = juce::Thread::getCurrentThreadId();
+       m_window->checkScale();
+ 
+       checkEmbedState();
+@@ -786,6 +809,7 @@ public:
+ 
+       // Release the context so no thread keeps it current between frames: the next frame (or a
+       // destroy) may come from another thread, and EGL refuses a context current elsewhere.
++      m_frameThread = nullptr;
+       juce::OpenGLContext::deactivateCurrentContext();
+     }
+ 
+-- 
+2.34.1
+
