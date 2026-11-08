@@ -89,6 +89,8 @@ Not part of the hunk count above (that measures `Source/`). Applied by `scripts/
 | `pd-iemguts/0001` | `iemguts_setup()` aggregator | Build glue for plugdata |
 | `pd-lua/0001` | sequential array indexing for atom tables | Fork fix |
 | `JUCE/0001` | nullptr check for `XGetImage` in `createSnapshotOfNativeWindow` | Fork fix (GEM capture); still needed at the 650c8d9 pin (P9) |
+| `Gem/0001` | regenerated `src/Utils/GLUtil_define_generated.h` (its own generator script) | Upstream bug at the d8a4451 pin: the file is committed empty, so every GL_* name resolves to -1; `[gemwin]` clears with mask 0xffffffff (GL_INVALID_VALUE every frame) and sets no projection, the Gem window never shows a frame. Drop when upstream fixes the file |
+| `Gem/0002` | `gemjucewindow::destroyMess` deletes the JUCE window asynchronously, `Window` callbacks check a cleared owner under the Pd lock | Upstream bug at the pin: destroy waited on the message thread (callSync) while holding the Pd lock, a hard freeze whenever the message thread wanted that lock (2026-11-08 owner freeze, reproduced). `create()` keeps the same hazard (not fixed yet) |
 
 ## Baseline (P3.2 S0, fork `060f3383c`, base `5c6587314`)
 
