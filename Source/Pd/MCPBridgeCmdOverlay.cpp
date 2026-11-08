@@ -250,7 +250,15 @@ void MCPBridge::pdAiAnnotate(const juce::String& action, const juce::OSCMessage&
                     };
                     // Live check 2026-11-08: the left side of an object at x=40 put the note at x=-241, off the canvas.
                     Cand chosen = cands[0];
-                    for (auto& c : cands) if (c.nx >= 0.0f && c.ny >= 0.0f && fits(c.nx, c.ny)) { chosen = c; break; }
+                    bool placed = false;
+                    for (auto& c : cands) if (c.nx >= 0.0f && c.ny >= 0.0f && fits(c.nx, c.ny)) { chosen = c; placed = true; break; }
+                    // Live check 2026-11-08: no free side next to a box in a dense column -> the note covered [+ 1] and a
+                    // slider. Slide right along the object's row until it is free (leader stays on the right edge).
+                    for (int step = 1; !placed && step <= 40; ++step) {
+                        Cand c = cands[0];
+                        c.nx += static_cast<float>(step) * 20.0f;
+                        if (fits(c.nx, c.ny)) { chosen = c; placed = true; }
+                    }
                     a.x = chosen.nx + 6.0f; // note anchor (tag left = a.x - 6)
                     a.y = chosen.ny + 9.0f; // note anchor (tag centre = a.y)
                     a.hasLeader = true;
