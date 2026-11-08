@@ -109,6 +109,21 @@ bool CanvasMcpLayer::getAnnotationLiveBounds(juce::String const& targetId, juce:
                 *outGroupBounds = juce::Rectangle<int>(minX, minY, maxX - minX, maxY - minY);
             }
 
+            // Live check 2026-11-08: a note the bridge placed beside ONE object (/pd/ai_annotate picks the free side) keeps
+            // that side, following the object when it moves. Pinning it above the object covered the box above it.
+            if (ids.size() == 1 && fallbackHasLeader) {
+                float const dx = fallbackX - fallbackLx, dy = fallbackY - fallbackLy;
+                float const cx = 0.5f * static_cast<float>(minX + maxX), cy = 0.5f * static_cast<float>(minY + maxY);
+                if (dx > 2.0f) { outLx = static_cast<float>(maxX); outLy = dy < -5.0f ? static_cast<float>(minY) : cy; }
+                else if (dx < -2.0f && std::abs(dy) < 15.0f) { outLx = static_cast<float>(minX); outLy = cy; }
+                else if (dy < 0.0f) { outLx = cx; outLy = static_cast<float>(minY); }
+                else { outLx = cx; outLy = static_cast<float>(maxY); }
+                outAx = outLx + dx - 6.0f;
+                outAy = outLy + dy - 9.0f;
+                outHasLeader = true;
+                return true;
+            }
+
             // Console Tape: pinned directly above the top edge of the module strip
             outLx = static_cast<float>(minX + 14);
             outLy = static_cast<float>(minY);
@@ -182,7 +197,8 @@ juce::Rectangle<float> CanvasMcpLayer::getAnnotationScreenBounds(size_t annIndex
     if (!grpBounds.isEmpty() && groupW >= 90.0f) {
         tapeW = std::min(groupW, std::max(80.0f, textW));
     } else {
-        tapeW = std::max(groupW, std::min(160.0f, textW));
+        // a note beside one object: wide enough for its text (live check 2026-11-08: cut at 160 px, 'gentle (veloc')
+        tapeW = std::max(groupW, std::min(320.0f, textW));
     }
     return juce::Rectangle<float>(ax, ay, tapeW, tapeH);
 }

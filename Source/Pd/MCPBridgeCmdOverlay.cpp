@@ -248,8 +248,9 @@ void MCPBridge::pdAiAnnotate(const juce::String& action, const juce::OSCMessage&
                         { ox, oy + oh + 20.0f, ox + ow * 0.5f, oy + oh },                                // below
                         { ox + ow + 14.0f, oy - 20.0f, ox + ow, oy },                                    // upper-right
                     };
+                    // Live check 2026-11-08: the left side of an object at x=40 put the note at x=-241, off the canvas.
                     Cand chosen = cands[0];
-                    for (auto& c : cands) if (fits(c.nx, c.ny)) { chosen = c; break; }
+                    for (auto& c : cands) if (c.nx >= 0.0f && c.ny >= 0.0f && fits(c.nx, c.ny)) { chosen = c; break; }
                     a.x = chosen.nx + 6.0f; // note anchor (tag left = a.x - 6)
                     a.y = chosen.ny + 9.0f; // note anchor (tag centre = a.y)
                     a.hasLeader = true;
