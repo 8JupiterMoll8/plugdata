@@ -64,7 +64,6 @@ void MCPBridge::pumpWidgetAsks()
         args.add(juce::String("main")); // the focused tab: the key every verb takes for "main"
         args.add(juce::String::fromUTF8(e.widget));
         args.add(e.rev);
-        args.add(juce::String::fromUTF8(e.words));
         sendReply("/pd/widget_ask", args);
     }
     auto const c = widgetAsk->queue.takeCounts();

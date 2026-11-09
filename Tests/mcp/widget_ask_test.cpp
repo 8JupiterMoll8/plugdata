@@ -4,7 +4,7 @@
 // lock, and the bridge's message-thread pump pops them as /pd/widget_ask events.
 //  - names: only ai.<word> widgets (bounded length, no Pd/system names);
 //  - rev: a whole number 0..9999999;
-//  - words: bounded (kWidgetAskMaxWords atoms, kWidgetAskWordsLen bytes), control characters become spaces;
+//  - no free text: the event carries no words (review M4);
 //  - rate: at most one ask per widget per 2 s (a hello has its own budget), refused asks are counted, not queued;
 //  - the queue is fixed (no allocation): a full queue drops and counts.
 // Build + run: scripts/test-bridge-safety.sh
@@ -58,26 +58,25 @@ void namesAndRevs()
 void askQueuedAndPopped()
 {
     WidgetAskQueue q;
-    CHECK(q.offer(WidgetAskKind::Ask, "ai.draw", 7, "bass line", 1000) == WidgetAskOutcome::Queued);
+    CHECK(q.offer(WidgetAskKind::Ask, "ai.draw", 7, 1000) == WidgetAskOutcome::Queued);
     mcp::WidgetAskEvent e;
     CHECK(q.pop(e));
     CHECK(e.kind == WidgetAskKind::Ask);
     CHECK(std::strcmp(e.widget, "ai.draw") == 0);
     CHECK(e.rev == 7);
-    CHECK(std::strcmp(e.words, "bass line") == 0);
     CHECK(!q.pop(e));
     // hello: no rev, no words
-    CHECK(q.offer(WidgetAskKind::Hello, "ai.tap", 0, "", 1000) == WidgetAskOutcome::Queued);
+    CHECK(q.offer(WidgetAskKind::Hello, "ai.tap", 0, 1000) == WidgetAskOutcome::Queued);
     CHECK(q.pop(e));
-    CHECK(e.kind == WidgetAskKind::Hello && std::strcmp(e.widget, "ai.tap") == 0 && e.words[0] == 0);
+    CHECK(e.kind == WidgetAskKind::Hello && std::strcmp(e.widget, "ai.tap") == 0 && e.rev == 0);
 }
 
 void malformedRefused()
 {
     WidgetAskQueue q;
-    CHECK(q.offer(WidgetAskKind::Ask, "pd", 1, "", 0) == WidgetAskOutcome::Malformed);
-    CHECK(q.offer(WidgetAskKind::Ask, "ai.draw", -3, "", 0) == WidgetAskOutcome::Malformed);
-    CHECK(q.offer(WidgetAskKind::Ask, nullptr, 1, "", 0) == WidgetAskOutcome::Malformed);
+    CHECK(q.offer(WidgetAskKind::Ask, "pd", 1, 0) == WidgetAskOutcome::Malformed);
+    CHECK(q.offer(WidgetAskKind::Ask, "ai.draw", -3, 0) == WidgetAskOutcome::Malformed);
+    CHECK(q.offer(WidgetAskKind::Ask, nullptr, 1, 0) == WidgetAskOutcome::Malformed);
     mcp::WidgetAskEvent e;
     CHECK(!q.pop(e));
     auto const c = q.takeCounts();
@@ -89,20 +88,20 @@ void malformedRefused()
 void rateLimit()
 {
     WidgetAskQueue q;
-    CHECK(q.offer(WidgetAskKind::Ask, "ai.draw", 1, "", 10000) == WidgetAskOutcome::Queued);
-    CHECK(q.offer(WidgetAskKind::Ask, "ai.draw", 2, "", 10500) == WidgetAskOutcome::RateLimited);
-    CHECK(q.offer(WidgetAskKind::Ask, "ai.draw", 2, "", 11999) == WidgetAskOutcome::RateLimited);
+    CHECK(q.offer(WidgetAskKind::Ask, "ai.draw", 1, 10000) == WidgetAskOutcome::Queued);
+    CHECK(q.offer(WidgetAskKind::Ask, "ai.draw", 2, 10500) == WidgetAskOutcome::RateLimited);
+    CHECK(q.offer(WidgetAskKind::Ask, "ai.draw", 2, 11999) == WidgetAskOutcome::RateLimited);
     // another widget has its own budget
-    CHECK(q.offer(WidgetAskKind::Ask, "ai.tap", 1, "", 10600) == WidgetAskOutcome::Queued);
+    CHECK(q.offer(WidgetAskKind::Ask, "ai.tap", 1, 10600) == WidgetAskOutcome::Queued);
     // a hello does not use the ask's budget (a widget made and asked within 2 s)
-    CHECK(q.offer(WidgetAskKind::Hello, "ai.draw", 0, "", 10700) == WidgetAskOutcome::Queued);
-    CHECK(q.offer(WidgetAskKind::Hello, "ai.draw", 0, "", 10800) == WidgetAskOutcome::RateLimited);
+    CHECK(q.offer(WidgetAskKind::Hello, "ai.draw", 0, 10700) == WidgetAskOutcome::Queued);
+    CHECK(q.offer(WidgetAskKind::Hello, "ai.draw", 0, 10800) == WidgetAskOutcome::RateLimited);
     // 2 s after the last ACCEPTED ask (a refused one does not restart the clock)
-    CHECK(q.offer(WidgetAskKind::Ask, "ai.draw", 3, "", 12000) == WidgetAskOutcome::Queued);
+    CHECK(q.offer(WidgetAskKind::Ask, "ai.draw", 3, 12000) == WidgetAskOutcome::Queued);
     auto const c = q.takeCounts();
     CHECK(c.rateLimited == 3);
     // a clock that went backwards (another time source) never locks a widget out for long
-    CHECK(q.offer(WidgetAskKind::Ask, "ai.draw", 4, "", 100) == WidgetAskOutcome::Queued);
+    CHECK(q.offer(WidgetAskKind::Ask, "ai.draw", 4, 100) == WidgetAskOutcome::Queued);
 }
 
 void rateTableBounded()
@@ -112,7 +111,7 @@ void rateTableBounded()
     char name[16];
     for (int i = 0; i < mcp::kWidgetAskRateSlots + 5; ++i) {
         std::snprintf(name, sizeof(name), "ai.w%d", i);
-        CHECK(q.offer(WidgetAskKind::Ask, name, 1, "", 5000 + i) == WidgetAskOutcome::Queued);
+        CHECK(q.offer(WidgetAskKind::Ask, name, 1, 5000 + i) == WidgetAskOutcome::Queued);
         mcp::WidgetAskEvent e;
         CHECK(q.pop(e));
     }
@@ -125,7 +124,7 @@ void queueFull()
     int queued = 0;
     for (int i = 0; i < mcp::kWidgetAskQueueSlots + 3; ++i) {
         std::snprintf(name, sizeof(name), "ai.q%d", i);
-        if (q.offer(WidgetAskKind::Ask, name, 1, "", 1000) == WidgetAskOutcome::Queued) ++queued;
+        if (q.offer(WidgetAskKind::Ask, name, 1, 1000) == WidgetAskOutcome::Queued) ++queued;
     }
     CHECK(queued == mcp::kWidgetAskQueueSlots);
     CHECK(q.takeCounts().full == 3);
@@ -133,40 +132,6 @@ void queueFull()
     int popped = 0;
     while (q.pop(e)) ++popped;
     CHECK(popped == mcp::kWidgetAskQueueSlots);
-}
-
-void wordsBounded()
-{
-    WidgetAskQueue q;
-    std::string longWords(400, 'x');
-    CHECK(q.offer(WidgetAskKind::Ask, "ai.draw", 1, longWords.c_str(), 0) == WidgetAskOutcome::Queued);
-    mcp::WidgetAskEvent e;
-    CHECK(q.pop(e));
-    CHECK(std::strlen(e.words) == static_cast<size_t>(mcp::kWidgetAskWordsLen - 1));
-    // control characters (a newline, a tab, an escape) become spaces: one note line, no terminal tricks
-    CHECK(q.offer(WidgetAskKind::Ask, "ai.tap", 1, "a\nb\tc\x1b[2J", 0) == WidgetAskOutcome::Queued);
-    CHECK(q.pop(e));
-    CHECK(std::strcmp(e.words, "a b c [2J") == 0);
-}
-
-void appendWords()
-{
-    // The receiver joins atoms into a stack buffer with this helper (no allocation): words are cut at the limit.
-    char buf[mcp::kWidgetAskWordsLen] = {};
-    int n = 0;
-    CHECK(mcp::widgetAskAppend(buf, sizeof(buf), n, "bass"));
-    CHECK(mcp::widgetAskAppend(buf, sizeof(buf), n, "line"));
-    CHECK(std::strcmp(buf, "bass line") == 0);
-    char small[8] = {};
-    int m = 0;
-    CHECK(mcp::widgetAskAppend(small, sizeof(small), m, "abc"));
-    CHECK(!mcp::widgetAskAppend(small, sizeof(small), m, "defgh")); // does not fit: cut, says so
-    CHECK(std::strcmp(small, "abc def") == 0);
-    char num[32] = {};
-    mcp::widgetAskFormatNumber(num, sizeof(num), 0.5);
-    CHECK(std::strcmp(num, "0.5") == 0);
-    mcp::widgetAskFormatNumber(num, sizeof(num), 110);
-    CHECK(std::strcmp(num, "110") == 0);
 }
 
 void inName()
@@ -188,7 +153,7 @@ void producerConsumerThreads()
         char name[16];
         for (int i = 0; i < total; ++i) {
             std::snprintf(name, sizeof(name), "ai.p%d", i % 200);
-            while (q.offer(WidgetAskKind::Ask, name, i, "w", static_cast<std::int64_t>(i) * 3000) == WidgetAskOutcome::Full)
+            while (q.offer(WidgetAskKind::Ask, name, i, static_cast<std::int64_t>(i) * 3000) == WidgetAskOutcome::Full)
                 std::this_thread::yield();
         }
     });
@@ -220,8 +185,6 @@ int main()
     rateLimit();
     rateTableBounded();
     queueFull();
-    wordsBounded();
-    appendWords();
     inName();
     producerConsumerThreads();
     if (failures) {

@@ -2298,8 +2298,8 @@ juce::var inletEntry(juce::var const& json, char const* id, int inlet)
     return (arr && inlet < arr->size()) ? (*arr)[inlet] : juce::var();
 }
 
-// Proof3 3c (capability widget_ask): a pd-lua widget's `ai-ask <widget> <rev> [words]` (or `ai-ask hello <widget>`)
-// reaches the server as ONE event /pd/widget_ask <ask|hello> <canvas> <widget> <rev> <words>, sent from the message
+// Proof3 3c (capability widget_ask): a pd-lua widget's `ai-ask <widget> <rev>` (or `ai-ask hello <widget>`)
+// reaches the server as ONE event /pd/widget_ask <ask|hello> <canvas> <widget> <rev> (no free text), sent from the message
 // thread; at most one ask per widget per 2 s (a refused ask is one console line, not an event); the receiver is bound
 // only while the bridge serves.
 void sendToAiAsk(McpHost* host, t_symbol* selector, std::vector<t_atom> atoms)
@@ -2341,18 +2341,17 @@ void runWidgetAskCases(Harness& h, PluginProcessor& processor, MCPBridge& bridge
     CHECK(hasCap(h, "widget_ask", "wk0"));
     CHECK(bridge.widgetAskBound());
 
-    // 1. A list from a Lua widget (pd.send("ai-ask", "list", {...})): one event, words joined, numbers as Pd prints them.
+    // 1. A list from a Lua widget (pd.send("ai-ask", "list", {...})): one event; trailing words are dropped (review M4).
     h.replies.clear();
     sendToAiAsk(host, &s_list, { symAtom("ai.draw"), numAtom(7), symAtom("bass"), symAtom("line"), numAtom(0.5) });
     auto ask = h.replies.waitFor("/pd/widget_ask", 2000);
     CHECK(ask.has_value());
     if (ask) {
-        CHECK(ask->args.size() == 5);
+        CHECK(ask->args.size() == 4);
         CHECK(ask->str(0) == "ask");
         CHECK(ask->str(1) == "main");
         CHECK(ask->str(2) == "ai.draw");
         CHECK(ask->args[3].isNumber && ask->num(3) == 7);
-        CHECK(ask->str(4) == "bass line 0.5");
     } else {
         std::printf("  unread replies: %s\n", h.replies.describe().c_str());
     }
@@ -2366,7 +2365,7 @@ void runWidgetAskCases(Harness& h, PluginProcessor& processor, MCPBridge& bridge
     // 3. Another widget, as a [s ai-ask] message box sends it (the widget name is the selector), and a hello.
     sendToAiAsk(host, gensym("ai.tap"), { numAtom(3) });
     auto tap = h.replies.waitFor("/pd/widget_ask", 2000);
-    CHECK(tap && tap->str(0) == "ask" && tap->str(2) == "ai.tap" && tap->num(3) == 3 && tap->str(4).empty());
+    CHECK(tap && tap->str(0) == "ask" && tap->str(2) == "ai.tap" && tap->num(3) == 3 && tap->args.size() == 4);
     sendToAiAsk(host, gensym("hello"), { symAtom("ai.draw") });
     auto hello = h.replies.waitFor("/pd/widget_ask", 2000);
     CHECK(hello && hello->str(0) == "hello" && hello->str(2) == "ai.draw");
@@ -2396,7 +2395,7 @@ void runWidgetAskCases(Harness& h, PluginProcessor& processor, MCPBridge& bridge
         if (t_gobj* g = host->resolveStableId("main", "wk_del")) pd_bang(&g->g_pd);
     }, 2000));
     auto fromPatch = h.replies.waitFor("/pd/widget_ask", 2000);
-    CHECK(fromPatch && fromPatch->str(2) == "ai.grid" && fromPatch->num(3) == 2 && fromPatch->str(4) == "from audio");
+    CHECK(fromPatch && fromPatch->str(2) == "ai.grid" && fromPatch->num(3) == 2 && fromPatch->args.size() == 4);
     h.call("/pd/batch_atomic", { "main", "wk2", 3, 0, 0, 0, 0, "wk_del", "wk_msg", "wk_s", 0, 5, 10, 0 }, "/pd/batch_atomic/reply/wk2");
 
     // 6. Without a running bridge nothing is bound to `ai-ask` and nothing is sent; serving again binds it again.
@@ -2549,6 +2548,41 @@ void runControlTruthCases(Harness& h, PluginProcessor& processor)
         CHECK(json["refused"].toString().isNotEmpty() && !static_cast<bool>(json["delivered"]));
         if (std::string(name) == "ct_arr_name" || std::string(name) == "ct_nc_name")
             CHECK(json["refused"].toString() == "non-object binder" && json["refusedClass"].toString().isNotEmpty());
+    }
+    // Review H5 (proof3): a bound thing that is not a box on a canvas, though its class passes pd_checkobject: pd-lua's
+    // `pd.Receive` proxy is a class made with flags 0 (= CLASS_PATCHABLE) and a 24-byte struct, so reading it as a
+    // t_object (obj_noutlets, te_binbuf) overreads the heap. Such a binder is refused, alone or beside a real [r].
+    {
+        struct FakeProxy { t_pd pd; void* owner; t_symbol* name; }; // pdlua.c t_pdlua_proxyreceive's layout
+        static t_class* proxyClass = nullptr;
+        FakeProxy* proxy = nullptr;
+        CHECK(host->pdWait([&] {
+            if (!proxyClass) {
+                proxyClass = class_new(gensym("h5 fake proxy receive"), nullptr, nullptr, sizeof(FakeProxy), 0, static_cast<t_atomtype>(0));
+                class_addanything(proxyClass, reinterpret_cast<t_method>(+[](FakeProxy*, t_symbol*, int, t_atom*) {}));
+            }
+            // As pdlua_proxyreceive_new: malloc'd and its class set by hand (pd_new would write t_object fields past
+            // the 24 bytes, pd_free would read them).
+            proxy = static_cast<FakeProxy*>(getbytes(sizeof(FakeProxy)));
+            proxy->pd = proxyClass;
+            proxy->name = gensym("ct_proxy_name");
+            pd_bind(&proxy->pd, proxy->name);
+            pd_bind(&proxy->pd, gensym("ct_f")); // beside [r ct_f]
+        }, 2000));
+        CHECK(proxy && pd_checkobject(&proxy->pd) != nullptr); // the trap: the class check alone lets it through
+        for (auto const* name : { "ct_proxy_name", "ct_f" }) {
+            auto r = h.call("/pd/send_checked", { "main", "ct18", name, 1, 3.0 }, "/pd/send_checked/reply/ct18");
+            CHECK(r.has_value());
+            auto const json = r ? parseJson(*r) : juce::var();
+            CHECK(json["refused"].toString() == "non-object binder");
+            CHECK(json["refusedClass"].toString() == "h5 fake proxy receive");
+            CHECK(!static_cast<bool>(json["delivered"]));
+        }
+        CHECK(host->pdWait([&] {
+            pd_unbind(&proxy->pd, gensym("ct_f"));
+            pd_unbind(&proxy->pd, proxy->name);
+            freebytes(proxy, sizeof(FakeProxy));
+        }, 2000));
     }
     {
         auto r = h.call("/pd/send_checked", { "main", "ct11", "ct_f", 1, 42.0 }, "/pd/send_checked/reply/ct11");
@@ -3177,6 +3211,69 @@ void runSaveCoordsCases(Harness& h, PluginProcessor& processor)
 // P11.6 review M1: a canvas named by the full path of its file resolves to exactly that open root, also when two
 // roots share the file name (a/twin.pd, b/twin.pd); a path no open root has resolves to nothing (never the first tab of
 // that name).
+// Review H1 (proof3, pd-lua patch 0002): a widget that keeps its state with self:set_args marks its patch changed, so
+// closing without saving asks (the drawing is not lost silently). Only a real change marks it.
+void runLuaSetArgsDirtyCases(PluginProcessor& processor)
+{
+    std::printf("pd-lua set_args marks the patch changed (H1)\n");
+    auto* host = processor.getMcp();
+    auto base = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("mcp_h1_setargs");
+    base.deleteRecursively();
+    base.createDirectory();
+    base.getChildFile("h1dirty.pd_lua").replaceWithText(
+        "local h1 = pd.Class:new():register(\"h1dirty\")\n"
+        "function h1:initialize(sel, atoms) self.inlets = 1; return true end\n"
+        "function h1:in_1_float(f) self:set_args({f}) end\n");
+    auto host_pd = base.getChildFile("h1host.pd");
+    // A pd-lua object takes messages through its inlet proxies (pd_float on the box itself: "no method for 'float'"),
+    // so the float comes as in a patch: [r h1go] -> [h1dirty].
+    host_pd.replaceWithText("#N canvas 0 50 450 300 12;\n#X obj 10 10 h1dirty;\n#X obj 10 60 r h1go;\n#X connect 1 0 0 0;\n");
+    CHECK(host->pdWait([&] {
+        t_atom a[2];
+        SETSYMBOL(&a[0], gensym(host_pd.getFileName().toRawUTF8()));
+        SETSYMBOL(&a[1], gensym(base.getFullPathName().toRawUTF8()));
+        pd_typedmess(gensym("pd")->s_thing, gensym("open"), 2, a);
+    }, 3000));
+    t_canvas* c = nullptr;
+    bool isLua = false;
+    host->pdWait([&] {
+        c = host->getCanvasBySymbol(host_pd.getFullPathName());
+        isLua = c && c->gl_list && pd_class(&c->gl_list->g_pd) != text_class; // created, not a broken box
+    }, 3000);
+    CHECK(c != nullptr);
+    CHECK(isLua);
+    uint64_t const consoleAtStart = host->consoleSeqNow();
+    if (c && isLua) {
+        auto sendAndReadDirty = [&](double v, bool clearFirst) {
+            int dirty = -1;
+            host->pdWait([&] {
+                if (clearFirst) canvas_dirty(c, 0);
+                if (auto* go = gensym("h1go"); go->s_thing) pd_float(go->s_thing, static_cast<t_float>(v));
+                dirty = c->gl_dirty;
+                char* buf = nullptr; int len = 0;
+                binbuf_gettext(reinterpret_cast<t_text*>(c->gl_list)->te_binbuf, &buf, &len);
+                std::printf("  h1: after %g the box reads '%.*s', root dirty %d (class %s)\n", v, len, buf ? buf : "", dirty,
+                    class_getname(pd_class(&c->gl_list->g_pd)));
+                if (buf) freebytes(buf, len);
+            }, 3000);
+            return dirty;
+        };
+        CHECK(sendAndReadDirty(5, true) == 1);  // new args: changed
+        CHECK(sendAndReadDirty(5, true) == 0);  // the same args again: no change, not marked
+        CHECK(sendAndReadDirty(6, true) == 1);  // different again: marked
+        host->pdWait([&] { canvas_dirty(c, 0); }, 3000);
+    }
+    for (auto const& hit : host->consoleSince(consoleAtStart))
+        std::printf("  h1 console: %s\n", hit.text.toRawUTF8());
+    host->pdWait([&] {
+        if (!c) return;
+        t_atom force;
+        SETFLOAT(&force, 1);
+        pd_typedmess(&c->gl_pd, gensym("menuclose"), 1, &force);
+    }, 3000);
+    base.deleteRecursively();
+}
+
 void runPathCanvasCases(PluginProcessor& processor)
 {
     std::printf("canvas by full file path (P11.6 M1)\n");
@@ -6295,6 +6392,7 @@ int main()
             runContentVersionCases(harness, processor);
             runSelectionGetCases(harness);
             runFlowProvenanceCases(harness, processor);
+            runLuaSetArgsDirtyCases(processor); // opens and closes its own tab: after the cases that need "main" settled
             runFlowModeCases(harness, processor, [&] {
                 bridge->setReplySinkForTests([&replies](juce::OSCMessage const& msg) { replies.push(msg); });
             });

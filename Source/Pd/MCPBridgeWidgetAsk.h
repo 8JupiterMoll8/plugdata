@@ -8,11 +8,12 @@
 // setReplySinkForTests, until stop()), a native CLASS_PD receiver is bound to the Pd name `ai-ask`, the same way the
 // armed control window binds its probe (MCPBridgeControlWindow.h): no canvas object, it coexists with any [r ai-ask].
 //
-//   ai-ask <widget> <rev> [words...]   ->  /pd/widget_ask ask   main <widget> <rev> <words>
-//   ai-ask hello <widget>              ->  /pd/widget_ask hello main <widget> 0     ""
+//   ai-ask <widget> <rev>    ->  /pd/widget_ask ask   main <widget> <rev>
+//   ai-ask hello <widget>    ->  /pd/widget_ask hello main <widget> 0
+// Anything after the rev is dropped (review M4: no free text from a patch into the AI's prompt).
 //
-// The receiver runs wherever Pd dispatches (the audio thread too), under the Pd lock: it only parses into stack
-// buffers and calls mcp::WidgetAskQueue::offer (no lock, no allocation, no JUCE). The pump below runs on the message
+// The receiver runs wherever Pd dispatches (the audio thread too), under the Pd lock: it only reads the atoms and
+// calls mcp::WidgetAskQueue::offer (no lock, no allocation, no JUCE). The pump below runs on the message
 // thread every kPumpMs, pops the events and sends them (MCPBridge::pumpWidgetAsks). Bounds and the rate limit
 // (1 ask per widget per 2 s): Source/Mcp/McpWidgetAsk.h. Included by MCPBridge.cpp only.
 
@@ -43,25 +44,11 @@ inline void mcpAskOffer(McpAskReceiver* x, t_symbol* head, int argc, t_atom* arg
     char const* first = head ? head->s_name : nullptr;
     if (first && std::strcmp(first, "hello") == 0) {
         char const* widget = (argc >= 1 && argv[0].a_type == A_SYMBOL && argv[0].a_w.w_symbol) ? argv[0].a_w.w_symbol->s_name : nullptr;
-        x->queue->offer(mcp::WidgetAskKind::Hello, widget, 0, "", now);
+        x->queue->offer(mcp::WidgetAskKind::Hello, widget, 0, now);
         return;
     }
     double const rev = (argc >= 1 && argv[0].a_type == A_FLOAT) ? static_cast<double>(argv[0].a_w.w_float) : -1.0;
-    char words[mcp::kWidgetAskWordsLen] = {};
-    int used = 0;
-    for (int i = 1; i < argc && i <= mcp::kWidgetAskMaxWords; ++i) {
-        char num[32] = {};
-        char const* word = nullptr;
-        if (argv[i].a_type == A_SYMBOL && argv[i].a_w.w_symbol)
-            word = argv[i].a_w.w_symbol->s_name;
-        else if (argv[i].a_type == A_FLOAT) {
-            mcp::widgetAskFormatNumber(num, sizeof(num), argv[i].a_w.w_float);
-            word = num;
-        }
-        if (!word) continue;
-        if (!mcp::widgetAskAppend(words, sizeof(words), used, word)) break;
-    }
-    x->queue->offer(mcp::WidgetAskKind::Ask, first, rev, words, now);
+    x->queue->offer(mcp::WidgetAskKind::Ask, first, rev, now);
 }
 
 inline void mcpAskReceiverFree(McpAskReceiver* x)

@@ -258,12 +258,13 @@ void MCPBridge::pdSendChecked(const juce::String& action, const juce::OSCMessage
         t_symbol* sym = mcp::bound::findSymbolNoCreate(name.toRawUTF8());
         auto const binders = mcp::bound::bindersOf(sym);
         std::vector<t_object*> receivers;
+        auto const placed = mcp::bound::placedAmong(binders); // review H5: only a placed box is read as a t_object
         for (auto* b : binders) {
             if (mcpCtrlReceiverClass && *b == mcpCtrlReceiverClass) continue; // the bridge's own probe
-            t_object* o = *b == canvas_class ? nullptr : pd_checkobject(b);
+            t_object* o = (*b == canvas_class || placed.count(b) == 0) ? nullptr : pd_checkobject(b);
             if (!o) {
                 // Review M6, fail closed: the name also reaches something that is not a box (a canvas by namecanvas,
-                // an array, a dialog stub): never sent.
+                // an array, a dialog stub, a pd-lua pd.Receive proxy: review H5): never sent.
                 root->setProperty("refused", "non-object binder"); // server review B: the exact word
                 root->setProperty("refusedClass", juce::String::fromUTF8(class_getname(*b)));
                 return;

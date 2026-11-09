@@ -8,15 +8,16 @@
 // Tests/mcp/widget_ask_test.cpp through scripts/test-bridge-safety.sh).
 //
 // Pd side (MCPBridgeWidgetAsk.h): the bridge binds a receiver to `ai-ask` while it serves. A message
-//   ai-ask <widget> <rev> [words...]     the widget's ask chip ("complete it"), rev = the widget's state revision
+//   ai-ask <widget> <rev>                the widget's ask chip ("complete it"), rev = the widget's state revision
 //   ai-ask hello <widget>                a widget that was made (or loaded) asks whether anyone hears
 // is parsed by the receiver and handed to WidgetAskQueue::offer. The receiver runs wherever Pd dispatches (the audio
 // thread too), always under the Pd lock: offer never locks, never allocates and never calls JUCE; one offer runs at a
 // time (the Pd lock). The bridge's message-thread pump pops the events and sends /pd/widget_ask.
 //
-// Bounds: widget names ai.<lowercase word> (kWidgetAskNameLen), rev a whole number 0..9999999, words cut at
-// kWidgetAskWordsLen bytes, control characters made spaces; at most one ask per widget per kWidgetAskMinGapMs (a hello
-// has its own budget); a fixed queue of kWidgetAskQueueSlots (full = dropped and counted).
+// Bounds: widget names ai.<lowercase word> (kWidgetAskNameLen), rev a whole number 0..9999999. No free text travels
+// (review M4: a patch-side text channel into the AI's prompt): anything after the rev is dropped by the receiver. At
+// most one ask per widget per kWidgetAskMinGapMs (a hello has its own budget); a fixed queue of kWidgetAskQueueSlots
+// (full = dropped and counted).
 
 #pragma once
 
@@ -30,8 +31,6 @@
 namespace mcp {
 
 constexpr int kWidgetAskNameLen = 32;   // ai.<word>, the terminating NUL not counted
-constexpr int kWidgetAskWordsLen = 161; // 160 bytes of words + NUL
-constexpr int kWidgetAskMaxWords = 16;  // atoms after the rev that are read at all
 constexpr int kWidgetAskQueueSlots = 16;
 constexpr int kWidgetAskRateSlots = 16;
 constexpr std::int64_t kWidgetAskMinGapMs = 2000;
@@ -44,7 +43,6 @@ struct WidgetAskEvent {
     WidgetAskKind kind = WidgetAskKind::Ask;
     int rev = 0;
     char widget[kWidgetAskNameLen + 1] = {};
-    char words[kWidgetAskWordsLen] = {};
 };
 
 struct WidgetAskCounts {
@@ -82,37 +80,10 @@ inline bool widgetAskInName(char const* widget, char* out, std::size_t outLen)
     return n > 0 && static_cast<std::size_t>(n) < outLen;
 }
 
-// Appends `word` to `buf` (a space before it unless first), cut at the buffer's end. `used` = bytes in buf. Returns
-// false when the word did not fit whole (what fits is kept).
-inline bool widgetAskAppend(char* buf, std::size_t bufLen, int& used, char const* word)
-{
-    if (!buf || bufLen == 0 || !word) return false;
-    std::size_t pos = used > 0 ? static_cast<std::size_t>(used) : 0;
-    if (pos >= bufLen - 1) return false;
-    bool whole = true;
-    if (pos > 0) buf[pos++] = ' ';
-    for (char const* w = word; *w; ++w) {
-        if (pos >= bufLen - 1) {
-            whole = false;
-            break;
-        }
-        buf[pos++] = *w;
-    }
-    buf[pos] = 0;
-    used = static_cast<int>(pos);
-    return whole;
-}
-
-// %g with up to 6 significant digits ("0.5", "110"): how Pd itself prints a float atom.
-inline void widgetAskFormatNumber(char* out, std::size_t outLen, double v)
-{
-    std::snprintf(out, outLen, "%g", v);
-}
-
 // Single producer (the Pd lock), single consumer (the bridge's message-thread pump). Fixed storage.
 class WidgetAskQueue {
 public:
-    WidgetAskOutcome offer(WidgetAskKind kind, char const* widget, double rev, char const* words, std::int64_t nowMs)
+    WidgetAskOutcome offer(WidgetAskKind kind, char const* widget, double rev, std::int64_t nowMs)
     {
         if (!widgetAskNameOk(widget) || (kind == WidgetAskKind::Ask && !widgetAskRevOk(rev))) {
             malformed.fetch_add(1, std::memory_order_relaxed);
@@ -132,14 +103,13 @@ public:
         WidgetAskEvent& e = slots[head % kWidgetAskQueueSlots];
         e.kind = kind;
         e.rev = kind == WidgetAskKind::Ask ? static_cast<int>(rev) : 0;
-        std::snprintf(e.widget, sizeof(e.widget), "%s", widget);
-        copyWords(e.words, words);
+        copyName(e.widget, widget);
         writeIndex.store(head + 1, std::memory_order_release);
 
         if (!slot) slot = claimRateSlot();
         slot->used = true;
         slot->kind = kind;
-        std::snprintf(slot->widget, sizeof(slot->widget), "%s", widget);
+        copyName(slot->widget, widget);
         slot->lastMs = nowMs;
         return WidgetAskOutcome::Queued;
     }
@@ -191,14 +161,13 @@ private:
         return oldest;
     }
 
-    static void copyWords(char* dst, char const* src)
+    // A checked name (widgetAskNameOk: <= kWidgetAskNameLen bytes) into a kWidgetAskNameLen + 1 buffer. No printf on
+    // the dispatch path (review L5: no locale, no formatting).
+    static void copyName(char* dst, char const* src)
     {
         std::size_t i = 0;
-        if (src)
-            for (; src[i] && i < static_cast<std::size_t>(kWidgetAskWordsLen - 1); ++i) {
-                auto const c = static_cast<unsigned char>(src[i]);
-                dst[i] = (c < 0x20 || c == 0x7f) ? ' ' : static_cast<char>(c);
-            }
+        for (; src[i] && i < static_cast<std::size_t>(kWidgetAskNameLen); ++i)
+            dst[i] = src[i];
         dst[i] = 0;
     }
 

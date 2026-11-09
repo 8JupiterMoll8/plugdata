@@ -1,0 +1,73 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Alphi <alphi@starchaser.local>
+Date: Mon, 9 Nov 2026 18:23:45 +0100
+Subject: [PATCH] fix(lua): set_args marks the patch changed when the args
+ change
+
+pdlua_set_arguments rewrote the object's binbuf but never marked a canvas dirty, so a
+widget that keeps its state in its args (self:set_args) lost it when the patch was
+closed without saving, without a question. Now the canvas whose file keeps the args
+(canvas_getrootfor: the root patch or the enclosing abstraction) is marked dirty, only
+when the new args differ from the old ones (count, type, value).
+---
+ pdlua.c | 30 ++++++++++++++++++++++++++++++
+ 1 file changed, 30 insertions(+)
+
+diff --git a/pdlua.c b/pdlua.c
+index ff173f0..18e9525 100644
+--- a/pdlua.c
++++ b/pdlua.c
+@@ -1433,6 +1433,24 @@ static int pdlua_get_arguments(lua_State *L)
+     return 0;
+ }
+ 
++/** plugdata MCP fork: 1 when two argument lists differ (count, atom type or value). */
++static int pdlua_binbuf_differs(t_binbuf *a, t_binbuf *b)
++{
++    int na = binbuf_getnatom(a), nb = binbuf_getnatom(b);
++    if (na != nb) return 1;
++    t_atom *va = binbuf_getvec(a), *vb = binbuf_getvec(b);
++    for (int i = 0; i < na; i++) {
++        if (va[i].a_type != vb[i].a_type) return 1;
++        switch (va[i].a_type) {
++        case A_FLOAT: if (va[i].a_w.w_float != vb[i].a_w.w_float) return 1; break;
++        case A_SYMBOL: case A_DOLLSYM: if (va[i].a_w.w_symbol != vb[i].a_w.w_symbol) return 1; break;
++        case A_DOLLAR: if (va[i].a_w.w_index != vb[i].a_w.w_index) return 1; break;
++        default: break;
++        }
++    }
++    return 0;
++}
++
+ static int pdlua_set_arguments(lua_State *L)
+ {
+     // Check if the first argument is a valid user data pointer
+@@ -1454,6 +1472,10 @@ static int pdlua_set_arguments(lua_State *L)
+             return 0;
+         }
+ 
++        // plugdata MCP fork: keep the old args to see whether they change (the patch is marked changed then, so
++        // closing it without saving asks instead of losing the state a widget keeps in its args).
++        t_binbuf *before = binbuf_duplicate(b);
++
+         t_atom name;
+         SETSYMBOL(&name, atom_getsymbol(binbuf_getvec(b)));
+         binbuf_clear(b);
+@@ -1519,6 +1541,14 @@ static int pdlua_set_arguments(lua_State *L)
+         } else {
+             pd_error(o, "%s: set_args: argument must be a table", src_info(L, msg));
+         }
++
++        // plugdata MCP fork: mark the canvas whose file keeps these args (the root patch, or the abstraction the
++        // object sits in) as changed, only when the args really changed.
++        if (pdlua_binbuf_differs(before, b) && o->canvas) {
++            t_canvas *owner = canvas_getrootfor(o->canvas);
++            if (owner) canvas_dirty(owner, 1);
++        }
++        binbuf_free(before);
+     } else {
+         pd_error(NULL, "%s: set_args: missing object", src_info(L, msg));
+     }
+-- 
+2.34.1
+

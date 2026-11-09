@@ -497,7 +497,7 @@ public:
 
     // Proof3 3c (capability widget_ask): `ai-ask` is bound while the bridge serves (start / setReplySinkForTests,
     // until stop). The pump (message thread, every 50 ms) sends each queued ask as /pd/widget_ask
-    // <ask|hello> <canvas> <widget> <rev> <words> and logs refused asks as one console line.
+    // <ask|hello> <canvas> <widget> <rev> and posts refused asks as one Pd console line.
     void pumpWidgetAsks();
     // Tests: the receiver is bound now.
     bool widgetAskBound() const;
