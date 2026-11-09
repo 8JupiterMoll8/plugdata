@@ -1044,6 +1044,18 @@ bool McpHost::undoStep(t_canvas* cnv, bool redo)
     return true;
 }
 
+void McpHost::journalEditorRemove(t_canvas* cnv, SmallArray<t_gobj*> const& objects)
+{
+    PdLockScope lock(processor);
+    if (!cnv) return;
+    for (auto* obj : objects) {
+        if (!obj) continue;
+        auto const id = getStableId(obj);
+        if (id.isEmpty()) continue;
+        journalId(cnv, id.toStdString(), obj); // checks the id is bound to this very object on this canvas
+    }
+}
+
 void McpHost::journalId(t_canvas* cnv, std::string const& id, t_gobj* obj)
 {
     // Only a real binding (resolveStableId has no index fallback since P5.1; kept as a guard).

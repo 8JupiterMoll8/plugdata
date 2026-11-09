@@ -106,6 +106,9 @@ public:
     bool redo();
     bool canUndo(); // an MCP transaction or the native stack (also the editor's undo button state)
     bool canRedo();
+    // Slice 3 F5: Canvas::removeSelection is about to delete these boxes (the artist's Cut/Delete): their ids go to the
+    // canvas's undo journal (McpHost::journalEditorRemove), so Ctrl+Z gives them back.
+    void aboutToRemove(SmallArray<struct _gobj*> const& objects);
 
     // PRD overlay: handle a click that may land on an AI note (x = dismiss, body =
     // open the editor). Returns true if a note consumed it. Called by the canvas AND

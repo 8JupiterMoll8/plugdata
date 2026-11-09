@@ -1953,6 +1953,7 @@ void Canvas::removeSelection()
     };
 
     // remove selection
+    mcpLayer->aboutToRemove(objects); // MCP-HOOK(canvasLifecycle)
     patch.removeObjects(objects);
 
     // Remove connection afterwards and make sure they aren't already deleted

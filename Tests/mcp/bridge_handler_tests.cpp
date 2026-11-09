@@ -637,6 +637,71 @@ void runSharedUndoCases(Harness& h, PluginProcessor& processor)
     CHECK(u.has_value() && u->num(0) == 1);
     CHECK(inText("su_in").empty());
     CHECK(text("su_sub") == "pd su_sub"); // the parent's history is untouched
+
+    // 11. (slice 3 F5, plan "case 8") The ARTIST deletes two wired AI boxes (Canvas::removeSelection: the editor
+    //     hook journals the ids, then Patch::removeObjects + finishRemove). Ctrl+Z brings back the text, the wire and
+    //     both ids, and the origin is no longer the AI's; redo takes them away, undo brings them back again. An
+    //     object without an id journals nothing.
+    auto const ce1 = next("sue");
+    CHECK(batch({ "main", ce1, 0, 0, 0, 2, 1,
+        "su_e1", 1200, 500, "obj", "osc~", 1, "330",
+        "su_e2", 1200, 550, "obj", "*~", 1, "0.2",
+        "su_e1", 0, "su_e2", 0,
+        0, 5, 10, 0 }, ce1));
+    CHECK(wired("su_e1", "su_e2"));
+    auto editorDelete = [&](std::vector<char const*> ids) {
+        return host->pdWait([&] {
+            t_canvas* cnv = host->getCanvasBySymbolStrict("main");
+            if (!cnv) return;
+            SmallArray<t_gobj*> objs;
+            for (auto const* id : ids)
+                if (t_gobj* o = host->resolveStableId("main", id)) objs.add(o);
+            if (!cnv->gl_editor) canvas_create_editor(cnv);
+            canvas_undo_add(cnv, UNDO_SEQUENCE_START, "Remove object/s", nullptr); // Patch::startUndoSequence
+            host->journalEditorRemove(cnv, objs); // the MCP-HOOK in Canvas::removeSelection
+            pd::Interface::removeObjects(cnv, objs);
+            pd::Interface::finishRemove(cnv);
+        }, 2000);
+    };
+    CHECK(editorDelete({ "su_e1", "su_e2" }));
+    CHECK(text("su_e1").empty() && text("su_e2").empty());
+    CHECK(step("undo"));
+    CHECK(text("su_e1") == "osc~ 330" && text("su_e2") == "*~ 0.2");
+    CHECK(wired("su_e1", "su_e2"));
+    bool aiOrigin = true;
+    CHECK(host->pdWait([&] {
+        t_gobj* o = host->resolveStableId("main", "su_e1");
+        aiOrigin = o && host->aiIntact(o);
+    }, 2000));
+    CHECK(!aiOrigin); // brought back by undo: never the AI's own
+    CHECK(step("redo"));
+    CHECK(text("su_e1").empty() && text("su_e2").empty());
+    CHECK(step("undo"));
+    CHECK(text("su_e1") == "osc~ 330" && text("su_e2") == "*~ 0.2");
+    CHECK(wired("su_e1", "su_e2"));
+
+    size_t journalBefore = 0, journalAfter = 1;
+    CHECK(host->pdWait([&] {
+        t_canvas* cnv = host->getCanvasBySymbolStrict("main");
+        if (!cnv) return;
+        t_atom at[4];
+        SETFLOAT(at, 1300);
+        SETFLOAT(at + 1, 500);
+        SETSYMBOL(at + 2, gensym("f"));
+        SETFLOAT(at + 3, 9);
+        pd_typedmess(&cnv->gl_pd, gensym("obj"), 4, at); // a box made outside the bridge: no id
+        t_gobj* last = cnv->gl_list;
+        while (last && last->g_next) last = last->g_next;
+        if (!last || host->getStableId(last).isNotEmpty()) return;
+        journalBefore = host->undoJournalFor(cnv).size();
+        SmallArray<t_gobj*> objs;
+        objs.add(last);
+        host->journalEditorRemove(cnv, objs);
+        journalAfter = host->undoJournalFor(cnv).size();
+        pd::Interface::removeObjects(cnv, objs);
+        pd::Interface::finishRemove(cnv);
+    }, 2000));
+    CHECK(journalAfter == journalBefore);
 }
 
 // P6.2 UF: /pd/undo_peek reads the canvas's undo queue without changing it: depth D (steps Ctrl+Z can take), redo R,

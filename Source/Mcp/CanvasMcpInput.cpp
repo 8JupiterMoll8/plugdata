@@ -505,6 +505,12 @@ bool CanvasMcpLayer::redo()
     return canvas.pd && canvas.pd->getMcp()->undoStep(canvas.patch.getUncheckedPointer(), true);
 }
 
+void CanvasMcpLayer::aboutToRemove(SmallArray<t_gobj*> const& objects)
+{
+    if (canvas.pd && !objects.empty())
+        canvas.pd->getMcp()->journalEditorRemove(canvas.patch.getUncheckedPointer(), objects);
+}
+
 bool CanvasMcpLayer::canUndo()
 {
     return canvas.patch.canUndo();
