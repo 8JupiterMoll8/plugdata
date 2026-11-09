@@ -18,8 +18,8 @@
 //                 silent_source the output is silent (or dc_only) and no signal wire comes in
 //                 bus_end       the same at a bus receiver (catch~, receive~) whose senders the canvas does not hold
 //                               (review M4: the walk crosses throw~ -> catch~ and send~ -> receive~ through bus edges)
-//               none: every output hears sound and no candidate was measured on any branch (hop 0, the first
-//               output; review C: a sounding voice never hides a dead one, whose stop is reported). unread: an untapped node lies
+//               none (option D): every output hears sound: no stop is chosen (node -1); the rows carry each node's
+//               own verdict and `diesHere`. Otherwise the walk from the SILENT outputs only. unread: an untapped node lies
 //               nearer than any measured stop (or no stop was measured); `refocus` names the untapped nodes of the
 //               walk to tap. No output on the canvas: no stop (`hasStop` false).
 //   liveEnds    every node with an audible signal input, at least one signal outlet and no wire on any of them
@@ -29,7 +29,6 @@
 #pragma once
 
 #include <algorithm>
-#include <functional>
 #include <cstddef>
 #include <string>
 #include <vector>
@@ -60,8 +59,6 @@ struct Node {
     std::string id;
     bool output = false; // dac~ / out~
     bool busEnd = false; // a bus receiver whose senders are not on this canvas (or not found)
-    bool sums = false;   // a summing node ([+~], a signal inlet with several wires, a catch~): a dead voice's path
-                         // to the output may end here although the sum sounds (delta review 1)
     std::vector<Inlet> inlets;
     std::vector<Outlet> outlets;
 };
@@ -235,43 +232,41 @@ inline Result walk(Graph const& g, std::vector<int> const& outputs, int cap = kR
     if (r.outputs.empty()) return r;
     r.hasStop = true;
 
-    // Server review C: `none` only when nothing measured stops anywhere on the walk and every output hears sound. A
-    // sounding voice never hides a dead one: the measured candidates below are looked for first.
-    bool allOutputsSound = true;
-    for (int o : r.outputs) allOutputsSound = allOutputsSound && inputAudible(g, o);
-    r.allOutputsSound = allOutputsSound;
+    // Option D (third review, facts only): when EVERY output sounds, there is no stop to choose: kind none, no node.
+    // The rows still carry each node's own measured verdict and `diesHere`; the reader decides what a dead voice
+    // behind a sounding mixer, or a constant bias, means. No path rule, no sum detection.
+    std::vector<int> silentOutputs;
+    for (int o : r.outputs)
+        if (!inputAudible(g, o)) silentOutputs.push_back(o);
+    r.allOutputsSound = silentOutputs.empty();
+    if (r.allOutputsSound) {
+        r.stop = { StopKind::None, -1, 0, -1 };
+        return r;
+    }
 
-    // Delta review 1: a candidate counts only when its own path to the output stays dead: some chain of consumers,
-    // each silent or dc_only, reaches an output or a summing node (a sum may sound from its other voices). A dead node
-    // whose consumer sounds (a [sig~] gain into a sounding [*~], a resting [line~], an idle LFO) is never a stop.
-    std::vector<int> pathState(static_cast<size_t>(numNodes), 0); // 0 unknown, 1 in progress, 2 dead path, 3 not
-    std::function<bool(int)> deadPathFrom = [&](int m) -> bool { // m is a consumer on the path
-        auto const& node = g.nodes[static_cast<size_t>(m)];
-        if (node.output || node.sums) return true;
-        auto& st = pathState[static_cast<size_t>(m)];
-        if (st == 2) return true;
-        if (st == 1 || st == 3) return false; // a loop, or known not dead
-        if (!deadOut(outLevel(node))) {
-            st = 3;
-            return false;
+    // Some output is silent: the measured walk from the SILENT outputs only (a sounding output is not searched).
+    std::vector<int> hopS(static_cast<size_t>(numNodes), -1);
+    std::vector<int> orderS;
+    std::vector<int> frontierS;
+    for (int o : silentOutputs) {
+        hopS[static_cast<size_t>(o)] = 0;
+        frontierS.push_back(o);
+    }
+    for (size_t head = 0; head < frontierS.size(); ++head) {
+        int const at = frontierS[head];
+        std::vector<Edge const*> in;
+        for (auto const& e : g.edges)
+            if (e.dst == at && detail::validEdge(g, e)) in.push_back(&e);
+        std::stable_sort(in.begin(), in.end(), [](Edge const* x, Edge const* y) { return x->dstInlet < y->dstInlet; });
+        for (auto const* e : in) {
+            if (hopS[static_cast<size_t>(e->src)] >= 0) continue;
+            hopS[static_cast<size_t>(e->src)] = hopS[static_cast<size_t>(at)] + 1;
+            frontierS.push_back(e->src);
+            if (!g.nodes[static_cast<size_t>(e->src)].output) orderS.push_back(e->src);
         }
-        st = 1;
-        bool dead = false;
-        for (auto const& e : g.edges)
-            if (e.src == m && detail::validEdge(g, e) && deadPathFrom(e.dst)) {
-                dead = true;
-                break;
-            }
-        st = dead ? 2 : 3;
-        return dead;
-    };
-    auto pathStaysDead = [&](int n) {
-        for (auto const& e : g.edges)
-            if (e.src == n && detail::validEdge(g, e) && deadPathFrom(e.dst)) return true;
-        return false;
-    };
+    }
 
-    // The measured candidates, nearest first; at one hop: dies_here, open_inlet, silent_source.
+    // The measured candidates, nearest first; at one hop: dies_here, open_inlet, silent_source / bus_end.
     Stop best;
     bool found = false;
     auto consider = [&](Stop const& s) {
@@ -281,22 +276,21 @@ inline Result walk(Graph const& g, std::vector<int> const& outputs, int cap = kR
             found = true;
         }
     };
-    for (int o : r.outputs)
+    for (int o : silentOutputs)
         if (signalWiresIn(g, o) == 0) {
             auto const open = openSignalInlets(g.nodes[static_cast<size_t>(o)]);
             consider({ StopKind::OpenInlet, o, 0, open.empty() ? 0 : open.front() });
         }
     int nearestUnread = -1;
-    for (int n : order) {
+    for (int n : orderS) {
         auto const& node = g.nodes[static_cast<size_t>(n)];
-        int const h = hop[static_cast<size_t>(n)];
+        int const h = hopS[static_cast<size_t>(n)];
         Level const out = outLevel(node);
         if (out == Level::Unread || out == Level::Unmeasured) {
-            if (nearestUnread < 0 || h < hop[static_cast<size_t>(nearestUnread)]) nearestUnread = n;
+            if (nearestUnread < 0 || h < hopS[static_cast<size_t>(nearestUnread)]) nearestUnread = n;
             continue;
         }
         if (!deadOut(out)) continue;
-        if (!pathStaysDead(n)) continue; // its consumer sounds: not where the sound stops
         if (inputAudible(g, n)) {
             consider({ StopKind::DiesHere, n, h, -1 });
             continue;
@@ -309,13 +303,9 @@ inline Result walk(Graph const& g, std::vector<int> const& outputs, int cap = kR
         if (signalWiresIn(g, n) == 0) consider({ node.busEnd ? StopKind::BusEnd : StopKind::SilentSource, n, h, -1 });
     }
 
-    if (!found && allOutputsSound) { // it sounds and no branch was measured stopping (an untapped one is not asked)
-        r.stop = { StopKind::None, r.outputs.front(), 0, -1 };
-        return r;
-    }
-    if (nearestUnread >= 0 && (!found || hop[static_cast<size_t>(nearestUnread)] < best.hop)) {
-        r.stop = { StopKind::Unread, nearestUnread, hop[static_cast<size_t>(nearestUnread)], -1 };
-        for (int n : order) {
+    if (nearestUnread >= 0 && (!found || hopS[static_cast<size_t>(nearestUnread)] < best.hop)) {
+        r.stop = { StopKind::Unread, nearestUnread, hopS[static_cast<size_t>(nearestUnread)], -1 };
+        for (int n : orderS) {
             Level const out = outLevel(g.nodes[static_cast<size_t>(n)]);
             if ((out == Level::Unread || out == Level::Unmeasured) && static_cast<int>(r.refocus.size()) < kRefocusCap)
                 r.refocus.push_back(n);
@@ -327,9 +317,15 @@ inline Result walk(Graph const& g, std::vector<int> const& outputs, int cap = kR
         return r;
     }
     // Every walked node is silent with wired inputs and no source was reached (should not happen on a finite graph,
-    // but a malformed one must not invent a stop): unread at the nearest output.
-    r.stop = { StopKind::Unread, r.outputs.front(), 0, -1 };
+    // but a malformed one must not invent a stop): unread at the first silent output.
+    r.stop = { StopKind::Unread, silentOutputs.front(), 0, -1 };
     return r;
+}
+
+/** A measured row fact (option D): some signal input is audible and the output is silent or dc_only. */
+inline bool diesHere(Graph const& g, int n)
+{
+    return !g.nodes[static_cast<size_t>(n)].output && deadOut(outLevel(g.nodes[static_cast<size_t>(n)])) && inputAudible(g, n);
 }
 
 } // namespace mcp::stops

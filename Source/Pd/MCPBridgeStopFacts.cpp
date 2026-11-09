@@ -215,16 +215,6 @@ WalkSummary walkCanvas(t_canvas* cnv, CanvasObjects const& objects,
         }
 
     addBusEdges(g, cnv, objects);
-    // Delta review 1: summing nodes ([+~], a catch~ with several throws, any signal inlet with several wires): a dead
-    // voice's path may end there although the sum sounds from its other voices.
-    for (size_t i = 0; i < g.nodes.size(); ++i) {
-        std::unordered_map<int, int> perInlet;
-        for (auto const& e : g.edges)
-            if (e.dst == static_cast<int>(i)) ++perInlet[e.dstInlet];
-        bool many = false;
-        for (auto const& [inlet, count] : perInlet) many = many || count > 1;
-        g.nodes[i].sums = many || objects.classNames[i] == "+~";
-    }
     out.result = walk(g, outputs, kRowCap);
     return out;
 }
@@ -292,6 +282,7 @@ juce::String stopFactsJson(PluginProcessor* processor, t_canvas* cnv, CanvasObje
         ro->setProperty("class", objects.classNames[static_cast<size_t>(n)]);
         ro->setProperty("hop", row.hop);
         if (row.liveEnd) ro->setProperty("liveEnd", true);
+        ro->setProperty("diesHere", diesHere(g, n)); // option D: audible signal in, silent or dc_only out (a fact)
         ro->setProperty("made", juce::String(host->aiIntact(gobj) ? "ai" : "other"));
         ro->setProperty("out", outJson(node));
         int outWires = 0;
@@ -388,6 +379,7 @@ juce::String stopFactsJson(PluginProcessor* processor, t_canvas* cnv, CanvasObje
     juce::Array<juce::var> outs;
     for (int o : r.outputs) outs.add(idOf(o));
     root->setProperty("outputs", outs);
+    root->setProperty("kind", r.hasStop ? juce::var(juce::String(kindName(r.stop.kind))) : juce::var()); // option D
     if (r.hasStop && r.stop.node >= 0) {
         auto* s = new juce::DynamicObject();
         s->setProperty("tempId", idOf(r.stop.node));

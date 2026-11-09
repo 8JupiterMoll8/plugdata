@@ -164,7 +164,7 @@ int main()
         b.wire(osc, dac, 0);
         b.level(osc, Level::Audible, -12.0f);
         auto const r = walk(b.g, { dac });
-        CHECK(r.stop.kind == StopKind::None && stopId(r, b.g) == "dac" && r.stop.hop == 0);
+        CHECK(r.stop.kind == StopKind::None && r.stop.node == -1 && r.allOutputsSound); // option D: no node chosen
         CHECK(std::string(kindName(r.stop.kind)) == "none");
     }
 
@@ -186,12 +186,14 @@ int main()
         b.level(leadVca, Level::Silent);
         b.level(leadOut, Level::Silent);
         auto const r = walk(b.g, { dac });
-        CHECK(r.stop.kind == StopKind::DiesHere && stopId(r, b.g) == "lead_vca" && r.stop.hop == 2);
-        // Every branch sounds: none.
+        // Option D: the output sounds, so no stop is chosen; the lead's row says it dies (a measured fact).
+        CHECK(r.stop.kind == StopKind::None && r.stop.node == -1);
+        CHECK(diesHere(b.g, leadVca) && !diesHere(b.g, leadOut) && !diesHere(b.g, bass));
+        CHECK(hopOf(r, b.g, "lead_vca") == 2);
         b.level(leadVca, Level::Audible, -8.0f);
         b.level(leadOut, Level::Audible, -8.0f);
         auto const all = walk(b.g, { dac });
-        CHECK(all.stop.kind == StopKind::None && stopId(all, b.g) == "dac");
+        CHECK(all.stop.kind == StopKind::None && !diesHere(b.g, leadVca));
     }
 
     // Delta review 1: a dc_only or silent node whose consumer sounds is never a stop. [osc~] -> [*~] <- [sig~ 0.5]
@@ -240,7 +242,6 @@ int main()
         Builder b;
         int const dac = b.add("dac", 1, 0, 0, true);
         int const sum = b.add("sum", 2, 0, 1);
-        b.g.nodes[static_cast<size_t>(sum)].sums = true;
         int const bass = b.add("bass", 1, 0, 1);
         int const leadOsc = b.add("lead_osc", 1, 0, 1);
         int const leadVca = b.add("lead_vca", 1, 1, 1);
@@ -253,8 +254,34 @@ int main()
         b.level(leadVca, Level::Silent);
         b.level(sum, Level::Audible, -9.0f);
         auto const r = walk(b.g, { dac });
-        CHECK(r.stop.kind == StopKind::DiesHere && stopId(r, b.g) == "lead_vca" && r.stop.hop == 2);
-        CHECK(r.allOutputsSound);
+        CHECK(r.stop.kind == StopKind::None && r.stop.node == -1 && r.allOutputsSound); // probe C
+        CHECK(diesHere(b.g, leadVca) && hopOf(r, b.g, "lead_vca") == 2);
+    }
+
+    // Option D: some output silent: the stop comes from the walk from the SILENT output only. dac_ok sounds and carries
+    // a constant [sig~ 0] bias branch (never searched); dac_bad's voice dies at its VCA.
+    {
+        Builder b;
+        int const ok = b.add("dac_ok", 1, 0, 0, true);
+        int const bad = b.add("dac_bad", 1, 0, 0, true);
+        int const osc = b.add("osc", 1, 0, 1);
+        int const bias = b.add("bias", 0, 1, 1);
+        int const mul = b.add("mul", 2, 0, 1);
+        int const osc2 = b.add("osc2", 1, 0, 1);
+        int const vca = b.add("vca", 1, 1, 1);
+        b.wire(osc, mul, 0);
+        b.wire(bias, mul, 1);
+        b.wire(mul, ok, 0);
+        b.wire(osc2, vca, 0);
+        b.wire(vca, bad, 0);
+        b.level(osc, Level::Audible, -6.0f);
+        b.level(bias, Level::Silent);
+        b.level(mul, Level::Audible, -6.0f);
+        b.level(osc2, Level::Audible, -6.0f);
+        b.level(vca, Level::Silent);
+        auto const r = walk(b.g, { ok, bad });
+        CHECK(!r.allOutputsSound);
+        CHECK(r.stop.kind == StopKind::DiesHere && stopId(r, b.g) == "vca" && r.stop.hop == 1);
     }
 
     // Two live ends, both listed (whatever the walk found); the output has no wire at all: the output's own inlet.

@@ -11,13 +11,13 @@ as the fork now answers them. Nothing in the plan's shapes was removed or rename
    at hop 1 wins over a dying node at hop 2 (the L2 case: `sig_8` hop 1 beats `dust_g` hop 2). `unread` only when an
    untapped node lies nearer than every measured candidate (or none was measured).
 2. **An output with no signal wire at all** is `open_inlet` at the output itself, `hop: 0`, `inlet: 0`.
-3. **`kind: "none"`** (server review C): only when EVERY output hears sound AND no stop was measured on any branch.
-   A sounding voice never hides a dead one: with a bass sounding and a lead dying at hop 2 into the same dac~,
-   `nearestStop` is the lead's stop (`dies_here`, hop 2). `nearestStop.tempId` for `none` is the first output's
-   tempId, `hop: 0`, no `inlet`. (No per-output `stops[]` array: the one nearest measured stop is reported.)
-   **Delta review 1:** a candidate counts only when its path to the output stays dead (each consumer silent or
-   dc_only, up to an output or a summing node: [+~], a signal inlet with several wires, a catch~ with several throws).
-   A dead node whose consumer sounds (a [sig~] gain, a resting [line~], an idle LFO) is never a stop.
+3. **Option D (third review), facts only.** NEW `stopFacts.kind` (always present when there is an output): the stop
+   kind. **When every output sounds: `kind: "none"` and `nearestStop: null`** (no stop is chosen; no path rule, no
+   sum detection). The walk still lists every node upstream of the outputs as rows with their OWN measured verdicts.
+   **When some output is silent:** `nearestStop` is the measured walk from the SILENT outputs only (dies_here,
+   open_inlet, silent_source, bus_end at the lowest hop, or unread); sounding outputs are never searched for stops.
+   **Every row has `diesHere: true|false`**: some signal input audible and the output silent or dc_only (a measured
+   fact; the reader decides whether a dead lead into a sounding mixer, or a [sig~] bias, matters).
 4. **No output on the canvas** (no dac~ / out~): `"nearestStop": null`; the trace's `reason` is `"no_output"`.
 5. `nearestStop.inlet` is present only for `open_inlet`.
 6. **Live-end rows**: after the walk's rows (≤ 30), every live end that is not on the walk is appended as a row with
@@ -42,10 +42,9 @@ as the fork now answers them. Nothing in the plan's shapes was removed or rename
 
 ## Trace top level (no window and window)
 14. `chokePoint` = `nearestStop.tempId`, `reason` = the kind code (`dies_here | open_inlet | silent_source | bus_end |
-    unread | no_output`). **Review H3 / delta 1:** whenever EVERY output sounds the old pair stays exactly (even when
-    `stopFacts.nearestStop` names a dead voice behind a sounding sum):
-    `chokePoint: "none"`, `reason: "signal reaches master sink"` (an older server reads it right); the output's id is
-    only in `stopFacts.nearestStop.tempId`. The prose
+    unread | no_output`). **Review H3 / option D:** whenever EVERY output sounds the old pair stays exactly:
+    `chokePoint: "none"`, `reason: "signal reaches master sink"` (an older server reads it right), and
+    `stopFacts.kind: "none"`, `stopFacts.nearestStop: null`. The prose
     reasons, the gate-sel note and `stages[].note` are gone. The plain (unarmed) trace runs the same walk on the
     last block's raw peaks (audible above -60 dBFS, the judge's floor) but has NO `stopFacts` block.
 

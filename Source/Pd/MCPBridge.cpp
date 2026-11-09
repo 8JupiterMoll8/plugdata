@@ -982,7 +982,7 @@ juce::String MCPBridge::computeSignalTrace(PluginProcessor* processor, t_canvas*
     auto const& stop = walk.result.stop;
     // Review H3: a server that predates the stop facts reads "none" + this reason as "it sounds"; keep both exactly when
     // the walk says the output sounds, so a fork/server mismatch never lies. The output's id is in stopFacts only.
-    // Delta review 1: keyed on every output sounding (a dead voice behind a sounding sum is still in stopFacts).
+    // Option D: keyed on every output sounding (then no stop is chosen; the rows carry diesHere).
     bool const sounds = walk.result.hasStop && walk.result.allOutputsSound;
     juce::String const chokeReason = sounds ? juce::String("signal reaches master sink")
         : walk.result.hasStop ? juce::String(mcp::stops::kindName(stop.kind)) : juce::String("no_output");
