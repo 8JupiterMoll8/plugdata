@@ -951,6 +951,25 @@ bool McpHost::undoStep(t_canvas* cnv, bool redo)
         }
     }
 
+    // Review H1: editorDelete ghosts are tied to their delete's own undo action. Resolve the ones not tied yet
+    // (anchor->next, while the anchor is still in the queue) and drop those whose action left the queue.
+    auto& ghosts = undoJournalFor(cnv);
+    t_undo* const queue = canvas_undo_get(cnv);
+    auto liveActions = [queue] {
+        std::unordered_set<void const*> out;
+        for (t_undo_action* a = queue ? queue->u_queue : nullptr; a; a = a->next) out.insert(a);
+        return out;
+    };
+    {
+        auto const liveNow = liveActions();
+        for (auto it = ghosts.begin(); it != ghosts.end();) {
+            if (it->origin == McpUndoGhost::Origin::EditorDelete && !it->action && it->anchor && liveNow.count(it->anchor))
+                it->action = static_cast<t_undo_action const*>(it->anchor)->next;
+            bool const dead = it->origin == McpUndoGhost::Origin::EditorDelete && (!it->action || !liveNow.count(it->action));
+            it = dead ? ghosts.erase(it) : std::next(it);
+        }
+    }
+    void const* const lastBefore = queue ? queue->u_last : nullptr;
     {
         mcp::undo::EditorScope editor(cnv);
         if (redo)
@@ -958,6 +977,15 @@ bool McpHost::undoStep(t_canvas* cnv, bool redo)
         else
             pd::Interface::undo(cnv);
     }
+    // The actions this step reverted (an undo only): from the old newest action back to the new one, exclusive.
+    std::unordered_set<void const*> reverted;
+    if (!redo && queue)
+        for (auto* a = static_cast<t_undo_action const*>(lastBefore); a && a != queue->u_last; a = a->prev)
+            reverted.insert(a);
+    auto mayReturn = [&](McpUndoGhost const& ghost, bool byPlaceOnly) {
+        if (ghost.origin != McpUndoGhost::Origin::EditorDelete) return true;
+        return !byPlaceOnly && reverted.count(ghost.action) > 0; // never by place alone (Pass 2)
+    };
 
     std::unordered_set<t_gobj*> live;
     for (t_gobj* g = cnv->gl_list; g; g = g->g_next) live.insert(g);
@@ -970,7 +998,7 @@ bool McpHost::undoStep(t_canvas* cnv, bool redo)
         bool const reused = now == b.obj && objectText(now) != b.text;
         if (now && live.count(now) && !reused) continue;
         identity.eraseId(cnv, b.id);
-        journal.push_back({ b.id, b.text, b.x, b.y, b.index });
+        journal.push_back({ b.id, b.text, b.x, b.y, b.index, McpUndoGhost::Origin::Step, nullptr, nullptr });
         changed = true;
     }
     if (journal.size() > kUndoJournalMax)
@@ -1007,7 +1035,7 @@ bool McpHost::undoStep(t_canvas* cnv, bool redo)
             auto const text = objectText(g);
             for (auto it = journal.end(); it != journal.begin();) {
                 --it;
-                if (it->text == text && it->x == ob->te_xpix && it->y == ob->te_ypix) {
+                if (it->text == text && it->x == ob->te_xpix && it->y == ob->te_ypix && mayReturn(*it, false)) {
                     bind(g, it);
                     break;
                 }
@@ -1028,7 +1056,7 @@ bool McpHost::undoStep(t_canvas* cnv, bool redo)
             auto match = journal.end();
             int ghostsHere = 0;
             for (auto it = journal.begin(); it != journal.end(); ++it)
-                if (it->x == ob->te_xpix && it->y == ob->te_ypix) {
+                if (it->x == ob->te_xpix && it->y == ob->te_ypix && mayReturn(*it, true)) {
                     ++ghostsHere;
                     match = it;
                 }
@@ -1048,15 +1076,19 @@ void McpHost::journalEditorRemove(t_canvas* cnv, SmallArray<t_gobj*> const& obje
 {
     PdLockScope lock(processor);
     if (!cnv) return;
+    t_undo* const queue = canvas_undo_get(cnv);
+    void const* const anchor = queue ? queue->u_last : nullptr;
+    if (!anchor) return; // no undo queue to tie the ghosts to: an undo can never prove it brings these boxes back
     for (auto* obj : objects) {
         if (!obj) continue;
         auto const id = getStableId(obj);
         if (id.isEmpty()) continue;
-        journalId(cnv, id.toStdString(), obj); // checks the id is bound to this very object on this canvas
+        // checks the id is bound to this very object on this canvas
+        journalId(cnv, id.toStdString(), obj, McpUndoGhost::Origin::EditorDelete, anchor);
     }
 }
 
-void McpHost::journalId(t_canvas* cnv, std::string const& id, t_gobj* obj)
+void McpHost::journalId(t_canvas* cnv, std::string const& id, t_gobj* obj, McpUndoGhost::Origin origin, void const* anchor)
 {
     // Only a real binding (resolveStableId has no index fallback since P5.1; kept as a guard).
     if (!cnv || !obj || identity.resolve(cnv, id) != obj) return;
@@ -1064,7 +1096,7 @@ void McpHost::journalId(t_canvas* cnv, std::string const& id, t_gobj* obj)
     for (t_gobj* g = cnv->gl_list; g && g != obj; g = g->g_next) ++index;
     t_object* ob = pd_checkobject(&obj->g_pd);
     auto& journal = undoJournalFor(cnv);
-    journal.push_back({ id, objectText(obj), ob ? ob->te_xpix : 0, ob ? ob->te_ypix : 0, index });
+    journal.push_back({ id, objectText(obj), ob ? ob->te_xpix : 0, ob ? ob->te_ypix : 0, index, origin, anchor, nullptr });
     if (journal.size() > kUndoJournalMax)
         journal.erase(journal.begin());
 }

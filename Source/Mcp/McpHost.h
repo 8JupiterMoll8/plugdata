@@ -67,10 +67,15 @@ public:
     void clearUndoJournal(t_canvas* cnv);
     // An MCP edit is about to take `obj` (named `id`) away in an undoable step: its id goes to the journal, so an
     // undo that brings the object back gives it the id again. Pd context (lock held).
-    void journalId(t_canvas* cnv, std::string const& id, t_gobj* obj);
+    void journalId(t_canvas* cnv, std::string const& id, t_gobj* obj,
+        McpUndoGhost::Origin origin = McpUndoGhost::Origin::AiDelete, void const* anchor = nullptr);
     // Slice 3 F5: the ARTIST is about to delete `objects` from the editor (Canvas::removeSelection, Cut/Delete): the
     // ids of the ones that have one go to the journal, so Ctrl+Z gives them back. An object without an id journals
-    // nothing. Message thread; takes the Pd lock.
+    // nothing. The ghosts remember the delete's undo action (the canvas's newest action when this runs: the "Remove
+    // object/s" sequence start Canvas::removeSelection just added), so only the undo of THAT delete brings the ids
+    // back (review H1). No undo queue: nothing is journalled. Message thread; takes the Pd lock.
+    // Known gaps (not journalled, ids are lost as before): encapsulate, triggerize, the children of a deleted
+    // subpatch, and a cut -> paste -> undo -> redo chain (the paste makes new boxes).
     void journalEditorRemove(t_canvas* cnv, SmallArray<t_gobj*> const& objects);
     bool settingsChanged(String const& name, var const& value);
     // P9: the owner's switch for the output ceiling, from the settings panel only (the one way to switch it off

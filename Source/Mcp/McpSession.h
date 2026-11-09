@@ -37,9 +37,19 @@ extern "C" {
 // P4.4: an id whose object an undo or redo took away, kept so the object that comes back (same text, same place)
 // gets the id again. Pd context only.
 struct McpUndoGhost {
+    // Where the ghost came from (slice 3 review H1): an undo/redo step took the object away, an AI delete, or the
+    // artist's own editor delete. An editorDelete ghost comes back ONLY with the undo of its own delete and never by
+    // place alone. `anchor` is the canvas's newest undo action when the delete began (the hook runs before Pd adds
+    // the delete's actions); `action` is the delete's own first action (anchor->next), filled in by the next undo step
+    // (McpHost::undoStep: no undo can run in between except through it) while it is still in the queue. Both are
+    // only dereferenced after they were found in the canvas's live undo queue.
+    enum class Origin { Step, AiDelete, EditorDelete };
     std::string id;
     std::string text;
     int x = 0, y = 0, index = -1;
+    Origin origin = Origin::Step;
+    void const* anchor = nullptr;
+    void const* action = nullptr;
 };
 
 struct McpSession {

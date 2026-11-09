@@ -702,6 +702,50 @@ void runSharedUndoCases(Harness& h, PluginProcessor& processor)
         pd::Interface::finishRemove(cnv);
     }, 2000));
     CHECK(journalAfter == journalBefore);
+
+    // 12. (slice 3 review H1) An editor-delete ghost comes back only with the undo of ITS delete. The artist deletes
+    //     an AI lop~, places a hip~ by hand at the same spot, deletes that and presses Ctrl+Z: the hip~ comes back
+    //     WITHOUT the lop's id (the old Pass 2 bound one ghost and one rebuilt box at the same place).
+    auto const cg1 = next("sug");
+    CHECK(batch({ "main", cg1, 0, 0, 0, 1, 0, "su_lp", 1500, 500, "obj", "lop~", 1, "300", 0, 5, 10, 0 }, cg1));
+    CHECK(text("su_lp") == "lop~ 300");
+    CHECK(editorDelete({ "su_lp" }));
+    CHECK(text("su_lp").empty());
+    int lopX = -1, lopY = -1;
+    CHECK(host->pdWait([&] {
+        t_canvas* cnv = host->getCanvasBySymbolStrict("main");
+        if (!cnv) return;
+        for (auto const& ghost : host->undoJournalFor(cnv))
+            if (ghost.id == "su_lp") { lopX = ghost.x; lopY = ghost.y; }
+        if (lopX < 0) return;
+        t_atom at[4];
+        SETFLOAT(at, lopX);
+        SETFLOAT(at + 1, lopY);
+        SETSYMBOL(at + 2, gensym("hip~"));
+        SETFLOAT(at + 3, 5);
+        pd_typedmess(&cnv->gl_pd, gensym("obj"), 4, at); // placed by hand at the lop's spot
+        canvas_undo_add(cnv, UNDO_CREATE, "create", canvas_undo_set_create(cnv));
+        t_gobj* hip = cnv->gl_list;
+        while (hip && hip->g_next) hip = hip->g_next;
+        if (!cnv->gl_editor) canvas_create_editor(cnv);
+        canvas_undo_add(cnv, UNDO_SEQUENCE_START, "Remove object/s", nullptr);
+        SmallArray<t_gobj*> objs;
+        objs.add(hip);
+        host->journalEditorRemove(cnv, objs);
+        pd::Interface::removeObjects(cnv, objs);
+        pd::Interface::finishRemove(cnv);
+    }, 2000));
+    CHECK(lopX >= 0);
+    CHECK(step("undo")); // the hip~ comes back
+    std::string hipId = "?";
+    CHECK(host->pdWait([&] {
+        t_canvas* cnv = host->getCanvasBySymbolStrict("main");
+        t_gobj* last = cnv ? cnv->gl_list : nullptr;
+        while (last && last->g_next) last = last->g_next;
+        hipId = last ? host->getStableId(last).toStdString() : "?";
+    }, 2000));
+    CHECK(hipId != "su_lp");
+    CHECK(text("su_lp").empty()); // the lop's id stays a ghost: nothing wears it
 }
 
 // P6.2 UF: /pd/undo_peek reads the canvas's undo queue without changing it: depth D (steps Ctrl+Z can take), redo R,
