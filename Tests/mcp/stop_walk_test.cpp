@@ -168,6 +168,32 @@ int main()
         CHECK(std::string(kindName(r.stop.kind)) == "none");
     }
 
+    // Server review C: `none` is honest per branch. A bass sounds into dac~; a lead dies at hop 2 into the same dac~.
+    // The output hears the bass, but the lead's stop is still reported (never hidden behind a sounding voice).
+    {
+        Builder b;
+        int const dac = b.add("dac", 2, 0, 0, true);
+        int const bass = b.add("bass", 1, 0, 1);
+        int const leadOsc = b.add("lead_osc", 1, 0, 1);
+        int const leadVca = b.add("lead_vca", 1, 1, 1);
+        int const leadOut = b.add("lead_out", 1, 1, 1);
+        b.wire(bass, dac, 0);
+        b.wire(leadOsc, leadVca, 0);
+        b.wire(leadVca, leadOut, 0);
+        b.wire(leadOut, dac, 1);
+        b.level(bass, Level::Audible, -9.0f);
+        b.level(leadOsc, Level::Audible, -6.0f);
+        b.level(leadVca, Level::Silent);
+        b.level(leadOut, Level::Silent);
+        auto const r = walk(b.g, { dac });
+        CHECK(r.stop.kind == StopKind::DiesHere && stopId(r, b.g) == "lead_vca" && r.stop.hop == 2);
+        // Every branch sounds: none.
+        b.level(leadVca, Level::Audible, -8.0f);
+        b.level(leadOut, Level::Audible, -8.0f);
+        auto const all = walk(b.g, { dac });
+        CHECK(all.stop.kind == StopKind::None && stopId(all, b.g) == "dac");
+    }
+
     // Two live ends, both listed (whatever the walk found); the output has no wire at all: the output's own inlet.
     {
         Builder b;

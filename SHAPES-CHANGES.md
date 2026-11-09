@@ -11,7 +11,10 @@ as the fork now answers them. Nothing in the plan's shapes was removed or rename
    at hop 1 wins over a dying node at hop 2 (the L2 case: `sig_8` hop 1 beats `dust_g` hop 2). `unread` only when an
    untapped node lies nearer than every measured candidate (or none was measured).
 2. **An output with no signal wire at all** is `open_inlet` at the output itself, `hop: 0`, `inlet: 0`.
-3. **`kind: "none"`**: `nearestStop.tempId` is the output's tempId, `hop: 0`, no `inlet`.
+3. **`kind: "none"`** (server review C): only when EVERY output hears sound AND no stop was measured on any branch.
+   A sounding voice never hides a dead one: with a bass sounding and a lead dying at hop 2 into the same dac~,
+   `nearestStop` is the lead's stop (`dies_here`, hop 2). `nearestStop.tempId` for `none` is the first output's
+   tempId, `hop: 0`, no `inlet`. (No per-output `stops[]` array: the one nearest measured stop is reported.)
 4. **No output on the canvas** (no dac~ / out~): `"nearestStop": null`; the trace's `reason` is `"no_output"`.
 5. `nearestStop.inlet` is present only for `open_inlet`.
 6. **Live-end rows**: after the walk's rows (≤ 30), every live end that is not on the walk is appended as a row with
@@ -70,9 +73,13 @@ as the fork now answers them. Nothing in the plan's shapes was removed or rename
     every ERROR line printed during delivery (any object) plus any line a receiver printed, as `{tempId, text}`
     (`tempId` "" when the printer has none). `receivers[].readBack.source`: `gui` (a GUI bound to the name) or
     `last` (the record this send left on the receiver's outlet wire, e.g. `[r f]` → hsl) or null with a reason.
-    Receivers are objects only; at most 64. **Review M6, fail closed:** also refused: names starting with `.`, and any
-    name that also reaches something that is not a box (a canvas named by namecanvas, an array, a dialog stub):
-    `refused` names what it reaches, nothing is sent. The bridge's own probes are skipped.
+    Receivers are objects only; at most 64. **Review M6 / server review B, fail closed:** also refused: names starting with `.`
+    (a sentence in `refused`), and any name that also reaches something that is not a box (a canvas named by
+    namecanvas, an array, a [v] value, a dialog stub): `refused: "non-object binder"` exactly, plus
+    `refusedClass: "<Pd class>"`; nothing is sent.
+    **Server review A:** a delivered send also writes the /param shadow, so `/pd/param_get <name>` reads it.
+    **Server review D:** when the Pd context does not answer in time: `bound: null` (not known), `delivered: false`,
+    `error: "the Pd context did not answer in time"`. The bridge's own probes are skipped.
 19a. **`delivered` counts differently (review L9):** obj_set_batch counts any line the SET object printed during
     delivery; send_checked counts every ERROR line during delivery (any object) plus any line a receiver printed.
     Neither sees a line Pd prints in a later tick.

@@ -1329,11 +1329,10 @@ void runArmedTraceCases(Harness& h)
                 }
         CHECK(levelOf(json, "t2b_env") > -3.0);  // the envelope reached ~1
         CHECK(json["chokePoint"].toString() != "t2b_vca");
-        // Review H3: the output sounds: the old pair for an old server ("none" + its reason), the id in stopFacts only.
-        CHECK(json["chokePoint"].toString() == "none");
-        CHECK(json["reason"].toString() == "signal reaches master sink");
-        CHECK(json["stopFacts"]["nearestStop"]["kind"].toString() == "none");
-        CHECK(json["stopFacts"]["nearestStop"]["tempId"].toString() == "t2b_dac");
+        // Review H3 (the isolated case is in runStopFactsCases): main holds other cases' boxes, so another branch may
+        // be reported here (server review C); whenever the kind is none, the old pair holds.
+        if (json["stopFacts"]["nearestStop"]["kind"].toString() == "none")
+            CHECK(json["chokePoint"].toString() == "none" && json["reason"].toString() == "signal reaches master sink");
         auto const* silentEnv = json["silentEnvelopes"].getArray();
         CHECK(silentEnv != nullptr && !silentEnv->contains("t2b_env"));
     }
@@ -2029,6 +2028,32 @@ void runStopFactsCases(Harness& h, PluginProcessor& processor)
     h.fire("/pd/dsp", { 0 });
     h.call("/pd/batch_atomic", { "main", "sf8", 1, 0, 0, 0, 0, "sf_sub", 0, 5, 10, 0 }, "/pd/batch_atomic/reply/sf8");
 
+    // Review H3: a patch that sounds (its own subpatch): the old pair for an old server, the output's id in stopFacts.
+    auto okSub = h.call("/pd/batch_atomic", { "main", "sf14", 0, 0, 0, 1, 0, "sf_osub", 1400, 700, "obj", "pd", 1, "sf_ok", 0, 5, 10, 0 },
+        "/pd/batch_atomic/reply/sf14");
+    CHECK(okSub.has_value() && okSub->num(0) == 1);
+    auto ok = h.call("/pd/batch_atomic", { "pd-sf_ok", "sf15", 0, 0, 0, 2, 1,
+        "ok_osc", 40, 40, "obj", "osc~", 1, "330",
+        "ok_dac", 40, 100, "obj", "dac~", 0,
+        "ok_osc", 0, "ok_dac", 0,
+        0, 5, 10, 0 }, "/pd/batch_atomic/reply/sf15");
+    CHECK(ok.has_value() && ok->num(0) == 2);
+    h.fire("/pd/dsp", { 1 });
+    sleepMs(200);
+    {
+        auto armed = h.call("/meter/trace", { "pd-sf_ok", "sf16", "arm", 300, "" }, "/meter/trace/reply/sf16");
+        CHECK(armed.has_value());
+        sleepMs(350);
+        auto read = h.call("/meter/trace", { "pd-sf_ok", "sf17", "read" }, "/meter/trace/reply/sf17");
+        auto const okJson = read ? parseJson(*read) : juce::var();
+        CHECK(okJson["chokePoint"].toString() == "none");
+        CHECK(okJson["reason"].toString() == "signal reaches master sink");
+        CHECK(okJson["stopFacts"]["nearestStop"]["kind"].toString() == "none");
+        CHECK(okJson["stopFacts"]["nearestStop"]["tempId"].toString() == "ok_dac");
+    }
+    h.fire("/pd/dsp", { 0 });
+    h.call("/pd/batch_atomic", { "main", "sf18", 1, 0, 0, 0, 0, "sf_osub", 0, 5, 10, 0 }, "/pd/batch_atomic/reply/sf18");
+
     // Review M4: the walk crosses a bus. Two throw~ voices into one catch~ -> *~ -> dac~: voice 1 dies at its VCA
     // ([*~ 0]), voice 2's throw~ has nothing plugged in (cut). The nearest stop is voice 2's open throw~ inlet (hop 2);
     // the catch~ row (hop 1) lists both senders under `bus`; voice 1's VCA is a row at hop 3.
@@ -2273,6 +2298,8 @@ void runControlTruthCases(Harness& h, PluginProcessor& processor)
         CHECK(r.has_value());
         auto const json = r ? parseJson(*r) : juce::var();
         CHECK(json["refused"].toString().isNotEmpty() && !static_cast<bool>(json["delivered"]));
+        if (std::string(name) == "ct_arr_name" || std::string(name) == "ct_nc_name")
+            CHECK(json["refused"].toString() == "non-object binder" && json["refusedClass"].toString().isNotEmpty());
     }
     {
         auto r = h.call("/pd/send_checked", { "main", "ct11", "ct_f", 1, 42.0 }, "/pd/send_checked/reply/ct11");
@@ -2288,6 +2315,11 @@ void runControlTruthCases(Harness& h, PluginProcessor& processor)
         }
         auto const last = inletEntry(read("ct12", "ct_hsl"), "ct_hsl", 0)["last"];
         CHECK(last["by"].toString() == "ai"); // the send was the AI's
+        // Server review A: /pd/param_get reads what send_checked delivered.
+        auto pg = h.call("/pd/param_get", { "ct_f", "ct11b" }, "/pd/param_get/reply/ct11b");
+        CHECK(pg.has_value());
+        auto const pj = pg ? parseJson(*pg) : juce::var();
+        CHECK(static_cast<bool>(pj["found"]) && std::abs(static_cast<double>(pj["atoms"][0]) - 42.0) < 1e-6);
     }
 
     // 5. Review H2: once more AI ranges came than the ring keeps, an old record's `by` is "not known" (null), never

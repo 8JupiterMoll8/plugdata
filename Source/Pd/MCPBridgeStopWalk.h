@@ -18,7 +18,8 @@
 //                 silent_source the output is silent (or dc_only) and no signal wire comes in
 //                 bus_end       the same at a bus receiver (catch~, receive~) whose senders the canvas does not hold
 //                               (review M4: the walk crosses throw~ -> catch~ and send~ -> receive~ through bus edges)
-//               none: a signal wire into an output is audible (hop 0, the output). unread: an untapped node lies
+//               none: every output hears sound and no candidate was measured on any branch (hop 0, the first
+//               output; review C: a sounding voice never hides a dead one, whose stop is reported). unread: an untapped node lies
 //               nearer than any measured stop (or no stop was measured); `refocus` names the untapped nodes of the
 //               walk to tap. No output on the canvas: no stop (`hasStop` false).
 //   liveEnds    every node with an audible signal input, at least one signal outlet and no wire on any of them
@@ -230,12 +231,10 @@ inline Result walk(Graph const& g, std::vector<int> const& outputs, int cap = kR
     if (r.outputs.empty()) return r;
     r.hasStop = true;
 
-    // Sound at an output: none.
-    for (int o : r.outputs)
-        if (inputAudible(g, o)) {
-            r.stop = { StopKind::None, o, 0, -1 };
-            return r;
-        }
+    // Server review C: `none` only when nothing measured stops anywhere on the walk and every output hears sound. A
+    // sounding voice never hides a dead one: the measured candidates below are looked for first.
+    bool allOutputsSound = true;
+    for (int o : r.outputs) allOutputsSound = allOutputsSound && inputAudible(g, o);
 
     // The measured candidates, nearest first; at one hop: dies_here, open_inlet, silent_source.
     Stop best;
@@ -274,6 +273,10 @@ inline Result walk(Graph const& g, std::vector<int> const& outputs, int cap = kR
         if (signalWiresIn(g, n) == 0) consider({ node.busEnd ? StopKind::BusEnd : StopKind::SilentSource, n, h, -1 });
     }
 
+    if (!found && allOutputsSound) { // it sounds and no branch was measured stopping (an untapped one is not asked)
+        r.stop = { StopKind::None, r.outputs.front(), 0, -1 };
+        return r;
+    }
     if (nearestUnread >= 0 && (!found || hop[static_cast<size_t>(nearestUnread)] < best.hop)) {
         r.stop = { StopKind::Unread, nearestUnread, hop[static_cast<size_t>(nearestUnread)], -1 };
         for (int n : order) {

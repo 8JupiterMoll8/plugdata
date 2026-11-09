@@ -159,7 +159,8 @@ void MCPBridge::handleChatDomain(const juce::String& action, const juce::OSCMess
 // (message thread under the Pd lock). Realtime /param and /trigger stay as they are (sequences). Atoms as obj_set:
 // floats as floats, strings as symbols ("s:" prefix optional). Reply /pd/send_checked/reply/<corrId>:
 // {name, bound, receivers:[{tempId, class, readBack:{value, source, reason}}], delivered, console:[{tempId, text}],
-// refused}.
+// refused[, refusedClass]}. A delivered send also writes the /param shadow (/pd/param_get). On a Pd-context timeout
+// bound is null (not known) and `error` says so.
 namespace {
 
 constexpr int kMaxSendReceivers = 64;
@@ -263,8 +264,8 @@ void MCPBridge::pdSendChecked(const juce::String& action, const juce::OSCMessage
             if (!o) {
                 // Review M6, fail closed: the name also reaches something that is not a box (a canvas by namecanvas,
                 // an array, a dialog stub): never sent.
-                root->setProperty("refused", "the name also reaches a " + juce::String::fromUTF8(class_getname(*b))
-                    + ", which is not a box: never sent from the AI");
+                root->setProperty("refused", "non-object binder"); // server review B: the exact word
+                root->setProperty("refusedClass", juce::String::fromUTF8(class_getname(*b)));
                 return;
             }
             receivers.push_back(o);
@@ -281,6 +282,11 @@ void MCPBridge::pdSendChecked(const juce::String& action, const juce::OSCMessage
         pd_typedmess(sym->s_thing, selector, static_cast<int>(atoms.size()), atoms.empty() ? nullptr : atoms.data());
         unsigned int const seqAfter = mcp_last_seq();
         host->noteAiSeqRange(seqBefore, seqAfter);
+        {
+            // Server review A: the same shadow /param keeps, so /pd/param_get stays true after a send_checked.
+            std::lock_guard<std::mutex> lk(s_paramShadowMutex);
+            s_paramShadow[name.toStdString()] = atoms;
+        }
 
         // Console: every error line the delivery printed, and any line a receiver printed. (obj_set_batch's delivered
         // counts only lines from the set object, error or not: review L9, see mcpPutDelivery.)
@@ -314,6 +320,10 @@ void MCPBridge::pdSendChecked(const juce::String& action, const juce::OSCMessage
         root->setProperty("receivers", list);
         root->setProperty("delivered", live && console.isEmpty());
     }, 3000);
-    if (!ran) root->setProperty("error", "the Pd context did not answer in time");
+    if (!ran) {
+        // Server review D: nothing is known (it may or may not have run): bound is null, never false.
+        root->setProperty("bound", juce::var());
+        root->setProperty("error", "the Pd context did not answer in time");
+    }
     sendReply(address, juce::JSON::toString(rootVar, true));
 }
