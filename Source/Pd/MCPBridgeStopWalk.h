@@ -29,6 +29,7 @@
 #pragma once
 
 #include <algorithm>
+#include <functional>
 #include <cstddef>
 #include <string>
 #include <vector>
@@ -59,6 +60,8 @@ struct Node {
     std::string id;
     bool output = false; // dac~ / out~
     bool busEnd = false; // a bus receiver whose senders are not on this canvas (or not found)
+    bool sums = false;   // a summing node ([+~], a signal inlet with several wires, a catch~): a dead voice's path
+                         // to the output may end here although the sum sounds (delta review 1)
     std::vector<Inlet> inlets;
     std::vector<Outlet> outlets;
 };
@@ -106,6 +109,7 @@ struct Row {
 
 struct Result {
     std::vector<int> outputs;
+    bool allOutputsSound = false; // every output hears sound (the trace keeps chokePoint "none" for an old server)
     bool hasStop = false;
     Stop stop;
     std::vector<Row> rows;
@@ -235,6 +239,37 @@ inline Result walk(Graph const& g, std::vector<int> const& outputs, int cap = kR
     // sounding voice never hides a dead one: the measured candidates below are looked for first.
     bool allOutputsSound = true;
     for (int o : r.outputs) allOutputsSound = allOutputsSound && inputAudible(g, o);
+    r.allOutputsSound = allOutputsSound;
+
+    // Delta review 1: a candidate counts only when its own path to the output stays dead: some chain of consumers,
+    // each silent or dc_only, reaches an output or a summing node (a sum may sound from its other voices). A dead node
+    // whose consumer sounds (a [sig~] gain into a sounding [*~], a resting [line~], an idle LFO) is never a stop.
+    std::vector<int> pathState(static_cast<size_t>(numNodes), 0); // 0 unknown, 1 in progress, 2 dead path, 3 not
+    std::function<bool(int)> deadPathFrom = [&](int m) -> bool { // m is a consumer on the path
+        auto const& node = g.nodes[static_cast<size_t>(m)];
+        if (node.output || node.sums) return true;
+        auto& st = pathState[static_cast<size_t>(m)];
+        if (st == 2) return true;
+        if (st == 1 || st == 3) return false; // a loop, or known not dead
+        if (!deadOut(outLevel(node))) {
+            st = 3;
+            return false;
+        }
+        st = 1;
+        bool dead = false;
+        for (auto const& e : g.edges)
+            if (e.src == m && detail::validEdge(g, e) && deadPathFrom(e.dst)) {
+                dead = true;
+                break;
+            }
+        st = dead ? 2 : 3;
+        return dead;
+    };
+    auto pathStaysDead = [&](int n) {
+        for (auto const& e : g.edges)
+            if (e.src == n && detail::validEdge(g, e) && deadPathFrom(e.dst)) return true;
+        return false;
+    };
 
     // The measured candidates, nearest first; at one hop: dies_here, open_inlet, silent_source.
     Stop best;
@@ -261,6 +296,7 @@ inline Result walk(Graph const& g, std::vector<int> const& outputs, int cap = kR
             continue;
         }
         if (!deadOut(out)) continue;
+        if (!pathStaysDead(n)) continue; // its consumer sounds: not where the sound stops
         if (inputAudible(g, n)) {
             consider({ StopKind::DiesHere, n, h, -1 });
             continue;

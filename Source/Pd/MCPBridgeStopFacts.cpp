@@ -82,13 +82,16 @@ bool isGuiFeeder(t_object* o)
     return o && mcpGuiValue(o, v);
 }
 
-// The name a bus object is created with (its first creation argument), or null.
-t_symbol* busName(t_gobj* g)
+// The name a bus object is created with (its first creation argument), or null. A $0 name is realised in the
+// object's canvas (delta review 4: [throw~ $0-mix] -> [catch~ $0-mix]).
+t_symbol* busName(t_canvas* cnv, t_gobj* g)
 {
     t_object* o = pd_checkobject(&g->g_pd);
     if (!o || !o->te_binbuf || binbuf_getnatom(o->te_binbuf) < 2) return nullptr;
     t_atom const* a = binbuf_getvec(o->te_binbuf);
-    return a[1].a_type == A_SYMBOL ? a[1].a_w.w_symbol : nullptr;
+    if (a[1].a_type == A_SYMBOL) return a[1].a_w.w_symbol;
+    if (a[1].a_type == A_DOLLSYM && cnv) return canvas_realizedollar(cnv, a[1].a_w.w_symbol);
+    return nullptr;
 }
 
 bool bindsTo(t_symbol* name, t_gobj* g)
@@ -101,7 +104,7 @@ bool bindsTo(t_symbol* name, t_gobj* g)
 // Review M4: the walk crosses Pd's signal buses. throw~ N -> catch~ N (the catch~ binds N) and send~ N -> receive~ N
 // (the send~ binds N), checked against the binding, on this canvas. A sender gets one virtual `bus` outlet whose level
 // is its input's (it passes the signal on); a receiver whose senders are not on this canvas is a bus end.
-void addBusEdges(Graph& g, CanvasObjects const& objects)
+void addBusEdges(Graph& g, t_canvas* cnv, CanvasObjects const& objects)
 {
     int const n = static_cast<int>(g.nodes.size());
     auto isClass = [&](int i, std::initializer_list<char const*> names) {
@@ -114,11 +117,11 @@ void addBusEdges(Graph& g, CanvasObjects const& objects)
         bool const isCatch = isClass(r, { "catch~" });
         bool const isReceive = isClass(r, { "receive~", "r~" });
         if (!isCatch && !isReceive) continue;
-        t_symbol* name = busName(objects.objs[static_cast<size_t>(r)]);
+        t_symbol* name = busName(cnv, objects.objs[static_cast<size_t>(r)]);
         bool found = false;
         for (int sIdx = 0; name && sIdx < n; ++sIdx) {
             bool const sender = isCatch ? isClass(sIdx, { "throw~" }) : isClass(sIdx, { "send~", "s~" });
-            if (!sender || busName(objects.objs[static_cast<size_t>(sIdx)]) != name) continue;
+            if (!sender || busName(cnv, objects.objs[static_cast<size_t>(sIdx)]) != name) continue;
             // catch~ binds the name (a throw~ finds it there); send~ binds it (a receive~ finds it there).
             if (!bindsTo(name, objects.objs[static_cast<size_t>(isCatch ? r : sIdx)])) continue;
             auto& node = g.nodes[static_cast<size_t>(sIdx)];
@@ -211,7 +214,17 @@ WalkSummary walkCanvas(t_canvas* cnv, CanvasObjects const& objects,
             o.levelDb = hit->second.hasLevel ? hit->second.levelDb : -100.0f;
         }
 
-    addBusEdges(g, objects);
+    addBusEdges(g, cnv, objects);
+    // Delta review 1: summing nodes ([+~], a catch~ with several throws, any signal inlet with several wires): a dead
+    // voice's path may end there although the sum sounds from its other voices.
+    for (size_t i = 0; i < g.nodes.size(); ++i) {
+        std::unordered_map<int, int> perInlet;
+        for (auto const& e : g.edges)
+            if (e.dst == static_cast<int>(i)) ++perInlet[e.dstInlet];
+        bool many = false;
+        for (auto const& [inlet, count] : perInlet) many = many || count > 1;
+        g.nodes[i].sums = many || objects.classNames[i] == "+~";
+    }
     out.result = walk(g, outputs, kRowCap);
     return out;
 }
@@ -264,7 +277,7 @@ juce::String stopFactsJson(PluginProcessor* processor, t_canvas* cnv, CanvasObje
         if (std::abs(now - *ai) <= 1e-6 * std::max(1.0, std::abs(*ai))) return false;
         for (auto const& in : g.nodes[static_cast<size_t>(src)].inlets)
             if (in.wires > 0) return {};
-        if (!mcp::bound::namesBoundTo(o).empty()) return {};
+        if (!mcp::bound::namesBoundTo(o, cnv).empty()) return {};
         return true;
     };
 
@@ -362,7 +375,7 @@ juce::String stopFactsJson(PluginProcessor* processor, t_canvas* cnv, CanvasObje
         ro->setProperty("ctl", ctl);
 
         juce::Array<juce::var> names;
-        for (auto const& name : mcp::bound::namesBoundTo(o)) names.add(name);
+        for (auto const& name : mcp::bound::namesBoundTo(o, cnv)) names.add(name);
         ro->setProperty("names", names);
         ro->setProperty("redBox", mcp::broken::isRedBox(gobj));
         bool on = canvasOn;

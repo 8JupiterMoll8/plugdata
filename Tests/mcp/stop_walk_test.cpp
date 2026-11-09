@@ -194,6 +194,69 @@ int main()
         CHECK(all.stop.kind == StopKind::None && stopId(all, b.g) == "dac");
     }
 
+    // Delta review 1: a dc_only or silent node whose consumer sounds is never a stop. [osc~] -> [*~] <- [sig~ 0.5]
+    // (a constant gain), -> dac~: it plays, nothing stops; the H3 pair stays (allOutputsSound).
+    {
+        Builder b;
+        int const dac = b.add("dac", 1, 0, 0, true);
+        int const osc = b.add("osc", 1, 0, 1);
+        int const gainSig = b.add("sig", 0, 1, 1);
+        int const mul = b.add("mul", 2, 0, 1);
+        b.wire(osc, mul, 0);
+        b.wire(gainSig, mul, 1);
+        b.wire(mul, dac, 0);
+        b.level(osc, Level::Audible, -6.0f);
+        b.level(gainSig, Level::DcOnly);
+        b.level(mul, Level::Audible, -12.0f);
+        auto const r = walk(b.g, { dac });
+        CHECK(r.stop.kind == StopKind::None);
+        CHECK(r.allOutputsSound);
+    }
+    // A resting [line~] as the gain (dc_only at 0.8) and an idle LFO ([osc~ 0], silent) on a filter's inlet 1: plays.
+    {
+        Builder b;
+        int const dac = b.add("dac", 1, 0, 0, true);
+        int const osc = b.add("osc", 1, 0, 1);
+        int const env = b.add("line", 0, 1, 1);
+        int const vca = b.add("vca", 2, 0, 1);
+        int const lfo = b.add("lfo", 1, 1, 1);
+        int const filt = b.add("filt", 2, 0, 1);
+        b.wire(osc, vca, 0);
+        b.wire(env, vca, 1);
+        b.wire(vca, filt, 0);
+        b.wire(lfo, filt, 1);
+        b.wire(filt, dac, 0);
+        b.level(osc, Level::Audible, -6.0f);
+        b.level(env, Level::DcOnly);
+        b.level(vca, Level::Audible, -8.0f);
+        b.level(lfo, Level::Silent);
+        b.level(filt, Level::Audible, -10.0f);
+        auto const r = walk(b.g, { dac });
+        CHECK(r.stop.kind == StopKind::None);
+    }
+    // A dead voice into a summing node that sounds (bass + lead -> [+~] -> dac~): the lead's stop is reported (its
+    // path stays dead up to the sum), while the output sounds (allOutputsSound for the H3 pair).
+    {
+        Builder b;
+        int const dac = b.add("dac", 1, 0, 0, true);
+        int const sum = b.add("sum", 2, 0, 1);
+        b.g.nodes[static_cast<size_t>(sum)].sums = true;
+        int const bass = b.add("bass", 1, 0, 1);
+        int const leadOsc = b.add("lead_osc", 1, 0, 1);
+        int const leadVca = b.add("lead_vca", 1, 1, 1);
+        b.wire(bass, sum, 0);
+        b.wire(leadOsc, leadVca, 0);
+        b.wire(leadVca, sum, 1);
+        b.wire(sum, dac, 0);
+        b.level(bass, Level::Audible, -9.0f);
+        b.level(leadOsc, Level::Audible, -6.0f);
+        b.level(leadVca, Level::Silent);
+        b.level(sum, Level::Audible, -9.0f);
+        auto const r = walk(b.g, { dac });
+        CHECK(r.stop.kind == StopKind::DiesHere && stopId(r, b.g) == "lead_vca" && r.stop.hop == 2);
+        CHECK(r.allOutputsSound);
+    }
+
     // Two live ends, both listed (whatever the walk found); the output has no wire at all: the output's own inlet.
     {
         Builder b;

@@ -980,13 +980,14 @@ juce::String MCPBridge::computeSignalTrace(PluginProcessor* processor, t_canvas*
     mcp::stops::CanvasObjects const canvasObjects { objs, names, classNames };
     auto const walk = mcp::stops::walkCanvas(cnv, canvasObjects, verdicts);
     auto const& stop = walk.result.stop;
-    bool const stopped = walk.result.hasStop && stop.node >= 0 && stop.kind != mcp::stops::StopKind::None;
-    int const chokeIndex = stopped ? stop.node : -1;
     // Review H3: a server that predates the stop facts reads "none" + this reason as "it sounds"; keep both exactly when
     // the walk says the output sounds, so a fork/server mismatch never lies. The output's id is in stopFacts only.
-    bool const sounds = walk.result.hasStop && stop.kind == mcp::stops::StopKind::None;
+    // Delta review 1: keyed on every output sounding (a dead voice behind a sounding sum is still in stopFacts).
+    bool const sounds = walk.result.hasStop && walk.result.allOutputsSound;
     juce::String const chokeReason = sounds ? juce::String("signal reaches master sink")
         : walk.result.hasStop ? juce::String(mcp::stops::kindName(stop.kind)) : juce::String("no_output");
+    bool const stopped = !sounds && walk.result.hasStop && stop.node >= 0 && stop.kind != mcp::stops::StopKind::None;
+    int const chokeIndex = stopped ? stop.node : -1;
 
     juce::String chokeName = (!sounds && walk.result.hasStop && stop.node >= 0 && stop.node < numObjs) ? names[stop.node] : juce::String("none");
     juce::String chokeClass = (chokeIndex >= 0 && chokeIndex < numObjs) ? classNames[chokeIndex] : "none";

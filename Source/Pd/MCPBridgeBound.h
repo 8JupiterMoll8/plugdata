@@ -66,8 +66,9 @@ inline std::vector<t_pd*> bindersOf(t_symbol* sym)
  * The names object `o` itself listens on: each symbol of its creation text that Pd binds to this very object (an
  * [r name], [r~ name], [catch~ name], a GUI's receive name, ...). Checked against the binding, never guessed from the
  * class. A GUI's receive name that was changed after creation (properties dialog) is read from its iemgui field too.
+ * A $0 name is realised in `cnv` (the object's canvas; delta review 4); without it a $0 name is skipped.
  */
-inline std::vector<juce::String> namesBoundTo(t_object* o)
+inline std::vector<juce::String> namesBoundTo(t_object* o, t_canvas* cnv = nullptr)
 {
     std::vector<juce::String> out;
     if (!o) return out;
@@ -87,6 +88,7 @@ inline std::vector<juce::String> namesBoundTo(t_object* o)
         t_atom const* a = binbuf_getvec(o->te_binbuf);
         for (int i = 1; i < n; ++i)
             if (a[i].a_type == A_SYMBOL) consider(a[i].a_w.w_symbol);
+            else if (a[i].a_type == A_DOLLSYM && cnv) consider(canvas_realizedollar(cnv, a[i].a_w.w_symbol)); // $0-name
     }
     char const* cls = class_getname(pd_class(&o->ob_pd));
     static char const* const iem[] = { "hsl", "vsl", "tgl", "hradio", "vradio", "nbx", "bng", "vu", "cnv" };
