@@ -137,9 +137,11 @@ struct AcStats {
     uint64_t swings = 0;
     double rawSumSq = 0.0;
     float maxAbs = 0.0f;
+    uint64_t active = 0;       // truth slice 2 (M3): samples whose AC part is at or past +-kSwingLevel (the swing rate's base)
 
     void add(AcStats const& other)
     {
+        active += other.active;
         acSumSq += other.acSumSq;
         sum += other.sum;
         if (other.acPeak > acPeak) acPeak = other.acPeak;
@@ -162,12 +164,25 @@ inline void accumulate(DcBlocker& blocker, AcStats& stats, float const* vec, int
                 first += vec[i];
                 ++finite;
             }
-        if (finite > 0)
+        if (finite > 0) {
             blocker.prime(static_cast<float>(first / finite));
+            // Truth slice 2 (review H1): an exactly flat first block (silence, a constant) primes EXACTLY: nothing is
+            // off to settle, so a hit right after it (a click, the first note on a node tap) counts in acPeak at once.
+            float lo = 0.0f, hi = 0.0f;
+            bool seen = false;
+            for (int i = 0; i < n; ++i)
+                if (usable(vec[i])) {
+                    lo = seen ? std::min(lo, vec[i]) : vec[i];
+                    hi = seen ? std::max(hi, vec[i]) : vec[i];
+                    seen = true;
+                }
+            if (seen && lo == hi)
+                blocker.settleLeft = 0;
+        }
     }
     double acSq = 0.0, sum = 0.0, rawSq = 0.0;
     float peak = stats.acPeak, maxAbs = stats.maxAbs;
-    uint64_t counted = 0, swings = 0;
+    uint64_t counted = 0, swings = 0, active = 0;
     for (int i = 0; i < n; ++i) {
         float const x = vec[i];
         if (!usable(x)) {
@@ -187,6 +202,7 @@ inline void accumulate(DcBlocker& blocker, AcStats& stats, float const* vec, int
         if (now != 0) {
             if (blocker.side != 0 && now != blocker.side) ++swings;
             blocker.side = now;
+            ++active;
         }
         ++counted;
     }
@@ -197,6 +213,7 @@ inline void accumulate(DcBlocker& blocker, AcStats& stats, float const* vec, int
     stats.acPeak = peak;
     stats.count += counted;
     stats.swings += swings;
+    stats.active += active;
 }
 
 /**
@@ -247,6 +264,10 @@ struct AcLevels {
     float acPeakDb = kFloorDb;
     float dcDb = kFloorDb;
     bool tone = false;
+    double swingsPerActive = 0.0; // truth slice 2 (M3): zero crossings per sample while the AC part is up
+
+    /** The AC part's dominant swing rate (Hz): half the crossings per second of the time it was up; 0 = none. */
+    double swingHz(double sampleRate) const { return swingsPerActive * sampleRate * 0.5; }
 };
 
 /** The levels from an AC RMS, an AC peak and a DC amplitude (all linear) and the swings seen. */
@@ -265,7 +286,9 @@ inline AcLevels levelsOf(AcStats const& s)
 {
     if (s.count == 0) return {};
     double const n = static_cast<double>(s.count);
-    return levelsFrom(std::sqrt(std::max(0.0, s.acSumSq) / n), s.acPeak, s.sum / n, s.swings);
+    auto lv = levelsFrom(std::sqrt(std::max(0.0, s.acSumSq) / n), s.acPeak, s.sum / n, s.swings);
+    lv.swingsPerActive = s.active > 0 ? static_cast<double>(s.swings) / static_cast<double>(s.active) : 0.0;
+    return lv;
 }
 
 /**
@@ -280,6 +303,7 @@ inline AcLevels levelsOfChannels(AcStats const* channels, int numChannels)
     for (int c = 0; c < numChannels; ++c) {
         auto const lv = levelsOf(channels[c]);
         if (channels[c].count == 0) continue;
+        if (lv.acRmsDb > out.acRmsDb) out.swingsPerActive = lv.swingsPerActive; // the loudest channel's swing rate
         out.acRmsDb = std::max(out.acRmsDb, lv.acRmsDb);
         out.acPeakDb = std::max(out.acPeakDb, lv.acPeakDb);
         out.dcDb = std::max(out.dcDb, lv.dcDb);

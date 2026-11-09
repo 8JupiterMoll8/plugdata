@@ -452,7 +452,10 @@ void MCPBridge::meterRead(const juce::String& meterAction, const juce::OSCMessag
         floor.breakerTrips = trips;
         floor.breakerEngaged = engaged;
         floor.limiterReductionDb = s.mcpArmLimiterReductionDbMax.load(std::memory_order_relaxed);
-        auto const v = mcp::verdict::judge(peakDb, finalAc, &floor, blocksElapsed > 0);
+        // review L3: a hot peak from an output channel past the AC taps is unjudged, never "silent quiet_tone"
+        int const outputs = processor->getTotalNumOutputChannels();
+        bool const acCovers = outputs <= McpSession::kAcChannels || mcp::ac::ampToDb(s.armAcMaxAbs()) >= peakDb - 1.0f;
+        auto const v = mcp::verdict::judge(peakDb, finalAc, &floor, blocksElapsed > 0, processor->getSampleRate(), acCovers);
         rep.addArgument(juce::String(mcp::verdict::toJson(v, "final", &floor)));
     }
     sender.send(rep);
@@ -554,6 +557,7 @@ void MCPBridge::meterArmSpectral(const juce::String& meterAction, const juce::OS
     processor->getMcp()->session.mcpSpecArmed.store(false, std::memory_order_release);
     processor->getMcp()->session.mcpSpecWritePos.store(0, std::memory_order_relaxed);
     processor->getMcp()->session.mcpSpecLimit.store(target, std::memory_order_relaxed);
+    processor->getMcp()->session.resetSpecAc(); // truth slice 2 (M2): the window's per-channel verdict stats
     processor->getMcp()->session.mcpSpecArmed.store(true, std::memory_order_release);
     windowLock.unlock();
     juce::OSCMessage rep { juce::OSCAddressPattern("/meter/arm_spectral/reply/" + correlationId) };
@@ -603,10 +607,10 @@ void MCPBridge::meterReadSpectral(const juce::String& meterAction, const juce::O
     mcpLogLine(*this, processor, juce::String::formatted("MCP-ARM-DIAG read_spectral: samples=%d blocksElapsed=%lld armedTailRuns=%lld tailPeak=%.6f",
          n, (long long)blocksElapsed, (long long)armedTailRuns, (double)tailPeak));
     juce::String json = armedSpectralJson(processor->getMcp()->session.mcpSpecBuffer.data(), n, sr);
-    // Truth slice 2 (meter_verdict): the capture's own sound verdict (the final tap, judged over the whole capture),
-    // taken before the write position is reset; no audio block ran in the window: unmeasured.
-    auto const sound = blocksElapsed > 0 ? mcp::verdict::judgeSamples(processor->getMcp()->session.mcpSpecBuffer.data(), n, sr)
-                                         : mcp::verdict::judge(-100.0f, mcp::ac::AcLevels {}, nullptr, false);
+    // Truth slice 2 (meter_verdict): the window's sound verdict, each OUTPUT channel judged on its own (review M2) from
+    // the final tap's blockers; no audio block ran in the window: unmeasured.
+    auto const specChannels = processor->getMcp()->session.readSpecAc();
+    auto const sound = mcp::verdict::judgeChannels(specChannels.data(), static_cast<int>(specChannels.size()), sr, blocksElapsed > 0);
     processor->getMcp()->session.mcpSpecWritePos.store(0, std::memory_order_relaxed);
     if (json.isEmpty()) {
         sendReply("/meter/read_spectral/reply/" + correlationId,
@@ -873,7 +877,7 @@ void MCPBridge::readSignalTrace(const juce::String& correlationId)
             maxBlocks = std::max(maxBlocks, blocks);
             levels += ",\"peakDb\":" + juce::String(mcp::trace::peakToDb(peak), 1) + ",\"blocks\":" + juce::String(blocks)
                 + acJsonFields(mcp::ac::levelsOf(reading.ac)) // V1 AC taps
-                + ",\"sound\":" + soundJson(mcp::trace::peakToDb(peak), mcp::ac::levelsOf(reading.ac)) + "}"; // slice 2
+                + ",\"sound\":" + soundJson(mcp::trace::peakToDb(peak), mcp::ac::levelsOf(reading.ac), processor ? processor->getSampleRate() : 0.0) + "}"; // slice 2
         } else {
             if (!unread.isEmpty()) unread += ",";
             unread += "\"" + jsonEscape(juce::String(tap.name)) + ":" + juce::String(tap.outlet) + "\"";

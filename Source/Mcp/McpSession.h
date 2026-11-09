@@ -428,8 +428,12 @@ struct McpSession {
         std::atomic<float> acPeak { 0.0f };
         std::atomic<uint64_t> count { 0 };
         std::atomic<uint64_t> swings { 0 };
+        std::atomic<uint64_t> active { 0 };   // truth slice 2 (M3): the swing rate's base
+        std::atomic<float> maxAbs { 0.0f };   // truth slice 2 (M2, L3): the channel's own raw peak
         void reset()
         {
+            active.store(0, std::memory_order_relaxed);
+            maxAbs.store(0.0f, std::memory_order_relaxed);
             acSumSq.store(0.0, std::memory_order_relaxed);
             sum.store(0.0, std::memory_order_relaxed);
             acPeak.store(0.0f, std::memory_order_relaxed);
@@ -443,6 +447,8 @@ struct McpSession {
             if (s.acPeak > acPeak.load(std::memory_order_relaxed)) acPeak.store(s.acPeak, std::memory_order_relaxed);
             count.store(count.load(std::memory_order_relaxed) + s.count, std::memory_order_relaxed);
             swings.store(swings.load(std::memory_order_relaxed) + s.swings, std::memory_order_relaxed);
+            active.store(active.load(std::memory_order_relaxed) + s.active, std::memory_order_relaxed);
+            if (s.maxAbs > maxAbs.load(std::memory_order_relaxed)) maxAbs.store(s.maxAbs, std::memory_order_relaxed);
         }
         mcp::ac::AcStats read() const
         {
@@ -452,6 +458,8 @@ struct McpSession {
             s.acPeak = acPeak.load(std::memory_order_relaxed);
             s.count = count.load(std::memory_order_relaxed);
             s.swings = swings.load(std::memory_order_relaxed);
+            s.active = active.load(std::memory_order_relaxed);
+            s.maxAbs = maxAbs.load(std::memory_order_relaxed);
             return s;
         }
     };
@@ -465,6 +473,25 @@ struct McpSession {
         std::array<mcp::ac::AcStats, kAcChannels> channels {};
         for (size_t c = 0; c < channels.size(); ++c) channels[c] = mcpArmFinalAc[c].read();
         return mcp::ac::levelsOfChannels(channels.data(), kAcChannels);
+    }
+    float armAcMaxAbs() const // truth slice 2 (L3): the loudest raw sample the AC taps saw in the window
+    {
+        float m = 0.0f;
+        for (auto const& c : mcpArmFinalAc) m = std::max(m, c.maxAbs.load(std::memory_order_relaxed));
+        return m;
+    }
+    // Truth slice 2 (M2): the armed SPECTRAL window's per-output-channel AC stats (the same blockers as the final tap),
+    // so its verdict reads each output channel on its own, never a mono sum and never an input channel.
+    std::array<ArmChannelAc, kAcChannels> mcpSpecFinalAc {};
+    void resetSpecAc()
+    {
+        for (auto& c : mcpSpecFinalAc) c.reset();
+    }
+    std::array<mcp::ac::AcStats, kAcChannels> readSpecAc() const
+    {
+        std::array<mcp::ac::AcStats, kAcChannels> channels {};
+        for (size_t c = 0; c < channels.size(); ++c) channels[c] = mcpSpecFinalAc[c].read();
+        return channels;
     }
     // V1 /pd/wire_activity (review 2026-11-06: one window per instance, not per process). The table is written by
     // record() on the thread running this instance's Pd, under its Pd lock; the bridge arms and reads it under the

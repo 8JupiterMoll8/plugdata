@@ -170,12 +170,15 @@ void McpHost::audioBlockFinished(AudioBuffer<float>& buffer)
                 blocker.reset(coeff);
         }
         bool const armed = session.mcpArmActive.load(std::memory_order_relaxed);
+        bool const specArmed = session.mcpSpecArmed.load(std::memory_order_relaxed); // truth slice 2 (M2)
         int const acChannels = std::min(outputs, McpSession::kAcChannels);
         for (int ch = 0; ch < acChannels; ++ch) {
             mcp::ac::AcStats channel;
             mcp::ac::accumulate(session.mcpAcBlockers[static_cast<size_t>(ch)], channel, buffer.getReadPointer(ch), buffer.getNumSamples());
             if (armed)
                 session.mcpArmFinalAc[static_cast<size_t>(ch)].add(channel); // each channel on its own (review F3)
+            if (specArmed)
+                session.mcpSpecFinalAc[static_cast<size_t>(ch)].add(channel); // fixed-size atomics: no allocation
         }
     }
 
@@ -191,7 +194,8 @@ void McpHost::audioBlockFinished(AudioBuffer<float>& buffer)
                                   session.mcpSpecCapacity.load(std::memory_order_relaxed));
         if (!session.mcpSpecBuffer.empty() && pos < stop) {
             int const numSamples = buffer.getNumSamples();
-            int const numCh = buffer.getNumChannels();
+            // truth slice 2 (M2): the OUTPUT channels only (the JUCE buffer also holds the input channels)
+            int const numCh = std::min(buffer.getNumChannels(), outputs);
             auto* dst = session.mcpSpecBuffer.data();
             if (numCh > 0) {
                 for (int i = 0; i < numSamples && pos < stop; ++i) {

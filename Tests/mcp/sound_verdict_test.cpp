@@ -237,15 +237,129 @@ int main()
         CHECK(!has(json, "breakerTrips")); // a node tap carries no floor
     }
 
-    // judgeSamples: one buffer (the armed spectral capture), the same verdict as the tap.
+    // REVIEW H1 (blocker): a hit at the very start of a FRESH tap (a node tap opens with a new blocker) fell inside the
+    // blocker's settle period, its AC peak was skipped, and a real hit read "silent quiet_tone" next to tone:true.
+    // H1a: a 30 ms 1 kHz burst at -6 dBFS at tap start, then silence (a 500 ms window).
     {
-        auto const sig = phasor(55.0, 0.4f, kWindow);
+        auto sig = std::vector<float>(static_cast<size_t>(kWindow), 0.0f);
+        float const amp = std::pow(10.0f, -6.0f / 20.0f);
+        for (int i = 0; i < static_cast<int>(0.030 * kRate); ++i)
+            sig[static_cast<size_t>(i)] = amp * static_cast<float>(std::sin(2.0 * kPi * 1000.0 * i / kRate));
         auto const t = tapOf(sig);
-        auto const a = verdict::judge(t.rawPeakDb, t.ac, nullptr);
-        auto const b = verdict::judgeSamples(sig.data(), static_cast<int>(sig.size()), kRate);
-        CHECK(a.kind == b.kind);
-        CHECK(std::fabs(a.levelDb - b.levelDb) < 0.05f);
-        CHECK(verdict::judgeSamples(nullptr, 0, kRate).kind == Kind::Unmeasured);
+        auto const v = verdict::judge(t.rawPeakDb, t.ac, nullptr);
+        std::printf("  H1a burst: raw %.1f ac %.1f/%.1f tone %d -> %s level %.1f\n", t.rawPeakDb, t.ac.acRmsDb, t.ac.acPeakDb, t.ac.tone,
+            verdict::kindName(v.kind), v.levelDb);
+        CHECK(v.kind == Kind::Audible);
+        CHECK(v.levelDb > -30.0f && v.levelDb <= t.rawPeakDb);
+    }
+    // H1b: a 30 Hz tone at -6 dBFS in a 50 ms node window (fewer than two cycles: no tone flag, all inside the settle).
+    {
+        int const n = static_cast<int>(0.050 * kRate);
+        std::vector<float> sig(static_cast<size_t>(n));
+        float const amp = std::pow(10.0f, -6.0f / 20.0f);
+        for (int i = 0; i < n; ++i) sig[static_cast<size_t>(i)] = amp * static_cast<float>(std::sin(2.0 * kPi * 30.0 * i / kRate));
+        auto const t = tapOf(sig);
+        auto const v = verdict::judge(t.rawPeakDb, t.ac, nullptr);
+        std::printf("  H1b 30 Hz/50 ms: raw %.1f ac %.1f/%.1f dc %.1f tone %d -> %s level %.1f\n", t.rawPeakDb, t.ac.acRmsDb, t.ac.acPeakDb,
+            t.ac.dcDb, t.ac.tone, verdict::kindName(v.kind), v.levelDb);
+        CHECK(v.kind == Kind::Audible);
+        CHECK(v.levelDb > -20.0f && v.levelDb <= t.rawPeakDb);
+    }
+    // H1c: a single-sample click inside the settle period of a tap that opened on silence (an exactly flat first block
+    // primes exactly: nothing to settle).
+    {
+        std::vector<float> sig(static_cast<size_t>(kWindow), 0.0f);
+        sig[500] = 0.5f;
+        auto const t = tapOf(sig);
+        auto const v = verdict::judge(t.rawPeakDb, t.ac, nullptr);
+        std::printf("  H1c click: raw %.1f ac %.1f/%.1f -> %s level %.1f\n", t.rawPeakDb, t.ac.acRmsDb, t.ac.acPeakDb, verdict::kindName(v.kind), v.levelDb);
+        CHECK(v.kind == Kind::Audible);
+        CHECK(v.levelDb > -10.0f && v.levelDb <= t.rawPeakDb);
+    }
+    // H1d: the armed spectral window: a 40 ms 220 Hz pluck at its start. The final tap's blockers run on every block,
+    // so the window opens on a settled (here: silent) blocker; the per-channel stats decide, as the bridge reads them.
+    {
+        ac::DcBlocker blocker;
+        blocker.reset(ac::coefficientFor(kRate));
+        ac::AcStats warm;
+        std::vector<float> silence(kBlock * 20, 0.0f);
+        for (size_t at = 0; at < silence.size(); at += kBlock) ac::accumulate(blocker, warm, silence.data() + at, kBlock);
+        std::vector<float> sig(static_cast<size_t>(kWindow), 0.0f);
+        float const amp = std::pow(10.0f, -6.0f / 20.0f);
+        for (int i = 0; i < static_cast<int>(0.040 * kRate); ++i)
+            sig[static_cast<size_t>(i)] = amp * static_cast<float>(std::exp(-i / (0.015 * kRate)) * std::sin(2.0 * kPi * 220.0 * i / kRate));
+        ac::AcStats window;
+        for (size_t at = 0; at < sig.size(); at += kBlock) ac::accumulate(blocker, window, sig.data() + at, kBlock);
+        auto const v = verdict::judgeChannels(&window, 1, kRate, true);
+        std::printf("  H1d spectral pluck: -> %s level %.1f\n", verdict::kindName(v.kind), v.levelDb);
+        CHECK(v.kind == Kind::Audible);
+        CHECK(v.levelDb > -12.0f && v.levelDb <= -6.0f + 0.01f);
+    }
+    // M2: the spectral verdict reads each OUTPUT channel on its own: antiphase stereo (a mono sum of 0) is not silent.
+    {
+        auto const left = square(110.0, 0.5f, kWindow);
+        std::vector<float> right(left.size());
+        for (size_t i = 0; i < left.size(); ++i) right[i] = -left[i];
+        ac::AcStats ch[2];
+        ac::DcBlocker b[2];
+        for (auto& x : b) x.reset(ac::coefficientFor(kRate));
+        for (size_t at = 0; at < left.size(); at += kBlock) {
+            ac::accumulate(b[0], ch[0], left.data() + at, kBlock);
+            ac::accumulate(b[1], ch[1], right.data() + at, kBlock);
+        }
+        auto const v = verdict::judgeChannels(ch, 2, kRate, true);
+        CHECK(v.kind == Kind::Audible);
+        CHECK(verdict::judgeChannels(nullptr, 0, kRate, true).kind == Kind::Unmeasured);
+    }
+    // M3: an LFO wired into the output (2 Hz sine at -6 dBFS over 1 s) is said as sub-audio (a fact; the verdict keeps
+    // its rule); a 220 Hz tone is not.
+    {
+        int const n = static_cast<int>(kRate);
+        std::vector<float> lfo(static_cast<size_t>(n));
+        float const amp = std::pow(10.0f, -6.0f / 20.0f);
+        for (int i = 0; i < n; ++i) lfo[static_cast<size_t>(i)] = amp * static_cast<float>(std::sin(2.0 * kPi * 2.0 * i / kRate));
+        auto const t = tapOf(lfo);
+        auto const v = verdict::judge(t.rawPeakDb, t.ac, nullptr, true, kRate);
+        std::printf("  M3 lfo: swingHz %.2f -> %s subAudio %d\n", t.ac.swingHz(kRate), verdict::kindName(v.kind), v.subAudio);
+        CHECK(v.subAudio);
+        CHECK(has(verdict::toJson(v, "final", nullptr), "\"subAudio\":true"));
+        auto const tone220 = tapOf(tail(220.0, amp, 1.0e9, kWindow));
+        CHECK(!verdict::judge(tone220.rawPeakDb, tone220.ac, nullptr, true, kRate).subAudio);
+    }
+    // L1: an audible level is never printed at or under the floor.
+    {
+        ac::AcLevels lv;
+        lv.tone = true;
+        lv.acPeakDb = -59.97f; // above the floor by a hair: printed at -59.9, never -60.0
+        lv.acRmsDb = -70.0f;
+        auto const v = verdict::judge(-59.96f, lv, nullptr);
+        CHECK(v.kind == Kind::Audible);
+        CHECK(v.levelDb >= -59.9f);
+    }
+    // L2: no tone, DC under the AC level (dcShare below): the DC is no fact worth saying.
+    {
+        ac::AcLevels lv;
+        lv.acRmsDb = -30.0f;
+        lv.acPeakDb = -27.0f;
+        lv.dcDb = -40.0f;
+        auto const v = verdict::judge(-25.0f, lv, nullptr);
+        CHECK(v.dcShare == verdict::DcShare::Below);
+        CHECK(v.dcFact == verdict::DcFact::None);
+    }
+    // L4: master volume 0 is the reason only when Pd itself made sound before it.
+    {
+        verdict::Floor zero;
+        zero.read = true;
+        zero.masterVolume = 0.0f;
+        zero.pdOutPeakDb = -100.0f;
+        CHECK(std::string(verdict::judge(-100.0f, ac::AcLevels {}, &zero).reason).empty());
+    }
+    // L3: a hot read whose loudest channel the AC taps do not cover (channel 17 and up) is unjudged, never silent.
+    {
+        auto const v = verdict::judge(-6.0f, ac::AcLevels {}, nullptr, true, kRate, false);
+        CHECK(v.kind == Kind::Unmeasured);
+        CHECK(std::string(v.reason) == "channels_unjudged");
+        CHECK(verdict::judge(-80.0f, ac::AcLevels {}, nullptr, true, kRate, false).kind == Kind::Silent);
     }
 
     if (failures == 0) std::printf("sound_verdict_test: all passed\n");

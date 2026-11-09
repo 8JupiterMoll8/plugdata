@@ -21,15 +21,20 @@
 //   dcShare      the DC against the AC RMS: below | comparable (under +6 dB) | dominant (+6 dB and more)
 //   dcFact       a DC offset worth saying: none | alone (no tone) | with_tone (within 6 dB of the tone's level or above)
 //   nearFullScale  the raw peak is at or above -1 dBFS
-//   reason       "" | no_audio | no_level | dc_dominant | quiet_tone | master_volume_zero | master_volume_down |
-//                ceiling_breaker
+//   subAudio     the AC part's dominant swing is under 20 Hz (an LFO wired to the output): a fact, not a verdict rule
+//   reason       "" | no_audio | no_level | channels_unjudged | dc_dominant | quiet_tone | master_volume_zero |
+//                master_volume_down | ceiling_breaker
 //   final tap only: clamped, nonFinite, breakerTrips, breakerEngaged, limiterDb, masterVolume (the window's floor)
 //
 // The rules (what the server decided until now, with the bridge's own AC taps; MCPBridgeAcLevel.h):
 //   no audio block in the window         unmeasured (no_audio); a non-finite peak: unmeasured (no_level)
 //   raw peak at or under -60 dBFS         silent at the raw peak; the floor names what turned it down
+//   a hot raw peak the AC taps do not see unmeasured (channels_unjudged: an output channel past the 16 AC taps)
 //   no tone and DC >= AC RMS + 6 dB       dc_only (a DC offset is no sound)
-//   else                                  level = min(AC peak, raw peak): audible above -60, else silent (quiet_tone)
+//   else                                  level = min(raw peak, max(AC peak, AC RMS + 3 dB)): audible above -60 (said at
+//                                         -59.9 at least), else silent (quiet_tone). The AC RMS term (review H1): a
+//                                         FRESH tap skips its first ~64 ms of AC peak while the blocker settles, so a
+//                                         hit right at its start has an AC RMS but no AC peak.
 // The -60 dBFS floor is the server's truth-policy floor (TS MASTER_AUDIBLE_DBFS); keep the two equal.
 //
 // JUCE-free and Pd-free (Tests/mcp/sound_verdict_test.cpp runs it with g++ alone). Not for the audio thread: toJson
@@ -50,6 +55,9 @@ constexpr float kAudibleFloorDb = -60.0f;
 constexpr float kDcDominanceDb = 6.0f;
 constexpr float kDcNearToneDb = 6.0f;
 constexpr float kNearFullScaleDb = -1.0f;
+constexpr float kSineCrestDb = 3.01f;      // a sine's peak over its RMS
+constexpr float kAudibleSayDb = -59.9f;    // review L1: an audible level is never printed at or under the floor
+constexpr double kSubAudioHz = 20.0;
 
 enum class Kind { Audible, Silent, DcOnly, Unmeasured };
 enum class DcShare { Below, Comparable, Dominant };
@@ -83,6 +91,7 @@ struct Verdict {
     DcShare dcShare = DcShare::Below;
     DcFact dcFact = DcFact::None;
     bool nearFullScale = false;
+    bool subAudio = false;
     char const* reason = "";
 };
 
@@ -113,14 +122,18 @@ inline bool hot(float db) { return std::isfinite(db) && db > kAudibleFloorDb; }
 inline char const* silentReason(Floor const* floor)
 {
     if (!floor || !floor->read) return "";
-    if (floor->masterVolume == 0.0f) return "master_volume_zero";
+    if (floor->masterVolume == 0.0f && hot(floor->pdOutPeakDb)) return "master_volume_zero"; // review L4
     if (hot(floor->pdOutPeakDb) && !hot(floor->preLimiterPeakDb)) return "master_volume_down";
     if ((floor->breakerTrips > 0 || floor->breakerEngaged) && hot(floor->preCeilingPeakDb)) return "ceiling_breaker";
     return "";
 }
 
-/** The verdict of one tap: its raw peak (dBFS), its AC levels, the floor (final tap only), and whether audio ran. */
-inline Verdict judge(float rawPeakDb, ac::AcLevels const& lv, Floor const* floor, bool audioRan = true)
+/**
+ * The verdict of one tap: its raw peak (dBFS), its AC levels, the floor (final tap only), whether audio ran, the sample
+ * rate (for the swing rate), and whether the AC taps cover the channel the raw peak came from.
+ */
+inline Verdict judge(float rawPeakDb, ac::AcLevels const& lv, Floor const* floor, bool audioRan = true,
+    double sampleRate = ac::kDefaultRate, bool acCoversRaw = true)
 {
     Verdict v;
     v.tone = lv.tone;
@@ -147,6 +160,10 @@ inline Verdict judge(float rawPeakDb, ac::AcLevels const& lv, Floor const* floor
         v.reason = silentReason(floor);
         return v;
     }
+    if (!acCoversRaw) { // review L3: the loudest channel has no AC tap: no tone or DC fact about it
+        v.reason = "channels_unjudged";
+        return v;
+    }
     if (!lv.tone && v.dcShare == DcShare::Dominant) {
         v.kind = Kind::DcOnly;
         v.reason = "dc_dominant";
@@ -155,27 +172,34 @@ inline Verdict judge(float rawPeakDb, ac::AcLevels const& lv, Floor const* floor
     }
     v.quiet = !lv.tone;
     v.hasLevel = true;
-    v.levelDb = std::min(lv.acPeakDb, v.rawPeakDb);
+    v.levelDb = std::min(v.rawPeakDb, std::max(lv.acPeakDb, lv.acRmsDb + kSineCrestDb));
     v.kind = hot(v.levelDb) ? Kind::Audible : Kind::Silent;
+    if (v.kind == Kind::Audible) v.levelDb = std::max(v.levelDb, kAudibleSayDb);
     if (v.kind == Kind::Silent) v.reason = "quiet_tone";
-    if (hot(lv.dcDb)) {
+    if (hot(lv.dcDb) && v.dcShare != DcShare::Below) { // review L2: a DC under the AC level is no fact worth saying
         if (!lv.tone) v.dcFact = DcFact::Alone;
         else if (lv.dcDb >= v.levelDb - kDcNearToneDb) v.dcFact = DcFact::WithTone;
     }
+    double const hz = lv.swingHz(sampleRate);
+    v.subAudio = v.kind == Kind::Audible && hz > 0.0 && hz < kSubAudioHz; // review M3: a fact only
     return v;
 }
 
-/** The verdict of one captured buffer (the armed spectral window): the blocker runs over it in Pd-sized blocks. */
-inline Verdict judgeSamples(float const* data, int n, double sampleRate)
+/**
+ * The verdict of a window read per OUTPUT channel (the armed spectral window, review M2): each channel's own stats, as
+ * the final tap's blockers gathered them; the raw peak is the loudest channel's. No channel counted: unmeasured.
+ */
+inline Verdict judgeChannels(ac::AcStats const* channels, int numChannels, double sampleRate, bool audioRan)
 {
-    if (!data || n <= 0) return judge(std::nanf(""), ac::AcLevels {}, nullptr);
-    ac::DcBlocker blocker;
-    blocker.reset(ac::coefficientFor(sampleRate));
-    ac::AcStats stats;
-    for (int at = 0; at < n; at += 64)
-        ac::accumulate(blocker, stats, data + at, std::min(64, n - at));
-    if (stats.count == 0) return judge(std::nanf(""), ac::AcLevels {}, nullptr);
-    return judge(ac::ampToDb(stats.maxAbs), ac::levelsOf(stats), nullptr);
+    float maxAbs = 0.0f;
+    bool counted = false;
+    for (int c = 0; channels && c < numChannels; ++c)
+        if (channels[c].count > 0) {
+            counted = true;
+            maxAbs = std::max(maxAbs, channels[c].maxAbs);
+        }
+    if (!counted) return judge(std::nanf(""), ac::AcLevels {}, nullptr, audioRan, sampleRate);
+    return judge(ac::ampToDb(maxAbs), ac::levelsOfChannels(channels, numChannels), nullptr, audioRan, sampleRate);
 }
 
 inline std::string dbJson(bool read, float db)
@@ -198,7 +222,7 @@ inline std::string toJson(Verdict const& v, char const* tap, Floor const* floor)
         + ",\"acRmsDb\":" + dbJson(true, v.acRmsDb) + ",\"acPeakDb\":" + dbJson(true, v.acPeakDb)
         + ",\"dcDb\":" + dbJson(true, v.dcDb)
         + ",\"dcShare\":\"" + shareName(v.dcShare) + "\",\"dcFact\":\"" + factName(v.dcFact) + "\""
-        + ",\"nearFullScale\":" + b(v.nearFullScale)
+        + ",\"nearFullScale\":" + b(v.nearFullScale) + ",\"subAudio\":" + b(v.subAudio)
         + ",\"reason\":\"" + std::string(v.reason ? v.reason : "") + "\"";
     if (floor) {
         char buf[200];

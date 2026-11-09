@@ -230,9 +230,10 @@ inline juce::String acJsonFields(mcp::ac::AcLevels const& lv)
 }
 
 /** Truth slice 2 (meter_verdict): the sound block of a NODE tap, as a JSON object (see MCPBridgeSoundVerdict.h). */
-inline juce::String soundJson(float rawPeakDb, mcp::ac::AcLevels const& lv)
+inline juce::String soundJson(float rawPeakDb, mcp::ac::AcLevels const& lv, double sampleRate = 0.0)
 {
-    return juce::String(mcp::verdict::toJson(mcp::verdict::judge(rawPeakDb, lv, nullptr), "node", nullptr));
+    double const rate = sampleRate > 0.0 ? sampleRate : mcp::ac::kDefaultRate;
+    return juce::String(mcp::verdict::toJson(mcp::verdict::judge(rawPeakDb, lv, nullptr, true, rate), "node", nullptr));
 }
 
 // V1 AC taps: what a window tap measured when its window closed.
