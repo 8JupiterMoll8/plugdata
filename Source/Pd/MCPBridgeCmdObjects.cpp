@@ -131,75 +131,76 @@ void MCPBridge::pdObjSetBatch(const juce::String& action, const juce::OSCMessage
         juce::Array<juce::var> results;
 
         processor->setThis(); // review M5: this worker thread may never have selected the Pd instance (as pdObjSet)
-        sys_lock();
-        t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName); // slice 3: liveness + read-back
-        for (int i = 0; i < count && cursor < msg.size(); i++) {
-            auto tempId = getArgString(msg[cursor++]);
-            int inlet = (cursor < msg.size()) ? static_cast<int>(getArgFloat(msg[cursor++])) : 0;
-            auto selector = (cursor < msg.size()) ? getArgString(msg[cursor++]) : juce::String();
-            if (selector.startsWith("s:")) selector = selector.substring(2);
-            int argc = (cursor < msg.size()) ? static_cast<int>(getArgFloat(msg[cursor++])) : 0;
-            std::vector<t_atom> atoms;
-            for (int a = 0; a < argc && cursor < msg.size(); a++) {
-                auto const& arg = msg[cursor++];
-                t_atom at;
-                if (arg.isFloat32() || arg.isInt32()) SETFLOAT(&at, getArgFloat(arg));
-                else {
-                    auto s = getArgString(arg);
-                    if (s.startsWith("s:")) s = s.substring(2);
-                    SETSYMBOL(&at, gensym(s.toRawUTF8()));
-                }
-                atoms.push_back(at);
-            }
-            juce::String warning;
-            t_gobj* g = processor->getMcp()->resolveStableId(canvasName, tempId);
-            if (g && !mcpGobjIsLive(cnv, g)) g = nullptr; // slice 3: a stale id is unknown (never a dangling read-back)
-            bool const intact = processor->getMcp()->aiIntact(g); // P12a: the AI's own tuning stays the AI's
-            auto* host = processor->getMcp();
-            uint64_t const consoleBefore = host->consoleSeqNow(); // slice 3: delivery = no console line while delivered
-            unsigned int const seqBefore = mcp_last_seq();
-            auto err = mcpObjSetCore(g, tempId, inlet, selector, atoms, &warning);
-            unsigned int const seqAfter = mcp_last_seq();
-            host->noteAiSeqRange(seqBefore, seqAfter);
-            processor->getMcp()->restampAfterAiChange(g, intact);
-            if (err.isEmpty() && mcpIsGuiValueSet(inlet, selector)) processor->getMcp()->noteAiGuiValue(g); // slice 3: handMoved
-            auto* ro = new juce::DynamicObject();
-            ro->setProperty("tempId", tempId);
-            ro->setProperty("selector", selector);
-            if (err.isNotEmpty()) { ro->setProperty("ok", false); ro->setProperty("detail", err); }
-            else { ro->setProperty("ok", true); okCount++; if (warning.isNotEmpty()) ro->setProperty("warning", warning); }
-            if (err.isNotEmpty()) {
-                ro->setProperty("delivered", false);
-                ro->setProperty("console", juce::Array<juce::var>());
-                ro->setProperty("readBack", juce::var());
-            } else {
-                mcpPutDelivery(ro, host, cnv, g, inlet, consoleBefore, seqBefore, seqAfter);
-            }
-            results.add(juce::var(ro));
-        }
-        sys_unlock();
-
-        auto* root = new juce::DynamicObject();
-        root->setProperty("ok", okCount);
-        root->setProperty("total", count);
-        root->setProperty("results", results);
-        sendReply("/pd/obj_set_batch/reply/" + correlationId, juce::JSON::toString(juce::var(root)));
-    }
-    return;
-}
-
-void MCPBridge::pdParamGet(const juce::String& action, const juce::OSCMessage& msg)
-{
-    // /pd/param_get <name> <corrId>
-    // reply: JSON { name, found, atoms:[...] }  (last value posted via /param)
-    if (msg.size() >= 1) {
-        auto name = getArgString(msg[0]);
-        auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : juce::String("0");
-        std::vector<t_atom> atoms; bool found = false;
         {
-            std::lock_guard<std::mutex> lk(s_paramShadowMutex);
-            auto it = s_paramShadow.find(name.toStdString());
-            if (it != s_paramShadow.end()) { atoms = it->second; found = true; }
+            McpHost::PdLockScope lock(*processor); // delta review 5: RAII (an exception never leaves Pd locked)
+            t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName); // slice 3: liveness + read-back
+            for (int i = 0; i < count && cursor < msg.size(); i++) {
+                auto tempId = getArgString(msg[cursor++]);
+                int inlet = (cursor < msg.size()) ? static_cast<int>(getArgFloat(msg[cursor++])) : 0;
+                auto selector = (cursor < msg.size()) ? getArgString(msg[cursor++]) : juce::String();
+                if (selector.startsWith("s:")) selector = selector.substring(2);
+                int argc = (cursor < msg.size()) ? static_cast<int>(getArgFloat(msg[cursor++])) : 0;
+                std::vector<t_atom> atoms;
+                for (int a = 0; a < argc && cursor < msg.size(); a++) {
+                    auto const& arg = msg[cursor++];
+                    t_atom at;
+                    if (arg.isFloat32() || arg.isInt32()) SETFLOAT(&at, getArgFloat(arg));
+                    else {
+                        auto s = getArgString(arg);
+                        if (s.startsWith("s:")) s = s.substring(2);
+                        SETSYMBOL(&at, gensym(s.toRawUTF8()));
+                    }
+                    atoms.push_back(at);
+                }
+                juce::String warning;
+                t_gobj* g = processor->getMcp()->resolveStableId(canvasName, tempId);
+                if (g && !mcpGobjIsLive(cnv, g)) g = nullptr; // slice 3: a stale id is unknown (never a dangling read-back)
+                bool const intact = processor->getMcp()->aiIntact(g); // P12a: the AI's own tuning stays the AI's
+                auto* host = processor->getMcp();
+                uint64_t const consoleBefore = host->consoleSeqNow(); // slice 3: delivery = no console line while delivered
+                unsigned int const seqBefore = mcp_last_seq();
+                auto err = mcpObjSetCore(g, tempId, inlet, selector, atoms, &warning);
+                unsigned int const seqAfter = mcp_last_seq();
+                host->noteAiSeqRange(seqBefore, seqAfter);
+                processor->getMcp()->restampAfterAiChange(g, intact);
+                if (err.isEmpty() && mcpIsGuiValueSet(inlet, selector)) processor->getMcp()->noteAiGuiValue(g); // slice 3: handMoved
+                auto* ro = new juce::DynamicObject();
+                ro->setProperty("tempId", tempId);
+                ro->setProperty("selector", selector);
+                if (err.isNotEmpty()) { ro->setProperty("ok", false); ro->setProperty("detail", err); }
+                else { ro->setProperty("ok", true); okCount++; if (warning.isNotEmpty()) ro->setProperty("warning", warning); }
+                if (err.isNotEmpty()) {
+                    ro->setProperty("delivered", false);
+                    ro->setProperty("console", juce::Array<juce::var>());
+                    ro->setProperty("readBack", juce::var());
+                } else {
+                    mcpPutDelivery(ro, host, cnv, g, inlet, consoleBefore, seqBefore, seqAfter);
+                }
+                results.add(juce::var(ro));
+            }
+            }
+
+            auto* root = new juce::DynamicObject();
+            root->setProperty("ok", okCount);
+            root->setProperty("total", count);
+            root->setProperty("results", results);
+            sendReply("/pd/obj_set_batch/reply/" + correlationId, juce::JSON::toString(juce::var(root)));
+        }
+        return;
+    }
+
+    void MCPBridge::pdParamGet(const juce::String& action, const juce::OSCMessage& msg)
+    {
+        // /pd/param_get <name> <corrId>
+        // reply: JSON { name, found, atoms:[...] }  (last value posted via /param)
+        if (msg.size() >= 1) {
+            auto name = getArgString(msg[0]);
+            auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : juce::String("0");
+            std::vector<t_atom> atoms; bool found = false;
+            {
+                std::lock_guard<std::mutex> lk(s_paramShadowMutex);
+                auto it = s_paramShadow.find(name.toStdString());
+                if (it != s_paramShadow.end()) { atoms = it->second; found = true; }
         }
         auto* root = new juce::DynamicObject();
         root->setProperty("name", name);

@@ -1,4 +1,4 @@
-From d51c2c76322c94fe64fd43228d1a6ae78a528ef3 Mon Sep 17 00:00:00 2001
+From 6f01ee0da4f994f3716959213e239bc9856dc9ed Mon Sep 17 00:00:00 2001
 From: Alphi <alphi@starchaser.local>
 Date: Mon, 9 Nov 2026 14:19:32 +0100
 Subject: [PATCH] feat(core): MCP last value per inlet and wire
@@ -36,7 +36,7 @@ equivalent.
  2 files changed, 114 insertions(+)
 
 diff --git a/src/m_obj.c b/src/m_obj.c
-index fe3ec7e..daae992 100644
+index fe3ec7e..71d4605 100644
 --- a/src/m_obj.c
 +++ b/src/m_obj.c
 @@ -39,6 +39,14 @@ union inletunion
@@ -45,10 +45,10 @@ index fe3ec7e..daae992 100644
  
 +    /* MCP fork (truth slice 3): the last control message a wire or a secondary inlet carried, for the bridge's
 +       read-back (who set a value, and what it was). At most MCP_LAST_ATOMS atoms are kept; mcp_argc is the full count
-+       (more = truncated); a pointer atom keeps its type but not the pointer. mcp_seq is the instance's message counter
-+   at the store (0 = nothing yet; the counter skips 0 when it wraps). Written on the
-+       thread that runs Pd (under the Pd lock): a few plain stores, no lock, no allocation. Appended at the END of the
-+       structs, so code that mirrors their first fields (pdlua, cyclone poke~) is unaffected. */
++       (more = truncated); a pointer atom keeps its type but not the pointer. mcp_seq is the instance's message
++       counter at the store (0 = nothing yet; the counter skips 0 when it wraps). Written on the thread that runs Pd
++       (under the Pd lock): a few plain stores, no lock, no allocation. Appended at the END of the structs, so code
++       that mirrors their first fields (pdlua, cyclone poke~) is unaffected. */
 +#define MCP_LAST_ATOMS 4
 +
  struct _inlet
