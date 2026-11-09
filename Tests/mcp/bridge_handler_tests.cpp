@@ -662,6 +662,7 @@ void runSharedUndoCases(Harness& h, PluginProcessor& processor)
             host->journalEditorRemove(cnv, objs); // the MCP-HOOK in Canvas::removeSelection
             pd::Interface::removeObjects(cnv, objs);
             pd::Interface::finishRemove(cnv);
+            canvas_undo_add(cnv, UNDO_SEQUENCE_END, "Remove object/s", nullptr); // Patch::endUndoSequence
         }, 2000);
     };
     CHECK(editorDelete({ "su_e1", "su_e2" }));
@@ -735,6 +736,7 @@ void runSharedUndoCases(Harness& h, PluginProcessor& processor)
         host->journalEditorRemove(cnv, objs);
         pd::Interface::removeObjects(cnv, objs);
         pd::Interface::finishRemove(cnv);
+        canvas_undo_add(cnv, UNDO_SEQUENCE_END, "Remove object/s", nullptr);
     }, 2000));
     CHECK(lopX >= 0);
     CHECK(step("undo")); // the hip~ comes back
@@ -747,6 +749,102 @@ void runSharedUndoCases(Harness& h, PluginProcessor& processor)
     }, 2000));
     CHECK(hipId != "su_lp");
     CHECK(text("su_lp").empty()); // the lop's id stays a ghost: nothing wears it
+
+    // A box placed by hand at (x, y) and registered as Pd's own create (UNDO_CREATE), then deleted the editor's way.
+    auto handPlaceAndDelete = [&](int x, int y, char const* cls, float arg) {
+        return host->pdWait([&] {
+            t_canvas* cnv = host->getCanvasBySymbolStrict("main");
+            if (!cnv) return;
+            t_atom at[4];
+            SETFLOAT(at, x);
+            SETFLOAT(at + 1, y);
+            SETSYMBOL(at + 2, gensym(cls));
+            SETFLOAT(at + 3, arg);
+            pd_typedmess(&cnv->gl_pd, gensym("obj"), 4, at);
+            canvas_undo_add(cnv, UNDO_CREATE, "create", canvas_undo_set_create(cnv));
+            t_gobj* last = cnv->gl_list;
+            while (last && last->g_next) last = last->g_next;
+            if (!cnv->gl_editor) canvas_create_editor(cnv);
+            canvas_undo_add(cnv, UNDO_SEQUENCE_START, "Remove object/s", nullptr);
+            SmallArray<t_gobj*> objs;
+            objs.add(last);
+            host->journalEditorRemove(cnv, objs);
+            pd::Interface::removeObjects(cnv, objs);
+            pd::Interface::finishRemove(cnv);
+            canvas_undo_add(cnv, UNDO_SEQUENCE_END, "Remove object/s", nullptr);
+        }, 2000);
+    };
+    auto lastBoxId = [&]() {
+        std::string id = "?";
+        host->pdWait([&] {
+            t_canvas* cnv = host->getCanvasBySymbolStrict("main");
+            t_gobj* last = cnv ? cnv->gl_list : nullptr;
+            while (last && last->g_next) last = last->g_next;
+            id = last ? host->getStableId(last).toStdString() : "?";
+        }, 2000);
+        return id;
+    };
+    auto ghostOf = [&](char const* id) {
+        bool found = false;
+        host->pdWait([&] {
+            if (t_canvas* cnv = host->getCanvasBySymbolStrict("main"))
+                for (auto const& g : host->undoJournalFor(cnv)) found = found || g.id == id;
+        }, 2000);
+        return found;
+    };
+
+    // 13. (delta review 2) The AI-delete variant of case 12: the AI deletes its lop~, a hip~ placed by hand at that spot
+    //     is deleted and Ctrl+Z'd: the hip~ comes back without the lop's id.
+    auto const cq1 = next("suq");
+    CHECK(batch({ "main", cq1, 0, 0, 0, 1, 0, "su_lq", 1600, 500, "obj", "lop~", 1, "300", 0, 5, 10, 0 }, cq1));
+    auto const cq2 = next("suq");
+    CHECK(batch({ "main", cq2, 1, 0, 0, 0, 0, "su_lq", 0, 5, 10, 0 }, cq2));
+    CHECK(text("su_lq").empty());
+    CHECK(handPlaceAndDelete(1600, 500, "hip~", 5));
+    CHECK(step("undo"));
+    CHECK(lastBoxId() != "su_lq" && text("su_lq").empty());
+
+    // 14. delete -> another edit -> two undos: the first undo (the edit) brings nothing back, the second the box.
+    auto const cq3 = next("suq");
+    CHECK(batch({ "main", cq3, 0, 0, 0, 1, 0, "su_q1", 1650, 560, "obj", "f", 1, "3", 0, 5, 10, 0 }, cq3));
+    auto const cq4 = next("suq");
+    CHECK(batch({ "main", cq4, 1, 0, 0, 0, 0, "su_q1", 0, 5, 10, 0 }, cq4));
+    CHECK(manualMove("su_e1", 5, 5));
+    CHECK(step("undo"));
+    CHECK(text("su_q1").empty());
+    CHECK(step("undo"));
+    CHECK(text("su_q1") == "f 3");
+
+    // 15. delete -> undo -> redo -> undo (the editor's delete): the id follows every step.
+    CHECK(editorDelete({ "su_q1" }));
+    CHECK(text("su_q1").empty());
+    CHECK(step("undo"));
+    CHECK(text("su_q1") == "f 3");
+    CHECK(step("redo"));
+    CHECK(text("su_q1").empty());
+    CHECK(step("undo"));
+    CHECK(text("su_q1") == "f 3");
+
+    // 16. The id is in use when its box comes back: the box comes back without it, the id stays where it is, and the
+    //     ghost is gone (delta review 3: one chance; never later at the same address).
+    CHECK(editorDelete({ "su_q1" }));
+    CHECK(host->pdWait([&] {
+        t_canvas* cnv = host->getCanvasBySymbolStrict("main");
+        if (!cnv) return;
+        t_atom at[4];
+        SETFLOAT(at, 1700);
+        SETFLOAT(at + 1, 600);
+        SETSYMBOL(at + 2, gensym("f"));
+        SETFLOAT(at + 3, 77);
+        pd_typedmess(&cnv->gl_pd, gensym("obj"), 4, at); // a box made outside the bridge (no undo entry)
+        t_gobj* last = cnv->gl_list;
+        while (last && last->g_next) last = last->g_next;
+        host->identity.bind(cnv, "su_q1", last); // the id is now in use
+    }, 2000));
+    CHECK(text("su_q1") == "f 77");
+    CHECK(step("undo")); // the f 3 box comes back
+    CHECK(text("su_q1") == "f 77");
+    CHECK(!ghostOf("su_q1"));
 }
 
 // P6.2 UF: /pd/undo_peek reads the canvas's undo queue without changing it: depth D (steps Ctrl+Z can take), redo R,
@@ -2094,6 +2192,37 @@ void runStopFactsCases(Harness& h, PluginProcessor& processor)
     }
     h.fire("/pd/dsp", { 0 });
     h.call("/pd/batch_atomic", { "main", "sf13", 1, 0, 0, 0, 0, "sf_bsub", 0, 5, 10, 0 }, "/pd/batch_atomic/reply/sf13");
+
+    // Delta review 4: a $0 bus ([throw~ $0-mix] -> [catch~ $0-mix]) is crossed like any other: the catch~'s row lists
+    // its sender, and the patch sounds.
+    auto dzSub = h.call("/pd/batch_atomic", { "main", "sf19", 0, 0, 0, 1, 0, "sf_dsub", 1400, 750, "obj", "pd", 1, "sf_dz", 0, 5, 10, 0 },
+        "/pd/batch_atomic/reply/sf19");
+    CHECK(dzSub.has_value() && dzSub->num(0) == 1);
+    auto dz = h.call("/pd/batch_atomic", { "pd-sf_dz", "sf20", 0, 0, 0, 4, 3,
+        "dz_osc", 40, 40, "obj", "osc~", 1, "220",
+        "dz_t", 40, 90, "obj", "throw~", 1, "$0-mix",
+        "dz_c", 40, 150, "obj", "catch~", 1, "$0-mix",
+        "dz_dac", 40, 200, "obj", "dac~", 0,
+        "dz_osc", 0, "dz_t", 0,
+        "dz_c", 0, "dz_dac", 0,
+        "dz_c", 0, "dz_dac", 1,
+        0, 5, 10, 0 }, "/pd/batch_atomic/reply/sf20");
+    CHECK(dz.has_value() && dz->num(0) == 4);
+    h.fire("/pd/dsp", { 1 });
+    sleepMs(200);
+    {
+        auto armed = h.call("/meter/trace", { "pd-sf_dz", "sf21", "arm", 300, "" }, "/meter/trace/reply/sf21");
+        CHECK(armed.has_value());
+        sleepMs(350);
+        auto read = h.call("/meter/trace", { "pd-sf_dz", "sf22", "read" }, "/meter/trace/reply/sf22");
+        auto const df = read ? parseJson(*read)["stopFacts"] : juce::var();
+        auto const c = stopRow(df, "dz_c");
+        CHECK(c["bus"].getArray() && c["bus"].getArray()->size() == 1);
+        CHECK(c["bus"][0]["id"].toString() == "dz_t:bus" && c["bus"][0]["verdict"].toString() == "audible");
+        CHECK(df["nearestStop"]["kind"].toString() == "none");
+    }
+    h.fire("/pd/dsp", { 0 });
+    h.call("/pd/batch_atomic", { "main", "sf23", 1, 0, 0, 0, 0, "sf_dsub", 0, 5, 10, 0 }, "/pd/batch_atomic/reply/sf23");
 }
 
 // V1 /pd/inlet_values: the live value each inlet holds (capability inlet_values). [lop~ 300] with a signal on inlet

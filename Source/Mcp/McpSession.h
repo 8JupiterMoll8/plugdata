@@ -37,12 +37,14 @@ extern "C" {
 // P4.4: an id whose object an undo or redo took away, kept so the object that comes back (same text, same place)
 // gets the id again. Pd context only.
 struct McpUndoGhost {
-    // Where the ghost came from (slice 3 review H1): an undo/redo step took the object away, an AI delete, or the
-    // artist's own editor delete. An editorDelete ghost comes back ONLY with the undo of its own delete and never by
-    // place alone. `anchor` is the canvas's newest undo action when the delete began (the hook runs before Pd adds
-    // the delete's actions); `action` is the delete's own first action (anchor->next), filled in by the next undo step
-    // (McpHost::undoStep: no undo can run in between except through it) while it is still in the queue. Both are
-    // only dereferenced after they were found in the canvas's live undo queue.
+    // Where the ghost came from (slice 3 review H1, delta review 2): an undo/redo step took the object away, an AI
+    // delete, or the artist's own editor delete. EVERY ghost is tied to one undo action and comes back only with the
+    // undo/redo step that contains that action (both binding passes): a delete's ghost with the undo of that delete,
+    // a step's ghost with the step that reverses it. For a delete, `anchor` is the canvas's newest undo action when
+    // the delete began (the delete's own actions come after it); `action` (anchor->next) is filled in by the next undo
+    // step (McpHost::undoStep: no undo runs in between except through it) while it is still in the queue. A step's
+    // ghost gets the newest action of its step at once. Pointers are compared, and dereferenced only after they were
+    // found in the canvas's live undo queue. `stepNo` = the undo step that made it (0 = a delete).
     enum class Origin { Step, AiDelete, EditorDelete };
     std::string id;
     std::string text;
@@ -50,6 +52,7 @@ struct McpUndoGhost {
     Origin origin = Origin::Step;
     void const* anchor = nullptr;
     void const* action = nullptr;
+    uint64_t stepNo = 0;
 };
 
 struct McpSession {
