@@ -53,6 +53,7 @@
 #include "Mcp/McpCeilingPlayer.h" // P9 round 1: the clamp on playVoiceTake's own callback
 #include "Mcp/McpNativeUndo.h" // P6.2 UF: hand-made undo entries (motion) for /pd/undo_peek
 #include "v2_test_client.h" // P4.1 S2: loopback v2 client
+#include "Pd/MCPBridgePdAccessors.h" // slice 3 review H2: mcp_last_seq
 #include "Pd/MCPBridgeCmdCommon.h" // armedSpectralJson / renderSpectralJson (Plan 5 spectral window)
 #include <juce_cryptography/juce_cryptography.h> // juce::SHA256: the save_content hash (P11.2 V11)
 #include "Utility/PluginParameter.h" // PlugDataParameter: the master volume guard (P5.1 sink floor)
@@ -1328,6 +1329,11 @@ void runArmedTraceCases(Harness& h)
                 }
         CHECK(levelOf(json, "t2b_env") > -3.0);  // the envelope reached ~1
         CHECK(json["chokePoint"].toString() != "t2b_vca");
+        // Review H3: the output sounds: the old pair for an old server ("none" + its reason), the id in stopFacts only.
+        CHECK(json["chokePoint"].toString() == "none");
+        CHECK(json["reason"].toString() == "signal reaches master sink");
+        CHECK(json["stopFacts"]["nearestStop"]["kind"].toString() == "none");
+        CHECK(json["stopFacts"]["nearestStop"]["tempId"].toString() == "t2b_dac");
         auto const* silentEnv = json["silentEnvelopes"].getArray();
         CHECK(silentEnv != nullptr && !silentEnv->contains("t2b_env"));
     }
@@ -2022,6 +2028,47 @@ void runStopFactsCases(Harness& h, PluginProcessor& processor)
 
     h.fire("/pd/dsp", { 0 });
     h.call("/pd/batch_atomic", { "main", "sf8", 1, 0, 0, 0, 0, "sf_sub", 0, 5, 10, 0 }, "/pd/batch_atomic/reply/sf8");
+
+    // Review M4: the walk crosses a bus. Two throw~ voices into one catch~ -> *~ -> dac~: voice 1 dies at its VCA
+    // ([*~ 0]), voice 2's throw~ has nothing plugged in (cut). The nearest stop is voice 2's open throw~ inlet (hop 2);
+    // the catch~ row (hop 1) lists both senders under `bus`; voice 1's VCA is a row at hop 3.
+    auto busSub = h.call("/pd/batch_atomic", { "main", "sf9", 0, 0, 0, 1, 0, "sf_bsub", 1400, 650, "obj", "pd", 1, "sf_bus", 0, 5, 10, 0 },
+        "/pd/batch_atomic/reply/sf9");
+    CHECK(busSub.has_value() && busSub->num(0) == 1);
+    char const* const BUS = "pd-sf_bus";
+    auto bus = h.call("/pd/batch_atomic",
+        { BUS, "sf10", 0, 0, 0, 6, 4,
+            "bs_osc", 40, 40, "obj", "osc~", 1, "300",
+            "bs_vca", 40, 90, "obj", "*~", 1, "0",
+            "bs_t1", 40, 140, "obj", "throw~", 1, "sf3bus",
+            "bs_t2", 200, 140, "obj", "throw~", 1, "sf3bus",
+            "bs_c", 120, 200, "obj", "catch~", 1, "sf3bus",
+            "bs_dac", 120, 300, "obj", "dac~", 0,
+            "bs_osc", 0, "bs_vca", 0,
+            "bs_vca", 0, "bs_t1", 0,
+            "bs_c", 0, "bs_dac", 0,
+            "bs_c", 0, "bs_dac", 1,
+            0, 5, 10, 0 },
+        "/pd/batch_atomic/reply/sf10");
+    CHECK(bus.has_value() && bus->num(0) == 6);
+    h.fire("/pd/dsp", { 1 });
+    sleepMs(200);
+    {
+        auto armed = h.call("/meter/trace", { BUS, "sf11", "arm", 300, "" }, "/meter/trace/reply/sf11");
+        CHECK(armed.has_value());
+        sleepMs(350);
+        auto read = h.call("/meter/trace", { BUS, "sf12", "read" }, "/meter/trace/reply/sf12");
+        CHECK(read.has_value());
+        auto const bf = read ? parseJson(*read)["stopFacts"] : juce::var();
+        CHECK(bf["nearestStop"]["tempId"].toString() == "bs_t2");
+        CHECK(bf["nearestStop"]["kind"].toString() == "open_inlet" && static_cast<int>(bf["nearestStop"]["hop"]) == 2);
+        auto const c = stopRow(bf, "bs_c");
+        CHECK(static_cast<int>(c["hop"]) == 1 && c["bus"].getArray() && c["bus"].getArray()->size() == 2);
+        CHECK(static_cast<int>(stopRow(bf, "bs_vca")["hop"]) == 3);
+        CHECK(stopRow(bf, "bs_vca")["sig"][0]["from"][0]["verdict"].toString() == "audible");
+    }
+    h.fire("/pd/dsp", { 0 });
+    h.call("/pd/batch_atomic", { "main", "sf13", 1, 0, 0, 0, 0, "sf_bsub", 0, 5, 10, 0 }, "/pd/batch_atomic/reply/sf13");
 }
 
 // V1 /pd/inlet_values: the live value each inlet holds (capability inlet_values). [lop~ 300] with a signal on inlet
@@ -2215,7 +2262,13 @@ void runControlTruthCases(Harness& h, PluginProcessor& processor)
         CHECK(json["refused"].toString().isEmpty());
         CHECK(json["receivers"].getArray() && json["receivers"].getArray()->isEmpty());
     }
-    for (auto const* name : { "pd", "pd-main", "#plugdata_mcp_ui", "mcp_host" }) {
+    // Review M6: names that also reach something that is not a box are refused (an array, a canvas by namecanvas).
+    auto refusing = h.call("/pd/batch_atomic", { "main", "ct17", 0, 0, 0, 2, 0,
+        "ct_arr", 2300, 10, "obj", "array", 2, "define", "ct_arr_name",
+        "ct_nc", 2300, 60, "obj", "namecanvas", 1, "ct_nc_name",
+        0, 5, 10, 0 }, "/pd/batch_atomic/reply/ct17");
+    CHECK(refusing.has_value() && refusing->num(0) == 2);
+    for (auto const* name : { "pd", "pd-main", "#plugdata_mcp_ui", "mcp_host", ".x123", "ct_arr_name", "ct_nc_name" }) {
         auto r = h.call("/pd/send_checked", { "main", "ct10", name, 1, 1.0 }, "/pd/send_checked/reply/ct10");
         CHECK(r.has_value());
         auto const json = r ? parseJson(*r) : juce::var();
@@ -2237,7 +2290,33 @@ void runControlTruthCases(Harness& h, PluginProcessor& processor)
         CHECK(last["by"].toString() == "ai"); // the send was the AI's
     }
 
-    h.call("/pd/batch_atomic", { "main", "ct13", 7, 0, 0, 0, 0,
+    // 5. Review H2: once more AI ranges came than the ring keeps, an old record's `by` is "not known" (null), never
+    //    "other". Each loop turn is one AI-like dispatch (its range noted) and one hand message (not noted), so no
+    //    two ranges merge; a record made after the oldest kept range still reads "other".
+    auto extra = h.call("/pd/batch_atomic", { "main", "ct14", 0, 0, 0, 2, 1,
+        "ct_m2", 2200, 10, "msg", "1", 0,
+        "ct_f2", 2200, 50, "obj", "f", 0,
+        "ct_m2", 0, "ct_f2", 0,
+        0, 5, 10, 0 }, "/pd/batch_atomic/reply/ct14");
+    CHECK(extra.has_value() && extra->num(0) == 2);
+    CHECK(host->pdWait([&] {
+        t_gobj* m2 = host->resolveStableId("main", "ct_m2");
+        if (!m2) return;
+        for (int i = 0; i < 1100; ++i) {
+            unsigned int const before = mcp_last_seq();
+            pd_bang(&m2->g_pd);
+            host->noteAiSeqRange(before, mcp_last_seq());
+            pd_bang(&m2->g_pd); // the hand: breaks the run of ranges
+        }
+    }, 5000));
+    {
+        auto const old = inletEntry(read("ct15", "ct_osc"), "ct_osc", 1)["last"];
+        CHECK(old.isObject() && old["by"].isVoid());
+        auto const recent = inletEntry(read("ct16", "ct_f2"), "ct_f2", 0)["last"];
+        CHECK(recent["by"].toString() == "other");
+    }
+
+    h.call("/pd/batch_atomic", { "main", "ct13", 11, 0, 0, 0, 0, "ct_arr", "ct_nc", "ct_m2", "ct_f2",
         "ct_osc", "ct_msg", "ct_sig", "ct_noise", "ct_lop", "ct_r", "ct_hsl", 0, 5, 10, 0 }, "/pd/batch_atomic/reply/ct13");
 }
 

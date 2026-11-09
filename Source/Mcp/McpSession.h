@@ -399,9 +399,12 @@ struct McpSession {
 
     // Truth slice 3 (`by`): the ranges of Pd's message counter (mcp_last_seq, pure-data/0005) that the bridge's own
     // dispatches covered (obj_set, obj_set_batch, send_checked): a recorded message whose seq falls in one was the
-    // AI's, any other was not. A ring of the newest 256 (before, after]; the counter wraps, so ranges are compared
-    // with unsigned differences. Pd lock held (the dispatches and the readers both run under it).
-    static constexpr size_t kAiSeqRanges = 256;
+    // AI's, any other was not. A ring of the newest 1024 (before, after]; a dispatch that follows the previous one
+    // with nothing recorded in between extends it. Once the ring is full, a seq older than its oldest range is "not
+    // known" (review H2). The counter wraps, so ranges are compared with unsigned differences. Pd lock held (the
+    // dispatches and the readers both run under it).
+    static constexpr size_t kAiSeqRanges = 1024;
+    bool aiSeqFull = false; // the ring has dropped a range at least once
     struct SeqRange {
         unsigned int before = 0, after = 0;
     };

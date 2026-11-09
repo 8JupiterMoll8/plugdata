@@ -154,7 +154,7 @@ void MCPBridge::pdInletValues(const juce::String& action, const juce::OSCMessage
             return juce::String::fromUTF8(class_getname(pd_class(&o->ob_pd))) + "#" + juce::String(index);
         };
         auto const last = mcp::inlets::lastInto(cnv, wanted, nameOf);
-        auto const isAi = [host](unsigned int seq) { return host->seqIsAi(seq); };
+        auto const byOf = [host](unsigned int seq) { auto const by = host->seqBy(seq); return by ? juce::var(*by) : juce::var(); };
         auto* root = new juce::DynamicObject();
         auto* out = new juce::DynamicObject();
         root->setProperty("canvas", canvasName);
@@ -165,7 +165,7 @@ void MCPBridge::pdInletValues(const juce::String& action, const juce::OSCMessage
                 auto const it = wires.find(o);
                 auto const lt = last.find(o);
                 auto const inlets = mcp::inlets::objectInlets(o, it == wires.end() ? std::unordered_map<int, mcp::inlets::Wires> {} : it->second,
-                    lt == last.end() ? nullptr : &lt->second, isAi);
+                    lt == last.end() ? nullptr : &lt->second, byOf);
                 if (windowMs > 0)
                     if (auto const* list = inlets.getArray())
                         for (auto const& in : *list) {

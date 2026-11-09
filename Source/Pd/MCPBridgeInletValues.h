@@ -72,8 +72,9 @@ inline juce::String kindOf(t_symbol* s)
 // Truth slice 3 (capability inlet_last): the last control message an inlet got, from the records pure-data/0005 keeps
 // on every wire (outconnect) and every secondary inlet. Inlet 0 has no record of its own (messages go straight to the
 // object): its last is the newest record over the wires into it. An inlet >= 1 stores every message it gets, so its
-// own record wins; else the newest wire. `by`: inside one of the bridge's own dispatch ranges (McpHost::seqIsAi) =
-// "ai", else "other". Read only, under the Pd lock.
+// own record wins; else the newest wire. `by`: inside one of the bridge's own dispatch ranges (McpHost::seqBy) =
+// "ai", else "other"; null when the seq is older than every range still kept ("not known"). Read only, under the Pd
+// lock.
 struct Last {
     bool has = false;
     t_symbol* sel = nullptr;
@@ -83,7 +84,8 @@ struct Last {
     juce::String via; // "wire:<srcId>:<outlet>" or "inlet"
 };
 
-/** a is newer than b (the counter wraps: compared as a signed difference). */
+/** a is newer than b. The counter wraps, so this compares the signed difference: right while the two are less than
+    2^31 messages apart (records older than that compare wrongly; no live patch keeps one that long). */
 inline bool newer(unsigned int a, unsigned int b) { return static_cast<int>(a - b) > 0; }
 
 /** The first atom of a record as a number (nullopt: none, or not a float). */
@@ -127,8 +129,8 @@ inline std::unordered_map<t_object*, std::unordered_map<int, Last>> lastInto(t_c
     return out;
 }
 
-/** {selector, atoms, seq, by, via[, truncated]} of a record. */
-inline juce::var lastJson(Last const& l, bool ai)
+/** {selector, atoms, seq, by, via[, truncated]} of a record; `by` is "ai", "other" or void (null: not known). */
+inline juce::var lastJson(Last const& l, juce::var const& by)
 {
     auto* o = new juce::DynamicObject();
     o->setProperty("selector", juce::String::fromUTF8(l.sel && l.sel->s_name ? l.sel->s_name : ""));
@@ -142,7 +144,7 @@ inline juce::var lastJson(Last const& l, bool ai)
     }
     o->setProperty("atoms", atoms);
     o->setProperty("seq", static_cast<juce::int64>(l.seq));
-    o->setProperty("by", juce::String(ai ? "ai" : "other"));
+    o->setProperty("by", by);
     o->setProperty("via", l.via);
     if (l.argc > kMcpLastAtoms) o->setProperty("truncated", l.argc); // the full atom count; only the first 4 are kept
     return juce::var(o);
@@ -209,10 +211,10 @@ inline juce::var objectInletsBase(t_object* o, std::unordered_map<int, Wires> co
 
 /**
  * Every inlet of `o`, left to right. Caller holds the Pd lock. With `last` (slice 3) each inlet that has a record
- * gets `last` ({selector, atoms, seq, by, via}); `isAi` says whose a seq was.
+ * gets `last` ({selector, atoms, seq, by, via}); `byOf` says whose a seq was (void: not known).
  */
 inline juce::var objectInlets(t_object* o, std::unordered_map<int, Wires> const& wires,
-    std::unordered_map<int, Last> const* last = nullptr, std::function<bool(unsigned int)> const& isAi = {})
+    std::unordered_map<int, Last> const* last = nullptr, std::function<juce::var(unsigned int)> const& byOf = {})
 {
     juce::var const out = objectInletsBase(o, wires);
     if (!last) return out;
@@ -221,7 +223,7 @@ inline juce::var objectInlets(t_object* o, std::unordered_map<int, Wires> const&
             auto const it = last->find(static_cast<int>(entry["index"]));
             if (it == last->end() || !it->second.has) continue;
             if (auto* obj = entry.getDynamicObject())
-                obj->setProperty("last", lastJson(it->second, isAi && isAi(it->second.seq)));
+                obj->setProperty("last", lastJson(it->second, byOf ? byOf(it->second.seq) : juce::var()));
         }
     return out;
 }

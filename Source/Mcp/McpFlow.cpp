@@ -18,6 +18,7 @@
 
 #include "../Pd/MCPBridgeCmdCommon.h"
 #include "Mcp/McpOwnership.h"
+#include "../Pd/MCPBridgePdAccessors.h" // slice 3: mcp_last_seq for seqBy
 
 namespace {
 
@@ -208,21 +209,38 @@ std::optional<double> McpHost::aiGuiValue(t_gobj* g)
 void McpHost::noteAiSeqRange(unsigned int before, unsigned int after)
 {
     if (before == after) return; // the dispatch delivered nothing that was recorded
-    session.aiSeqRanges[session.aiSeqHead] = { before, after };
+    auto& ring = session.aiSeqRanges;
+    if (session.aiSeqCount > 0) {
+        auto& newest = ring[(session.aiSeqHead + McpSession::kAiSeqRanges - 1) % McpSession::kAiSeqRanges];
+        if (newest.after == before) { // nothing was recorded between the two dispatches: one range
+            newest.after = after;
+            return;
+        }
+    }
+    if (session.aiSeqCount == McpSession::kAiSeqRanges) session.aiSeqFull = true; // the oldest is overwritten now
+    ring[session.aiSeqHead] = { before, after };
     session.aiSeqHead = (session.aiSeqHead + 1) % McpSession::kAiSeqRanges;
     session.aiSeqCount = std::min(session.aiSeqCount + 1, McpSession::kAiSeqRanges);
 }
 
-bool McpHost::seqIsAi(unsigned int seq) const
+std::optional<juce::String> McpHost::seqBy(unsigned int seq) const
 {
+    if (seq == 0) return std::nullopt;
     for (size_t i = 0; i < session.aiSeqCount; ++i) {
         auto const& r = session.aiSeqRanges[i];
         // (before, after] with wrap-around: seq - before in [1, after - before].
         unsigned int const span = r.after - r.before;
         unsigned int const at = seq - r.before;
-        if (at >= 1 && at <= span) return true;
+        if (at >= 1 && at <= span) return juce::String("ai");
     }
-    return false;
+    if (session.aiSeqFull) {
+        // The oldest kept range is the one the head overwrites next. A seq at or before its start may have been
+        // covered by a dropped range: not known. Ages are taken from the counter now (wrap-safe up to 2^31).
+        auto const& oldest = session.aiSeqRanges[session.aiSeqHead];
+        unsigned int const now = mcp_last_seq();
+        if (now - seq >= now - oldest.before) return std::nullopt;
+    }
+    return juce::String("other");
 }
 
 uint64_t McpHost::consoleSeqNow()

@@ -982,9 +982,13 @@ juce::String MCPBridge::computeSignalTrace(PluginProcessor* processor, t_canvas*
     auto const& stop = walk.result.stop;
     bool const stopped = walk.result.hasStop && stop.node >= 0 && stop.kind != mcp::stops::StopKind::None;
     int const chokeIndex = stopped ? stop.node : -1;
-    juce::String const chokeReason = walk.result.hasStop ? juce::String(mcp::stops::kindName(stop.kind)) : juce::String("no_output");
+    // Review H3: a server that predates the stop facts reads "none" + this reason as "it sounds"; keep both exactly when
+    // the walk says the output sounds, so a fork/server mismatch never lies. The output's id is in stopFacts only.
+    bool const sounds = walk.result.hasStop && stop.kind == mcp::stops::StopKind::None;
+    juce::String const chokeReason = sounds ? juce::String("signal reaches master sink")
+        : walk.result.hasStop ? juce::String(mcp::stops::kindName(stop.kind)) : juce::String("no_output");
 
-    juce::String chokeName = (walk.result.hasStop && stop.node >= 0 && stop.node < numObjs) ? names[stop.node] : juce::String("none");
+    juce::String chokeName = (!sounds && walk.result.hasStop && stop.node >= 0 && stop.node < numObjs) ? names[stop.node] : juce::String("none");
     juce::String chokeClass = (chokeIndex >= 0 && chokeIndex < numObjs) ? classNames[chokeIndex] : "none";
     // Report real levels. When there is no choke point, fall back to the
     // loudest live source (input) and the peak arriving at dac~ (output) so

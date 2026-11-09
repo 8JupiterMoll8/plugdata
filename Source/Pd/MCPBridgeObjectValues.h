@@ -275,6 +275,9 @@ inline juce::var mcpReadBack(McpHost* host, t_canvas* cnv, t_gobj* g, int inlet,
 }
 
 // delivered / console / readBack of one AI set. `consoleBefore` and the seq range were read around the dispatch.
+// Review L9: `delivered` here counts ANY console line the set object printed during delivery (an error or not, from
+// that object only); /pd/send_checked counts every ERROR line during delivery from any object, plus any line from a
+// receiver. Neither sees a line Pd prints in a later tick.
 inline void mcpPutDelivery(juce::DynamicObject* out, McpHost* host, t_canvas* cnv, t_gobj* g, int inlet,
     uint64_t consoleBefore, unsigned int seqBefore, unsigned int seqAfter)
 {

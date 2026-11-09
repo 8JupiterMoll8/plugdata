@@ -16,6 +16,8 @@
 //                 open_inlet    the output is silent (or dc_only) and a signal inlet has no wire at all (also an
 //                               output whose signal inlets have no wire: hop 0)
 //                 silent_source the output is silent (or dc_only) and no signal wire comes in
+//                 bus_end       the same at a bus receiver (catch~, receive~) whose senders the canvas does not hold
+//                               (review M4: the walk crosses throw~ -> catch~ and send~ -> receive~ through bus edges)
 //               none: a signal wire into an output is audible (hop 0, the output). unread: an untapped node lies
 //               nearer than any measured stop (or no stop was measured); `refocus` names the untapped nodes of the
 //               walk to tap. No output on the canvas: no stop (`hasStop` false).
@@ -48,11 +50,14 @@ struct Outlet {
     int wires = 0;
     Level level = Level::Unread;
     float levelDb = -100.0f;
+    bool bus = false; // review M4: a throw~/send~'s virtual outlet to its catch~/receive~ (never tapped; its level is
+                      // the sender's input, set by the graph builder)
 };
 
 struct Node {
     std::string id;
     bool output = false; // dac~ / out~
+    bool busEnd = false; // a bus receiver whose senders are not on this canvas (or not found)
     std::vector<Inlet> inlets;
     std::vector<Outlet> outlets;
 };
@@ -70,7 +75,7 @@ struct Graph {
     std::vector<Edge> edges;
 };
 
-enum class StopKind { DiesHere, OpenInlet, SilentSource, None, Unread };
+enum class StopKind { DiesHere, OpenInlet, SilentSource, BusEnd, None, Unread };
 
 inline char const* kindName(StopKind k)
 {
@@ -78,6 +83,7 @@ inline char const* kindName(StopKind k)
     case StopKind::DiesHere: return "dies_here";
     case StopKind::OpenInlet: return "open_inlet";
     case StopKind::SilentSource: return "silent_source";
+    case StopKind::BusEnd: return "bus_end";
     case StopKind::None: return "none";
     case StopKind::Unread: return "unread";
     }
@@ -265,7 +271,7 @@ inline Result walk(Graph const& g, std::vector<int> const& outputs, int cap = kR
             consider({ StopKind::OpenInlet, n, h, open.front() });
             continue;
         }
-        if (signalWiresIn(g, n) == 0) consider({ StopKind::SilentSource, n, h, -1 });
+        if (signalWiresIn(g, n) == 0) consider({ node.busEnd ? StopKind::BusEnd : StopKind::SilentSource, n, h, -1 });
     }
 
     if (nearestUnread >= 0 && (!found || hop[static_cast<size_t>(nearestUnread)] < best.hop)) {

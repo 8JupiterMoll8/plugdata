@@ -261,8 +261,10 @@ public:
     // Truth slice 3 (`by`): the bridge's own dispatch moved Pd's message counter from `before` to `after` (both read
     // with mcp_last_seq): every message recorded in between was the AI's. Pd lock held.
     void noteAiSeqRange(unsigned int before, unsigned int after);
-    // A recorded message's seq: inside one of the newest 256 AI ranges. Pd lock held.
-    bool seqIsAi(unsigned int seq) const;
+    // Who sent a recorded message (review H2): "ai" inside one of the kept AI ranges, "other" outside them, and
+    // nullopt ("not known") when the seq is older than the oldest range the full ring still keeps (an AI range that
+    // covered it may have been dropped). Pd lock held.
+    std::optional<juce::String> seqBy(unsigned int seq) const;
     // Truth slice 3 (delivery): the console's sequence number now, and the lines printed after `seq` by `object`
     // (pointer compared only). Pd prints synchronously, so a line an AI dispatch caused is there when it returns.
     uint64_t consoleSeqNow();

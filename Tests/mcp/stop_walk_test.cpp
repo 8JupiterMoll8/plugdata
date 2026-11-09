@@ -316,6 +316,48 @@ int main()
         CHECK(std::string(kindName(r.stop.kind)) == "silent_source");
     }
 
+    // Review M4: a bus. Two throw~ voices (bus outlets) into one catch~ -> *~ -> dac~; voice 1 dies at its VCA, voice 2's
+    // throw~ has nothing plugged in. The walk crosses the bus: the nearest stop is voice 2's open throw~ inlet (hop 3),
+    // voice 1's VCA is a row one hop further. A catch~ whose throws are elsewhere is a bus_end, not a silent source.
+    {
+        Builder b;
+        int const dac = b.add("dac", 1, 0, 0, true);
+        int const gain = b.add("gain", 1, 1, 1);
+        int const cat = b.add("catch", 0, 1, 1);
+        int const t1 = b.add("throw1", 1, 0, 1);
+        int const t2 = b.add("throw2", 1, 0, 1);
+        b.g.nodes[static_cast<size_t>(t1)].outlets[0].bus = true;
+        b.g.nodes[static_cast<size_t>(t2)].outlets[0].bus = true;
+        int const vca1 = b.add("vca1", 1, 1, 1);
+        int const osc1 = b.add("osc1", 1, 0, 1);
+        b.wire(osc1, vca1, 0);
+        b.wire(vca1, t1, 0);
+        b.wire(t1, cat, 0);
+        b.wire(t2, cat, 0);
+        b.wire(cat, gain, 0);
+        b.wire(gain, dac, 0);
+        b.level(osc1, Level::Audible, -6.0f);
+        b.level(vca1, Level::Silent);
+        b.level(t1, Level::Silent);
+        b.level(t2, Level::Silent);
+        b.level(cat, Level::Silent);
+        b.level(gain, Level::Silent);
+        auto const r = walk(b.g, { dac });
+        CHECK(r.stop.kind == StopKind::OpenInlet && stopId(r, b.g) == "throw2" && r.stop.hop == 3);
+        CHECK(hopOf(r, b.g, "catch") == 2 && hopOf(r, b.g, "vca1") == 4);
+        CHECK(r.liveEnds.empty());
+
+        Builder e;
+        int const dac2 = e.add("dac", 1, 0, 0, true);
+        int const c2 = e.add("catch", 0, 1, 1);
+        e.g.nodes[static_cast<size_t>(c2)].busEnd = true;
+        e.wire(c2, dac2, 0);
+        e.level(c2, Level::Silent);
+        auto const r2 = walk(e.g, { dac2 });
+        CHECK(r2.stop.kind == StopKind::BusEnd && stopId(r2, e.g) == "catch");
+        CHECK(std::string(kindName(r2.stop.kind)) == "bus_end");
+    }
+
     // No output on the canvas: no stop (null), live ends still listed.
     {
         Builder b;

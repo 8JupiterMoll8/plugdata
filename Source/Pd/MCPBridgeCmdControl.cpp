@@ -154,7 +154,8 @@ void MCPBridge::handleChatDomain(const juce::String& action, const juce::OSCMess
 // ── Truth slice 3 (capability send_checked): /pd/send_checked <canvas> <corrId> <name> <argc> <atoms...> ─────────────
 // A send to a Pd name that says what happened, from C++ reads: who listens (MCPBridgeBound.h), whether a console line
 // came while it was delivered (Pd prints synchronously), and per receiver what it holds now. Refuses Pd's own names
-// (fail closed: `pd`, `pd-*`, `#*`, `mcp_host`); an unbound name is answered without sending. Runs in the Pd context
+// (fail closed: `pd`, `pd-*`, `#*`, `.*`, `mcp_host`, and any name that also reaches something that is not a box: a
+// canvas by namecanvas, an array, a dialog stub); an unbound name is answered without sending. Runs in the Pd context
 // (message thread under the Pd lock). Realtime /param and /trigger stay as they are (sequences). Atoms as obj_set:
 // floats as floats, strings as symbols ("s:" prefix optional). Reply /pd/send_checked/reply/<corrId>:
 // {name, bound, receivers:[{tempId, class, readBack:{value, source, reason}}], delivered, console:[{tempId, text}],
@@ -168,6 +169,7 @@ juce::String refusedName(juce::String const& name)
     if (name.isEmpty()) return "no name";
     if (name == "pd" || name.startsWith("pd-")) return "a Pd system name (pd, pd-<canvas>): never sent from the AI";
     if (name.startsWith("#")) return "a reserved name (#...): never sent from the AI";
+    if (name.startsWith(".")) return "a reserved name (.x...: Pd's own window names): never sent from the AI";
     if (name == "mcp_host") return "the bridge's own name: never sent from the AI";
     return {};
 }
@@ -256,8 +258,16 @@ void MCPBridge::pdSendChecked(const juce::String& action, const juce::OSCMessage
         auto const binders = mcp::bound::bindersOf(sym);
         std::vector<t_object*> receivers;
         for (auto* b : binders) {
-            if (*b == canvas_class || (mcpCtrlReceiverClass && *b == mcpCtrlReceiverClass)) continue;
-            if (t_object* o = pd_checkobject(b)) receivers.push_back(o);
+            if (mcpCtrlReceiverClass && *b == mcpCtrlReceiverClass) continue; // the bridge's own probe
+            t_object* o = *b == canvas_class ? nullptr : pd_checkobject(b);
+            if (!o) {
+                // Review M6, fail closed: the name also reaches something that is not a box (a canvas by namecanvas,
+                // an array, a dialog stub): never sent.
+                root->setProperty("refused", "the name also reaches a " + juce::String::fromUTF8(class_getname(*b))
+                    + ", which is not a box: never sent from the AI");
+                return;
+            }
+            receivers.push_back(o);
         }
         root->setProperty("bound", !receivers.empty());
         if (receivers.empty()) return; // nothing listens: nothing is sent
@@ -272,7 +282,8 @@ void MCPBridge::pdSendChecked(const juce::String& action, const juce::OSCMessage
         unsigned int const seqAfter = mcp_last_seq();
         host->noteAiSeqRange(seqBefore, seqAfter);
 
-        // Console: every error line the delivery printed, and any line a receiver printed.
+        // Console: every error line the delivery printed, and any line a receiver printed. (obj_set_batch's delivered
+        // counts only lines from the set object, error or not: review L9, see mcpPutDelivery.)
         juce::Array<juce::var> console;
         for (auto const& hit : host->consoleSince(consoleBefore)) {
             bool const fromReceiver = std::find(receivers.begin(), receivers.end(), static_cast<t_object const*>(hit.object)) != receivers.end();

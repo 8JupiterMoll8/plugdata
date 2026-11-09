@@ -82,6 +82,83 @@ bool isGuiFeeder(t_object* o)
     return o && mcpGuiValue(o, v);
 }
 
+// The name a bus object is created with (its first creation argument), or null.
+t_symbol* busName(t_gobj* g)
+{
+    t_object* o = pd_checkobject(&g->g_pd);
+    if (!o || !o->te_binbuf || binbuf_getnatom(o->te_binbuf) < 2) return nullptr;
+    t_atom const* a = binbuf_getvec(o->te_binbuf);
+    return a[1].a_type == A_SYMBOL ? a[1].a_w.w_symbol : nullptr;
+}
+
+bool bindsTo(t_symbol* name, t_gobj* g)
+{
+    for (auto* b : mcp::bound::bindersOf(name))
+        if (b == &g->g_pd) return true;
+    return false;
+}
+
+// Review M4: the walk crosses Pd's signal buses. throw~ N -> catch~ N (the catch~ binds N) and send~ N -> receive~ N
+// (the send~ binds N), checked against the binding, on this canvas. A sender gets one virtual `bus` outlet whose level
+// is its input's (it passes the signal on); a receiver whose senders are not on this canvas is a bus end.
+void addBusEdges(Graph& g, CanvasObjects const& objects)
+{
+    int const n = static_cast<int>(g.nodes.size());
+    auto isClass = [&](int i, std::initializer_list<char const*> names) {
+        for (auto const* c : names)
+            if (objects.classNames[static_cast<size_t>(i)] == c) return true;
+        return false;
+    };
+    std::unordered_map<int, int> busOutlet; // sender node -> its bus outlet index
+    for (int r = 0; r < n; ++r) {
+        bool const isCatch = isClass(r, { "catch~" });
+        bool const isReceive = isClass(r, { "receive~", "r~" });
+        if (!isCatch && !isReceive) continue;
+        t_symbol* name = busName(objects.objs[static_cast<size_t>(r)]);
+        bool found = false;
+        for (int sIdx = 0; name && sIdx < n; ++sIdx) {
+            bool const sender = isCatch ? isClass(sIdx, { "throw~" }) : isClass(sIdx, { "send~", "s~" });
+            if (!sender || busName(objects.objs[static_cast<size_t>(sIdx)]) != name) continue;
+            // catch~ binds the name (a throw~ finds it there); send~ binds it (a receive~ finds it there).
+            if (!bindsTo(name, objects.objs[static_cast<size_t>(isCatch ? r : sIdx)])) continue;
+            auto& node = g.nodes[static_cast<size_t>(sIdx)];
+            auto const at = busOutlet.find(sIdx);
+            int k = 0;
+            if (at == busOutlet.end()) {
+                k = static_cast<int>(node.outlets.size());
+                Outlet o;
+                o.signal = true;
+                o.bus = true;
+                node.outlets.push_back(o);
+                busOutlet[sIdx] = k;
+            } else {
+                k = at->second;
+            }
+            ++node.outlets[static_cast<size_t>(k)].wires;
+            g.edges.push_back({ sIdx, k, r, 0 });
+            found = true;
+        }
+        g.nodes[static_cast<size_t>(r)].busEnd = !found;
+    }
+    // A sender's bus level is its input: audible if any input is, unread if any is not read, else dc_only / silent.
+    for (auto const& [sIdx, k] : busOutlet) {
+        bool audible = false, unread = false, dc = false;
+        float db = -100.0f;
+        for (auto const& e : g.edges) {
+            if (e.dst != sIdx) continue;
+            auto const& src = g.nodes[static_cast<size_t>(e.src)].outlets[static_cast<size_t>(e.srcOutlet)];
+            if (src.bus) continue;
+            audible = audible || src.level == Level::Audible;
+            unread = unread || src.level == Level::Unread || src.level == Level::Unmeasured;
+            dc = dc || src.level == Level::DcOnly;
+            if (src.level == Level::Audible || src.level == Level::Silent) db = std::max(db, src.levelDb);
+        }
+        auto& o = g.nodes[static_cast<size_t>(sIdx)].outlets[static_cast<size_t>(k)];
+        o.level = audible ? Level::Audible : unread ? Level::Unread : dc ? Level::DcOnly : Level::Silent;
+        o.levelDb = db;
+    }
+}
+
 } // namespace
 
 WalkSummary walkCanvas(t_canvas* cnv, CanvasObjects const& objects,
@@ -134,6 +211,7 @@ WalkSummary walkCanvas(t_canvas* cnv, CanvasObjects const& objects,
             o.levelDb = hit->second.hasLevel ? hit->second.levelDb : -100.0f;
         }
 
+    addBusEdges(g, objects);
     out.result = walk(g, outputs, kRowCap);
     return out;
 }
@@ -171,7 +249,7 @@ juce::String stopFactsJson(PluginProcessor* processor, t_canvas* cnv, CanvasObje
         auto const it = indexOf.find(&o->ob_g);
         return it == indexOf.end() ? juce::String() : idOf(it->second);
     });
-    auto byOf = [&](unsigned int seq) { return juce::String(host->seqIsAi(seq) ? "ai" : "other"); };
+    auto byOf = [&](unsigned int seq) { auto const by = host->seqBy(seq); return by ? juce::var(*by) : juce::var(); };
     bool const canvasOn = mcp_canvas_switchedon_chain(cnv) != 0;
 
     // handMoved of a GUI feeder: true = no wire in, no receive name, and a value other than the AI's last; false = the
@@ -205,7 +283,7 @@ juce::String stopFactsJson(PluginProcessor* processor, t_canvas* cnv, CanvasObje
         ro->setProperty("out", outJson(node));
         int outWires = 0;
         for (auto const& out : node.outlets)
-            if (out.signal) outWires += out.wires;
+            if (out.signal && !out.bus) outWires += out.wires;
         ro->setProperty("outWires", outWires);
         juce::Array<juce::var> open;
         for (int k : openSignalInlets(node)) open.add(k);
@@ -217,6 +295,7 @@ juce::String stopFactsJson(PluginProcessor* processor, t_canvas* cnv, CanvasObje
             juce::Array<juce::var> from;
             for (auto const& e : g.edges) {
                 if (e.dst != n || static_cast<size_t>(e.dstInlet) != k) continue;
+                if (g.nodes[static_cast<size_t>(e.src)].outlets[static_cast<size_t>(e.srcOutlet)].bus) continue; // in `bus`
                 auto* f = new juce::DynamicObject();
                 f->setProperty("id", idOf(e.src) + ":" + juce::String(e.srcOutlet));
                 putLevel(f, g.nodes[static_cast<size_t>(e.src)].outlets[static_cast<size_t>(e.srcOutlet)]);
@@ -228,6 +307,17 @@ juce::String stopFactsJson(PluginProcessor* processor, t_canvas* cnv, CanvasObje
             sig.add(juce::var(s));
         }
         ro->setProperty("sig", sig);
+        // Review M4: what this bus receiver gets from its senders (throw~ -> catch~, send~ -> receive~).
+        juce::Array<juce::var> bus;
+        for (auto const& e : g.edges) {
+            auto const& src = g.nodes[static_cast<size_t>(e.src)].outlets[static_cast<size_t>(e.srcOutlet)];
+            if (e.dst != n || !src.bus) continue;
+            auto* f = new juce::DynamicObject();
+            f->setProperty("id", idOf(e.src) + ":bus");
+            putLevel(f, src);
+            bus.add(juce::var(f));
+        }
+        if (!bus.isEmpty() || node.busEnd) ro->setProperty("bus", bus);
 
         juce::Array<juce::var> ctl;
         if (o) {
@@ -261,7 +351,7 @@ juce::String stopFactsJson(PluginProcessor* processor, t_canvas* cnv, CanvasObje
                         if (so && mcpGuiValue(so, v)) value = v;
                         else if (auto const n = mcp::inlets::lastNumber(rec)) value = *n;
                         f->setProperty("value", value);
-                        f->setProperty("by", rec.has ? juce::var(byOf(rec.seq)) : juce::var());
+                        f->setProperty("by", rec.has ? byOf(rec.seq) : juce::var());
                         f->setProperty("handMoved", isGuiFeeder(so) ? handMoved(e.src) : juce::var());
                         from.add(juce::var(f));
                     }
