@@ -68,6 +68,7 @@ struct ControlEdge {
     int srcOutlet = 0;
     int dst = 0;
     int dstInlet = 0;
+    t_outconnect* oc = nullptr; // its record (pure-data/0005): the last message the wire carried
 };
 
 // The wires of the canvas, as the builder and the row words need them. One pass under the Pd lock.
@@ -156,15 +157,21 @@ juce::String stopFactsJson(PluginProcessor* processor, t_canvas* cnv, CanvasObje
     {
         t_linetraverser lt;
         linetraverser_start(&lt, cnv);
-        while (linetraverser_next_nosize(&lt)) {
+        while (t_outconnect* oc = linetraverser_next_nosize(&lt)) {
             if (obj_issignaloutlet(lt.tr_ob, lt.tr_outno)) continue;
             auto const di = indexOf.find(&lt.tr_ob2->ob_g);
             auto const si = indexOf.find(&lt.tr_ob->ob_g);
             if (di == indexOf.end() || si == indexOf.end() || !rowNodes.count(di->second)) continue;
-            wiring.control.push_back({ si->second, lt.tr_outno, di->second, lt.tr_inno });
+            wiring.control.push_back({ si->second, lt.tr_outno, di->second, lt.tr_inno, oc });
         }
     }
     auto const inletWires = mcp::inlets::wiresInto(cnv, wanted);
+    // The last message per inlet (slice 3 F2): `by` of an inlet's value.
+    auto const lastRecords = mcp::inlets::lastInto(cnv, wanted, [&](t_object* o) {
+        auto const it = indexOf.find(&o->ob_g);
+        return it == indexOf.end() ? juce::String() : idOf(it->second);
+    });
+    auto byOf = [&](unsigned int seq) { return juce::String(host->seqIsAi(seq) ? "ai" : "other"); };
     bool const canvasOn = mcp_canvas_switchedon_chain(cnv) != 0;
 
     // handMoved of a GUI feeder: true = no wire in, no receive name, and a value other than the AI's last; false = the
@@ -237,16 +244,24 @@ juce::String stopFactsJson(PluginProcessor* processor, t_canvas* cnv, CanvasObje
                     c->setProperty("inlet", k);
                     c->setProperty("value", in["value"]);
                     c->setProperty("source", holds ? in["source"] : juce::var()); // void when the inlet keeps no copy
-                    c->setProperty("by", juce::var());
+                    juce::var by;
+                    if (auto const lo = lastRecords.find(o); lo != lastRecords.end())
+                        if (auto const li = lo->second.find(k); li != lo->second.end() && li->second.has) by = byOf(li->second.seq);
+                    c->setProperty("by", by);
                     juce::Array<juce::var> from;
                     for (auto const& e : wiring.control) {
                         if (e.dst != n || e.dstInlet != k) continue;
                         auto* f = new juce::DynamicObject();
                         f->setProperty("id", idOf(e.src) + ":" + juce::String(e.srcOutlet));
                         t_object* so = pd_checkobject(&objects.objs[static_cast<size_t>(e.src)]->g_pd);
+                        mcp::inlets::Last rec;
+                        rec.has = mcp_outconnect_last(e.oc, &rec.sel, &rec.argc, rec.atoms, &rec.seq) != 0;
                         double v = 0.0;
-                        f->setProperty("value", so && mcpGuiValue(so, v) ? juce::var(v) : juce::var());
-                        f->setProperty("by", juce::var());
+                        juce::var value; // a GUI's own value; else the first atom the wire last carried
+                        if (so && mcpGuiValue(so, v)) value = v;
+                        else if (auto const n = mcp::inlets::lastNumber(rec)) value = *n;
+                        f->setProperty("value", value);
+                        f->setProperty("by", rec.has ? juce::var(byOf(rec.seq)) : juce::var());
                         f->setProperty("handMoved", isGuiFeeder(so) ? handMoved(e.src) : juce::var());
                         from.add(juce::var(f));
                     }

@@ -186,6 +186,10 @@ struct ActiveProbe {
     std::atomic<float> windowAcPeak { 0.0f };
     std::atomic<uint64_t> windowAcCount { 0 };
     std::atomic<uint64_t> windowSwings { 0 };
+    // Truth slice 3 (inlet_values signal window): the lowest and highest raw sample of the window (valid once
+    // windowAcCount > 0). Same single writer.
+    std::atomic<float> windowRawMin { 0.0f };
+    std::atomic<float> windowRawMax { 0.0f };
 
     // V1 AC taps: the DC blocker belongs to the audio tick alone. startProbe bumps `acEpoch` (and publishes the pole
     // for the sample rate in `acCoeff`); the tick resets its blocker, and the window sums, when it sees a new epoch,

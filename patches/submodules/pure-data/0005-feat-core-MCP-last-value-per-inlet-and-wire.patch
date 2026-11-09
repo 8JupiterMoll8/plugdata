@@ -1,0 +1,297 @@
+From b5163d6293c800b0341f7ad8cf55908707b35662 Mon Sep 17 00:00:00 2001
+From: Alphi <alphi@starchaser.local>
+Date: Mon, 9 Nov 2026 14:19:32 +0100
+Subject: [PATCH] feat(core): MCP last value per inlet and wire
+
+The MCP bridge needs to READ what a control wire or an inlet last carried
+(truth slice 3, control truth: "who set this value, and what was it"),
+without mirroring Pd's private structs.
+
+- m_obj.c: struct _outconnect and struct _inlet get, at their END,
+  mcp_sel, mcp_argc, mcp_atoms[4] and mcp_seq. outlet_bang/pointer/float/
+  symbol/list/anything store the message on each connection before they
+  deliver it (next to plugdata_forward_message); the generic inlet methods
+  (inlet_bang/pointer/float/symbol/list/anything) and floatinlet_float,
+  symbolinlet_symbol, pointerinlet_pointer store it on the inlet. At most 4
+  atoms are kept; mcp_argc is the full count. mcp_seq is the instance's
+  counter after the store.
+- s_stuff.h: struct _instancestuff gets st_mcp_seq as its LAST field.
+- Accessors: mcp_outconnect_last, mcp_inlet_last (class-checked),
+  mcp_last_seq.
+
+Realtime: a few plain stores per delivered control message (<= 4 atoms),
+no flag branch, no lock, no allocation, no syscall; always on the thread
+that runs Pd, under the Pd lock; the bridge reads under the same lock.
+ABI: private structs; appending keeps the prefix that pdlua and cyclone
+poke~ mirror. ~90 bytes more per connection and per inlet. The counter
+wraps at 2^32 (the bridge compares ranges, never absolute values).
+
+Depended on by: Source/Pd/MCPBridgePdAccessors.h (mcp_*_last),
+MCPBridgeInletValues.h (/pd/inlet_values `last`), the stop facts (ctl by)
+and obj_set / send_checked read-back. Fork feature, no upstream
+equivalent.
+---
+ src/m_obj.c   | 104 ++++++++++++++++++++++++++++++++++++++++++++++++++
+ src/s_stuff.h |   1 +
+ 2 files changed, 105 insertions(+)
+
+diff --git a/src/m_obj.c b/src/m_obj.c
+index fe3ec7e..43562e6 100644
+--- a/src/m_obj.c
++++ b/src/m_obj.c
+@@ -39,6 +39,13 @@ union inletunion
+     t_float iu_floatsignalvalue;
+ };
+ 
++    /* MCP fork (truth slice 3): the last control message a wire or a secondary inlet carried, for the bridge's
++       read-back (who set a value, and what it was). At most MCP_LAST_ATOMS atoms are kept; mcp_argc is the full count
++       (more = truncated). mcp_seq is the instance's message counter at the store (0 = nothing yet). Written on the
++       thread that runs Pd (under the Pd lock): a few plain stores, no lock, no allocation. Appended at the END of the
++       structs, so code that mirrors their first fields (pdlua, cyclone poke~) is unaffected. */
++#define MCP_LAST_ATOMS 4
++
+ struct _inlet
+ {
+     t_pd i_pd;
+@@ -47,8 +54,26 @@ struct _inlet
+     t_pd *i_dest;
+     t_symbol *i_symfrom;
+     union inletunion i_un;
++    t_symbol *mcp_sel;
++    int mcp_argc;
++    t_atom mcp_atoms[MCP_LAST_ATOMS];
++    unsigned int mcp_seq;
+ };
+ 
++static void mcp_last_store(t_symbol **sel, int *argcp, t_atom *atoms, unsigned int *seq,
++    t_symbol *s, int argc, const t_atom *argv)
++{
++    int i, n = (argc < MCP_LAST_ATOMS ? argc : MCP_LAST_ATOMS);
++    *sel = s;
++    *argcp = argc;
++    for (i = 0; i < n; i++)
++        atoms[i] = argv[i];
++    *seq = ++STUFF->st_mcp_seq;
++}
++
++#define MCP_INLET_LAST(x, s, argc, argv) \
++    mcp_last_store(&(x)->mcp_sel, &(x)->mcp_argc, (x)->mcp_atoms, &(x)->mcp_seq, (s), (argc), (argv))
++
+ #define i_symto i_un.iu_symto
+ #define i_pointerslot i_un.iu_pointerslot
+ #define i_floatslot i_un.iu_floatslot
+@@ -108,6 +133,7 @@ extern t_class *vinlet_class;
+     /* LATER figure out how to make these efficient: */
+ static void inlet_bang(t_inlet *x)
+ {
++    MCP_INLET_LAST(x, &s_bang, 0, 0);
+     if (x->i_symfrom == &s_bang)
+         pd_vmess(x->i_dest, x->i_symto, "");
+     else if (!x->i_symfrom) pd_bang(x->i_dest);
+@@ -120,6 +146,9 @@ static void inlet_bang(t_inlet *x)
+ 
+ static void inlet_pointer(t_inlet *x, t_gpointer *gp)
+ {
++    t_atom mcp_a;
++    SETPOINTER(&mcp_a, gp);
++    MCP_INLET_LAST(x, &s_pointer, 1, &mcp_a);
+     if (x->i_symfrom == &s_pointer)
+         pd_vmess(x->i_dest, x->i_symto, "p", gp);
+     else if (!x->i_symfrom) pd_pointer(x->i_dest, gp);
+@@ -134,6 +163,9 @@ static void inlet_pointer(t_inlet *x, t_gpointer *gp)
+ 
+ static void inlet_float(t_inlet *x, t_float f)
+ {
++    t_atom mcp_a;
++    SETFLOAT(&mcp_a, f);
++    MCP_INLET_LAST(x, &s_float, 1, &mcp_a);
+     if (x->i_symfrom == &s_float)
+         pd_vmess(x->i_dest, x->i_symto, "f", (t_floatarg)f);
+     else if (x->i_symfrom == &s_signal)
+@@ -151,6 +183,9 @@ static void inlet_float(t_inlet *x, t_float f)
+ 
+ static void inlet_symbol(t_inlet *x, t_symbol *s)
+ {
++    t_atom mcp_a;
++    SETSYMBOL(&mcp_a, s);
++    MCP_INLET_LAST(x, &s_symbol, 1, &mcp_a);
+     if (x->i_symfrom == &s_symbol)
+         pd_vmess(x->i_dest, x->i_symto, "s", s);
+     else if (!x->i_symfrom) pd_symbol(x->i_dest, s);
+@@ -179,6 +214,7 @@ static void inlet_fwd(t_inlet *x, t_symbol *s, int argc, t_atom *argv)
+ static void inlet_list(t_inlet *x, t_symbol *s, int argc, t_atom *argv)
+ {
+     t_atom at;
++    MCP_INLET_LAST(x, &s_list, argc, argv);
+     if (x->i_symfrom == &s_list || x->i_symfrom == &s_float
+         || x->i_symfrom == &s_symbol || x->i_symfrom == &s_pointer)
+             typedmess(x->i_dest, x->i_symto, argc, argv);
+@@ -196,6 +232,7 @@ static void inlet_list(t_inlet *x, t_symbol *s, int argc, t_atom *argv)
+ 
+ static void inlet_anything(t_inlet *x, t_symbol *s, int argc, t_atom *argv)
+ {
++    MCP_INLET_LAST(x, s, argc, argv);
+     if (x->i_symfrom == s)
+     {
+         /* the "symto" field is undefined for signal inlets, so we don't
+@@ -231,6 +268,9 @@ void inlet_free(t_inlet *x)
+ 
+ static void pointerinlet_pointer(t_inlet *x, t_gpointer *gp)
+ {
++    t_atom mcp_a;
++    SETPOINTER(&mcp_a, gp);
++    MCP_INLET_LAST(x, &s_pointer, 1, &mcp_a);
+     gpointer_unset(x->i_pointerslot);
+     *(x->i_pointerslot) = *gp;
+     if (gp->gp_stub) gp->gp_stub->gs_refcount++;
+@@ -255,6 +295,9 @@ t_inlet *pointerinlet_new(t_object *owner, t_gpointer *gp)
+ 
+ static void floatinlet_float(t_inlet *x, t_float f)
+ {
++    t_atom mcp_a;
++    SETFLOAT(&mcp_a, f);
++    MCP_INLET_LAST(x, &s_float, 1, &mcp_a);
+     *(x->i_floatslot) = f;
+ }
+ 
+@@ -277,6 +320,9 @@ t_inlet *floatinlet_new(t_object *owner, t_float *fp)
+ 
+ static void symbolinlet_symbol(t_inlet *x, t_symbol *s)
+ {
++    t_atom mcp_a;
++    SETSYMBOL(&mcp_a, s);
++    MCP_INLET_LAST(x, &s_symbol, 1, &mcp_a);
+     *(x->i_symslot) = s;
+ }
+ 
+@@ -332,8 +378,15 @@ struct _outconnect
+     t_symbol* oc_path_data;
+     t_signal* oc_signal;
+     void* oc_signal_reference;
++    t_symbol *mcp_sel;      /* MCP fork (truth slice 3): see MCP_LAST_ATOMS */
++    int mcp_argc;
++    t_atom mcp_atoms[MCP_LAST_ATOMS];
++    unsigned int mcp_seq;
+ };
+ 
++#define MCP_OC_LAST(oc, s, argc, argv) \
++    mcp_last_store(&(oc)->mcp_sel, &(oc)->mcp_argc, (oc)->mcp_atoms, &(oc)->mcp_seq, (s), (argc), (argv))
++
+ struct _outlet
+ {
+     t_object *o_owner;
+@@ -591,6 +644,7 @@ void outlet_bang(t_outlet *x)
+     else
+         for (oc = x->o_connections; oc; oc = oc->oc_next) {
+             if(plugdata_debugging_or_activity_enabled()) plugdata_forward_message(1, oc, &s_bang, 0, NULL);
++            MCP_OC_LAST(oc, &s_bang, 0, 0);
+             pd_bang(oc->oc_to);
+         }
+     stackcount_release();
+@@ -607,6 +661,11 @@ void outlet_pointer(t_outlet *x, t_gpointer *gp)
+         gpointer = *gp;
+         for (oc = x->o_connections; oc; oc = oc->oc_next) {
+             if(plugdata_debugging_or_activity_enabled()) plugdata_forward_message(1, oc, &s_pointer, 0, gp);
++            {
++                t_atom mcp_a;
++                SETPOINTER(&mcp_a, gp);
++                MCP_OC_LAST(oc, &s_pointer, 1, &mcp_a);
++            }
+             pd_pointer(oc->oc_to, &gpointer);
+         }
+     }
+@@ -624,6 +683,11 @@ void outlet_float(t_outlet *x, t_float f)
+                 t_atom value = { .a_type = A_FLOAT, .a_w.w_float = f};
+                 plugdata_forward_message(1, oc, &s_float, 1, &value);
+             }
++            {
++                t_atom mcp_a;
++                SETFLOAT(&mcp_a, f);
++                MCP_OC_LAST(oc, &s_float, 1, &mcp_a);
++            }
+             pd_float(oc->oc_to, f);
+         }
+     stackcount_release();
+@@ -640,6 +704,11 @@ void outlet_symbol(t_outlet *x, t_symbol *s)
+                 t_atom value = { .a_type = A_SYMBOL, .a_w.w_symbol = s};
+                 plugdata_forward_message(1, oc, &s_symbol, 1, &value);
+             }
++            {
++                t_atom mcp_a;
++                SETSYMBOL(&mcp_a, s);
++                MCP_OC_LAST(oc, &s_symbol, 1, &mcp_a);
++            }
+             pd_symbol(oc->oc_to, s);
+         }
+     stackcount_release();
+@@ -653,6 +722,7 @@ void outlet_list(t_outlet *x, t_symbol *s, int argc, t_atom *argv)
+     else
+         for (oc = x->o_connections; oc; oc = oc->oc_next) {
+             if(plugdata_debugging_or_activity_enabled()) plugdata_forward_message(1, oc, &s_list, argc, argv);
++            MCP_OC_LAST(oc, &s_list, argc, argv);
+             pd_list(oc->oc_to, s, argc, argv);
+         }
+     stackcount_release();
+@@ -666,6 +736,7 @@ void outlet_anything(t_outlet *x, t_symbol *s, int argc, t_atom *argv)
+     else
+         for (oc = x->o_connections; oc; oc = oc->oc_next) {
+             if(plugdata_debugging_or_activity_enabled()) plugdata_forward_message(1, oc, s, argc, argv);
++            MCP_OC_LAST(oc, s, argc, argv);
+             typedmess(oc->oc_to, s, argc, argv);
+         }
+     stackcount_release();
+@@ -1062,6 +1133,39 @@ t_float *mcp_inlet_signalscalar(t_inlet *x)
+     return ((x && x->i_pd == inlet_class && x->i_symfrom == &s_signal) ? &x->i_un.iu_floatsignalvalue : 0);
+ }
+ 
++/* MCP fork (truth slice 3): the last control message a wire (an outconnect) or an inlet carried. Copies at most
++   MCP_LAST_ATOMS atoms into `atoms` (which must hold that many), the full count into *argc and the counter into *seq.
++   Returns 0 when nothing was recorded yet (or for a null pointer). A pointer atom is copied, never dereferenced. */
++int mcp_outconnect_last(t_outconnect *oc, t_symbol **sel, int *argc, t_atom *atoms, unsigned int *seq)
++{
++    int i, n;
++    if (!oc || !oc->mcp_seq) return (0);
++    n = (oc->mcp_argc < MCP_LAST_ATOMS ? oc->mcp_argc : MCP_LAST_ATOMS);
++    if (sel) *sel = oc->mcp_sel;
++    if (argc) *argc = oc->mcp_argc;
++    if (atoms) for (i = 0; i < n; i++) atoms[i] = oc->mcp_atoms[i];
++    if (seq) *seq = oc->mcp_seq;
++    return (1);
++}
++
++int mcp_inlet_last(t_inlet *x, t_symbol **sel, int *argc, t_atom *atoms, unsigned int *seq)
++{
++    int i, n;
++    if (!x || !ISINLET(&x->i_pd) || !x->mcp_seq) return (0);
++    n = (x->mcp_argc < MCP_LAST_ATOMS ? x->mcp_argc : MCP_LAST_ATOMS);
++    if (sel) *sel = x->mcp_sel;
++    if (argc) *argc = x->mcp_argc;
++    if (atoms) for (i = 0; i < n; i++) atoms[i] = x->mcp_atoms[i];
++    if (seq) *seq = x->mcp_seq;
++    return (1);
++}
++
++    /* the instance's message counter: the bridge reads it before and after its own dispatch */
++unsigned int mcp_last_seq(void)
++{
++    return (STUFF->st_mcp_seq);
++}
++
+ /* ------------------- setup routine, somewhat misnamed */
+ void obj_init(void)
+ {
+diff --git a/src/s_stuff.h b/src/s_stuff.h
+index b9c262c..06bbbd4 100644
+--- a/src/s_stuff.h
++++ b/src/s_stuff.h
+@@ -437,6 +437,7 @@ struct _instancestuff
+     double st_time_per_dsp_tick;    /* obsolete - included for GEM?? */
+     t_printhook st_printhook;   /* set this to override per-instance printing */
+     void *st_impdata; /* optional implementation-specific data for libpd, etc */
++    unsigned int st_mcp_seq; /* MCP fork (truth slice 3): counts the control messages wires and inlets carried */
+ };
+ 
+ #define STUFF (pd_this->pd_stuff)
+-- 
+2.34.1
+

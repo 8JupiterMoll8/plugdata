@@ -23,6 +23,9 @@
 #include "MCPBridgeCmdCommon.h"
 #include "MCPBridgePdAccessors.h"
 
+#include <functional>
+#include <optional>
+
 namespace mcp::inlets {
 
 struct Wires {
@@ -66,6 +69,85 @@ inline juce::String kindOf(t_symbol* s)
     return "other";
 }
 
+// Truth slice 3 (capability inlet_last): the last control message an inlet got, from the records pure-data/0005 keeps
+// on every wire (outconnect) and every secondary inlet. Inlet 0 has no record of its own (messages go straight to the
+// object): its last is the newest record over the wires into it. An inlet >= 1 stores every message it gets, so its
+// own record wins; else the newest wire. `by`: inside one of the bridge's own dispatch ranges (McpHost::seqIsAi) =
+// "ai", else "other". Read only, under the Pd lock.
+struct Last {
+    bool has = false;
+    t_symbol* sel = nullptr;
+    int argc = 0;
+    t_atom atoms[kMcpLastAtoms] {};
+    unsigned int seq = 0;
+    juce::String via; // "wire:<srcId>:<outlet>" or "inlet"
+};
+
+/** a is newer than b (the counter wraps: compared as a signed difference). */
+inline bool newer(unsigned int a, unsigned int b) { return static_cast<int>(a - b) > 0; }
+
+/** The first atom of a record as a number (nullopt: none, or not a float). */
+inline std::optional<double> lastNumber(Last const& l)
+{
+    if (!l.has || l.argc < 1 || l.atoms[0].a_type != A_FLOAT) return std::nullopt;
+    return static_cast<double>(l.atoms[0].a_w.w_float);
+}
+
+/**
+ * The newest record per inlet of each object in `wanted`, in one pass over the canvas's wires plus each object's
+ * inlet list. `nameOf` names a wire's source (tempId, else "class#index"). Caller holds the Pd lock.
+ */
+inline std::unordered_map<t_object*, std::unordered_map<int, Last>> lastInto(t_canvas* cnv, std::unordered_set<t_object*> const& wanted,
+    std::function<juce::String(t_object*)> const& nameOf)
+{
+    std::unordered_map<t_object*, std::unordered_map<int, Last>> out;
+    if (!cnv) return out;
+    t_linetraverser lt;
+    linetraverser_start(&lt, cnv);
+    while (t_outconnect* oc = linetraverser_next_nosize(&lt)) {
+        if (!wanted.count(lt.tr_ob2)) continue;
+        Last l;
+        if (!mcp_outconnect_last(oc, &l.sel, &l.argc, l.atoms, &l.seq)) continue;
+        l.has = true;
+        auto& cur = out[lt.tr_ob2][lt.tr_inno];
+        if (cur.has && !newer(l.seq, cur.seq)) continue;
+        l.via = "wire:" + nameOf(lt.tr_ob) + ":" + juce::String(lt.tr_outno);
+        cur = l;
+    }
+    for (t_object* o : wanted) {
+        int physical = pd_class(&o->ob_pd)->c_firstin ? 1 : 0;
+        for (t_inlet* in = o->ob_inlet; in; in = mcp_inlet_next(in), ++physical) {
+            Last l;
+            if (!mcp_inlet_last(in, &l.sel, &l.argc, l.atoms, &l.seq)) continue;
+            l.has = true;
+            l.via = "inlet";
+            out[o][physical] = l; // the inlet's own record: every message it got, by wire or sent to it
+        }
+    }
+    return out;
+}
+
+/** {selector, atoms, seq, by, via[, truncated]} of a record. */
+inline juce::var lastJson(Last const& l, bool ai)
+{
+    auto* o = new juce::DynamicObject();
+    o->setProperty("selector", juce::String::fromUTF8(l.sel && l.sel->s_name ? l.sel->s_name : ""));
+    juce::Array<juce::var> atoms;
+    for (int i = 0; i < std::min(l.argc, kMcpLastAtoms); ++i) {
+        auto const& a = l.atoms[i];
+        if (a.a_type == A_FLOAT) atoms.add(static_cast<double>(a.a_w.w_float));
+        else if (a.a_type == A_SYMBOL && a.a_w.w_symbol) atoms.add(juce::String::fromUTF8(a.a_w.w_symbol->s_name));
+        else if (a.a_type == A_POINTER) atoms.add("<pointer>");
+        else atoms.add(juce::var());
+    }
+    o->setProperty("atoms", atoms);
+    o->setProperty("seq", static_cast<juce::int64>(l.seq));
+    o->setProperty("by", juce::String(ai ? "ai" : "other"));
+    o->setProperty("via", l.via);
+    if (l.argc > kMcpLastAtoms) o->setProperty("truncated", l.argc); // the full atom count; only the first 4 are kept
+    return juce::var(o);
+}
+
 /** One inlet's entry. `value` stays null unless Pd holds it in a place this code can read for certain. */
 inline juce::var inletJson(int index, juce::String const& kind, Wires const& w, juce::var value, juce::String const& source, juce::String const& reason)
 {
@@ -81,8 +163,8 @@ inline juce::var inletJson(int index, juce::String const& kind, Wires const& w, 
     return juce::var(o);
 }
 
-/** Every inlet of `o`, left to right. Caller holds the Pd lock. */
-inline juce::var objectInlets(t_object* o, std::unordered_map<int, Wires> const& wires)
+/** Every inlet of `o`, left to right, without the records. Caller holds the Pd lock. */
+inline juce::var objectInletsBase(t_object* o, std::unordered_map<int, Wires> const& wires)
 {
     juce::Array<juce::var> list;
     auto wiresOf = [&](int i) { auto it = wires.find(i); return it == wires.end() ? Wires {} : it->second; };
@@ -123,6 +205,25 @@ inline juce::var objectInlets(t_object* o, std::unordered_map<int, Wires> const&
         }
     }
     return juce::var(list);
+}
+
+/**
+ * Every inlet of `o`, left to right. Caller holds the Pd lock. With `last` (slice 3) each inlet that has a record
+ * gets `last` ({selector, atoms, seq, by, via}); `isAi` says whose a seq was.
+ */
+inline juce::var objectInlets(t_object* o, std::unordered_map<int, Wires> const& wires,
+    std::unordered_map<int, Last> const* last = nullptr, std::function<bool(unsigned int)> const& isAi = {})
+{
+    juce::var const out = objectInletsBase(o, wires);
+    if (!last) return out;
+    if (auto const* list = out.getArray())
+        for (auto const& entry : *list) {
+            auto const it = last->find(static_cast<int>(entry["index"]));
+            if (it == last->end() || !it->second.has) continue;
+            if (auto* obj = entry.getDynamicObject())
+                obj->setProperty("last", lastJson(it->second, isAi && isAi(it->second.seq)));
+        }
+    return out;
 }
 
 } // namespace mcp::inlets

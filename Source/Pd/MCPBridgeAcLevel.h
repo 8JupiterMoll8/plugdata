@@ -36,6 +36,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <cstdint>
 
 namespace mcp::ac {
@@ -138,9 +139,15 @@ struct AcStats {
     double rawSumSq = 0.0;
     float maxAbs = 0.0f;
     uint64_t active = 0;       // truth slice 2 (M3): samples whose AC part is at or past +-kSwingLevel (the swing rate's base)
+    float rawMin = 0.0f;       // truth slice 3 (inlet_values signal window): the lowest and highest raw sample counted
+    float rawMax = 0.0f;       // by accumulate() (meaningful only when count > 0)
 
     void add(AcStats const& other)
     {
+        if (other.count > 0) {
+            rawMin = count > 0 ? std::min(rawMin, other.rawMin) : other.rawMin;
+            rawMax = count > 0 ? std::max(rawMax, other.rawMax) : other.rawMax;
+        }
         active += other.active;
         acSumSq += other.acSumSq;
         sum += other.sum;
@@ -182,6 +189,8 @@ inline void accumulate(DcBlocker& blocker, AcStats& stats, float const* vec, int
     }
     double acSq = 0.0, sum = 0.0, rawSq = 0.0;
     float peak = stats.acPeak, maxAbs = stats.maxAbs;
+    float lo = stats.count > 0 ? stats.rawMin : std::numeric_limits<float>::max();
+    float hi = stats.count > 0 ? stats.rawMax : std::numeric_limits<float>::lowest();
     uint64_t counted = 0, swings = 0, active = 0;
     for (int i = 0; i < n; ++i) {
         float const x = vec[i];
@@ -194,6 +203,8 @@ inline void accumulate(DcBlocker& blocker, AcStats& stats, float const* vec, int
         sum += x;
         rawSq += static_cast<double>(x) * x;
         maxAbs = std::max(maxAbs, std::fabs(x));
+        lo = std::min(lo, x);
+        hi = std::max(hi, x);
         if (blocker.settleLeft > 0)
             --blocker.settleLeft;
         else
@@ -210,6 +221,10 @@ inline void accumulate(DcBlocker& blocker, AcStats& stats, float const* vec, int
     stats.sum += sum;
     stats.rawSumSq += rawSq;
     stats.maxAbs = maxAbs;
+    if (counted > 0) {
+        stats.rawMin = lo;
+        stats.rawMax = hi;
+    }
     stats.acPeak = peak;
     stats.count += counted;
     stats.swings += swings;

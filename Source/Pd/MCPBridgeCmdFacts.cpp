@@ -16,6 +16,8 @@
 #include "MCPBridgeObjectValues.h" // mcpGobjIsLive
 #include "MCPBridgePdAccessors.h"
 
+#include <map>
+
 namespace {
 
 constexpr int kPdWaitMs = 3000;
@@ -33,7 +35,22 @@ uint32_t wireClock() { return juce::Time::getMillisecondCounter(); }
 
 } // namespace
 
-// ── /pd/inlet_values <canvas> <corrId> <count> <tempId...> ─────────────────────────────────────────────────────────
+// ── /pd/inlet_values <canvas> <corrId> <count> <tempId...> [signalWindowMs <ms>] ────────────────────────────────
+// Truth slice 3: every inlet with a record gets `last` (capability inlet_last; MCPBridgeInletValues.h). With
+// signalWindowMs the signal on the signal-connected inlets is read over a window: up to kSignalFeeders feeding outlets
+// are tapped through the probe slots (the same window taps the armed trace uses; never outconnect_get_signal after the
+// tick), and the inlet gets `signal` {mean, min, max, blocks, feeders} (min/max only with one feeder: Pd sums the
+// feeders, so only the mean of the sum is known).
+namespace {
+constexpr int kSignalFeeders = 4;
+
+struct FeederTap {
+    t_object* dst = nullptr;
+    int inlet = 0;
+    uint32_t probeId = 0;
+};
+} // namespace
+
 void MCPBridge::pdInletValues(const juce::String& action, const juce::OSCMessage& msg)
 {
     juce::ignoreUnused(action);
@@ -43,14 +60,77 @@ void MCPBridge::pdInletValues(const juce::String& action, const juce::OSCMessage
     auto const address = "/pd/inlet_values/reply/" + corr;
     int const count = msg.size() > 2 ? std::max(0, static_cast<int>(getArgFloat(msg[2]))) : 0;
     std::vector<juce::String> ids;
-    for (int i = 0; i < count && 3 + i < static_cast<int>(msg.size()); ++i)
-        ids.push_back(getArgString(msg[static_cast<size_t>(3 + i)]));
+    int cursor = 3;
+    for (int i = 0; i < count && cursor < static_cast<int>(msg.size()); ++i)
+        ids.push_back(getArgString(msg[static_cast<size_t>(cursor++)]));
+    int windowMs = 0;
+    if (cursor + 1 < static_cast<int>(msg.size()) && getArgString(msg[static_cast<size_t>(cursor)]) == "signalWindowMs")
+        windowMs = juce::jlimit(20, 1000, static_cast<int>(getArgFloat(msg[static_cast<size_t>(cursor + 1)])));
     if (ids.empty()) {
-        sendReply(address, errorJson("no object given (/pd/inlet_values <canvas> <corrId> <count> <tempId...>)"));
+        sendReply(address, errorJson("no object given (/pd/inlet_values <canvas> <corrId> <count> <tempId...> [signalWindowMs <ms>])"));
         return;
     }
-    juce::String json;
     auto* host = processor->getMcp();
+
+    // 1. The signal window (optional): tap the feeders of the signal-connected inlets, wait, read.
+    std::vector<FeederTap> taps;
+    std::map<std::pair<t_object*, int>, int> feedersOf; // every signal feeder of an inlet, tapped or not
+    if (windowMs > 0) {
+        if (activateProbing())
+            juce::Thread::sleep(5);
+        int const cap = std::min(kSignalFeeders, MAX_PROBES - probeManager.getActiveProbeCount());
+        host->pdWait([&] {
+            t_canvas* cnv = host->getCanvasBySymbol(canvasName);
+            if (!cnv) return;
+            std::unordered_set<t_object*> wanted;
+            for (auto const& id : ids) {
+                t_gobj* g = host->resolveStableId(canvasName, id);
+                if (t_object* o = (g && mcpGobjIsLive(cnv, g)) ? pd::Interface::checkObject(g) : nullptr) wanted.insert(o);
+            }
+            int const epoch = ugen_getsortno();
+            t_linetraverser lt;
+            linetraverser_start(&lt, cnv);
+            while (t_outconnect* oc = linetraverser_next_nosize(&lt)) {
+                if (!wanted.count(lt.tr_ob2) || !obj_issignaloutlet(lt.tr_ob, lt.tr_outno)) continue;
+                ++feedersOf[{ lt.tr_ob2, lt.tr_inno }];
+                if (static_cast<int>(taps.size()) >= cap) continue;
+                auto const srcId = host->getStableId(&lt.tr_ob->ob_g);
+                juce::String target = srcId;
+                if (target.isEmpty()) {
+                    int index = 0;
+                    for (t_gobj* y = cnv->gl_list; y && y != &lt.tr_ob->ob_g; y = y->g_next) ++index;
+                    target = juce::String(index);
+                }
+                int const id = probeManager.startProbe(oc, epoch, canvasName, target, lt.tr_outno, juce::String(),
+                    windowMs + ProbeManager::WINDOW_TAP_GRACE_MS, true);
+                if (id > 0) taps.push_back({ lt.tr_ob2, lt.tr_inno, static_cast<uint32_t>(id) });
+            }
+        }, kPdWaitMs);
+        if (!taps.empty())
+            juce::Thread::sleep(windowMs);
+    }
+    struct Window {
+        double sum = 0.0;
+        uint64_t count = 0;
+        float lo = 0.0f, hi = 0.0f;
+        int blocks = 0, read = 0;
+    };
+    std::map<std::pair<t_object*, int>, Window> windows;
+    for (auto const& tap : taps) {
+        WindowTapReading reading;
+        bool const got = probeManager.finishWindowTap(tap.probeId, reading);
+        auto& w = windows[{ tap.dst, tap.inlet }];
+        if (!got || reading.blocks <= 0 || reading.ac.count == 0) continue;
+        w.lo = w.read ? std::min(w.lo, reading.ac.rawMin) : reading.ac.rawMin;
+        w.hi = w.read ? std::max(w.hi, reading.ac.rawMax) : reading.ac.rawMax;
+        w.sum += reading.ac.sum / static_cast<double>(reading.ac.count); // the mean of each feeder; Pd sums them
+        w.count = std::max<uint64_t>(w.count, reading.ac.count);
+        w.blocks = std::max(w.blocks, reading.blocks);
+        ++w.read;
+    }
+
+    // 2. The facts, with the records and the window attached, under one Pd lock.
+    juce::String json;
     bool const ran = host->pdWait([&] {
         t_canvas* cnv = host->getCanvasBySymbol(canvasName);
         if (!cnv) {
@@ -66,6 +146,15 @@ void MCPBridge::pdInletValues(const juce::String& action, const juce::OSCMessage
             if (o) wanted.insert(o);
         }
         auto const wires = mcp::inlets::wiresInto(cnv, wanted);
+        auto const nameOf = [&](t_object* o) {
+            auto const id = host->getStableId(&o->ob_g);
+            if (id.isNotEmpty()) return id;
+            int index = 0;
+            for (t_gobj* y = cnv->gl_list; y && y != &o->ob_g; y = y->g_next) ++index;
+            return juce::String::fromUTF8(class_getname(pd_class(&o->ob_pd))) + "#" + juce::String(index);
+        };
+        auto const last = mcp::inlets::lastInto(cnv, wanted, nameOf);
+        auto const isAi = [host](unsigned int seq) { return host->seqIsAi(seq); };
         auto* root = new juce::DynamicObject();
         auto* out = new juce::DynamicObject();
         root->setProperty("canvas", canvasName);
@@ -74,13 +163,36 @@ void MCPBridge::pdInletValues(const juce::String& action, const juce::OSCMessage
             if (t_object* o = objects[i]) {
                 entry->setProperty("class", juce::String::fromUTF8(class_getname(pd_class(&o->ob_pd))));
                 auto const it = wires.find(o);
-                entry->setProperty("inlets", mcp::inlets::objectInlets(o, it == wires.end() ? std::unordered_map<int, mcp::inlets::Wires> {} : it->second));
+                auto const lt = last.find(o);
+                auto const inlets = mcp::inlets::objectInlets(o, it == wires.end() ? std::unordered_map<int, mcp::inlets::Wires> {} : it->second,
+                    lt == last.end() ? nullptr : &lt->second, isAi);
+                if (windowMs > 0)
+                    if (auto const* list = inlets.getArray())
+                        for (auto const& in : *list) {
+                            int const k = static_cast<int>(in["index"]);
+                            auto const feeders = feedersOf.find({ o, k });
+                            if (feeders == feedersOf.end()) continue;
+                            auto* sig = new juce::DynamicObject();
+                            auto const w = windows.find({ o, k });
+                            bool const all = w != windows.end() && w->second.read == feeders->second;
+                            sig->setProperty("feeders", feeders->second);
+                            sig->setProperty("blocks", w != windows.end() ? w->second.blocks : 0);
+                            sig->setProperty("mean", all ? juce::var(w->second.sum) : juce::var());
+                            bool const one = all && feeders->second == 1;
+                            sig->setProperty("min", one ? juce::var(static_cast<double>(w->second.lo)) : juce::var());
+                            sig->setProperty("max", one ? juce::var(static_cast<double>(w->second.hi)) : juce::var());
+                            if (!all) sig->setProperty("reason", feeders->second > kSignalFeeders || w == windows.end()
+                                ? "not every feeder could be tapped (probe slots)" : "a feeder ran no audio block in the window");
+                            if (auto* obj = in.getDynamicObject()) obj->setProperty("signal", juce::var(sig));
+                        }
+                entry->setProperty("inlets", inlets);
             } else {
                 entry->setProperty("error", "unknown tempId");
             }
             out->setProperty(ids[i], juce::var(entry));
         }
         root->setProperty("objects", juce::var(out));
+        if (windowMs > 0) root->setProperty("signalWindowMs", windowMs);
         json = toJson(root);
     }, kPdWaitMs);
     sendReply(address, ran ? json : errorJson("the Pd context did not answer in time"));

@@ -3288,6 +3288,8 @@ void ProbeManager::audioTick()
             probe.windowAcPeak.store(0.0f, std::memory_order_relaxed);
             probe.windowAcCount.store(0, std::memory_order_relaxed);
             probe.windowSwings.store(0, std::memory_order_relaxed);
+            probe.windowRawMin.store(0.0f, std::memory_order_relaxed);
+            probe.windowRawMax.store(0.0f, std::memory_order_relaxed);
         }
         mcp::ac::AcStats blockAc;
         mcp::ac::accumulate(probe.acBlocker, blockAc, vec, n);
@@ -3303,6 +3305,11 @@ void ProbeManager::audioTick()
             probe.windowSum.store(probe.windowSum.load(std::memory_order_relaxed) + blockAc.sum, std::memory_order_relaxed);
             if (blockAc.acPeak > probe.windowAcPeak.load(std::memory_order_relaxed))
                 probe.windowAcPeak.store(blockAc.acPeak, std::memory_order_relaxed);
+            if (blockAc.count > 0) { // slice 3: the window's raw range (the first counted block sets it)
+                bool const first = probe.windowAcCount.load(std::memory_order_relaxed) == 0;
+                probe.windowRawMin.store(first ? blockAc.rawMin : std::min(probe.windowRawMin.load(std::memory_order_relaxed), blockAc.rawMin), std::memory_order_relaxed);
+                probe.windowRawMax.store(first ? blockAc.rawMax : std::max(probe.windowRawMax.load(std::memory_order_relaxed), blockAc.rawMax), std::memory_order_relaxed);
+            }
             probe.windowAcCount.store(probe.windowAcCount.load(std::memory_order_relaxed) + blockAc.count, std::memory_order_relaxed);
             probe.windowSwings.store(probe.windowSwings.load(std::memory_order_relaxed) + blockAc.swings, std::memory_order_relaxed);
             probe.windowBlocks.store(probe.windowBlocks.load(std::memory_order_relaxed) + 1, std::memory_order_release);
@@ -3355,6 +3362,8 @@ bool ProbeManager::finishWindowTap(uint32_t probeId, WindowTapReading& out)
         out.ac.acPeak = probe.windowAcPeak.load(std::memory_order_relaxed);
         out.ac.count = probe.windowAcCount.load(std::memory_order_relaxed);
         out.ac.swings = probe.windowSwings.load(std::memory_order_relaxed);
+        out.ac.rawMin = probe.windowRawMin.load(std::memory_order_relaxed); // slice 3 (valid when count > 0)
+        out.ac.rawMax = probe.windowRawMax.load(std::memory_order_relaxed);
         return true;
     }
     return false;
@@ -3375,6 +3384,8 @@ int ProbeManager::startProbe(t_outconnect* oc, int const epoch, const juce::Stri
             probe.windowAcPeak.store(0.0f, std::memory_order_relaxed);
             probe.windowAcCount.store(0, std::memory_order_relaxed);
             probe.windowSwings.store(0, std::memory_order_relaxed);
+            probe.windowRawMin.store(0.0f, std::memory_order_relaxed);
+            probe.windowRawMax.store(0.0f, std::memory_order_relaxed);
             probe.acCoeff.store(mcp::ac::coefficientFor(bridge && bridge->processor ? bridge->processor->getSampleRate() : 0.0), std::memory_order_relaxed);
             probe.acEpoch.fetch_add(1, std::memory_order_release);
             probe.spectral = false;

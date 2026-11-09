@@ -205,6 +205,26 @@ std::optional<double> McpHost::aiGuiValue(t_gobj* g)
     return it->second.value;
 }
 
+void McpHost::noteAiSeqRange(unsigned int before, unsigned int after)
+{
+    if (before == after) return; // the dispatch delivered nothing that was recorded
+    session.aiSeqRanges[session.aiSeqHead] = { before, after };
+    session.aiSeqHead = (session.aiSeqHead + 1) % McpSession::kAiSeqRanges;
+    session.aiSeqCount = std::min(session.aiSeqCount + 1, McpSession::kAiSeqRanges);
+}
+
+bool McpHost::seqIsAi(unsigned int seq) const
+{
+    for (size_t i = 0; i < session.aiSeqCount; ++i) {
+        auto const& r = session.aiSeqRanges[i];
+        // (before, after] with wrap-around: seq - before in [1, after - before].
+        unsigned int const span = r.after - r.before;
+        unsigned int const at = seq - r.before;
+        if (at >= 1 && at <= span) return true;
+    }
+    return false;
+}
+
 bool McpHost::aiIntact(t_gobj* g)
 {
     if (!g || identity.originOf(g) != mcp::IdentityService::Origin::Ai)

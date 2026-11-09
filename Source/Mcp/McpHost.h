@@ -253,6 +253,11 @@ public:
     void noteAiGuiValue(t_gobj* g);
     // The value the AI last gave GUI `g` (nullopt: none recorded, or the object is gone). Pd lock held.
     std::optional<double> aiGuiValue(t_gobj* g);
+    // Truth slice 3 (`by`): the bridge's own dispatch moved Pd's message counter from `before` to `after` (both read
+    // with mcp_last_seq): every message recorded in between was the AI's. Pd lock held.
+    void noteAiSeqRange(unsigned int before, unsigned int after);
+    // A recorded message's seq: inside one of the newest 256 AI ranges. Pd lock held.
+    bool seqIsAi(unsigned int seq) const;
     // Switches flow mode off (any door). True when it was on. `by` names the door for the event and the console.
     bool flowModeOff(juce::String const& by);
     // {on, sinceMs, bootToken}

@@ -48,7 +48,9 @@ void MCPBridge::pdObjSet(const juce::String& action, const juce::OSCMessage& msg
             t_gobj* g = processor->getMcp()->resolveStableId(canvasName, tempId);
             if (g && !mcpGobjIsLive(cnv, g)) g = nullptr; // stale → treat as unknown
             bool const intact = processor->getMcp()->aiIntact(g); // P12a: the AI's own tuning stays the AI's
+            unsigned int const seqBefore = mcp_last_seq(); // slice 3: what this dispatch delivered is the AI's
             err = mcpObjSetCore(g, tempId, inlet, selector, atoms, &warning);
+            processor->getMcp()->noteAiSeqRange(seqBefore, mcp_last_seq());
             processor->getMcp()->restampAfterAiChange(g, intact);
             if (err.isEmpty() && mcpIsGuiValueSet(inlet, selector)) processor->getMcp()->noteAiGuiValue(g); // slice 3: handMoved
             sys_unlock();
@@ -149,7 +151,11 @@ void MCPBridge::pdObjSetBatch(const juce::String& action, const juce::OSCMessage
             juce::String warning;
             t_gobj* g = processor->getMcp()->resolveStableId(canvasName, tempId);
             bool const intact = processor->getMcp()->aiIntact(g); // P12a: the AI's own tuning stays the AI's
+            auto* host = processor->getMcp();
+            unsigned int const seqBefore = mcp_last_seq();
             auto err = mcpObjSetCore(g, tempId, inlet, selector, atoms, &warning);
+            unsigned int const seqAfter = mcp_last_seq();
+            host->noteAiSeqRange(seqBefore, seqAfter);
             processor->getMcp()->restampAfterAiChange(g, intact);
             if (err.isEmpty() && mcpIsGuiValueSet(inlet, selector)) processor->getMcp()->noteAiGuiValue(g); // slice 3: handMoved
             auto* ro = new juce::DynamicObject();

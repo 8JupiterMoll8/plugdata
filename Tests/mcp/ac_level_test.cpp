@@ -373,6 +373,31 @@ int main()
         CHECK(near(levelsFrom(0.0, 0.0, -0.5, 0).dcDb, -6.02, 0.01));
     }
 
+    // Truth slice 3 (inlet_values signal window): the raw min and max of the counted samples, kept across blocks and
+    // across add(); NaN/inf samples never count.
+    {
+        DcBlocker b;
+        AcStats st;
+        float const first[] = { 0.25f, -0.5f, 0.1f };
+        float const second[] = { std::nanf(""), 0.9f, 0.0f };
+        accumulate(b, st, first, 3);
+        CHECK(st.rawMin == -0.5f && st.rawMax == 0.25f);
+        accumulate(b, st, second, 3);
+        CHECK(st.rawMin == -0.5f && st.rawMax == 0.9f && st.count == 5);
+        AcStats empty;
+        empty.add(st);
+        CHECK(empty.rawMin == -0.5f && empty.rawMax == 0.9f);
+        AcStats other;
+        float const third[] = { -2.0f, -1.0f };
+        DcBlocker b2;
+        accumulate(b2, other, third, 2);
+        st.add(other);
+        CHECK(st.rawMin == -2.0f && st.rawMax == 0.9f);
+        AcStats none;
+        st.add(none); // an empty window changes nothing
+        CHECK(st.rawMin == -2.0f && st.rawMax == 0.9f);
+    }
+
     if (failures == 0)
         std::printf("ac_level_test: all passed\n");
     return failures == 0 ? 0 : 1;
