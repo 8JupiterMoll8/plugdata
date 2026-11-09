@@ -436,7 +436,24 @@ void MCPBridge::meterRead(const juce::String& meterAction, const juce::OSCMessag
         // V1 AC taps, args 17-20: the FINAL tap after a ~10 Hz DC blocker per channel, each channel judged alone
         // (review F3): acRmsDb, acPeakDb, dcDb of the loudest channel, tone (0/1: some channel has acRms above -60 dBFS
         // and swings, review F2). A DC drone has a loud arg 0 and no tone.
-        addAcArgs(rep, s.readArmAc());
+        auto const finalAc = s.readArmAc();
+        addAcArgs(rep, finalAc);
+        // Truth slice 2 (capability meter_verdict), arg 21: the ONE sound verdict of this window, as JSON
+        // (MCPBridgeSoundVerdict.h): audible / silent / dc_only / unmeasured, the level that decided, the tone and DC
+        // facts, and the window's floor (clamps, breaker, limiter, master volume). The server only words it.
+        mcp::verdict::Floor floor;
+        floor.read = true;
+        floor.masterVolume = processor->getMcp()->masterGain();
+        floor.pdOutPeakDb = mcp::ac::ampToDb(s.mcpArmPdOutPeak.load(std::memory_order_relaxed));
+        floor.preLimiterPeakDb = mcp::ac::ampToDb(s.mcpArmPreLimiterPeak.load(std::memory_order_relaxed));
+        floor.preCeilingPeakDb = mcp::ac::ampToDb(preCeilingPeak);
+        floor.clamped = clamped;
+        floor.nonFinite = nonFinite;
+        floor.breakerTrips = trips;
+        floor.breakerEngaged = engaged;
+        floor.limiterReductionDb = s.mcpArmLimiterReductionDbMax.load(std::memory_order_relaxed);
+        auto const v = mcp::verdict::judge(peakDb, finalAc, &floor, blocksElapsed > 0);
+        rep.addArgument(juce::String(mcp::verdict::toJson(v, "final", &floor)));
     }
     sender.send(rep);
     return;
@@ -586,13 +603,18 @@ void MCPBridge::meterReadSpectral(const juce::String& meterAction, const juce::O
     mcpLogLine(*this, processor, juce::String::formatted("MCP-ARM-DIAG read_spectral: samples=%d blocksElapsed=%lld armedTailRuns=%lld tailPeak=%.6f",
          n, (long long)blocksElapsed, (long long)armedTailRuns, (double)tailPeak));
     juce::String json = armedSpectralJson(processor->getMcp()->session.mcpSpecBuffer.data(), n, sr);
+    // Truth slice 2 (meter_verdict): the capture's own sound verdict (the final tap, judged over the whole capture),
+    // taken before the write position is reset; no audio block ran in the window: unmeasured.
+    auto const sound = blocksElapsed > 0 ? mcp::verdict::judgeSamples(processor->getMcp()->session.mcpSpecBuffer.data(), n, sr)
+                                         : mcp::verdict::judge(-100.0f, mcp::ac::AcLevels {}, nullptr, false);
     processor->getMcp()->session.mcpSpecWritePos.store(0, std::memory_order_relaxed);
     if (json.isEmpty()) {
         sendReply("/meter/read_spectral/reply/" + correlationId,
                   juce::String("{\"error\":\"insufficient capture\",\"samples\":") + juce::String(n) + diag + "}");
         return;
     }
-    if (json.endsWithChar('}')) json = json.dropLastCharacters(1) + diag + "}";
+    juce::String const soundField = ",\"sound\":" + juce::String(mcp::verdict::toJson(sound, "final", nullptr));
+    if (json.endsWithChar('}')) json = json.dropLastCharacters(1) + diag + soundField + "}";
     sendReply("/meter/read_spectral/reply/" + correlationId, json);
     return;
 }
@@ -850,11 +872,12 @@ void MCPBridge::readSignalTrace(const juce::String& correlationId)
             view.peaks[tap.name + ":" + std::to_string(tap.outlet)] = peak;
             maxBlocks = std::max(maxBlocks, blocks);
             levels += ",\"peakDb\":" + juce::String(mcp::trace::peakToDb(peak), 1) + ",\"blocks\":" + juce::String(blocks)
-                + acJsonFields(mcp::ac::levelsOf(reading.ac)) + "}"; // V1 AC taps
+                + acJsonFields(mcp::ac::levelsOf(reading.ac)) // V1 AC taps
+                + ",\"sound\":" + soundJson(mcp::trace::peakToDb(peak), mcp::ac::levelsOf(reading.ac)) + "}"; // slice 2
         } else {
             if (!unread.isEmpty()) unread += ",";
             unread += "\"" + jsonEscape(juce::String(tap.name)) + ":" + juce::String(tap.outlet) + "\"";
-            levels += ",\"peakDb\":null,\"blocks\":0,\"acRmsDb\":null,\"acPeakDb\":null,\"dcDb\":null,\"tone\":null}";
+            levels += ",\"peakDb\":null,\"blocks\":0,\"acRmsDb\":null,\"acPeakDb\":null,\"dcDb\":null,\"tone\":null,\"sound\":null}";
         }
     }
     juce::String untapped;

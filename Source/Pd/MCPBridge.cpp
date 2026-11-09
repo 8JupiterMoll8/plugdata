@@ -3545,6 +3545,7 @@ void ProbeManager::stopProbe(uint32_t probeId, const juce::String& correlationId
                 rep.addArgument(freq);
                 rep.addArgument(static_cast<int32>(probe.accBlocks));
                 addAcArgs(rep, mcp::ac::levelsOf(probe.accAc)); // V1 args 4-7
+                rep.addArgument(soundJson(peakDb, mcp::ac::levelsOf(probe.accAc))); // slice 2 (meter_verdict) arg 8
                 bridge->sender.send(rep);
             }
 
@@ -3668,6 +3669,7 @@ void ProbeManager::collectResults()
                     rootObj->setProperty("acPeakDb", ac.acPeakDb);
                     rootObj->setProperty("dcDb", ac.dcDb);
                     rootObj->setProperty("tone", ac.tone);
+                    rootObj->setProperty("sound", juce::JSON::parse(soundJson(peakDb, ac))); // slice 2 (meter_verdict)
 
                     juce::String jsonString = juce::JSON::toString(specVar, true);
                     juce::OSCMessage rep { juce::OSCAddressPattern("/meter/spectral/result/" + probe.correlationId) };
@@ -3685,6 +3687,7 @@ void ProbeManager::collectResults()
                 rep.addArgument(freq);
                 rep.addArgument(static_cast<int32>(probe.accBlocks));
                 addAcArgs(rep, mcp::ac::levelsOf(probe.accAc)); // V1 args 4-7
+                rep.addArgument(soundJson(peakDb, mcp::ac::levelsOf(probe.accAc))); // slice 2 (meter_verdict) arg 8
                 bridge->sender.send(rep);
             }
 

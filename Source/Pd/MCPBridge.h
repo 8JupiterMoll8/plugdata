@@ -32,6 +32,7 @@
 #include "Pd/MCPBridgeV2Server.h" // v2 TCP listener (Plan 4 P4.1)
 #include "Pd/MCPBridgeV2Router.h" // v2 reply routing (P4.1 S3)
 #include "Pd/MCPBridgeAcLevel.h"  // V1 AC taps: DC blocker + AC/DC levels (JUCE-free)
+#include "Pd/MCPBridgeSoundVerdict.h" // truth slice 2: the one sound verdict per read (JUCE-free)
 
 class PluginProcessor;
 class MCPBridge;
@@ -226,6 +227,12 @@ inline juce::String acJsonFields(mcp::ac::AcLevels const& lv)
 {
     return ",\"acRmsDb\":" + juce::String(lv.acRmsDb, 1) + ",\"acPeakDb\":" + juce::String(lv.acPeakDb, 1)
         + ",\"dcDb\":" + juce::String(lv.dcDb, 1) + ",\"tone\":" + (lv.tone ? "true" : "false");
+}
+
+/** Truth slice 2 (meter_verdict): the sound block of a NODE tap, as a JSON object (see MCPBridgeSoundVerdict.h). */
+inline juce::String soundJson(float rawPeakDb, mcp::ac::AcLevels const& lv)
+{
+    return juce::String(mcp::verdict::toJson(mcp::verdict::judge(rawPeakDb, lv, nullptr), "node", nullptr));
 }
 
 // V1 AC taps: what a window tap measured when its window closed.

@@ -1124,6 +1124,10 @@ void runAudioStallCases(Harness& h, AudioControl& audio)
     sleepMs(100);
     auto armed = h.call("/meter/read", { "s83r" }, "/meter/read/reply/s83r");
     CHECK(armed.has_value() && armed->num(2) == 0); // blocksElapsed: the audio thread is not ticking
+    // Truth slice 2 (meter_verdict): arg 21 is the window's sound block; no audio block ran: unmeasured, never silent.
+    CHECK(armed.has_value() && armed->str(21).find("\"verdict\":\"unmeasured\"") != std::string::npos);
+    CHECK(armed.has_value() && armed->str(21).find("\"reason\":\"no_audio\"") != std::string::npos);
+    CHECK(armed.has_value() && armed->str(21).find("\"tap\":\"final\"") != std::string::npos);
     auto stalled = h.call("/meter/master", { "main", "s83m2" }, "/meter/master/reply/s83m2");
     CHECK(stalled.has_value() && stalled->num(0) <= -99.0);
     CHECK(stalled.has_value() && stalled->str(3) == "audio_not_running");
@@ -1206,6 +1210,13 @@ void runArmedTraceCases(Harness& h)
         auto const json = parseJson(*read);
         CHECK(static_cast<int>(json["window"]["blocks"]) > 0);
         CHECK(levelOf(json, "t2b_vca") > -20.0); // the voice sounded while the note was held
+        // Truth slice 2 (meter_verdict): every read level carries its node's sound block; the held note is a tone.
+        if (auto const* rows = json["levels"].getArray())
+            for (auto const& row : *rows)
+                if (row["tempId"].toString() == "t2b_vca") {
+                    CHECK(row["sound"]["verdict"].toString() == "audible");
+                    CHECK(row["sound"]["tap"].toString() == "node");
+                }
         CHECK(levelOf(json, "t2b_env") > -3.0);  // the envelope reached ~1
         CHECK(json["chokePoint"].toString() != "t2b_vca");
         auto const* silentEnv = json["silentEnvelopes"].getArray();

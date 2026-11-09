@@ -287,6 +287,11 @@ std::vector<std::string> MCPBridge::capabilityList() const
         // blocker: a DC drone has a loud peak and no tone. tone is 0/1, except the one-block snapshots /meter/master
         // and /meter/query: 1 tone, 0 no sound, -1 unknown (a bass the block cannot see; use the armed read)
         "meter_ac",
+        // Truth slice 2: ONE sound verdict per read, from the bridge (MCPBridgeSoundVerdict.h): /meter/read arg 21 and
+        // /meter/result arg 8 (JSON), and a "sound" object in the armed trace's levels[], the spectral result and the
+        // read_spectral JSON: verdict audible/silent/dc_only/unmeasured, levelDb (the level that decided), tap, tone,
+        // quiet, rawPeakDb, acRmsDb, acPeakDb, dcDb, dcShare, dcFact, nearFullScale, reason; the final tap's floor too
+        "meter_verdict",
         // V1 read-only facts (MCPBridgeCmdFacts.cpp): /pd/inlet_values, /pd/wire_activity, /pd/audio_device,
         // /pd/broken, /pd/console_history; census rows carry switchedOn/blockSize/sampleRate (containers) and
         // broken/brokenInside; /pd/diagnose carries switchedOn and dac_channels_missing
