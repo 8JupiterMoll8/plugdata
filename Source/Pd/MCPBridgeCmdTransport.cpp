@@ -415,6 +415,17 @@ std::vector<std::string> MCPBridge::capabilityList() const
         // P12a: /pd/flow_mode_get|off (the switch lives in C++; no verb turns it on: the artist clicks Alphi) and /pd/ownership (A2)
         "flow_mode",
         "ownership",
+        // Truth slice 3: the armed trace's `stopFacts` (MCPBridgeStopWalk.h / MCPBridgeStopFacts.cpp: where the
+        // measured walk from the speakers ends, live ends, per-row facts; chokePoint = nearestStop.tempId, reason =
+        // its kind code)
+        "trace_stop_facts",
+        // /pd/inlet_values: `last` per inlet {selector, atoms, seq, by, via} (pure-data/0005) and the optional
+        // `signalWindowMs <ms>` window ({mean, min, max, blocks, feeders} on signal-connected inlets)
+        "inlet_last",
+        // /pd/obj_set_batch results: delivered / console / readBack {value, source, reason}
+        "set_delivery",
+        // /pd/send_checked <canvas> <corrId> <name> <argc> <atoms...>: receivers, delivered, console, refused
+        "send_checked",
     };
     // P4.1 S2: the v2 listener is up (TCP 127.0.0.1, port and token in the discovery file).
     if (v2Server.running())
