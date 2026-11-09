@@ -99,8 +99,9 @@ void MCPBridge::pdObjRelabel(const juce::String& action, const juce::OSCMessage&
     // 0b75486d6). A repaint is enough to trigger it; on the message thread
     // (P3.4 S3: repaintView may open a tab: 2 JUCE assertions per call before).
     if (ok) {
-        // Re-measure the box on the message thread (a repaint alone left the old text on screen).
-        juce::MessageManager::callAsync([proc = processor, cnv, g] {
+        // Re-measure the box on the message thread (a repaint alone left the old text on screen). THREADING rule 13:
+        // through postMessage (it carries the request's work token), never a bare callAsync.
+        postMessage([proc = processor, cnv, g] {
             sys_lock();
             bool const live = mcpCanvasIsLive(cnv);
             sys_unlock();
