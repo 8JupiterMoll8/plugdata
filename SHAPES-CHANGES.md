@@ -15,6 +15,9 @@ as the fork now answers them. Nothing in the plan's shapes was removed or rename
    A sounding voice never hides a dead one: with a bass sounding and a lead dying at hop 2 into the same dac~,
    `nearestStop` is the lead's stop (`dies_here`, hop 2). `nearestStop.tempId` for `none` is the first output's
    tempId, `hop: 0`, no `inlet`. (No per-output `stops[]` array: the one nearest measured stop is reported.)
+   **Delta review 1:** a candidate counts only when its path to the output stays dead (each consumer silent or
+   dc_only, up to an output or a summing node: [+~], a signal inlet with several wires, a catch~ with several throws).
+   A dead node whose consumer sounds (a [sig~] gain, a resting [line~], an idle LFO) is never a stop.
 4. **No output on the canvas** (no dac~ / out~): `"nearestStop": null`; the trace's `reason` is `"no_output"`.
 5. `nearestStop.inlet` is present only for `open_inlet`.
 6. **Live-end rows**: after the walk's rows (≤ 30), every live end that is not on the walk is appended as a row with
@@ -39,13 +42,14 @@ as the fork now answers them. Nothing in the plan's shapes was removed or rename
 
 ## Trace top level (no window and window)
 14. `chokePoint` = `nearestStop.tempId`, `reason` = the kind code (`dies_here | open_inlet | silent_source | bus_end |
-    unread | no_output`). **Review H3:** when the output sounds (kind `none`) the old pair stays exactly:
+    unread | no_output`). **Review H3 / delta 1:** whenever EVERY output sounds the old pair stays exactly (even when
+    `stopFacts.nearestStop` names a dead voice behind a sounding sum):
     `chokePoint: "none"`, `reason: "signal reaches master sink"` (an older server reads it right); the output's id is
     only in `stopFacts.nearestStop.tempId`. The prose
     reasons, the gate-sel note and `stages[].note` are gone. The plain (unarmed) trace runs the same walk on the
     last block's raw peaks (audible above -60 dBFS, the judge's floor) but has NO `stopFacts` block.
 
-15a. **Buses (review M4):** the walk crosses `throw~ N` -> `catch~ N` and `send~/s~ N` -> `receive~/r~ N` on the same
+15a. **Buses (review M4; `$0` names realised, delta 4):** the walk crosses `throw~ N` -> `catch~ N` and `send~/s~ N` -> `receive~/r~ N` on the same
     canvas (checked against Pd's binding). A bus receiver's row gets `bus: [{id: "<senderId>:bus", verdict, levelDb}]`
     (the sender's level is its input's); a receiver with no sender on the canvas gets `bus: []` and, when the walk ends
     there, kind `bus_end`. Bus edges count for hops; a throw~/send~'s bus outlet is not counted in `outWires`.
