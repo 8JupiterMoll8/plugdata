@@ -19,6 +19,10 @@ struct McpGuiParam { juce::String name; double min = 0, max = 1, value = 0; };
 
 bool mcpGetGuiParam(const juce::String& className, t_object* obj, McpGuiParam& out);
 
+// Truth slice 3: the value a GUI holds right now (hsl, vsl, tgl, hradio, vradio, nbx, knob, a float atom box). False
+// for anything else (not a GUI, a symbol atom). Pd lock held.
+bool mcpGuiValue(t_object* obj, double& out);
+
 // Screenshot label name of an else/knob: its receive name, else its send name
 // (empty when neither is set). Was inline in /pd/screenshot_canvas.
 juce::String mcpKnobLabelName(t_gobj* y);

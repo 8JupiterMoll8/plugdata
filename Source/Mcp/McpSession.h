@@ -378,6 +378,15 @@ struct McpSession {
     };
     std::map<t_canvas*, UndoJournal> undoJournal;
 
+    // Truth slice 3 (handMoved): the value the AI last gave each GUI (a set through the bridge, or the value it had
+    // right after the AI created it). Weak-keyed: `alive` is the GUI's pd::WeakReference, so a new object at a reused
+    // address never inherits an entry. Pd lock held (McpHost::noteAiGuiValue / aiGuiValue).
+    struct AiGuiValue {
+        std::function<bool()> alive;
+        double value = 0.0;
+    };
+    std::unordered_map<t_gobj*, AiGuiValue> aiGuiValues;
+
     // MCP zero-dropout WAV recorder — taps outputFifo directly in processBlock.
     // No canvas objects created, no DSP recompile, zero audio dropout.
     CriticalSection mcpRecorderLock;

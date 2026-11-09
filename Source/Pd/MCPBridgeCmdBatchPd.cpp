@@ -401,8 +401,10 @@ void mcp::BatchJob::createPhase(const std::string& canonStr)
                     processor->logMessage("batch_atomic: tempId '" + pc.tempId + "' already names another object; the new one gets a minted id");
                 // P12a A1: THE one place an object becomes the AI's own: this batch just pasted it (it was not on the
                 // canvas before, preCreateCount) and the bridge confirmed it under the AI's id. Never from a name.
-                if (bound == mcp::IdentityService::BindResult::Bound && preCreate.count(no.ptr) == 0)
+                if (bound == mcp::IdentityService::BindResult::Bound && preCreate.count(no.ptr) == 0) {
                     processor->getMcp()->identity.setOriginAi(no.ptr, McpHost::editStamp(no.ptr));
+                    processor->getMcp()->noteAiGuiValue(no.ptr); // slice 3: a GUI's creation value is the AI's
+                }
 
                 // Auto-seed line~/vline~ init value (fork ignores creation args)
                 if (pc.seedInit) {

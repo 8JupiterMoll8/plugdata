@@ -172,3 +172,24 @@ juce::String mcpKnobLabelName(t_gobj* y)
     else if (valid(knb->x_snd_raw)) semantic = juce::String::fromUTF8(knb->x_snd_raw->s_name);
     return semantic;
 }
+
+bool mcpGuiValue(t_object* obj, double& out)
+{
+    if (!obj) return false;
+    if (obj->te_type == T_ATOM) { // a float atom box keeps its value as the one atom of its binbuf
+        if (!obj->te_binbuf || binbuf_getnatom(obj->te_binbuf) < 1) return false;
+        t_atom const* a = binbuf_getvec(obj->te_binbuf);
+        if (a[0].a_type != A_FLOAT) return false;
+        out = static_cast<double>(a[0].a_w.w_float);
+        return true;
+    }
+    // The value fields mcpBuildGuiProps reads (not mcpGetGuiParam: that one also wants a send name).
+    juce::String const cls = juce::String::fromUTF8(class_getname(pd_class(&obj->ob_pd)));
+    if (cls == "knob") out = static_cast<double>(reinterpret_cast<t_fake_knob*>(obj)->x_fval);
+    else if (cls == "hsl" || cls == "vsl") out = static_cast<double>(reinterpret_cast<t_slider*>(obj)->x_fval);
+    else if (cls == "tgl") out = static_cast<double>(reinterpret_cast<t_toggle*>(obj)->x_on);
+    else if (cls == "hradio" || cls == "vradio") out = static_cast<double>(reinterpret_cast<t_radio*>(obj)->x_fval);
+    else if (cls == "nbx") out = static_cast<double>(reinterpret_cast<t_my_numbox*>(obj)->x_val);
+    else return false;
+    return true;
+}

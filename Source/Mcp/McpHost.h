@@ -248,6 +248,11 @@ public:
     // intact BEFORE the change (`wasIntact`), its stamp follows the change, so the AI's own tuning never reads as an
     // artist edit. A box the artist had edited stays edited. Pd lock held.
     void restampAfterAiChange(t_gobj* g, bool wasIntact);
+    // Truth slice 3 (handMoved): the AI just gave GUI `g` its value (an inlet-0 float/set/list through the bridge, or
+    // its creation): remember the value the GUI holds now. Not a GUI: nothing. Pd lock held.
+    void noteAiGuiValue(t_gobj* g);
+    // The value the AI last gave GUI `g` (nullopt: none recorded, or the object is gone). Pd lock held.
+    std::optional<double> aiGuiValue(t_gobj* g);
     // Switches flow mode off (any door). True when it was on. `by` names the door for the event and the console.
     bool flowModeOff(juce::String const& by);
     // {on, sinceMs, bootToken}

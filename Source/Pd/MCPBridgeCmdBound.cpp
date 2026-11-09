@@ -22,6 +22,7 @@
 
 #include "MCPBridgeCmdCommon.h"
 #include "MCPBridgeControlWindow.h" // mcpCtrlReceiverClass: the bridge's own control probes
+#include "MCPBridgeBound.h" // bindersOf, findSymbolNoCreate (truth slice 3: shared with the stop facts and send_checked)
 
 #include <chrono>
 #include <cstring>
@@ -30,26 +31,8 @@ namespace {
 
 constexpr int kMaxBoundNames = 64;
 
-// The layout of t_bindlist in Libraries/pure-data/src/m_pd.c (static there). Pinned by runBoundCases.
-struct McpBindlistView {
-    t_pd b_pd;
-    t_pd** b_vec;
-    int b_n;
-};
-
-// gensym's lookup (m_class.c dogensym: djb2 over the bytes, SYMTABHASHSIZE buckets) without the insert.
-t_symbol* findSymbolNoCreate(char const* s)
-{
-    if (!s || !pd_this || !pd_this->pd_symhash)
-        return nullptr;
-    unsigned int hash = 5381;
-    for (char const* p = s; *p; ++p)
-        hash = ((hash << 5) + hash) + static_cast<unsigned int>(*p); // as dogensym: a char added (sign included)
-    for (t_symbol* sym = pd_this->pd_symhash[hash & (SYMTABHASHSIZE - 1)]; sym; sym = sym->s_next)
-        if (std::strcmp(sym->s_name, s) == 0)
-            return sym;
-    return nullptr;
-}
+using mcp::bound::bindersOf;
+using mcp::bound::findSymbolNoCreate;
 
 struct Where {
     t_canvas* owner = nullptr;
@@ -118,25 +101,6 @@ juce::String receiverKind(char const* cls)
     if (c.endsWithChar('~'))
         return "signal";
     return "control";
-}
-
-std::vector<t_pd*> bindersOf(t_symbol* sym)
-{
-    std::vector<t_pd*> out;
-    if (!sym || !sym->s_thing)
-        return out;
-    t_pd* thing = sym->s_thing;
-    char const* cls = class_getname(*thing);
-    if (cls && std::strcmp(cls, "bindlist") == 0) {
-        auto const* list = reinterpret_cast<McpBindlistView const*>(thing);
-        if (list->b_vec && list->b_n > 0 && list->b_n < 1000000)
-            for (int i = 0; i < list->b_n; ++i)
-                if (list->b_vec[i])
-                    out.push_back(list->b_vec[i]);
-        return out;
-    }
-    out.push_back(thing);
-    return out;
 }
 
 } // namespace

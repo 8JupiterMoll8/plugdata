@@ -876,6 +876,9 @@ void MCPBridge::readSignalTrace(const juce::String& correlationId)
         levels += "{\"tempId\":\"" + jsonEscape(juce::String(tap.name)) + "\",\"class\":\"" + jsonEscape(tap.cls) + "\",\"outlet\":" + juce::String(tap.outlet);
         if (got && blocks > 0) {
             view.peaks[tap.name + ":" + std::to_string(tap.outlet)] = peak;
+            double const rate = processor && processor->getSampleRate() > 0.0 ? processor->getSampleRate() : mcp::ac::kDefaultRate;
+            view.verdicts[tap.name + ":" + std::to_string(tap.outlet)]
+                = mcp::verdict::judge(mcp::trace::peakToDb(peak), mcp::ac::levelsOf(reading.ac), nullptr, true, rate); // slice 3
             maxBlocks = std::max(maxBlocks, blocks);
             levels += ",\"peakDb\":" + juce::String(mcp::trace::peakToDb(peak), 1) + ",\"blocks\":" + juce::String(blocks)
                 + acJsonFields(mcp::ac::levelsOf(reading.ac)) // V1 AC taps

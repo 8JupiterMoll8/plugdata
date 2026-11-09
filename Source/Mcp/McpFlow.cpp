@@ -181,6 +181,30 @@ void McpHost::restampAfterAiChange(t_gobj* g, bool wasIntact)
         identity.setOriginAi(g, editStamp(g));
 }
 
+void McpHost::noteAiGuiValue(t_gobj* g)
+{
+    t_object* ob = g ? pd_checkobject(&g->g_pd) : nullptr;
+    double value = 0.0;
+    if (!ob || !mcpGuiValue(ob, value)) return;
+    auto& map = session.aiGuiValues;
+    if (map.size() > 4096) // dead entries only; a live patch never holds this many AI-set GUIs
+        for (auto it = map.begin(); it != map.end();)
+            it = (it->second.alive && it->second.alive()) ? std::next(it) : map.erase(it);
+    pd::WeakReference ref(g, &processor);
+    map[g] = { [ref] { return ref.isValid(); }, value };
+}
+
+std::optional<double> McpHost::aiGuiValue(t_gobj* g)
+{
+    auto const it = session.aiGuiValues.find(g);
+    if (it == session.aiGuiValues.end()) return std::nullopt;
+    if (!it->second.alive || !it->second.alive()) {
+        session.aiGuiValues.erase(it);
+        return std::nullopt;
+    }
+    return it->second.value;
+}
+
 bool McpHost::aiIntact(t_gobj* g)
 {
     if (!g || identity.originOf(g) != mcp::IdentityService::Origin::Ai)

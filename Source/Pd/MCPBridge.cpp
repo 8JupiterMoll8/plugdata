@@ -405,6 +405,7 @@ juce::String MCPBridge::canonicalCanvasKey(t_canvas* cnv)
 // Compute native diagnostic graph facts under sys_lock(). Shared by standalone
 // /pd/diagnose and inline conditional X-ray in batch_atomic.
 #include "MCPBridgePdAccessors.h" // V1: mcp_canvas_switchedon_chain, canvas_getsr, canvas_getsignallength
+#include "MCPBridgeStopFacts.h" // truth slice 3: where it stops, as facts
 
 namespace {
 // V1 (diagnose): `,"switchedOn":..,"blockSize":..,"sampleRate":..,"deviceOutChannels":N,"switched_off":[...],
@@ -870,7 +871,7 @@ juce::String MCPBridge::computeSignalTrace(PluginProcessor* processor, t_canvas*
     // CONTROL wires (non-signal): inlet -> upstream object indices. Needed to
     // name WHY a silent envelope never triggered (e.g. [sel 1] on the gate path
     // never matches the note velocity — the classic silent VCA).
-    std::vector<std::unordered_map<int, std::vector<int>>> controlSources(numObjs);
+    std::unordered_map<std::string, float> blockPeaks; // plain trace: the last block's peak per signal outlet
 
     t_linetraverser lt;
     t_outconnect* oc = nullptr;
@@ -884,10 +885,7 @@ juce::String MCPBridge::computeSignalTrace(PluginProcessor* processor, t_canvas*
         if (si < 0 || di < 0) continue;
 
         bool isSig = (lt.tr_outlet->o_sym == gensym("signal"));
-        if (!isSig) {
-            controlSources[di][lt.tr_inno].push_back(si);
-            continue;
-        }
+        if (!isSig) continue;
 
         float wirePeak = 0.0f;
         bool wireRead = true;
@@ -906,6 +904,10 @@ juce::String MCPBridge::computeSignalTrace(PluginProcessor* processor, t_canvas*
             }
         }
 
+        if (!window && wireRead) {
+            auto& best = blockPeaks[std::string(names[si].toRawUTF8()) + ":" + std::to_string(lt.tr_outno)];
+            best = std::max(best, wirePeak);
+        }
         outgoingSigWires[si]++;
         incomingSigWires[di]++;
         inletSources[di][lt.tr_inno].push_back(si);
@@ -960,139 +962,29 @@ juce::String MCPBridge::computeSignalTrace(PluginProcessor* processor, t_canvas*
         }
     }
 
-    // ── Cause naming for silent envelopes ───────────────────────────────────
-    // The harness delivers the note gate as VELOCITY (1..127; 0 = release) —
-    // see midi-gate.ts sendNote(). A [sel N] with N != velocity on the gate
-    // path NEVER matches → no bang → no envelope → silent VCA. Walk the control
-    // wires upstream from a silent envelope; if a numeric [sel] AND a gate
-    // receiver share that chain, name the trap instead of leaving the generic
-    // "envelope did not trigger" verdict.
-    auto objTextOf = [&](int i) -> juce::String {
-        t_object* o = pd::Interface::checkObject(objs[i]);
-        if (!o) return {};
-        char* text = nullptr; int len = 0;
-        mcpGetObjectText(o, &text, &len);
-        if (!text || len <= 0) return {};
-        juce::String s = juce::String::fromUTF8(text, len);
-        freebytes(text, len);
-        return s;
-    };
-    auto gateSelUpstreamNote = [&](int envIndex) -> juce::String {
-        std::vector<int> frontier{ envIndex };
-        std::unordered_set<int> seen{ envIndex };
-        int selIdx = -1, gateIdx = -1;
-        for (int depth = 0; depth < 6 && !frontier.empty() && (selIdx < 0 || gateIdx < 0); ++depth) {
-            std::vector<int> next;
-            for (int idx : frontier) {
-                for (auto& [inletNo, srcs] : controlSources[idx]) {
-                    juce::ignoreUnused(inletNo);
-                    for (int s : srcs) {
-                        if (!seen.insert(s).second) continue;
-                        next.push_back(s);
-                        const juce::String& sc = classNames[s];
-                        // NOTE: Pd's raw class name for [sel] is "select" ("sel" is
-                        // only the creator alias — the census normalizes it for
-                        // display, class_getname does not).
-                        if (selIdx < 0 && (sc == "select" || sc == "sel")) {
-                            juce::String t = objTextOf(s);
-                            juce::String after = t.startsWith("select") ? t.substring(6).trim()
-                                                                       : t.substring(3).trim();
-                            if (after.isNotEmpty() && after.containsOnly("0123456789.-+ "))
-                                selIdx = s;
-                        } else if (gateIdx < 0 && (sc == "r" || sc == "receive")) {
-                            juce::String nm = objTextOf(s).fromFirstOccurrenceOf(" ", false, true).trim();
-                            if (nm.startsWith("gate")) gateIdx = s;
-                        }
-                    }
-                }
-            }
-            frontier = next;
-        }
-        if (selIdx >= 0 && gateIdx >= 0) {
-            // ASCII only: non-ASCII in a reply string is mangled to mojibake on
-            // the C++ -> OSC -> TS path (an em-dash arrives as 'â').
-            return " - cause: [" + objTextOf(selIdx).trim() + "] ('" + names[selIdx] + "') filters the gate; the harness sends the note VELOCITY (1..127, e.g. 100), so only an exact match passes ([sel 1] never fires). Trigger on any non-zero ([t b] / [> 0]).";
-        }
-        return {};
-    };
-
-    int chokeIndex = -1;
-    juce::String chokeReason;
-
-    for (int i = 0; i < numObjs; ++i) {
-        const juce::String& c = classNames[i];
-        // dac~/out~ are sinks; throw~/send~ are bus SENDERS with no signal
-        // outlet — their signal continues at the matching catch~/receive~.
-        // Measuring a bus sender's outlet reads silence, so an [s~] with live
-        // input and an (empty) outlet was falsely reported as a choke on every
-        // working send~. Skip them; a genuinely dangling send~ (no matching
-        // receiver) still surfaces via the "never reaches dac~" fallback below.
-        if (c == "dac~" || c == "throw~" || c == "out~" || c == "send~" || c == "s~") continue;
-        if (!outRead(i)) continue; // T2b: not tapped, not judged
-
-        if (maxInPeak[i] >= ALIVE_THRESH && maxOutPeak[i] < ALIVE_THRESH) {
-            chokeIndex = i;
-            if (c == "*~") {
-                float inlet1Signal = inletPeaks[i].count(1) ? inletPeaks[i][1] : 0.0f;
-                if (inletSources[i].count(1) && !inletSources[i][1].empty()) {
-                    int srcI = inletSources[i][1][0];
-                    if (!outRead(srcI)) {
-                        chokeReason = "multiplier output is silent; the signal on inlet 1 (from '" + names[srcI] + "') was not tapped in this window";
-                    } else if (inlet1Signal < ALIVE_THRESH) {
-                        chokeReason = "multiplier control inlet 1 is zero from envelope '" + names[srcI] + "' (envelope did not trigger or [r gate] missing)"
-                                    + gateSelUpstreamNote(srcI);
-                    } else {
-                        chokeReason = "multiplier output is silent despite control signal on inlet 1";
-                    }
-                } else {
-                    chokeReason = "multiplier control inlet 1 is zero or disconnected (silent VCA)";
-                }
-            } else if (c == "vcf~" || c == "lop~" || c == "hip~" || c == "bp~") {
-                chokeReason = "filter attenuated signal to silence (cutoff may be at 0 Hz)";
-            } else {
-                float inDb = 20.0f * std::log10(maxInPeak[i] + 1e-7f);
-                float outDb = 20.0f * std::log10(maxOutPeak[i] + 1e-7f);
-                chokeReason = "signal died at this object (input " + juce::String(inDb, 1) + " dBFS, output " + juce::String(outDb, 1) + " dBFS)";
-            }
-            break;
+    // Truth slice 3: where it stops is the stop walk's fact (MCPBridgeStopWalk.h), from the window's per-tap verdicts
+    // (slice 2's judge); the plain trace judges the last block's raw peaks on the same floor. chokePoint is the
+    // nearest stop's tempId and reason its kind code; no prose, no advice.
+    std::unordered_map<std::string, mcp::verdict::Verdict> verdicts;
+    if (window) {
+        verdicts = window->verdicts;
+    } else {
+        for (auto const& [key, peak] : blockPeaks) {
+            mcp::verdict::Verdict v;
+            v.hasLevel = true;
+            v.levelDb = peakToDb(peak);
+            v.kind = mcp::verdict::hot(v.levelDb) ? mcp::verdict::Kind::Audible : mcp::verdict::Kind::Silent;
+            verdicts[key] = v;
         }
     }
+    mcp::stops::CanvasObjects const canvasObjects { objs, names, classNames };
+    auto const walk = mcp::stops::walkCanvas(cnv, canvasObjects, verdicts);
+    auto const& stop = walk.result.stop;
+    bool const stopped = walk.result.hasStop && stop.node >= 0 && stop.kind != mcp::stops::StopKind::None;
+    int const chokeIndex = stopped ? stop.node : -1;
+    juce::String const chokeReason = walk.result.hasStop ? juce::String(mcp::stops::kindName(stop.kind)) : juce::String("no_output");
 
-    if (chokeIndex < 0) {
-        if (!silentGenerators.empty() && liveSources.empty()) {
-            chokeReason = "sound generator '" + silentGenerators[0] + "' is silent (check frequency or pitch receiver)";
-            for (int i = 0; i < numObjs; ++i) {
-                if (names[i] == silentGenerators[0]) { chokeIndex = i; break; }
-            }
-        } else if (!silentEnvelopes.empty() && liveSources.empty()) {
-            chokeReason = "envelope generator '" + silentEnvelopes[0] + "' output is zero (envelope did not trigger)";
-            for (int i = 0; i < numObjs; ++i) {
-                if (names[i] == silentEnvelopes[0]) {
-                    chokeIndex = i;
-                    chokeReason += gateSelUpstreamNote(i);
-                    break;
-                }
-            }
-        } else if (!liveSources.empty()) {
-            if (dacIndex >= 0 && unreadInWires[dacIndex] > 0 && maxInPeak[dacIndex] < ALIVE_THRESH) {
-                // T2b: some of the wires into dac~ were not tapped, so "never reaches dac~" cannot be claimed.
-                chokeReason = "the window did not tap every wire into dac~; read 'levels' for where the signal stops";
-            } else if (dacIndex >= 0 && maxInPeak[dacIndex] < ALIVE_THRESH) {
-                chokeReason = "signal generated by '" + liveSources[0] + "' never reaches dac~ (broken signal path)";
-                chokeIndex = dacIndex;
-            } else {
-                // Healthy: a live source exists AND the signal is reaching the
-                // master sink. Previously this branch emitted the alarming
-                // "sound generated but not reaching master sink" reason even
-                // though the dac~ was fed — a false choke report.
-                chokeReason = "signal reaches master sink";
-            }
-        } else {
-            chokeReason = "no active audio sources found on canvas";
-        }
-    }
-
-    juce::String chokeName = (chokeIndex >= 0 && chokeIndex < numObjs) ? names[chokeIndex] : "none";
+    juce::String chokeName = (walk.result.hasStop && stop.node >= 0 && stop.node < numObjs) ? names[stop.node] : juce::String("none");
     juce::String chokeClass = (chokeIndex >= 0 && chokeIndex < numObjs) ? classNames[chokeIndex] : "none";
     // Report real levels. When there is no choke point, fall back to the
     // loudest live source (input) and the peak arriving at dac~ (output) so
@@ -1161,13 +1053,13 @@ juce::String MCPBridge::computeSignalTrace(PluginProcessor* processor, t_canvas*
               + ",\"outDb\":" + (outUnread ? juce::String("null") : juce::String(outDbS, 1));
         if (window)
             json += juce::String(",\"measured\":") + ((inUnread || outUnread) ? "false" : "true");
-        if (i == chokeIndex && chokeReason.isNotEmpty())
-            json += ",\"note\":\"" + jsonEscape(chokeReason) + "\"";
         json += "}";
     }
     json += "],\"stagesTruncated\":" + juce::String((int)stageOrder.size() >= 40 ? "true" : "false");
-    if (window)
+    if (window) {
+        json += ",\"stopFacts\":" + mcp::stops::stopFactsJson(processor, cnv, canvasObjects, walk);
         json += window->extraJson;
+    }
     json += "}";
 
     return json;

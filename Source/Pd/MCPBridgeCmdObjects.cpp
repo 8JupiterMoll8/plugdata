@@ -50,6 +50,7 @@ void MCPBridge::pdObjSet(const juce::String& action, const juce::OSCMessage& msg
             bool const intact = processor->getMcp()->aiIntact(g); // P12a: the AI's own tuning stays the AI's
             err = mcpObjSetCore(g, tempId, inlet, selector, atoms, &warning);
             processor->getMcp()->restampAfterAiChange(g, intact);
+            if (err.isEmpty() && mcpIsGuiValueSet(inlet, selector)) processor->getMcp()->noteAiGuiValue(g); // slice 3: handMoved
             sys_unlock();
         }
 
@@ -150,6 +151,7 @@ void MCPBridge::pdObjSetBatch(const juce::String& action, const juce::OSCMessage
             bool const intact = processor->getMcp()->aiIntact(g); // P12a: the AI's own tuning stays the AI's
             auto err = mcpObjSetCore(g, tempId, inlet, selector, atoms, &warning);
             processor->getMcp()->restampAfterAiChange(g, intact);
+            if (err.isEmpty() && mcpIsGuiValueSet(inlet, selector)) processor->getMcp()->noteAiGuiValue(g); // slice 3: handMoved
             auto* ro = new juce::DynamicObject();
             ro->setProperty("tempId", tempId);
             ro->setProperty("selector", selector);

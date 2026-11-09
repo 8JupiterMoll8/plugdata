@@ -1300,7 +1300,10 @@ void runArmedTraceCases(Harness& h)
         CHECK(levelOf(json, "t2b_osc") > -20.0); // the oscillator runs all the time
         auto const* silentEnv = json["silentEnvelopes"].getArray();
         CHECK(silentEnv != nullptr && silentEnv->contains("t2b_env"));
-        CHECK(json["reason"].toString().containsIgnoreCase("envelope") || json["reason"].toString().containsIgnoreCase("multiplier"));
+        // Truth slice 3: the stop walk's fact, no prose: the VCA hears the oscillator and gives nothing.
+        CHECK(json["chokePoint"].toString() == "t2b_vca");
+        CHECK(json["reason"].toString() == "dies_here");
+        CHECK(json["stopFacts"]["nearestStop"]["kind"].toString() == "dies_here");
     }
 
     // A read with no window open is refused, not answered with a stale trace.
@@ -1858,6 +1861,123 @@ void runAcTapCases(Harness& h, PluginProcessor& processor, AudioControl& audio)
     render(4);
     audio.paused = false;
     h.fire("/pd/dsp", { 0 });
+}
+
+// Truth slice 3 (F3): the armed trace's stopFacts on the L2 patch of the 2026-11-08 session. noise~ -> lop~ is
+// unplugged from [*~ 0.25] (sig_8), which feeds dac~ with nothing on its inlet 0; a dust branch (noise~ -> [*~] ->
+// [*~ 1] -> dac~) whose gain [*~] is fed by an hsl the AI set and then a hand moved to 0. The nearest stop is sig_8's
+// open inlet 0 (hop 1), the dust gain dies one hop further up (its row, not the stop), lop~ is the live end, and the
+// dust gain's row says the hsl was hand-moved. After the AI itself sets the hsl, the same row says not hand-moved.
+juce::var stopRow(juce::var const& facts, char const* tempId)
+{
+    if (auto const* rows = facts["rows"].getArray())
+        for (auto const& r : *rows)
+            if (r["tempId"].toString() == tempId) return r;
+    return {};
+}
+
+juce::var ctlInlet(juce::var const& row, int inlet)
+{
+    if (auto const* ctl = row["ctl"].getArray())
+        for (auto const& c : *ctl)
+            if (static_cast<int>(c["inlet"]) == inlet) return c;
+    return {};
+}
+
+void runStopFactsCases(Harness& h, PluginProcessor& processor)
+{
+    std::printf("stop facts (truth slice 3)\n");
+    auto* host = processor.getMcp();
+    // Its own subpatch: earlier cases leave sounding boxes on main (live ends of their own).
+    auto sub = h.call("/pd/batch_atomic", { "main", "sf0", 0, 0, 0, 1, 0, "sf_sub", 1400, 600, "obj", "pd", 1, "sf_l2", 0, 5, 10, 0 },
+        "/pd/batch_atomic/reply/sf0");
+    CHECK(sub.has_value() && sub->num(0) == 1);
+    char const* const L2 = "pd-sf_l2";
+    auto made = h.call("/pd/batch_atomic",
+        { L2, "sf1", 0, 0, 0, 8, 6,
+            "l2_noise", 1400, 40, "obj", "noise~", 0,
+            "lp_lop", 1400, 90, "obj", "lop~", 1, "800",
+            "sig_8", 1400, 150, "obj", "*~", 1, "0.25",
+            "out_dac", 1400, 220, "obj", "dac~", 0,
+            "dust_src", 1550, 40, "obj", "noise~", 0,
+            "mo_sl", 1650, 40, "obj", "hsl", 0,
+            "dust_g", 1550, 100, "obj", "*~", 0,
+            "dust_out", 1550, 150, "obj", "*~", 1, "1",
+            "l2_noise", 0, "lp_lop", 0,
+            "sig_8", 0, "out_dac", 0,
+            "dust_src", 0, "dust_g", 0,
+            "mo_sl", 0, "dust_g", 1,
+            "dust_g", 0, "dust_out", 0,
+            "dust_out", 0, "out_dac", 1,
+            0, 5, 10, 0 },
+        "/pd/batch_atomic/reply/sf1");
+    CHECK(made.has_value() && made->num(0) == 8);
+    // The AI sets the slider (0..127 default range) to 64; then a hand moves it to 0 outside any bridge set.
+    auto set = h.call("/pd/obj_set", { L2, "sf2", "mo_sl", 0, "float", 1, 64.0 }, "/pd/obj_set/reply/sf2");
+    CHECK(set.has_value() && set->num(0) == 1.0);
+    CHECK(host->pdWait([&] {
+        if (t_gobj* g = host->resolveStableId(L2, "mo_sl")) pd_float(&g->g_pd, 0);
+    }, 2000));
+    h.fire("/pd/dsp", { 1 });
+    sleepMs(300);
+
+    auto readFacts = [&](char const* armCorr, char const* readCorr) -> juce::var {
+        auto armed = h.call("/meter/trace", { L2, armCorr, "arm", 300, "" }, std::string("/meter/trace/reply/") + armCorr);
+        CHECK(armed.has_value() && static_cast<bool>(parseJson(*armed)["armed"]));
+        sleepMs(350);
+        auto read = h.call("/meter/trace", { L2, readCorr, "read" }, std::string("/meter/trace/reply/") + readCorr);
+        CHECK(read.has_value());
+        return read ? parseJson(*read) : juce::var();
+    };
+    auto json = readFacts("sf3", "sf4");
+    auto facts = json["stopFacts"];
+    CHECK(facts.isObject());
+    CHECK(facts["nearestStop"]["tempId"].toString() == "sig_8");
+    CHECK(facts["nearestStop"]["kind"].toString() == "open_inlet");
+    CHECK(static_cast<int>(facts["nearestStop"]["hop"]) == 1);
+    CHECK(static_cast<int>(facts["nearestStop"]["inlet"]) == 0);
+    auto const* live = facts["liveEnds"].getArray();
+    CHECK(live && live->size() == 1 && (*live)[0].toString() == "lp_lop");
+    CHECK(json["chokePoint"].toString() == "sig_8" && json["reason"].toString() == "open_inlet");
+    CHECK(static_cast<int>(facts["rowsTruncated"]) == 0);
+    CHECK(facts["refocus"].isArray() && facts["refocus"].getArray()->isEmpty());
+    auto const* outs = facts["outputs"].getArray();
+    CHECK(outs && outs->size() == 1 && (*outs)[0].toString() == "out_dac");
+
+    auto const sig8 = stopRow(facts, "sig_8");
+    CHECK(static_cast<int>(sig8["hop"]) == 1);
+    CHECK(sig8["out"]["verdict"].toString() == "silent");
+    CHECK(static_cast<int>(sig8["outWires"]) == 1);
+    CHECK(sig8["openSignalInlets"].getArray() && sig8["openSignalInlets"].getArray()->size() == 1);
+    CHECK(sig8["made"].toString() == "ai");
+    CHECK(!static_cast<bool>(sig8["redBox"]) && !static_cast<bool>(sig8["switchedOff"]));
+
+    auto const dust = stopRow(facts, "dust_g");
+    CHECK(static_cast<int>(dust["hop"]) == 2);
+    CHECK(dust["out"]["verdict"].toString() == "silent");
+    auto const in0 = dust["sig"][0];
+    CHECK(static_cast<int>(in0["inlet"]) == 0 && in0["from"][0]["id"].toString() == "dust_src:0");
+    CHECK(in0["from"][0]["verdict"].toString() == "audible");
+    auto const gain = ctlInlet(dust, 1);
+    CHECK(gain.isObject());
+    CHECK(gain["from"][0]["id"].toString() == "mo_sl:0");
+    CHECK(static_cast<double>(gain["from"][0]["value"]) == 0.0);
+    CHECK(gain["from"][0]["handMoved"].isBool() && static_cast<bool>(gain["from"][0]["handMoved"]));
+    CHECK(static_cast<double>(gain["value"]) == 0.0); // the scalar of the [*~]'s right inlet
+
+    auto const lop = stopRow(facts, "lp_lop");
+    CHECK(static_cast<bool>(lop["liveEnd"]) && static_cast<int>(lop["outWires"]) == 0);
+    CHECK(lop["sig"][0]["from"][0]["verdict"].toString() == "audible");
+
+    // The AI itself puts the slider at 0: not hand-moved.
+    auto set0 = h.call("/pd/obj_set", { L2, "sf5", "mo_sl", 0, "float", 1, 0.0 }, "/pd/obj_set/reply/sf5");
+    CHECK(set0.has_value() && set0->num(0) == 1.0);
+    auto again = readFacts("sf6", "sf7");
+    auto const gain2 = ctlInlet(stopRow(again["stopFacts"], "dust_g"), 1);
+    CHECK(gain2["from"][0]["handMoved"].isBool() && !static_cast<bool>(gain2["from"][0]["handMoved"]));
+
+    h.fire("/pd/dsp", { 0 });
+    h.call("/pd/batch_atomic", { "main", "sf8", 1, 0, 0, 0, 0, "sf_sub", 0, 5, 10, 0 }, "/pd/batch_atomic/reply/sf8");
 }
 
 // V1 /pd/inlet_values: the live value each inlet holds (capability inlet_values). [lop~ 300] with a signal on inlet
@@ -5577,6 +5697,7 @@ int main()
             runUndoPeekCases(harness, processor);
             runAudioStallCases(harness, audioControl);
             runArmedTraceCases(harness);
+            runStopFactsCases(harness, processor);
             runConsoleObjectCases(harness);
             runLimiterCases(harness, processor);
             runMeterWindowGenCases(harness, processor);

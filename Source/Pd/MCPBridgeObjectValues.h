@@ -54,6 +54,12 @@ inline void mcpMarkGuiLoadinit(t_object* o, const juce::String& clsLower)
         reinterpret_cast<t_my_numbox*>(o)->x_gui.x_isa.x_loadinit = 1;
 }
 
+// Truth slice 3 (handMoved): a set that gives a GUI its value: inlet 0, float / set / list.
+inline bool mcpIsGuiValueSet(int inlet, juce::String const& selector)
+{
+    return inlet <= 0 && (selector == "float" || selector == "set" || selector == "list");
+}
+
 inline juce::String mcpObjSetCore(t_gobj* g, const juce::String& tempId, int inlet,
                                    const juce::String& selector, std::vector<t_atom>& atoms,
                                    juce::String* warning)

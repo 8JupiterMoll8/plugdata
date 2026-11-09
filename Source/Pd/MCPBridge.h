@@ -622,6 +622,7 @@ private:
     // not silent). `extraJson` is appended to the trace reply (the window facts and the per-tap levels).
     struct TraceWindowView {
         std::unordered_map<std::string, float> peaks;
+        std::unordered_map<std::string, mcp::verdict::Verdict> verdicts; // slice 3: each read tap's sound verdict
         juce::String extraJson;
     };
     // The taps an armed trace opens: at most `cap` signal outlets of the canvas (`focus` objects first, then spread
