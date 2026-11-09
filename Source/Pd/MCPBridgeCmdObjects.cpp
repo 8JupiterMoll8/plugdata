@@ -130,6 +130,7 @@ void MCPBridge::pdObjSetBatch(const juce::String& action, const juce::OSCMessage
         int okCount = 0;
         juce::Array<juce::var> results;
 
+        processor->setThis(); // review M5: this worker thread may never have selected the Pd instance (as pdObjSet)
         sys_lock();
         t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName); // slice 3: liveness + read-back
         for (int i = 0; i < count && cursor < msg.size(); i++) {
