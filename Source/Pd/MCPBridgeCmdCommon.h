@@ -51,11 +51,7 @@ extern "C" {
 #include <g_all_guis.h> // t_iemgui x_snd/x_rcv for screenshot GUI-widget labels
 #include <m_imp.h>      // obj_starttraverseoutlet/obj_nexttraverseoutlet (duplicate-wire check)
 
-extern "C" {
-extern t_class* clone_class; // defined in g_clone.c (pd core)
-extern int clone_get_n(t_gobj*);
-extern t_glist* clone_get_instance(t_gobj*, int);
-}
+#include "Mcp/McpClone.h" // clone_class, clone_get_n, mcpCloneInstance (instance i whatever the clone's -s)
 
 extern t_class *text_class;
 

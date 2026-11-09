@@ -46,7 +46,7 @@ inline void collectFailedCreates(t_canvas* c, int topIndex, juce::String const& 
         } else if (pd_class(&g->g_pd) == clone_class) {
             int const n = clone_get_n(g);
             for (int i = 0; i < n; ++i)
-                if (auto* inst = clone_get_instance(g, i))
+                if (auto* inst = mcpCloneInstance(g, i))
                     collectFailedCreates(reinterpret_cast<t_canvas*>(inst), top,
                         (path.isEmpty() ? juce::String() : path + "/") + juce::String(index) + ":clone#" + juce::String(i), out, depth + 1);
         }
@@ -62,7 +62,7 @@ inline int countInside(t_gobj* g)
         collectFailedCreates(reinterpret_cast<t_canvas*>(g), 0, {}, found, 1);
     else if (pd_class(&g->g_pd) == clone_class)
         for (int i = 0, n = clone_get_n(g); i < n; ++i)
-            if (auto* inst = clone_get_instance(g, i))
+            if (auto* inst = mcpCloneInstance(g, i))
                 collectFailedCreates(reinterpret_cast<t_canvas*>(inst), 0, {}, found, 1);
     return found.size();
 }

@@ -1,0 +1,34 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Alphi <alphi@starchaser.local>
+Date: Mon, 9 Nov 2026 21:12:55 +0100
+Subject: [PATCH] feat(core): clone_get_startvoice accessor for the MCP bridge
+
+clone_get_instance(x, n) subtracts the clone's start voice (-s) and clamps, so a walk
+over instances 0..n-1 of [clone -s 1 abs N] read instance 0 twice and never the last
+one. The accessor lets the caller ask for voice startvoice + i.
+---
+ src/g_clone.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/src/g_clone.c b/src/g_clone.c
+index fdd06c4..ba65003 100644
+--- a/src/g_clone.c
++++ b/src/g_clone.c
+@@ -818,6 +818,14 @@ int clone_get_n(t_gobj *x)
+     else return ((t_clone *)x)->x_n;
+ }
+ 
++    /* plugdata MCP fork: the first voice number (-s), so a caller walking instances 0..n-1 can ask
++       clone_get_instance for voice startvoice + i (it subtracts the start voice and clamps). */
++int clone_get_startvoice(t_gobj *x)
++{
++    if (pd_class(&x->g_pd) != clone_class) return 0;
++    else return ((t_clone *)x)->x_startvoice;
++}
++
+ t_glist *clone_get_instance(t_gobj *x, int n)
+ {
+     t_clone *c;
+-- 
+2.34.1
+

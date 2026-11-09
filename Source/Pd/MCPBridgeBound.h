@@ -63,42 +63,57 @@ inline std::vector<t_pd*> bindersOf(t_symbol* sym)
     return out;
 }
 
+/** What placedAmong found: the binders that are placed boxes, and whether the walk stopped at its cap. */
+struct Placed {
+    std::unordered_set<t_pd const*> found;
+    bool walkLimit = false; // depth > 64 or more than maxObjects visited: a binder not found may be a real box
+};
+
 /**
- * Review H5 (proof3): which of `binders` are boxes placed on a canvas (found in some glist, clone instances included).
- * Only these may be read as a t_object. A class check is not enough: pd-lua's `pd.Receive` proxy has a class made with
- * flags 0 (CLASS_PATCHABLE, so pd_checkobject passes) on a 24-byte struct; reading its outlets or binbuf overreads the
- * heap. Pointers are compared, never dereferenced, until found. Fails closed: a walk cut by `maxObjects` finds less.
+ * Review H5 (proof3): which of `binders` are boxes placed on a canvas (found in some glist, every clone instance
+ * included, whatever its -s: mcpCloneInstance). Only these may be read as a t_object. A class check is not enough:
+ * pd-lua's `pd.Receive` proxy has a class made with flags 0 (CLASS_PATCHABLE, so pd_checkobject passes) on a 24-byte
+ * struct; reading its outlets or binbuf overreads the heap. Pointers are compared, never dereferenced, until found.
+ * A walk cut by its caps says so (walkLimit): the caller refuses with that word, not "non-object binder".
  * Caller holds the Pd lock.
  */
-inline std::unordered_set<t_pd const*> placedAmong(std::vector<t_pd*> const& binders, int maxObjects = 500000)
+inline Placed placedAmong(std::vector<t_pd*> const& binders, int maxObjects = 500000, int maxDepth = 64)
 {
     std::unordered_set<t_pd const*> wanted(binders.begin(), binders.end());
-    std::unordered_set<t_pd const*> found;
+    Placed out;
     if (wanted.empty() || !pd_this)
-        return found;
+        return out;
     int visited = 0;
     auto walk = [&](auto&& self, t_canvas* c, int depth) -> void {
-        if (!c || depth > 64)
+        if (!c)
             return;
-        for (t_gobj* g = c->gl_list; g && found.size() < wanted.size(); g = g->g_next) {
-            if (++visited > maxObjects)
+        if (depth > maxDepth) {
+            out.walkLimit = true;
+            return;
+        }
+        for (t_gobj* g = c->gl_list; g && out.found.size() < wanted.size(); g = g->g_next) {
+            if (++visited > maxObjects) {
+                out.walkLimit = true;
                 return;
+            }
             if (wanted.count(&g->g_pd) != 0)
-                found.insert(&g->g_pd);
+                out.found.insert(&g->g_pd);
             t_class* cl = pd_class(&g->g_pd);
             if (cl == canvas_class) {
                 self(self, reinterpret_cast<t_canvas*>(g), depth + 1);
             } else if (cl == clone_class) {
                 int const n = clone_get_n(g);
                 for (int i = 0; i < n; ++i)
-                    if (auto* inst = clone_get_instance(g, i))
+                    if (auto* inst = mcpCloneInstance(g, i))
                         self(self, reinterpret_cast<t_canvas*>(inst), depth + 1);
             }
+            if (out.walkLimit)
+                return;
         }
     };
-    for (t_canvas* r = pd_this->pd_canvaslist; r && found.size() < wanted.size(); r = r->gl_next)
+    for (t_canvas* r = pd_this->pd_canvaslist; r && out.found.size() < wanted.size() && !out.walkLimit; r = r->gl_next)
         walk(walk, r, 0);
-    return found;
+    return out;
 }
 
 /**

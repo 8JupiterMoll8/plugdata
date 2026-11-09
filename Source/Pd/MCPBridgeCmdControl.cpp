@@ -261,7 +261,13 @@ void MCPBridge::pdSendChecked(const juce::String& action, const juce::OSCMessage
         auto const placed = mcp::bound::placedAmong(binders); // review H5: only a placed box is read as a t_object
         for (auto* b : binders) {
             if (mcpCtrlReceiverClass && *b == mcpCtrlReceiverClass) continue; // the bridge's own probe
-            t_object* o = (*b == canvas_class || placed.count(b) == 0) ? nullptr : pd_checkobject(b);
+            t_object* o = (*b == canvas_class || placed.found.count(b) == 0) ? nullptr : pd_checkobject(b);
+            if (!o && *b != canvas_class && placed.walkLimit) {
+                // The walk stopped at its cap before it found this binder: it may be a box; not known, so not sent.
+                root->setProperty("refused", "walk limit");
+                root->setProperty("refusedClass", juce::String::fromUTF8(class_getname(*b)));
+                return;
+            }
             if (!o) {
                 // Review M6, fail closed: the name also reaches something that is not a box (a canvas by namecanvas,
                 // an array, a dialog stub, a pd-lua pd.Receive proxy: review H5): never sent.

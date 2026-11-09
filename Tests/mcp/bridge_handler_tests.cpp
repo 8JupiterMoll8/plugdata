@@ -55,6 +55,7 @@
 #include "v2_test_client.h" // P4.1 S2: loopback v2 client
 #include "Pd/MCPBridgePdAccessors.h" // slice 3 review H2: mcp_last_seq
 #include "Pd/MCPBridgeCmdCommon.h" // armedSpectralJson / renderSpectralJson (Plan 5 spectral window)
+#include "Pd/MCPBridgeBound.h" // delta review: placedAmong (clone voices, walk limit)
 #include <juce_cryptography/juce_cryptography.h> // juce::SHA256: the save_content hash (P11.2 V11)
 #include "Utility/PluginParameter.h" // PlugDataParameter: the master volume guard (P5.1 sink floor)
 #include "Mcp/McpPdFile.h" // P11.8 item 3: mcp::fileInPdDir
@@ -3211,6 +3212,61 @@ void runSaveCoordsCases(Harness& h, PluginProcessor& processor)
 // P11.6 review M1: a canvas named by the full path of its file resolves to exactly that open root, also when two
 // roots share the file name (a/twin.pd, b/twin.pd); a path no open root has resolves to nothing (never the first tab of
 // that name).
+// Delta review of H5: every instance of [clone -s 1 abs 3] counts as placed (clone_get_instance takes a voice number;
+// walking 0..n-1 without the start voice read instance 0 twice and never the last one, so its [r] was refused).
+// And a walk cut by its cap says "walk limit", not "non-object binder".
+void runCloneSendCases(Harness& h, PluginProcessor& processor)
+{
+    std::printf("send_checked into every clone instance (-s 1)\n");
+    auto* host = processor.getMcp();
+    auto base = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("mcp_clone_s1");
+    base.deleteRecursively();
+    base.createDirectory();
+    base.getChildFile("cs1voice.pd").replaceWithText("#N canvas 0 50 450 300 12;\n#X obj 10 10 r cs1_x;\n#X obj 10 50 f;\n#X connect 0 0 1 0;\n");
+    auto hostPd = base.getChildFile("cs1host.pd");
+    hostPd.replaceWithText("#N canvas 0 50 450 300 12;\n#X obj 10 10 clone -s 1 cs1voice 3;\n");
+    CHECK(host->pdWait([&] {
+        t_atom a[2];
+        SETSYMBOL(&a[0], gensym(hostPd.getFileName().toRawUTF8()));
+        SETSYMBOL(&a[1], gensym(base.getFullPathName().toRawUTF8()));
+        pd_typedmess(gensym("pd")->s_thing, gensym("open"), 2, a);
+    }, 3000));
+    t_canvas* c = nullptr;
+    int instances = 0;
+    host->pdWait([&] {
+        c = host->getCanvasBySymbol(hostPd.getFullPathName());
+        if (c && c->gl_list && pd_class(&c->gl_list->g_pd) == clone_class) instances = clone_get_n(c->gl_list);
+    }, 3000);
+    CHECK(instances == 3);
+    {
+        auto r = h.call("/pd/send_checked", { "main", "cs1", "cs1_x", 1, 7.0 }, "/pd/send_checked/reply/cs1");
+        CHECK(r.has_value());
+        auto const json = r ? parseJson(*r) : juce::var();
+        CHECK(json["refused"].toString().isEmpty());
+        CHECK(static_cast<bool>(json["bound"]) && static_cast<bool>(json["delivered"]));
+        CHECK(json["receivers"].getArray() && json["receivers"].getArray()->size() == 3);
+        if (json["refused"].toString().isNotEmpty())
+            std::printf("  refused: %s (%s)\n", json["refused"].toString().toRawUTF8(), json["refusedClass"].toString().toRawUTF8());
+    }
+    // The walk's caps: with room for one object it cannot reach the clone's [r]s: walkLimit, nothing claimed found.
+    bool limited = false;
+    size_t foundUnderCap = 99;
+    CHECK(host->pdWait([&] {
+        auto const placed = mcp::bound::placedAmong(mcp::bound::bindersOf(gensym("cs1_x")), 1);
+        limited = placed.walkLimit;
+        foundUnderCap = placed.found.size();
+    }, 3000));
+    CHECK(limited);
+    CHECK(foundUnderCap < 3);
+    host->pdWait([&] {
+        if (!c) return;
+        t_atom force;
+        SETFLOAT(&force, 1);
+        pd_typedmess(&c->gl_pd, gensym("menuclose"), 1, &force);
+    }, 3000);
+    base.deleteRecursively();
+}
+
 // Review H1 (proof3, pd-lua patch 0002): a widget that keeps its state with self:set_args marks its patch changed, so
 // closing without saving asks (the drawing is not lost silently). Only a real change marks it.
 void runLuaSetArgsDirtyCases(PluginProcessor& processor)
@@ -6393,6 +6449,7 @@ int main()
             runSelectionGetCases(harness);
             runFlowProvenanceCases(harness, processor);
             runLuaSetArgsDirtyCases(processor); // opens and closes its own tab: after the cases that need "main" settled
+            runCloneSendCases(harness, processor);
             runFlowModeCases(harness, processor, [&] {
                 bridge->setReplySinkForTests([&replies](juce::OSCMessage const& msg) { replies.push(msg); });
             });

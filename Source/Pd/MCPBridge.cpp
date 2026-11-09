@@ -1305,7 +1305,7 @@ double mcpSubtreeWeight(t_canvas* cnv, std::unordered_set<t_canvas*>& visited,
         if (cl == clone_class) {
             int n = clone_get_n(y);
             for (int i = 0; i < n; ++i) {
-                auto* inst = clone_get_instance(y, i);
+                auto* inst = mcpCloneInstance(y, i);
                 if (inst) total += mcpSubtreeWeight(reinterpret_cast<t_canvas*>(inst), visited, depth + 1, sig, heavies);
             }
             continue;
@@ -1355,7 +1355,7 @@ void mcpWalkPerf(t_canvas* cnv, const juce::String& path,
         if (cl == clone_class) {
             int n = clone_get_n(y);
             for (int i = 0; i < n; ++i) {
-                auto* inst = clone_get_instance(y, i);
+                auto* inst = mcpCloneInstance(y, i);
                 if (!inst) continue;
                 std::unordered_set<t_canvas*> localVisited;
                 int csig = 0; std::map<juce::String, int> ch;

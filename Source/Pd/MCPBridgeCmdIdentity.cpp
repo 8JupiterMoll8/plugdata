@@ -121,7 +121,7 @@ void MCPBridge::pdIdentitySnapshot(const juce::String& action, const juce::OSCMe
                 } else if (clones > 0) {
                     int inside = 0;
                     for (int ci = 0; ci < clones; ++ci)
-                        inside += 1 + mcpCountInside(clone_get_instance(ptr, ci), 0);
+                        inside += 1 + mcpCountInside(mcpCloneInstance(ptr, ci), 0);
                     entry->setProperty("cloneInstances", clones);
                     entry->setProperty("childCount", inside);
                 }

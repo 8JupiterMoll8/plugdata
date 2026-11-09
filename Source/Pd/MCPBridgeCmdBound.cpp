@@ -83,7 +83,7 @@ struct Walk {
             } else if (cl == clone_class) {
                 int const n = clone_get_n(g);
                 for (int i = 0; i < n && !done(); ++i)
-                    if (auto* inst = clone_get_instance(g, i))
+                    if (auto* inst = mcpCloneInstance(g, i))
                         canvas(reinterpret_cast<t_canvas*>(inst), path + "/[clone]#" + juce::String(i), depth + 1);
             }
         }

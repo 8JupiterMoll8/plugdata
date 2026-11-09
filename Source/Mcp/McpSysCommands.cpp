@@ -632,7 +632,7 @@ void McpHost::sysCensus(SmallString const& selector, mcp::SysList const& list)
                     } else if (clones > 0) {
                         int inside = 0;
                         for (int ci = 0; ci < clones; ++ci)
-                            inside += 1 + countInside(reinterpret_cast<t_canvas*>(clone_get_instance(y_obj, ci)), 0);
+                            inside += 1 + countInside(reinterpret_cast<t_canvas*>(mcpCloneInstance(y_obj, ci)), 0);
                         o->setProperty("cloneInstances", clones);
                         o->setProperty("childCount", inside);
                     }
