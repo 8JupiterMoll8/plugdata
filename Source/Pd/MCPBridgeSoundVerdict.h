@@ -188,8 +188,11 @@ inline Verdict judge(float rawPeakDb, ac::AcLevels const& lv, Floor const* floor
 /**
  * The verdict of a window read per OUTPUT channel (the armed spectral window, review M2): each channel's own stats, as
  * the final tap's blockers gathered them; the raw peak is the loudest channel's. No channel counted: unmeasured.
+ * `allOutputsTapped` false (a device with more than 16 outputs, delta review 4): quiet taps prove nothing about the
+ * untapped channels, so the window is unjudged (channels_unjudged), never silent; a hot tap is still judged.
  */
-inline Verdict judgeChannels(ac::AcStats const* channels, int numChannels, double sampleRate, bool audioRan)
+inline Verdict judgeChannels(ac::AcStats const* channels, int numChannels, double sampleRate, bool audioRan,
+    bool allOutputsTapped = true)
 {
     float maxAbs = 0.0f;
     bool counted = false;
@@ -199,7 +202,15 @@ inline Verdict judgeChannels(ac::AcStats const* channels, int numChannels, doubl
             maxAbs = std::max(maxAbs, channels[c].maxAbs);
         }
     if (!counted) return judge(std::nanf(""), ac::AcLevels {}, nullptr, audioRan, sampleRate);
-    return judge(ac::ampToDb(maxAbs), ac::levelsOfChannels(channels, numChannels), nullptr, audioRan, sampleRate);
+    float const rawDb = ac::ampToDb(maxAbs);
+    if (!allOutputsTapped && audioRan && !hot(rawDb)) {
+        Verdict v;
+        v.rawRead = true;
+        v.rawPeakDb = std::max(rawDb, ac::kFloorDb);
+        v.reason = "channels_unjudged";
+        return v;
+    }
+    return judge(rawDb, ac::levelsOfChannels(channels, numChannels), nullptr, audioRan, sampleRate);
 }
 
 inline std::string dbJson(bool read, float db)

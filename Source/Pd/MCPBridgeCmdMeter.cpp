@@ -557,7 +557,8 @@ void MCPBridge::meterArmSpectral(const juce::String& meterAction, const juce::OS
     processor->getMcp()->session.mcpSpecArmed.store(false, std::memory_order_release);
     processor->getMcp()->session.mcpSpecWritePos.store(0, std::memory_order_relaxed);
     processor->getMcp()->session.mcpSpecLimit.store(target, std::memory_order_relaxed);
-    processor->getMcp()->session.resetSpecAc(); // truth slice 2 (M2): the window's per-channel verdict stats
+    // truth slice 2 (M2) / delta review 1: the audio thread empties the window's per-channel verdict stats itself
+    processor->getMcp()->session.mcpSpecEpoch.fetch_add(1, std::memory_order_release);
     processor->getMcp()->session.mcpSpecArmed.store(true, std::memory_order_release);
     windowLock.unlock();
     juce::OSCMessage rep { juce::OSCAddressPattern("/meter/arm_spectral/reply/" + correlationId) };
@@ -610,7 +611,8 @@ void MCPBridge::meterReadSpectral(const juce::String& meterAction, const juce::O
     // Truth slice 2 (meter_verdict): the window's sound verdict, each OUTPUT channel judged on its own (review M2) from
     // the final tap's blockers; no audio block ran in the window: unmeasured.
     auto const specChannels = processor->getMcp()->session.readSpecAc();
-    auto const sound = mcp::verdict::judgeChannels(specChannels.data(), static_cast<int>(specChannels.size()), sr, blocksElapsed > 0);
+    bool const allTapped = processor->getTotalNumOutputChannels() <= McpSession::kAcChannels; // delta review 4
+    auto const sound = mcp::verdict::judgeChannels(specChannels.data(), static_cast<int>(specChannels.size()), sr, blocksElapsed > 0, allTapped);
     processor->getMcp()->session.mcpSpecWritePos.store(0, std::memory_order_relaxed);
     if (json.isEmpty()) {
         sendReply("/meter/read_spectral/reply/" + correlationId,

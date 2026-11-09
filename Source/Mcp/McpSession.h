@@ -483,6 +483,11 @@ struct McpSession {
     // Truth slice 2 (M2): the armed SPECTRAL window's per-output-channel AC stats (the same blockers as the final tap),
     // so its verdict reads each output channel on its own, never a mono sum and never an input channel.
     std::array<ArmChannelAc, kAcChannels> mcpSpecFinalAc {};
+    // Delta review 1: the spectral twin of mcpArmEpoch. The bridge bumps it (release) at arm_spectral; the audio thread
+    // (the stats' only writer) sees the new value and empties mcpSpecFinalAc itself before it adds, so a re-arm's reset
+    // can never be lost to an add's read-modify-write.
+    std::atomic<uint32_t> mcpSpecEpoch { 0 };
+    uint32_t mcpSpecEpochSeen = 0; // audio thread only
     void resetSpecAc()
     {
         for (auto& c : mcpSpecFinalAc) c.reset();

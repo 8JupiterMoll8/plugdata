@@ -310,6 +310,20 @@ int main()
         auto const v = verdict::judgeChannels(ch, 2, kRate, true);
         CHECK(v.kind == Kind::Audible);
         CHECK(verdict::judgeChannels(nullptr, 0, kRate, true).kind == Kind::Unmeasured);
+        // delta review 4: a device with more than 16 outputs whose AC taps are all quiet: the untapped channels may
+        // carry the sound, so the window is unjudged, never silent; a hot tapped channel is still judged.
+        ac::AcStats quiet[2];
+        std::vector<float> zeros(static_cast<size_t>(kWindow), 0.0f);
+        for (auto& q : quiet) {
+            ac::DcBlocker z;
+            z.reset(ac::coefficientFor(kRate));
+            for (size_t at = 0; at < zeros.size(); at += kBlock) ac::accumulate(z, q, zeros.data() + at, kBlock);
+        }
+        CHECK(verdict::judgeChannels(quiet, 2, kRate, true).kind == Kind::Silent);
+        auto const wide = verdict::judgeChannels(quiet, 2, kRate, true, false);
+        CHECK(wide.kind == Kind::Unmeasured);
+        CHECK(std::string(wide.reason) == "channels_unjudged");
+        CHECK(verdict::judgeChannels(ch, 2, kRate, true, false).kind == Kind::Audible);
     }
     // M3: an LFO wired into the output (2 Hz sine at -6 dBFS over 1 s) is said as sub-audio (a fact; the verdict keeps
     // its rule); a 220 Hz tone is not.

@@ -170,7 +170,17 @@ void McpHost::audioBlockFinished(AudioBuffer<float>& buffer)
                 blocker.reset(coeff);
         }
         bool const armed = session.mcpArmActive.load(std::memory_order_relaxed);
-        bool const specArmed = session.mcpSpecArmed.load(std::memory_order_relaxed); // truth slice 2 (M2)
+        // truth slice 2 (M2) / delta review 1-3: acquire pairs with the bridge's release at arm_spectral (the epoch bump
+        // comes before it); a new epoch empties the stats here, on their only writer; busy covers the AC adds too, so
+        // read_spectral waits for them
+        bool const specArmed = session.mcpSpecArmed.load(std::memory_order_acquire);
+        if (specArmed) {
+            session.mcpSpecBusy.store(true, std::memory_order_release);
+            if (uint32_t const epoch = session.mcpSpecEpoch.load(std::memory_order_acquire); epoch != session.mcpSpecEpochSeen) {
+                session.mcpSpecEpochSeen = epoch;
+                session.resetSpecAc();
+            }
+        }
         int const acChannels = std::min(outputs, McpSession::kAcChannels);
         for (int ch = 0; ch < acChannels; ++ch) {
             mcp::ac::AcStats channel;
@@ -180,6 +190,8 @@ void McpHost::audioBlockFinished(AudioBuffer<float>& buffer)
             if (specArmed)
                 session.mcpSpecFinalAc[static_cast<size_t>(ch)].add(channel); // fixed-size atomics: no allocation
         }
+        if (specArmed && !session.mcpSpecArmed.load(std::memory_order_relaxed))
+            session.mcpSpecBusy.store(false, std::memory_order_release); // a read closed the window meanwhile
     }
 
     // Armed spectral capture (Phase 5): append the FINAL output into the mono
@@ -187,7 +199,7 @@ void McpHost::audioBlockFinished(AudioBuffer<float>& buffer)
     // the analysis window. Same common end-of-processBlock placement as the
     // peak-hold (runs for constant AND variable block sizes). `mcpSpecBusy`
     // brackets the write so the reader never copies a half-written tail.
-    if (session.mcpSpecArmed.load(std::memory_order_relaxed)) {
+    if (session.mcpSpecArmed.load(std::memory_order_acquire)) {
         session.mcpSpecBusy.store(true, std::memory_order_release);
         int pos = session.mcpSpecWritePos.load(std::memory_order_relaxed);
         int const stop = std::min(session.mcpSpecLimit.load(std::memory_order_relaxed),
