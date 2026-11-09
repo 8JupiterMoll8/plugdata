@@ -7,6 +7,7 @@
 #include <cmath>
 #include "MCPBridgeCmdCommon.h"
 #include "MCPBridgeTraceTaps.h"
+#include "MCPBridgeWidgetAsk.h" // proof3 3c: the ai-ask receiver
 #include "Mcp/McpRtGuard.h"
 #include "Mcp/McpAudit.h"
 #include "Mcp/McpCeilingPlayer.h" // P9 round 1: playVoiceTake's own callback is clamped
@@ -22,6 +23,63 @@ void MCPBridge::mcpCtrlCapture(t_symbol* selector, int argc, t_atom* argv)
     if (controlWindow) controlWindow->record(selector, argc, argv);
 }
 
+// ── Proof3 3c: the ai-ask receiver (MCPBridgeWidgetAsk.h) ──────────────────────────────────────────────────────────
+void MCPBridge::bindWidgetAsk()
+{
+    if (!processor || !widgetAsk || widgetAsk->receiver) return;
+    {
+        McpHost::PdLockScope const lock(*processor);
+        ensureMcpAskReceiverClass();
+        auto* rec = reinterpret_cast<McpAskReceiver*>(pd_new(mcpAskReceiverClass));
+        rec->sym = gensym("ai-ask");
+        rec->queue = &widgetAsk->queue;
+        pd_bind(&rec->obj.ob_pd, rec->sym);
+        widgetAsk->receiver = rec;
+    }
+    widgetAsk->pump.startTimer(McpWidgetAskState::kPumpMs);
+}
+
+void MCPBridge::unbindWidgetAsk()
+{
+    if (!widgetAsk) return;
+    widgetAsk->pump.stopTimer();
+    if (!processor || !widgetAsk->receiver) return;
+    McpHost::PdLockScope const lock(*processor);
+    pd_free(reinterpret_cast<t_pd*>(widgetAsk->receiver)); // unbinds (mcpAskReceiverFree)
+    widgetAsk->receiver = nullptr;
+}
+
+bool MCPBridge::widgetAskBound() const
+{
+    return widgetAsk && widgetAsk->receiver != nullptr;
+}
+
+void MCPBridge::pumpWidgetAsks()
+{
+    if (!widgetAsk) return;
+    mcp::WidgetAskEvent e;
+    while (widgetAsk->queue.pop(e)) {
+        juce::Array<juce::var> args;
+        args.add(juce::String(e.kind == mcp::WidgetAskKind::Hello ? "hello" : "ask"));
+        args.add(juce::String("main")); // the focused tab: the key every verb takes for "main"
+        args.add(juce::String::fromUTF8(e.widget));
+        args.add(e.rev);
+        args.add(juce::String::fromUTF8(e.words));
+        sendReply("/pd/widget_ask", args);
+    }
+    auto const c = widgetAsk->queue.takeCounts();
+    if (processor && (c.malformed || c.rateLimited || c.full)) {
+        juce::StringArray parts;
+        if (c.rateLimited) parts.add(juce::String(c.rateLimited) + " within 2 s of the same widget's last ask");
+        if (c.malformed) parts.add(juce::String(c.malformed) + " without a widget name (ai.<word>) and a whole-number rev");
+        if (c.full) parts.add(juce::String(c.full) + " while the ask queue was full");
+        // A Pd console line (post), not logMessage: the artist sees it and the AI's console history has it too.
+        auto const line = "ai-ask: not sent to the AI: " + parts.joinIntoString("; ");
+        McpHost::PdLockScope const lock(*processor);
+        post("%s", line.toRawUTF8());
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 
 MCPBridge::MCPBridge(PluginProcessor* proc, int inPort, int outPort)
@@ -34,6 +92,7 @@ MCPBridge::MCPBridge(PluginProcessor* proc, int inPort, int outPort)
     sender.setRouter(&v2Router); // P4.1 S3
     v2Done->queue = &sender;
     controlWindow = std::make_unique<McpControlWindow>();
+    widgetAsk = std::make_unique<McpWidgetAskState>(*this);
     voiceCaptureBuffer.resize(MAX_VOICE_CAPTURE_SAMPLES, 0.0f);
     bootToken = juce::String(juce::Time::getMillisecondCounter()) + "-"
         + juce::String::toHexString(juce::Random::getSystemRandom().nextInt());
@@ -134,6 +193,7 @@ bool MCPBridge::start()
 {
     if (active.load()) {
         startV2(); // the v2 slot may have been taken by another bridge of this process at the first start
+        bindWidgetAsk();
         return true;
     }
 
@@ -167,6 +227,8 @@ bool MCPBridge::start()
 
     // P4.1 S2: v2 has its own TCP port and token, so it starts even when the UDP port is taken (L22).
     startV2();
+    if (canReply())
+        bindWidgetAsk(); // proof3 3c: a widget's ask has somewhere to go only while the bridge serves
     return active.load();
 }
 
@@ -291,6 +353,7 @@ void MCPBridge::setReplySinkForTests(std::function<void(juce::OSCMessage const&)
     sender.setUdpEnabled(true); // the sink stands for the UDP target
     startCommandWorker();
     active.store(true);
+    bindWidgetAsk();
 }
 
 void MCPBridge::stop()
@@ -300,6 +363,7 @@ void MCPBridge::stop()
         if (auto* host = processor->getMcp())
             host->bridgeStopping();
     sender.drain(500); // that event out before the sockets and sessions close
+    unbindWidgetAsk(); // proof3 3c: no ask receiver without a running bridge
     stopTimer();
     bool const v2WasRunning = v2Server.running();
     stopV2(); // P3.4 S8 order: listeners before the worker

@@ -426,6 +426,10 @@ std::vector<std::string> MCPBridge::capabilityList() const
         "set_delivery",
         // /pd/send_checked <canvas> <corrId> <name> <argc> <atoms...>: receivers, delivered, console, refused
         "send_checked",
+        // Proof3 3c (MCPBridgeWidgetAsk.h): the Pd name `ai-ask` is bound while the bridge serves; a widget's
+        // `ai-ask <widget> <rev> [words]` / `ai-ask hello <widget>` arrives as the event /pd/widget_ask
+        // <ask|hello> <canvas> <widget> <rev> <words> (at most one ask per widget per 2 s)
+        "widget_ask",
     };
     // P4.1 S2: the v2 listener is up (TCP 127.0.0.1, port and token in the discovery file).
     if (v2Server.running())

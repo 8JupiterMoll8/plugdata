@@ -8,7 +8,7 @@
 
 namespace mcp::v2schema {
 
-inline constexpr char kSchemaHash[] = "9ba42ce38adf08db";
+inline constexpr char kSchemaHash[] = "ca6fe8f8feff8d8e";
 inline constexpr int kProtocol = 2;
 
 enum class VerbClass : std::uint8_t { Read, Mutate, Heavy, Long, Realtime };
@@ -393,6 +393,7 @@ inline constexpr EventMeta kEvents[] = {
     { "/pd/ui/prompt", true },
     { "/pd/ui/selection", false },
     { "/pd/voice/event", true },
+    { "/pd/widget_ask", true },
 };
 
 inline constexpr std::uint32_t kMaxFrameBytes = 16777216;

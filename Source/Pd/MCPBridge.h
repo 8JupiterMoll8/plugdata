@@ -42,6 +42,8 @@ namespace mcp { struct BatchJob; }
 // receiver is bound to the requested name on arm; every message dispatched to
 // that name accumulates into this buffer until read. Defined in MCPBridge.cpp.
 struct McpControlWindow;
+// Proof3 3c: the `ai-ask` receiver, its queue and pump (MCPBridgeWidgetAsk.h).
+struct McpWidgetAskState;
 
 // PRD "Real Class Name Sync" §2.1 — the single shared class-name resolution
 // helper. C++ is the ONLY source of truth for object identity: the census
@@ -493,6 +495,13 @@ public:
     // control window is armed.
     void mcpCtrlCapture(t_symbol* selector, int argc, t_atom* argv);
 
+    // Proof3 3c (capability widget_ask): `ai-ask` is bound while the bridge serves (start / setReplySinkForTests,
+    // until stop). The pump (message thread, every 50 ms) sends each queued ask as /pd/widget_ask
+    // <ask|hello> <canvas> <widget> <rev> <words> and logs refused asks as one console line.
+    void pumpWidgetAsks();
+    // Tests: the receiver is bound now.
+    bool widgetAskBound() const;
+
     // Native Telemetry Dispatch (Port 19010)
     void sendSelectionTelemetry(const juce::String& selector, const SmallArray<pd::Atom>& list);
 
@@ -810,6 +819,12 @@ private:
 
     // Phase 4 armed control-message window (native Pd receiver + atom buffer).
     std::unique_ptr<McpControlWindow> controlWindow;
+
+    // Proof3 3c: the `ai-ask` receiver. bind/unbind take the Pd lock themselves (McpHost::PdLockScope; plugdata's
+    // lock is a recursive CriticalSection). Idempotent.
+    std::unique_ptr<McpWidgetAskState> widgetAsk;
+    void bindWidgetAsk();
+    void unbindWidgetAsk();
 
     // P11 V1: the armed windows' generation ids (meter and spectral). An arm bumps its id and answers it; a read
     // that names another id is refused and leaves the open window alone. Both counters and the arm/read state

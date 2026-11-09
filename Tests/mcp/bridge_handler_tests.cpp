@@ -2298,6 +2298,123 @@ juce::var inletEntry(juce::var const& json, char const* id, int inlet)
     return (arr && inlet < arr->size()) ? (*arr)[inlet] : juce::var();
 }
 
+// Proof3 3c (capability widget_ask): a pd-lua widget's `ai-ask <widget> <rev> [words]` (or `ai-ask hello <widget>`)
+// reaches the server as ONE event /pd/widget_ask <ask|hello> <canvas> <widget> <rev> <words>, sent from the message
+// thread; at most one ask per widget per 2 s (a refused ask is one console line, not an event); the receiver is bound
+// only while the bridge serves.
+void sendToAiAsk(McpHost* host, t_symbol* selector, std::vector<t_atom> atoms)
+{
+    CHECK(host->pdWait([&] {
+        auto* s = gensym("ai-ask");
+        if (s->s_thing) pd_typedmess(s->s_thing, selector, static_cast<int>(atoms.size()), atoms.empty() ? nullptr : atoms.data());
+    }, 2000));
+}
+
+t_atom symAtom(char const* s)
+{
+    t_atom a;
+    SETSYMBOL(&a, gensym(s));
+    return a;
+}
+
+t_atom numAtom(double v)
+{
+    t_atom a;
+    SETFLOAT(&a, static_cast<t_float>(v));
+    return a;
+}
+
+bool consoleHas(McpHost* host, uint64_t since, char const* needle, int timeoutMs)
+{
+    for (int waited = 0; waited <= timeoutMs; waited += 20) {
+        for (auto const& hit : host->consoleSince(since))
+            if (hit.text.contains(needle)) return true;
+        sleepMs(20);
+    }
+    return false;
+}
+
+void runWidgetAskCases(Harness& h, PluginProcessor& processor, MCPBridge& bridge, std::function<void()> const& restoreSink)
+{
+    std::printf("widget ask (proof3 3c)\n");
+    auto* host = processor.getMcp();
+    CHECK(hasCap(h, "widget_ask", "wk0"));
+    CHECK(bridge.widgetAskBound());
+
+    // 1. A list from a Lua widget (pd.send("ai-ask", "list", {...})): one event, words joined, numbers as Pd prints them.
+    h.replies.clear();
+    sendToAiAsk(host, &s_list, { symAtom("ai.draw"), numAtom(7), symAtom("bass"), symAtom("line"), numAtom(0.5) });
+    auto ask = h.replies.waitFor("/pd/widget_ask", 2000);
+    CHECK(ask.has_value());
+    if (ask) {
+        CHECK(ask->args.size() == 5);
+        CHECK(ask->str(0) == "ask");
+        CHECK(ask->str(1) == "main");
+        CHECK(ask->str(2) == "ai.draw");
+        CHECK(ask->args[3].isNumber && ask->num(3) == 7);
+        CHECK(ask->str(4) == "bass line 0.5");
+    } else {
+        std::printf("  unread replies: %s\n", h.replies.describe().c_str());
+    }
+
+    // 2. The same widget again at once: refused by the rate limit (no event), said once in the console.
+    uint64_t const before = host->consoleSeqNow();
+    sendToAiAsk(host, &s_list, { symAtom("ai.draw"), numAtom(8) });
+    CHECK(!h.replies.waitFor("/pd/widget_ask", 400).has_value());
+    CHECK(consoleHas(host, before, "within 2 s of the same widget's last ask", 2000));
+
+    // 3. Another widget, as a [s ai-ask] message box sends it (the widget name is the selector), and a hello.
+    sendToAiAsk(host, gensym("ai.tap"), { numAtom(3) });
+    auto tap = h.replies.waitFor("/pd/widget_ask", 2000);
+    CHECK(tap && tap->str(0) == "ask" && tap->str(2) == "ai.tap" && tap->num(3) == 3 && tap->str(4).empty());
+    sendToAiAsk(host, gensym("hello"), { symAtom("ai.draw") });
+    auto hello = h.replies.waitFor("/pd/widget_ask", 2000);
+    CHECK(hello && hello->str(0) == "hello" && hello->str(2) == "ai.draw");
+
+    // 4. Malformed (no ai.<word> name, no whole-number rev): no event, one console line.
+    uint64_t const beforeBad = host->consoleSeqNow();
+    sendToAiAsk(host, gensym("pd"), { numAtom(1) });
+    sendToAiAsk(host, gensym("ai.knob"), { numAtom(-2) });
+    sendToAiAsk(host, &s_float, { numAtom(4) });
+    CHECK(!h.replies.waitFor("/pd/widget_ask", 400).has_value());
+    CHECK(consoleHas(host, beforeBad, "without a widget name", 2000));
+
+    // 5. From a patch, dispatched on the audio thread (a [delay] fires inside the Pd scheduler, in processBlock):
+    //    [delay 20] -> [ai.grid 2 from audio( -> [s ai-ask]. The event still comes (sent by the message-thread pump).
+    auto made = h.call("/pd/batch_atomic",
+        { "main", "wk1", 0, 0, 0, 3, 2,
+            "wk_del", 2400, 40, "obj", "delay", 1, "20",
+            "wk_msg", 2400, 80, "msg", "ai.grid 2 from audio", 0,
+            "wk_s", 2400, 120, "obj", "s", 1, "ai-ask",
+            "wk_del", 0, "wk_msg", 0,
+            "wk_msg", 0, "wk_s", 0,
+            0, 5, 10, 0 },
+        "/pd/batch_atomic/reply/wk1");
+    CHECK(made.has_value() && made->num(0) == 3);
+    h.replies.clear();
+    CHECK(host->pdWait([&] {
+        if (t_gobj* g = host->resolveStableId("main", "wk_del")) pd_bang(&g->g_pd);
+    }, 2000));
+    auto fromPatch = h.replies.waitFor("/pd/widget_ask", 2000);
+    CHECK(fromPatch && fromPatch->str(2) == "ai.grid" && fromPatch->num(3) == 2 && fromPatch->str(4) == "from audio");
+    h.call("/pd/batch_atomic", { "main", "wk2", 3, 0, 0, 0, 0, "wk_del", "wk_msg", "wk_s", 0, 5, 10, 0 }, "/pd/batch_atomic/reply/wk2");
+
+    // 6. Without a running bridge nothing is bound to `ai-ask` and nothing is sent; serving again binds it again.
+    bridge.stop();
+    CHECK(!bridge.widgetAskBound());
+    bool unbound = false;
+    CHECK(host->pdWait([&] { unbound = gensym("ai-ask")->s_thing == nullptr; }, 2000));
+    CHECK(unbound);
+    restoreSink();
+    CHECK(bridge.startV2ForTests()); // stop() ended the v2 listener: later cases connect to it
+    CHECK(bridge.widgetAskBound());
+    h.replies.clear();
+    sleepMs(2100); // ai.tap's budget from case 3 is spent
+    sendToAiAsk(host, &s_list, { symAtom("ai.tap"), numAtom(4) });
+    auto again = h.replies.waitFor("/pd/widget_ask", 2000);
+    CHECK(again && again->str(2) == "ai.tap" && again->num(3) == 4);
+}
+
 void runControlTruthCases(Harness& h, PluginProcessor& processor)
 {
     std::printf("control truth (truth slice 3)\n");
@@ -6154,6 +6271,9 @@ int main()
             runAcTapCases(harness, processor, audioControl);
             runInletValueCases(harness);
             runControlTruthCases(harness, processor);
+            runWidgetAskCases(harness, processor, *bridge, [&] {
+                bridge->setReplySinkForTests([&replies](juce::OSCMessage const& msg) { replies.push(msg); });
+            });
             runWireActivityCases(harness);
             runFactCases(harness, processor);
             runOutputCeilingCases(harness, processor, audioControl);
