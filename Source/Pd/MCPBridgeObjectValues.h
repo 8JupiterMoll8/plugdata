@@ -11,6 +11,7 @@
 
 #include "MCPBridgeCmdCommon.h"
 #include "MCPBridgePdAccessors.h"
+#include "MCPBridgeInletValues.h" // truth slice 3: read-back through the inlet facts
 
 // Resolve the pd target for a given inlet index. <=0 -> the object itself. Walks Pd's inlet list through the fork's
 // accessor (patches/submodules/pure-data/0004; review 2026-11-06: no mirrored struct _inlet). Inlet 0 is the object
@@ -208,4 +209,80 @@ inline bool mcpGobjIsLive(t_canvas* cnv, t_gobj* g)
     for (t_gobj* y = cnv->gl_list; y; y = y->g_next)
         if (y == g) return true;
     return false;
+}
+
+// ── Truth slice 3 (capability set_delivery): what an AI set did, read back under the same Pd lock ──────────────────
+// The bridge dispatches a value and then reads, without guessing:
+//   delivered  the object still exists AND printed no console line while the message was delivered (Pd prints
+//              synchronously: Instance.cpp processPrint -> McpHost::consoleMessage). A line Pd prints in a later tick
+//              is outside this window: the fact is "no error during delivery".
+//   readBack   {value, source, reason}: a GUI's value for inlet 0 (source "gui"); else the inlet's own copy
+//              ("scalar" for a signal inlet's scalar, "floatSlot" for a float inlet, "symbolSlot"); else the record
+//              pure-data/0005 kept for that inlet ("last") but ONLY when this very dispatch made it (its seq is inside
+//              the dispatch's range); else null with the inlet's reason (e.g. forwarded: Pd keeps no copy).
+inline juce::var mcpReadBack(McpHost* host, t_canvas* cnv, t_gobj* g, int inlet, unsigned int seqBefore, unsigned int seqAfter)
+{
+    auto* rb = new juce::DynamicObject();
+    rb->setProperty("value", juce::var());
+    rb->setProperty("source", juce::var());
+    rb->setProperty("reason", "");
+    t_object* o = (g && mcpGobjIsLive(cnv, g)) ? pd::Interface::checkObject(g) : nullptr;
+    if (!o) {
+        rb->setProperty("reason", "the object is gone");
+        return juce::var(rb);
+    }
+    int const k = inlet < 0 ? 0 : inlet;
+    double gui = 0.0;
+    if (k == 0 && mcpGuiValue(o, gui)) {
+        rb->setProperty("value", gui);
+        rb->setProperty("source", "gui");
+        return juce::var(rb);
+    }
+    std::unordered_set<t_object*> wanted { o };
+    auto const wires = mcp::inlets::wiresInto(cnv, wanted);
+    auto const wit = wires.find(o);
+    auto const inlets = mcp::inlets::objectInletsBase(o, wit == wires.end() ? std::unordered_map<int, mcp::inlets::Wires> {} : wit->second);
+    juce::var entry;
+    if (auto const* list = inlets.getArray())
+        for (auto const& e : *list)
+            if (static_cast<int>(e["index"]) == k) entry = e;
+    if (entry.isObject() && !entry["value"].isVoid()) {
+        rb->setProperty("value", entry["value"]);
+        rb->setProperty("source", entry["source"]);
+        return juce::var(rb);
+    }
+    // The record of this inlet, if this dispatch made it.
+    auto const last = mcp::inlets::lastInto(cnv, wanted, [](t_object*) { return juce::String(); });
+    auto const lo = last.find(o);
+    if (lo != last.end()) {
+        auto const li = lo->second.find(k);
+        if (li != lo->second.end() && li->second.has) {
+            unsigned int const at = li->second.seq - seqBefore;
+            if (at >= 1 && at <= seqAfter - seqBefore) {
+                auto const number = mcp::inlets::lastNumber(li->second);
+                if (number) rb->setProperty("value", *number);
+                else if (li->second.argc >= 1 && li->second.atoms[0].a_type == A_SYMBOL && li->second.atoms[0].a_w.w_symbol)
+                    rb->setProperty("value", juce::String::fromUTF8(li->second.atoms[0].a_w.w_symbol->s_name));
+                rb->setProperty("source", "last");
+                return juce::var(rb);
+            }
+        }
+    }
+    juce::ignoreUnused(host);
+    rb->setProperty("reason", entry.isObject() && entry["reason"].toString().isNotEmpty() ? entry["reason"].toString()
+        : juce::String("the inlet keeps no copy of what it got"));
+    return juce::var(rb);
+}
+
+// delivered / console / readBack of one AI set. `consoleBefore` and the seq range were read around the dispatch.
+inline void mcpPutDelivery(juce::DynamicObject* out, McpHost* host, t_canvas* cnv, t_gobj* g, int inlet,
+    uint64_t consoleBefore, unsigned int seqBefore, unsigned int seqAfter)
+{
+    bool const live = g && mcpGobjIsLive(cnv, g);
+    juce::Array<juce::var> console;
+    if (live)
+        for (auto const& line : host->consoleLinesSince(consoleBefore, g)) console.add(line);
+    out->setProperty("delivered", live && console.isEmpty());
+    out->setProperty("console", console);
+    out->setProperty("readBack", mcpReadBack(host, cnv, g, inlet, seqBefore, seqAfter));
 }

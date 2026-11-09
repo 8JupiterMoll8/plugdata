@@ -258,6 +258,16 @@ public:
     void noteAiSeqRange(unsigned int before, unsigned int after);
     // A recorded message's seq: inside one of the newest 256 AI ranges. Pd lock held.
     bool seqIsAi(unsigned int seq) const;
+    // Truth slice 3 (delivery): the console's sequence number now, and the lines printed after `seq` by `object`
+    // (pointer compared only). Pd prints synchronously, so a line an AI dispatch caused is there when it returns.
+    uint64_t consoleSeqNow();
+    std::vector<juce::String> consoleLinesSince(uint64_t seq, void const* object);
+    struct ConsoleHit {
+        void const* object = nullptr;
+        juce::String tempId, text;
+        bool error = false;
+    };
+    std::vector<ConsoleHit> consoleSince(uint64_t seq); // every line after `seq`, oldest first
     // Switches flow mode off (any door). True when it was on. `by` names the door for the event and the console.
     bool flowModeOff(juce::String const& by);
     // {on, sinceMs, bootToken}

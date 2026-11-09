@@ -120,7 +120,8 @@ void MCPBridge::pdObjRelabel(const juce::String& action, const juce::OSCMessage&
 void MCPBridge::pdObjSetBatch(const juce::String& action, const juce::OSCMessage& msg)
 {
     // /pd/obj_set_batch <canvas> <corrId> <count> [tempId inlet selector argc atoms...] * count
-    // reply: JSON { ok, total, results:[{tempId,selector,ok,[detail|warning]}] }
+    // reply: JSON { ok, total, results:[{tempId,selector,ok,[detail|warning],delivered,console,readBack}] }
+    // (slice 3, capability set_delivery: MCPBridgeObjectValues.h mcpPutDelivery)
     if (msg.size() >= 3 && processor) {
         auto canvasName = normalizeCanvas(getArgString(msg[0]));
         auto correlationId = getArgString(msg[1]);
@@ -130,6 +131,7 @@ void MCPBridge::pdObjSetBatch(const juce::String& action, const juce::OSCMessage
         juce::Array<juce::var> results;
 
         sys_lock();
+        t_canvas* cnv = processor->getMcp()->getCanvasBySymbol(canvasName); // slice 3: liveness + read-back
         for (int i = 0; i < count && cursor < msg.size(); i++) {
             auto tempId = getArgString(msg[cursor++]);
             int inlet = (cursor < msg.size()) ? static_cast<int>(getArgFloat(msg[cursor++])) : 0;
@@ -150,8 +152,10 @@ void MCPBridge::pdObjSetBatch(const juce::String& action, const juce::OSCMessage
             }
             juce::String warning;
             t_gobj* g = processor->getMcp()->resolveStableId(canvasName, tempId);
+            if (g && !mcpGobjIsLive(cnv, g)) g = nullptr; // slice 3: a stale id is unknown (never a dangling read-back)
             bool const intact = processor->getMcp()->aiIntact(g); // P12a: the AI's own tuning stays the AI's
             auto* host = processor->getMcp();
+            uint64_t const consoleBefore = host->consoleSeqNow(); // slice 3: delivery = no console line while delivered
             unsigned int const seqBefore = mcp_last_seq();
             auto err = mcpObjSetCore(g, tempId, inlet, selector, atoms, &warning);
             unsigned int const seqAfter = mcp_last_seq();
@@ -163,6 +167,13 @@ void MCPBridge::pdObjSetBatch(const juce::String& action, const juce::OSCMessage
             ro->setProperty("selector", selector);
             if (err.isNotEmpty()) { ro->setProperty("ok", false); ro->setProperty("detail", err); }
             else { ro->setProperty("ok", true); okCount++; if (warning.isNotEmpty()) ro->setProperty("warning", warning); }
+            if (err.isNotEmpty()) {
+                ro->setProperty("delivered", false);
+                ro->setProperty("console", juce::Array<juce::var>());
+                ro->setProperty("readBack", juce::var());
+            } else {
+                mcpPutDelivery(ro, host, cnv, g, inlet, consoleBefore, seqBefore, seqAfter);
+            }
             results.add(juce::var(ro));
         }
         sys_unlock();

@@ -103,11 +103,12 @@ void McpHost::consoleMessage(String const& message, bool const isError, void* co
         std::lock_guard<std::mutex> const lock(session.consoleLock);
         uint64_t const seq = ++session.consoleSeq;
         auto& lines = session.consoleLines;
-        if (!lines.empty() && lines.back().text == message && lines.back().error == isError && lines.back().tempId == tempId) {
+        if (!lines.empty() && lines.back().text == message && lines.back().error == isError && lines.back().tempId == tempId
+            && lines.back().object == object) {
             lines.back().seq = seq;
             ++lines.back().repeats;
         } else {
-            lines.push_back({ seq, seq, message, tempId, isError, 1 });
+            lines.push_back({ seq, seq, message, tempId, isError, 1, object });
             if (lines.size() > McpSession::kConsoleLines)
                 lines.pop_front();
         }

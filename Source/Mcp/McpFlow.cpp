@@ -225,6 +225,30 @@ bool McpHost::seqIsAi(unsigned int seq) const
     return false;
 }
 
+uint64_t McpHost::consoleSeqNow()
+{
+    std::lock_guard<std::mutex> const lock(session.consoleLock);
+    return session.consoleSeq;
+}
+
+std::vector<McpHost::ConsoleHit> McpHost::consoleSince(uint64_t seq)
+{
+    std::vector<ConsoleHit> out;
+    std::lock_guard<std::mutex> const lock(session.consoleLock);
+    for (auto it = session.consoleLines.rbegin(); it != session.consoleLines.rend() && it->seq > seq; ++it)
+        out.insert(out.begin(), { it->object, it->tempId, it->text, it->error });
+    return out;
+}
+
+std::vector<juce::String> McpHost::consoleLinesSince(uint64_t seq, void const* object)
+{
+    std::vector<juce::String> out;
+    if (!object) return out;
+    for (auto const& hit : consoleSince(seq))
+        if (hit.object == object) out.push_back(hit.text);
+    return out;
+}
+
 bool McpHost::aiIntact(t_gobj* g)
 {
     if (!g || identity.originOf(g) != mcp::IdentityService::Origin::Ai)

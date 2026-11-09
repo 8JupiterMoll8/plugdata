@@ -2041,6 +2041,162 @@ void runInletValueCases(Harness& h)
     h.call("/pd/batch_atomic", { "main", "iv6", 3, 0, 0, 0, 0, "iv_osc", "iv_lop", "iv_mul", 0, 5, 10, 0 }, "/pd/batch_atomic/reply/iv6");
 }
 
+// Truth slice 3 (control truth): `last` per inlet (pure-data/0005, capability inlet_last) with `by` from the bridge's
+// own dispatch ranges; the signal window on a signal inlet (T1: lop~'s cutoff fed by [sig~ 100]); obj_set_batch's
+// delivered / console / readBack (capability set_delivery); send_checked (capability send_checked).
+juce::var inletEntry(juce::var const& json, char const* id, int inlet)
+{
+    auto const* arr = json["objects"][id]["inlets"].getArray();
+    return (arr && inlet < arr->size()) ? (*arr)[inlet] : juce::var();
+}
+
+void runControlTruthCases(Harness& h, PluginProcessor& processor)
+{
+    std::printf("control truth (truth slice 3)\n");
+    for (auto const* cap : { "inlet_last", "set_delivery", "send_checked", "trace_stop_facts" })
+        CHECK(hasCap(h, cap, "ct0"));
+    auto* host = processor.getMcp();
+    auto made = h.call("/pd/batch_atomic",
+        { "main", "ct1", 0, 0, 0, 7, 4,
+            "ct_osc", 1800, 40, "obj", "osc~", 1, "440",
+            "ct_msg", 1900, 10, "msg", "0.25", 0,
+            "ct_sig", 1950, 40, "obj", "sig~", 1, "100",
+            "ct_noise", 2050, 40, "obj", "noise~", 0,
+            "ct_lop", 2000, 100, "obj", "lop~", 1, "300",
+            "ct_r", 2100, 40, "obj", "r", 1, "ct_f",
+            "ct_hsl", 2100, 90, "obj", "hsl", 0,
+            "ct_msg", 0, "ct_osc", 1,
+            "ct_noise", 0, "ct_lop", 0,
+            "ct_sig", 0, "ct_lop", 1,
+            "ct_r", 0, "ct_hsl", 0,
+            0, 5, 10, 0 },
+        "/pd/batch_atomic/reply/ct1");
+    CHECK(made.has_value() && made->num(0) == 7);
+    auto read = [&](char const* corr, char const* id) {
+        auto r = h.call("/pd/inlet_values", { "main", corr, 1, id }, std::string("/pd/inlet_values/reply/") + corr);
+        CHECK(r.has_value());
+        return r ? parseJson(*r) : juce::var();
+    };
+
+    // 1. The message box clicked by hand (outside any bridge call): osc~'s phase inlet last got 0.25, not by the AI.
+    CHECK(host->pdWait([&] {
+        if (t_gobj* g = host->resolveStableId("main", "ct_msg")) pd_bang(&g->g_pd);
+    }, 2000));
+    {
+        auto const last = inletEntry(read("ct2", "ct_osc"), "ct_osc", 1)["last"];
+        CHECK(last.isObject());
+        CHECK(last["selector"].toString() == "float");
+        CHECK(std::abs(static_cast<double>(last["atoms"][0]) - 0.25) < 1e-6);
+        CHECK(last["by"].toString() == "other");
+        CHECK(last["via"].toString() == "inlet");
+    }
+    // ... then the AI sets it: by ai.
+    auto set = h.call("/pd/obj_set", { "main", "ct3", "ct_osc", 1, "float", 1, 0.5 }, "/pd/obj_set/reply/ct3");
+    CHECK(set.has_value() && set->num(0) == 1.0);
+    {
+        auto const last = inletEntry(read("ct4", "ct_osc"), "ct_osc", 1)["last"];
+        CHECK(std::abs(static_cast<double>(last["atoms"][0]) - 0.5) < 1e-6);
+        CHECK(last["by"].toString() == "ai");
+    }
+    // Inlet 0 of the hsl: the newest wire record ([r ct_f] -> hsl), via the wire.
+    CHECK(host->pdWait([&] {
+        t_atom a;
+        SETFLOAT(&a, 9);
+        if (auto* sym = gensym("ct_f"); sym->s_thing) pd_typedmess(sym->s_thing, &s_float, 1, &a);
+    }, 2000));
+    {
+        auto const last = inletEntry(read("ct5", "ct_hsl"), "ct_hsl", 0)["last"];
+        CHECK(last["via"].toString() == "wire:ct_r:0" && last["by"].toString() == "other");
+        CHECK(std::abs(static_cast<double>(last["atoms"][0]) - 9.0) < 1e-6);
+    }
+
+    // 2. T1: lop~'s cutoff inlet is fed by [sig~ 100]: the stored scalar says nothing; the signal window reads ~100.
+    h.fire("/pd/dsp", { 1 });
+    sleepMs(200);
+    {
+        auto r = h.call("/pd/inlet_values", { "main", "ct6", 1, "ct_lop", "signalWindowMs", 100 }, "/pd/inlet_values/reply/ct6");
+        CHECK(r.has_value());
+        auto const json = r ? parseJson(*r) : juce::var();
+        auto const sig = inletEntry(json, "ct_lop", 1)["signal"];
+        CHECK(sig.isObject());
+        CHECK(static_cast<int>(sig["feeders"]) == 1 && static_cast<int>(sig["blocks"]) > 0);
+        CHECK(std::abs(static_cast<double>(sig["mean"]) - 100.0) < 0.5);
+        CHECK(std::abs(static_cast<double>(sig["min"]) - 100.0) < 0.5 && std::abs(static_cast<double>(sig["max"]) - 100.0) < 0.5);
+        auto const in0 = inletEntry(json, "ct_lop", 0)["signal"]; // the noise: mean near 0, a real swing
+        CHECK(in0.isObject() && static_cast<double>(in0["max"]) > 0.1 && static_cast<double>(in0["min"]) < -0.1);
+        CHECK(static_cast<int>(json["signalWindowMs"]) == 100);
+    }
+    h.fire("/pd/dsp", { 0 });
+
+    // 3. obj_set_batch: a selector the object has no method for is NOT delivered (its console line says so); a value
+    //    that landed is read back from where Pd keeps it.
+    {
+        auto r = h.call("/pd/obj_set_batch", { "main", "ct7", 3,
+            "ct_osc", 0, "no_such_method", 1, 1.0,
+            "ct_lop", 1, "float", 1, 250.0,
+            "ct_hsl", 0, "float", 1, 3.0 }, "/pd/obj_set_batch/reply/ct7");
+        CHECK(r.has_value());
+        auto const json = r ? parseJson(*r) : juce::var();
+        auto const* results = json["results"].getArray();
+        CHECK(results && results->size() == 3);
+        if (results && results->size() == 3) {
+            auto const& bad = (*results)[0];
+            CHECK(!static_cast<bool>(bad["delivered"]));
+            CHECK(bad["console"].getArray() && bad["console"].getArray()->size() >= 1);
+            CHECK(bad["console"][0].toString().contains("no_such_method"));
+            auto const& cutoff = (*results)[1];
+            CHECK(static_cast<bool>(cutoff["delivered"]));
+            CHECK(cutoff["console"].getArray() && cutoff["console"].getArray()->isEmpty());
+            CHECK(std::abs(static_cast<double>(cutoff["readBack"]["value"]) - 250.0) < 1e-3);
+            CHECK(cutoff["readBack"]["source"].toString() == "scalar" || cutoff["readBack"]["source"].toString() == "last");
+            auto const& gui = (*results)[2];
+            CHECK(static_cast<bool>(gui["delivered"]));
+            CHECK(std::abs(static_cast<double>(gui["readBack"]["value"]) - 3.0) < 1e-3 && gui["readBack"]["source"].toString() == "gui");
+        }
+    }
+    // A forwarded inlet (osc~ phase): the inlet keeps no copy, but this very dispatch left its record: "last".
+    {
+        auto r = h.call("/pd/obj_set_batch", { "main", "ct8", 1, "ct_osc", 1, "float", 1, 0.75 }, "/pd/obj_set_batch/reply/ct8");
+        auto const json = r ? parseJson(*r) : juce::var();
+        auto const rb = json["results"][0]["readBack"];
+        CHECK(rb["source"].toString() == "last" && std::abs(static_cast<double>(rb["value"]) - 0.75) < 1e-6);
+    }
+
+    // 4. send_checked: nothing listens -> not sent; a Pd system name -> refused; [r ct_f] -> hsl -> read back.
+    {
+        auto r = h.call("/pd/send_checked", { "main", "ct9", "ct_nobody_listens_here", 1, 1.0 }, "/pd/send_checked/reply/ct9");
+        CHECK(r.has_value());
+        auto const json = r ? parseJson(*r) : juce::var();
+        CHECK(!static_cast<bool>(json["bound"]) && !static_cast<bool>(json["delivered"]));
+        CHECK(json["refused"].toString().isEmpty());
+        CHECK(json["receivers"].getArray() && json["receivers"].getArray()->isEmpty());
+    }
+    for (auto const* name : { "pd", "pd-main", "#plugdata_mcp_ui", "mcp_host" }) {
+        auto r = h.call("/pd/send_checked", { "main", "ct10", name, 1, 1.0 }, "/pd/send_checked/reply/ct10");
+        CHECK(r.has_value());
+        auto const json = r ? parseJson(*r) : juce::var();
+        CHECK(json["refused"].toString().isNotEmpty() && !static_cast<bool>(json["delivered"]));
+    }
+    {
+        auto r = h.call("/pd/send_checked", { "main", "ct11", "ct_f", 1, 42.0 }, "/pd/send_checked/reply/ct11");
+        CHECK(r.has_value());
+        auto const json = r ? parseJson(*r) : juce::var();
+        CHECK(static_cast<bool>(json["bound"]) && static_cast<bool>(json["delivered"]));
+        auto const* recv = json["receivers"].getArray();
+        CHECK(recv && recv->size() == 1);
+        if (recv && recv->size() == 1) {
+            auto const& r0 = (*recv)[0];
+            CHECK(r0["tempId"].toString() == "ct_r" && r0["class"].toString() == "receive");
+            CHECK(r0["readBack"]["source"].toString() == "last" && std::abs(static_cast<double>(r0["readBack"]["value"]) - 42.0) < 1e-6);
+        }
+        auto const last = inletEntry(read("ct12", "ct_hsl"), "ct_hsl", 0)["last"];
+        CHECK(last["by"].toString() == "ai"); // the send was the AI's
+    }
+
+    h.call("/pd/batch_atomic", { "main", "ct13", 7, 0, 0, 0, 0,
+        "ct_osc", "ct_msg", "ct_sig", "ct_noise", "ct_lop", "ct_r", "ct_hsl", 0, 5, 10, 0 }, "/pd/batch_atomic/reply/ct13");
+}
+
 // V1 /pd/wire_activity: control-wire traffic in an armed window (capability wire_activity). A message box sent during
 // the window counts once with its value; a slider moved counts with its value; an idle wire reads 0; signal wires are
 // skipped.
@@ -5254,7 +5410,7 @@ void runZeroArgCases(Harness& h)
         auto const* e = f ? f->find("error") : nullptr;
         refused += (f && field(*f, "outcome") == "rejected" && e && field(*e, "code") == "bad_frame") ? 1 : 0;
     }
-    CHECK(guarded == 27 && refused == guarded); // 19 since /pd/midi_devices (minArgs 1); +2 P11 /pd/bound, /pd/selection_get; +2 P12c approval_show/clear (minArgs 2); +3 P12a flow_mode_get/off, ownership (P12a.1: the offer verb is gone); +1 Alphi drop 1 alphi_say (minArgs 1)
+    CHECK(guarded == 28 && refused == guarded); // +1 truth slice 3 send_checked (minArgs 4); 19 since /pd/midi_devices (minArgs 1); +2 P11 /pd/bound, /pd/selection_get; +2 P12c approval_show/clear (minArgs 2); +3 P12a flow_mode_get/off, ownership (P12a.1: the offer verb is gone); +1 Alphi drop 1 alphi_say (minArgs 1)
 }
 
 // Alphi drop 1, step W: /pd/alphi_say <json {text, kind, state, turn, ttlMs}>. No reply on v1 (nothing at all comes
@@ -5704,6 +5860,7 @@ int main()
             runMeterTapCases(harness, processor, audioControl);
             runAcTapCases(harness, processor, audioControl);
             runInletValueCases(harness);
+            runControlTruthCases(harness, processor);
             runWireActivityCases(harness);
             runFactCases(harness, processor);
             runOutputCeilingCases(harness, processor, audioControl);

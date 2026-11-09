@@ -541,6 +541,7 @@ struct McpSession {
         juce::String text, tempId;
         bool error = false;
         int repeats = 1;
+        void const* object = nullptr; // truth slice 3: the printing object, compared only (never dereferenced)
     };
     static constexpr size_t kConsoleLines = 800;
     std::mutex consoleLock;
