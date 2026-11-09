@@ -1429,7 +1429,7 @@ void runArmedTraceCases(Harness& h)
         CHECK(json["chokePoint"].toString() != "t2b_vca");
         // Review H3 (the isolated case is in runStopFactsCases): main holds other cases' boxes, so another branch may
         // be reported here (server review C); whenever the kind is none, the old pair holds.
-        if (json["stopFacts"]["nearestStop"]["kind"].toString() == "none")
+        if (json["stopFacts"]["kind"].toString() == "none")
             CHECK(json["chokePoint"].toString() == "none" && json["reason"].toString() == "signal reaches master sink");
         auto const* silentEnv = json["silentEnvelopes"].getArray();
         CHECK(silentEnv != nullptr && !silentEnv->contains("t2b_env"));
@@ -2101,6 +2101,8 @@ void runStopFactsCases(Harness& h, PluginProcessor& processor)
 
     auto const dust = stopRow(facts, "dust_g");
     CHECK(static_cast<int>(dust["hop"]) == 2);
+    CHECK(static_cast<bool>(dust["diesHere"]) && !static_cast<bool>(sig8["diesHere"])); // option D row fact
+    CHECK(facts["kind"].toString() == "open_inlet");
     CHECK(dust["out"]["verdict"].toString() == "silent");
     auto const in0 = dust["sig"][0];
     CHECK(static_cast<int>(in0["inlet"]) == 0 && in0["from"][0]["id"].toString() == "dust_src:0");
@@ -2146,8 +2148,9 @@ void runStopFactsCases(Harness& h, PluginProcessor& processor)
         auto const okJson = read ? parseJson(*read) : juce::var();
         CHECK(okJson["chokePoint"].toString() == "none");
         CHECK(okJson["reason"].toString() == "signal reaches master sink");
-        CHECK(okJson["stopFacts"]["nearestStop"]["kind"].toString() == "none");
-        CHECK(okJson["stopFacts"]["nearestStop"]["tempId"].toString() == "ok_dac");
+        CHECK(okJson["stopFacts"]["kind"].toString() == "none"); // option D: no stop is chosen when it sounds
+        CHECK(okJson["stopFacts"]["nearestStop"].isVoid());
+        CHECK(!static_cast<bool>(stopRow(okJson["stopFacts"], "ok_osc")["diesHere"]));
     }
     h.fire("/pd/dsp", { 0 });
     h.call("/pd/batch_atomic", { "main", "sf18", 1, 0, 0, 0, 0, "sf_osub", 0, 5, 10, 0 }, "/pd/batch_atomic/reply/sf18");
@@ -2219,7 +2222,7 @@ void runStopFactsCases(Harness& h, PluginProcessor& processor)
         auto const c = stopRow(df, "dz_c");
         CHECK(c["bus"].getArray() && c["bus"].getArray()->size() == 1);
         CHECK(c["bus"][0]["id"].toString() == "dz_t:bus" && c["bus"][0]["verdict"].toString() == "audible");
-        CHECK(df["nearestStop"]["kind"].toString() == "none");
+        CHECK(df["kind"].toString() == "none" && df["nearestStop"].isVoid());
     }
     h.fire("/pd/dsp", { 0 });
     h.call("/pd/batch_atomic", { "main", "sf23", 1, 0, 0, 0, 0, "sf_dsub", 0, 5, 10, 0 }, "/pd/batch_atomic/reply/sf23");
@@ -3514,6 +3517,7 @@ void runContentVersionCases(Harness& h, PluginProcessor& processor)
     t_gobj *a = nullptr, *b = nullptr, *msg = nullptr;
     host->pdWait([&] {
         t_canvas* cnv = host->getCanvasBySymbol("main");
+        if (!cnv) return; // seen once (1 in 4 runs, slice 3 round 3): "main" not resolved right after the load cases
         auto obj = [&](char const* sel, char const* cls, int y) {
             t_atom at[3];
             SETFLOAT(at, 1200);
@@ -3526,6 +3530,11 @@ void runContentVersionCases(Harness& h, PluginProcessor& processor)
         b = obj("obj", "f", 80);
         msg = obj("msg", "hello", 120);
     }, 3000);
+    CHECK(a && b && msg);
+    if (!(a && b && msg)) {
+        std::printf("  contentVersion: main was not resolved; case skipped (a failure, never a crash)\n");
+        return;
+    }
     auto const v0 = versions("cv0");
     CHECK(v0.second >= 0);
     auto edit = [&](char const* what, std::function<void(t_canvas*)> const& fn, bool identityStays, char const* corr) {

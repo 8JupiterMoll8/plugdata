@@ -53,6 +53,11 @@ struct McpUndoGhost {
     void const* anchor = nullptr;
     void const* action = nullptr;
     uint64_t stepNo = 0;
+    // Review L1: the type of `action` when the ghost was tied to it. Pd frees actions only on a rebranch (an undo
+    // and then a new edit), and a new action may take the freed address. The ghost lives only while its address is in
+    // the queue with the same type: a cheap guard, not a proof (an equal-typed action at a reused address passes;
+    // binding then still needs that action in the current step and, in Pass 1, the same text at the same place).
+    int actionType = -1;
 };
 
 struct McpSession {

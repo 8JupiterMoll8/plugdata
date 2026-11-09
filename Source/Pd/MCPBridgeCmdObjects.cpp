@@ -178,29 +178,29 @@ void MCPBridge::pdObjSetBatch(const juce::String& action, const juce::OSCMessage
                 }
                 results.add(juce::var(ro));
             }
-            }
+        } // review M2: the Pd lock ends with the loop; the reply is built and sent without it
 
-            auto* root = new juce::DynamicObject();
-            root->setProperty("ok", okCount);
-            root->setProperty("total", count);
-            root->setProperty("results", results);
-            sendReply("/pd/obj_set_batch/reply/" + correlationId, juce::JSON::toString(juce::var(root)));
-        }
-        return;
+        auto* root = new juce::DynamicObject();
+        root->setProperty("ok", okCount);
+        root->setProperty("total", count);
+        root->setProperty("results", results);
+        sendReply("/pd/obj_set_batch/reply/" + correlationId, juce::JSON::toString(juce::var(root)));
     }
+    return;
+}
 
-    void MCPBridge::pdParamGet(const juce::String& action, const juce::OSCMessage& msg)
-    {
-        // /pd/param_get <name> <corrId>
-        // reply: JSON { name, found, atoms:[...] }  (last value posted via /param)
-        if (msg.size() >= 1) {
-            auto name = getArgString(msg[0]);
-            auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : juce::String("0");
-            std::vector<t_atom> atoms; bool found = false;
-            {
-                std::lock_guard<std::mutex> lk(s_paramShadowMutex);
-                auto it = s_paramShadow.find(name.toStdString());
-                if (it != s_paramShadow.end()) { atoms = it->second; found = true; }
+void MCPBridge::pdParamGet(const juce::String& action, const juce::OSCMessage& msg)
+{
+    // /pd/param_get <name> <corrId>
+    // reply: JSON { name, found, atoms:[...] }  (last value posted via /param or delivered by /pd/send_checked)
+    if (msg.size() >= 1) {
+        auto name = getArgString(msg[0]);
+        auto correlationId = msg.size() > 1 ? getArgString(msg[1]) : juce::String("0");
+        std::vector<t_atom> atoms; bool found = false;
+        {
+            std::lock_guard<std::mutex> lk(s_paramShadowMutex);
+            auto it = s_paramShadow.find(name.toStdString());
+            if (it != s_paramShadow.end()) { atoms = it->second; found = true; }
         }
         auto* root = new juce::DynamicObject();
         root->setProperty("name", name);

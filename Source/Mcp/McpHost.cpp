@@ -954,7 +954,7 @@ bool McpHost::undoStep(t_canvas* cnv, bool redo)
     // Review H1 / delta 2: every ghost is tied to an undo action. Resolve the delete ghosts not tied yet (anchor->next,
     // while the anchor is still in the queue) and drop every ghost whose action left the queue.
     auto& ghosts = undoJournalFor(cnv);
-    static uint64_t stepCounter = 0; // Pd lock held: one undo step at a time
+    static std::atomic<uint64_t> stepCounter { 0 }; // review L3: atomic (several instances may step at once)
     uint64_t const thisStep = ++stepCounter;
     t_undo* const queue = canvas_undo_get(cnv);
     auto liveActions = [queue] {
@@ -965,9 +965,16 @@ bool McpHost::undoStep(t_canvas* cnv, bool redo)
     {
         auto const liveNow = liveActions();
         for (auto it = ghosts.begin(); it != ghosts.end();) {
-            if (!it->action && it->anchor && liveNow.count(it->anchor))
-                it->action = static_cast<t_undo_action const*>(it->anchor)->next;
-            bool const dead = !it->action || !liveNow.count(it->action);
+            if (!it->action && it->anchor && liveNow.count(it->anchor)) {
+                auto const* next = static_cast<t_undo_action const*>(it->anchor)->next;
+                it->action = next;
+                it->actionType = next ? static_cast<int>(next->type) : -1;
+            }
+            // Review L1: a freed action's address can be reused by a new one. The action must still be in the queue
+            // AND still be of the type it had when the ghost was tied to it (a cheap guard, not a proof; see the note
+            // on McpUndoGhost).
+            bool const dead = !it->action || !liveNow.count(it->action)
+                || static_cast<int>(static_cast<t_undo_action const*>(it->action)->type) != it->actionType;
             it = dead ? ghosts.erase(it) : std::next(it);
         }
     }
@@ -1002,8 +1009,9 @@ bool McpHost::undoStep(t_canvas* cnv, bool redo)
         if (now && live.count(now) && !reused) continue;
         identity.eraseId(cnv, b.id);
         // Delta review 2: back only with the step that reverses this one (it holds the same actions).
-        journal.push_back({ b.id, b.text, b.x, b.y, b.index, McpUndoGhost::Origin::Step, nullptr,
-            stepActions.count(stepTop) ? stepTop : nullptr, thisStep });
+        auto const* top = stepActions.count(stepTop) ? static_cast<t_undo_action const*>(stepTop) : nullptr;
+        journal.push_back({ b.id, b.text, b.x, b.y, b.index, McpUndoGhost::Origin::Step, nullptr, top, thisStep,
+            top ? static_cast<int>(top->type) : -1 });
         changed = true;
     }
     if (journal.size() > kUndoJournalMax)
@@ -1105,13 +1113,15 @@ void McpHost::journalId(t_canvas* cnv, std::string const& id, t_gobj* obj, McpUn
     for (t_gobj* g = cnv->gl_list; g && g != obj; g = g->g_next) ++index;
     t_object* ob = pd_checkobject(&obj->g_pd);
     auto& journal = undoJournalFor(cnv);
+    // Review L2: a canvas whose edits are not registered in Pd's undo queue gets no ghost (no undo brings it back).
+    if (!mcp::undo::registrable(cnv)) return;
     // Delta review 2: an AI delete is anchored too (the newest action now; its own actions come after it).
     if (!anchor) {
         t_undo* const queue = canvas_undo_get(cnv);
         anchor = queue ? queue->u_last : nullptr;
         if (!anchor) return; // no undo queue: no undo can prove it brings the box back
     }
-    journal.push_back({ id, objectText(obj), ob ? ob->te_xpix : 0, ob ? ob->te_ypix : 0, index, origin, anchor, nullptr, 0 });
+    journal.push_back({ id, objectText(obj), ob ? ob->te_xpix : 0, ob ? ob->te_ypix : 0, index, origin, anchor, nullptr, 0, -1 });
     if (journal.size() > kUndoJournalMax)
         journal.erase(journal.begin());
 }
