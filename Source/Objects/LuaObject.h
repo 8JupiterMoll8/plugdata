@@ -170,6 +170,7 @@ class LuaObject final : public ObjectBase
 
     UnorderedSegmentedMap<hash32, std::pair<NVGImage, Rectangle<int>>> images;
 
+    // MCP-CARRIED(lua-text-layout-cache)
     // draw_text runs on every render; shaping a text again each time is slow (a glyph the UI font lacks asks the
     // OS for a fallback font). Layouts are kept per (text, size, width, colour, UI font); render() is the only user.
     static constexpr size_t maxCachedTextLayouts = 64;
@@ -732,7 +733,7 @@ public:
 
                 float ax = x, ay = y;
 
-                auto const& layout = getTextLayout(text, fontHeight, w);
+                auto const& layout = getTextLayout(text, fontHeight, w); // MCP-CARRIED(lua-text-layout-cache)
                 auto textW = layout.getWidth();
                 auto textH = layout.getHeight();
 
