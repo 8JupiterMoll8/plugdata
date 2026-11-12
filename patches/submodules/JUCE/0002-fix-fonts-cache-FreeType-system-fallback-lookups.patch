@@ -1,0 +1,137 @@
+From 28c4c10c87d25410630c192fb0d1592d86cc321f Mon Sep 17 00:00:00 2001
+From: Alphi <alphi@starchaser.local>
+Date: Thu, 12 Nov 2026 20:08:45 +0100
+Subject: [PATCH] fix(fonts): cache FreeType system fallback lookups
+
+createSystemFallback() ran FcConfigSubstitute + FcFontMatch (3-7 ms) for every
+shaping of a text holding a character the font lacks, so on every repaint of
+such text, on the GUI and the OpenGL threads. Cache the answer per (family,
+style, language, characters), a "no fallback" answer included, behind a
+mutex. Also guard a null fallback typeface (upstream dereferenced it).
+---
+ .../native/juce_Fonts_freetype.cpp            | 90 +++++++++++++++++--
+ 1 file changed, 83 insertions(+), 7 deletions(-)
+
+diff --git a/modules/juce_graphics/native/juce_Fonts_freetype.cpp b/modules/juce_graphics/native/juce_Fonts_freetype.cpp
+index 6a7e270..9cd137f 100644
+--- a/modules/juce_graphics/native/juce_Fonts_freetype.cpp
++++ b/modules/juce_graphics/native/juce_Fonts_freetype.cpp
+@@ -474,6 +474,60 @@ private:
+ };
+ 
+ //==============================================================================
++#if JUCE_USE_FONTCONFIG
++/*  plugdata fork: createSystemFallback() runs for every shaping of a text that holds a character
++    the font lacks, so for every repaint of such a text (GUI thread and OpenGL thread), and each
++    call costs FcConfigSubstitute + FcFontMatch (3-7 ms). The answer only depends on the font's
++    family and style, the language and the characters asked for, so it is cached here, a
++    "no fallback" answer included. Thread safe: both threads call it.
++*/
++class SystemFallbackCache final : public DeletedAtShutdown
++{
++public:
++    ~SystemFallbackCache() override
++    {
++        clearSingletonInstance();
++    }
++
++    /** Returns true and sets result when the key was cached (result may be nullptr: no fallback). */
++    bool find (const String& key, Typeface::Ptr& result)
++    {
++        const std::scoped_lock lock { mutex };
++        const auto it = cache.find (key);
++
++        if (it == cache.end())
++            return false;
++
++        result = it->second;
++        return true;
++    }
++
++    void store (const String& key, Typeface::Ptr typeface)
++    {
++        const std::scoped_lock lock { mutex };
++
++        // The keys are runs of missing characters, so few in practice; the cap only bounds odd input.
++        if (cache.size() >= maxEntries)
++            cache.clear();
++
++        cache[key] = std::move (typeface);
++    }
++
++    static String makeKey (const char* family, const char* style, const String& language, const String& text)
++    {
++        const auto fromC = [] (const char* s) { return s != nullptr ? String::fromUTF8 (s) : String(); };
++        return fromC (family) + "\n" + fromC (style) + "\n" + language + "\n" + text;
++    }
++
++    JUCE_DECLARE_SINGLETON_INLINE (SystemFallbackCache, false)
++
++private:
++    static constexpr size_t maxEntries = 1024;
++    std::mutex mutex;
++    std::map<String, Typeface::Ptr> cache;
++};
++#endif
++
+ class FreeTypeTypeface final : public Typeface
+ {
+     using Ptr = ReferenceCountedObjectPtr<FreeTypeTypeface>;
+@@ -583,6 +637,31 @@ public:
+         if (cache == nullptr)
+             return {};
+ 
++        auto* fallbackCache = SystemFallbackCache::getInstance();
++        const auto fallbackKey = SystemFallbackCache::makeKey (ftFace->face->family_name,
++                                                               ftFace->face->style_name,
++                                                               language,
++                                                               text);
++
++        if (Typeface::Ptr cached; fallbackCache != nullptr && fallbackCache->find (fallbackKey, cached))
++            return cached;
++
++        auto result = createSystemFallbackUncached (text, language);
++
++        if (fallbackCache != nullptr)
++            fallbackCache->store (fallbackKey, result);
++
++        return result;
++       #else
++        // Font substitution will not work unless fontconfig is enabled.
++        jassertfalse;
++        return nullptr;
++       #endif
++    }
++
++   #if JUCE_USE_FONTCONFIG
++    Typeface::Ptr createSystemFallbackUncached (const String& text, const String& language) const
++    {
+         const auto makeBasicPattern = [&]
+         {
+             FcPatternPtr pattern { FcPatternCreate() };
+@@ -623,18 +702,15 @@ public:
+             return fromPattern (pattern.get());
+         });
+ 
+-        if (text.isEmpty() || fallbackWithFamily->getNominalGlyphForCodepoint (*text.getCharPointer()).has_value())
++        if (text.isEmpty()
++            || (fallbackWithFamily != nullptr && fallbackWithFamily->getNominalGlyphForCodepoint (*text.getCharPointer()).has_value()))
+             return fallbackWithFamily;
+ 
+         const auto fallbackWithoutFamily = fromPattern (makeBasicPattern().get());
+-        jassert (fallbackWithoutFamily->getNominalGlyphForCodepoint (*text.getCharPointer()).has_value());
++        jassert (fallbackWithoutFamily == nullptr || fallbackWithoutFamily->getNominalGlyphForCodepoint (*text.getCharPointer()).has_value());
+         return fallbackWithoutFamily;
+-       #else
+-        // Font substitution will not work unless fontconfig is enabled.
+-        jassertfalse;
+-        return nullptr;
+-       #endif
+     }
++   #endif
+ 
+     const Native* getNativeDetails() const override
+     {
+-- 
+2.34.1
+
