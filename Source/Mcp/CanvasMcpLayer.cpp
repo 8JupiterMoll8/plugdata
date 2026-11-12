@@ -850,18 +850,31 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
                 nanovg::nvgFill(nvg);
             }
 
-            // Right ~26px: sleek submit button ↵
+            // Right ~26px: sleek submit button (a return arrow)
             {
                 float const subW = 20.0f;
                 float const subH = 18.0f;
                 float const subX = w - 25.0f;
                 float const subY = (h - subH) * 0.5f;
                 nanovg::nvgDrawRoundedRect(nvg, subX, subY, subW, subH, nanovg::nvgRGBA(74, 158, 255, 220), nanovg::nvgRGBA(140, 195, 255, 255), 4.0f);
-                mcpnvg::nvgFontFace(nvg, "Inter");
-                mcpnvg::nvgFontSize(nvg, 11.5f);
-                mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(255, 255, 255, 255));
-                mcpnvg::nvgText(nvg, subX + subW * 0.5f, subY + subH * 0.5f, "↵", nullptr);
+                // Drawn as a shape, not the glyph: text with a character the UI font lacks is shaped on every
+                // frame, and each shaping clones the Noto Emoji face for the preferred-fallback check (GUI CPU hunt).
+                float const cx = subX + subW * 0.5f;
+                float const cy = subY + subH * 0.5f;
+                nanovg::nvgSave(nvg);
+                nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(255, 255, 255, 255));
+                nanovg::nvgStrokeWidth(nvg, 1.4f);
+                nanovg::nvgLineCap(nvg, NVG_ROUND);
+                nanovg::nvgLineJoin(nvg, NVG_ROUND);
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgMoveTo(nvg, cx + 4.0f, cy - 4.0f); // down from the top right
+                nanovg::nvgLineTo(nvg, cx + 4.0f, cy + 1.5f);
+                nanovg::nvgLineTo(nvg, cx - 4.0f, cy + 1.5f); // then left
+                nanovg::nvgMoveTo(nvg, cx - 1.5f, cy - 1.0f); // arrow head
+                nanovg::nvgLineTo(nvg, cx - 4.0f, cy + 1.5f);
+                nanovg::nvgLineTo(nvg, cx - 1.5f, cy + 4.0f);
+                nanovg::nvgStroke(nvg);
+                nanovg::nvgRestore(nvg);
             }
             } // else: object-pill controls
         }

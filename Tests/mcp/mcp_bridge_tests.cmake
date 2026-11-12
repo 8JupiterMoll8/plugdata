@@ -28,3 +28,14 @@ target_include_directories(mcp_bridge_tests PRIVATE ${PLUGDATA_INCLUDE_DIRECTORY
 target_link_libraries(mcp_bridge_tests PRIVATE plugdata_core pd-src externals "-Wl,-export-dynamic")
 copy_binarydata(mcp_bridge_tests)
 set_target_properties(mcp_bridge_tests PROPERTIES FOLDER "Tests")
+
+# Font fallback cache (GUI CPU hunt 2026-11-12): counts FcFontMatch calls around JUCE's system font fallback
+# (patches/submodules/JUCE/0002), plus a timing print of the preferred-family path vs the cached one.
+add_executable(font_fallback_tests
+    ${CMAKE_CURRENT_LIST_DIR}/font_fallback_tests.cpp
+)
+target_compile_definitions(font_fallback_tests PRIVATE ${PLUGDATA_COMPILE_DEFINITIONS}
+    PLUGDATA_FONTS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/Resources/Fonts")
+target_include_directories(font_fallback_tests PRIVATE ${PLUGDATA_INCLUDE_DIRECTORY})
+target_link_libraries(font_fallback_tests PRIVATE plugdata_core pd-src externals dl "-Wl,-export-dynamic")
+set_target_properties(font_fallback_tests PROPERTIES FOLDER "Tests")

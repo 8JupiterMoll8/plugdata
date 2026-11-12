@@ -170,6 +170,30 @@ class LuaObject final : public ObjectBase
 
     UnorderedSegmentedMap<hash32, std::pair<NVGImage, Rectangle<int>>> images;
 
+    // draw_text runs on every render; shaping a text again each time is slow (a glyph the UI font lacks asks the
+    // OS for a fallback font). Layouts are kept per (text, size, width, colour, UI font); render() is the only user.
+    static constexpr size_t maxCachedTextLayouts = 64;
+    std::map<String, TextLayout> textLayoutCache;
+
+    TextLayout const& getTextLayout(String const& text, float const fontHeight, float const width)
+    {
+        auto const font = Fonts::getDefaultFont().withPointHeight(fontHeight);
+        auto const key = text + "\x1f" + String(fontHeight) + "\x1f" + String(width) + "\x1f" + String::toHexString(static_cast<int>(currentColour.getARGB())) + "\x1f" + font.getTypefaceName() + "\x1f" + font.getTypefaceStyle();
+
+        if (auto const it = textLayoutCache.find(key); it != textLayoutCache.end())
+            return it->second;
+
+        if (textLayoutCache.size() >= maxCachedTextLayouts)
+            textLayoutCache.clear();
+
+        AttributedString txt;
+        txt.append(text, font, currentColour);
+
+        TextLayout layout;
+        layout.createLayout(txt, width);
+        return textLayoutCache.emplace(key, std::move(layout)).first->second;
+    }
+
     struct LuaGuiMessage {
         t_symbol* symbol;
         SmallArray<t_atom> data;
@@ -708,11 +732,7 @@ public:
 
                 float ax = x, ay = y;
 
-                AttributedString txt;
-                txt.append(text, Fonts::getDefaultFont().withPointHeight(fontHeight), currentColour);
-
-                TextLayout layout;
-                layout.createLayout(txt, w);
+                auto const& layout = getTextLayout(text, fontHeight, w);
                 auto textW = layout.getWidth();
                 auto textH = layout.getHeight();
 
