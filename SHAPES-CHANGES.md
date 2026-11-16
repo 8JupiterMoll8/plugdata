@@ -92,14 +92,22 @@ as the fork now answers them. Nothing in the plan's shapes was removed or rename
     the reply has a new integer `proxies` (always present, 0 when none). `bound` is true when there are boxes or proxies; the
     send goes out when there is at least one of either; only the boxes are read back (`receivers[]`), so a name with proxies
     alone is `bound: true, proxies: N, receivers: []`, and `delivered` is true when no console line came. Every other binder
-    that is not a box is still refused as before. `obj_set` / `obj_set_batch` inlet k of a CLASS_NOINLET object (pd-lua, and an
-    unnamed [receive]) is `ob_inlet[k]`; with no `ob_inlet` entry at all inlet 0 stays the object itself.
+    that is not a box is still refused as before. `obj_set` / `obj_set_batch`: ONLY a pd-lua object (a class plugdata's own pd-lua
+    registry knows, `name` or its `name:gfx` shadow class, and CLASS_NOINLET) numbers its inlets from the first Lua inlet: inlet k is
+    `ob_inlet[k]`, inlet 0 stays the object itself when it has no `ob_inlet` entry at all. A negative inlet is the object, always.
+    Every other class, the CLASS_NOINLET ones included (the canvas of an abstraction or a [pd] with [inlet]s, [clone], an unnamed
+    [receive], a gatom, ELSE [receiver], [outlet~]), keeps the numbering it always had: inlet 0 is the object, inlet k >= 1 is
+    `ob_inlet[k-1]`, so the server's "physical inlet + 1" for abstraction sets and its canvas selectors (vis, clear, loadbang,
+    dsp, coords) on inlet 0 are unchanged. Only pd-lua objects changed; no server change. (Commit a9b265338 first applied the Lua
+    numbering to every CLASS_NOINLET class: wrong for the classes above, fixed 2026-11-17.)
 
 ## `/pd/widget_ask` (capability `widget_ask`)
 19c. The `<canvas>` argument is the tab the widget sits in: the identity wire key of the open root canvas whose patch (subpatches
     and abstractions included) holds a box of the widget's class (`ai.tap`, pd-lua's `ai.tap:gfx` shadow class, or an
     abstraction file `ai.tap.pd`), the `key` of that tab's `/pd/list_tabs` row. `main` (the focused tab, as before) when the widget
     cannot be placed (a looper, a box not yet placed, a clone instance) or sits in more than one tab. Same argument count.
+    All the widgets of one pump tick are looked up in ONE walk of the open patches (budget 20000 boxes); a walk that runs out of
+    budget claims nothing: `main`. Roots no tab shows (none are opened by plugdata itself) count like tabs.
 
 ## `/chat/msg` roles
 19d. Role `detail` (a long answer) is shown in the Copilot sidebar as an AI message. The only reader of `/chat/msg` is the sidebar

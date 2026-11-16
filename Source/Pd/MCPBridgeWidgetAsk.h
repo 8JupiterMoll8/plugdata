@@ -11,7 +11,7 @@
 //   ai-ask <widget> <rev>    ->  /pd/widget_ask ask   <canvas> <widget> <rev>
 //   ai-ask hello <widget>    ->  /pd/widget_ask hello <canvas> <widget> 0
 // Anything after the rev is dropped (review M4: no free text from a patch into the AI's prompt).
-// <canvas> is the tab the widget sits in (mcpWidgetAskCanvas below: found by the pump, the message names none), or
+// <canvas> is the tab the widget sits in (mcpWidgetAskCanvases: found by the pump, the message names none), or
 // `main` (the focused tab) when it cannot be told.
 //
 // The receiver runs wherever Pd dispatches (the audio thread too), under the Pd lock: it only reads the atoms and
@@ -22,6 +22,7 @@
 #pragma once
 
 #include "Mcp/McpWidgetAsk.h"
+#include "MCPBridgeWidgetAskCanvas.h"
 
 #include <chrono>
 
@@ -103,53 +104,7 @@ inline void ensureMcpAskReceiverClass()
     class_addanything(mcpAskReceiverClass, reinterpret_cast<t_method>(mcpAskReceiverAnything));
 }
 
-// ── The canvas of an ask ────────────────────────────────────────────────────────────────────────────────────────────
-// The ai-ask message names no canvas, so the receiver cannot know the patch a widget sits in; the pump finds it (message
-// thread, under the Pd lock): the open ROOT canvas (the tab) whose patch (subpatches and abstractions included) holds a
-// box of the widget's class (`ai.tap`; pd-lua's shadow class `ai.tap:gfx`, the one a GUI widget really is; or an abstraction
-// file `ai.tap` / `ai.tap.pd`), named by its identity wire key: the `key` of that tab's /pd/list_tabs row, the name every
-// canvas verb resolves. Not found (a looper: its class is ai-loop2, its word ai.loop_<name>; a box not placed yet; a
-// [clone] instance) or found in more than one tab (which one asked is not known): `main`, the focused tab, as before.
-inline constexpr int kAskCanvasWalkBudget = 200000; // boxes visited per lookup
-inline constexpr int kAskCanvasMaxDepth = 32;
-
-inline bool mcpCanvasHoldsWidget(t_canvas* c, std::string const& cls, std::string const& gfx, std::string const& file, int depth, int& budget)
-{
-    if (!c || depth > kAskCanvasMaxDepth) return false;
-    for (t_gobj* g = c->gl_list; g; g = g->g_next) {
-        if (--budget < 0) return false;
-        t_class* const k = pd_class(&g->g_pd);
-        if (k == canvas_class) {
-            juce::String abstraction;
-            if (pd::getAbstractionFileName(g, abstraction)
-                && (abstraction == juce::String(cls) || abstraction == juce::String(file))) return true;
-            if (mcpCanvasHoldsWidget(reinterpret_cast<t_canvas*>(g), cls, gfx, file, depth + 1, budget)) return true;
-            continue;
-        }
-        char const* const name = class_getname(k);
-        if (name && (cls == name || gfx == name)) return true;
-    }
-    return false;
-}
-
-// Caller holds no Pd lock: takes it. Never creates a name the AI could not resolve (the key is the identity wire key).
-inline juce::String mcpWidgetAskCanvas(PluginProcessor& processor, char const* widget)
-{
-    if (!widget || !pd_this) return "main";
-    std::string const cls(widget);
-    std::string const gfx = cls + ":gfx";
-    std::string const file = cls + ".pd";
-    McpHost::PdLockScope const lock(processor);
-    juce::String key;
-    int holders = 0;
-    int budget = kAskCanvasWalkBudget;
-    for (t_canvas* root = pd_this->pd_canvaslist; root && budget > 0; root = root->gl_next) {
-        if (!mcpCanvasHoldsWidget(root, cls, gfx, file, 0, budget)) continue;
-        if (++holders > 1) return "main";
-        key = juce::String(processor.getMcp()->identity.keyOf(root));
-    }
-    return holders == 1 && key.isNotEmpty() ? key : juce::String("main");
-}
+// The canvas of an ask (the tab the widget sits in) is found by the pump: MCPBridgeWidgetAskCanvas.h.
 
 // The bridge's part: the queue, the binding and the message-thread pump.
 struct McpWidgetAskState {

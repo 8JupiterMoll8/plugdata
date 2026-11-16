@@ -30,6 +30,7 @@
 #include <cstdlib>
 #include <functional>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -57,6 +58,7 @@
 #include "Pd/MCPBridgeCmdCommon.h" // armedSpectralJson / renderSpectralJson (Plan 5 spectral window)
 #include "Pd/MCPBridgeBound.h" // delta review: placedAmong (clone voices, walk limit)
 #include "Pd/MCPBridgeObjectValues.h" // mcpResolveInlet: pd-lua objects are CLASS_NOINLET (set reaches their proxy inlets)
+#include "Pd/MCPBridgeWidgetAskCanvas.h" // the tab of an ask: one walk for every widget of a pump tick
 #include <juce_cryptography/juce_cryptography.h> // juce::SHA256: the save_content hash (P11.2 V11)
 #include "Utility/PluginParameter.h" // PlugDataParameter: the master volume guard (P5.1 sink floor)
 #include "Mcp/McpPdFile.h" // P11.8 item 3: mcp::fileInPdDir
@@ -2453,11 +2455,115 @@ void runWidgetAskCases(Harness& h, PluginProcessor& processor, MCPBridge& bridge
     auto nowhere = h.replies.waitFor("/pd/widget_ask", 2000);
     CHECK(nowhere && nowhere->str(2) == "ai.wknone" && nowhere->str(1) == "main");
     h.call("/pd/batch_atomic", { "main", "wk4", 2, 0, 0, 0, 0, "wk_a", "wk_g", 0, 5, 10, 0 }, "/pd/batch_atomic/reply/wk4");
+
+    // 8. An abstraction FILE (`<widget>.pd`, an instance of it on the patch; its box class is not the widget's) names the tab too.
+    //    Written beside the main patch, instantiated by hand, as the identity cases do.
+    {
+        t_canvas* mainCnv = nullptr;
+        t_gobj* absBox = nullptr;
+        juce::File absFile;
+        CHECK(host->pdWait([&] {
+            mainCnv = host->getCanvasBySymbolStrict("main");
+            while (mainCnv && mainCnv->gl_owner) mainCnv = mainCnv->gl_owner;
+            if (!mainCnv) return;
+            absFile = juce::File(juce::String::fromUTF8(canvas_getdir(mainCnv)->s_name)).getChildFile("ai.wkabs.pd");
+            if (!absFile.replaceWithText("#N canvas 0 50 450 300 12;\n#X obj 10 10 inlet;\n")) return;
+            t_atom a[3];
+            SETFLOAT(a, 2500);
+            SETFLOAT(a + 1, 160);
+            SETSYMBOL(a + 2, gensym("ai.wkabs"));
+            pd_typedmess(&mainCnv->gl_pd, gensym("obj"), 3, a);
+            absBox = pd::Interface::getNewest(mainCnv);
+        }, 3000));
+        juce::String absName;
+        CHECK(host->pdWait([&] { CHECK(absBox && pd::getAbstractionFileName(absBox, absName)); }, 2000)); // a file, not a broken box
+        h.replies.clear();
+        sendToAiAsk(host, gensym("hello"), { symAtom("ai.wkabs") });
+        auto viaFile = h.replies.waitFor("/pd/widget_ask", 2000);
+        CHECK(viaFile && viaFile->str(0) == "hello" && viaFile->str(2) == "ai.wkabs" && viaFile->str(1) == tabKey);
+        CHECK(host->pdWait([&] {
+            if (absBox && mainCnv) glist_delete(mainCnv, absBox);
+            absFile.deleteFile();
+        }, 2000));
+    }
+
+    // 9. Several tabs (review 2026-11-17): a widget only ANOTHER tab holds is that tab's key; one two tabs hold, and one nobody
+    //    holds, is `main`; and the lookup is ONE walk for all the widgets of a tick (three hellos sent back to back).
+    static t_class* askOne = nullptr;
+    static t_class* askDup = nullptr;
+    CHECK(host->pdWait([&] {
+        if (askOne) return;
+        askOne = class_new(gensym("ai.wkone"), reinterpret_cast<t_newmethod>(+[]() -> void* { return pd_new(askOne); }), nullptr,
+            sizeof(t_object), 0, static_cast<t_atomtype>(0));
+        askDup = class_new(gensym("ai.wkdup"), reinterpret_cast<t_newmethod>(+[]() -> void* { return pd_new(askDup); }), nullptr,
+            sizeof(t_object), 0, static_cast<t_atomtype>(0));
+    }, 2000));
+    auto const tabsDir = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("mcp_wk_tabs");
+    tabsDir.deleteRecursively();
+    tabsDir.createDirectory();
+    auto const rootWith = [](char const* cls) { return juce::String("#N canvas 0 50 450 300 12;\n#X obj 10 10 ") + cls + ";\n"; };
+    CHECK(tabsDir.getChildFile("wkone.pd").replaceWithText(rootWith("ai.wkone")));
+    CHECK(tabsDir.getChildFile("wkdup_a.pd").replaceWithText(rootWith("ai.wkdup")));
+    CHECK(tabsDir.getChildFile("wkdup_b.pd").replaceWithText(rootWith("ai.wkdup")));
+    auto const openRoot = [&](juce::File const& f) {
+        host->pdWait([&] {
+            t_atom a[2];
+            SETSYMBOL(&a[0], gensym(f.getFileName().toRawUTF8()));
+            SETSYMBOL(&a[1], gensym(f.getParentDirectory().getFullPathName().toRawUTF8()));
+            pd_typedmess(gensym("pd")->s_thing, gensym("open"), 2, a);
+        }, 3000);
+        t_canvas* c = nullptr;
+        host->pdWait([&] { c = host->getCanvasBySymbol(f.getFullPathName()); }, 3000);
+        return c;
+    };
+    t_canvas* const rootOne = openRoot(tabsDir.getChildFile("wkone.pd"));
+    t_canvas* const rootDupA = openRoot(tabsDir.getChildFile("wkdup_a.pd"));
+    t_canvas* const rootDupB = openRoot(tabsDir.getChildFile("wkdup_b.pd"));
+    CHECK(rootOne && rootDupA && rootDupB);
+    std::string oneKey;
+    CHECK(host->pdWait([&] { if (rootOne) oneKey = host->identity.keyOf(rootOne); }, 2000));
+    CHECK(!oneKey.empty() && oneKey != "main" && oneKey != tabKey);
+    h.replies.clear();
+    for (char const* w : { "ai.wkone", "ai.wkdup", "ai.wknone2" })
+        sendToAiAsk(host, gensym("hello"), { symAtom(w) });
+    std::map<std::string, std::string> canvasOfWidget;
+    for (int i = 0; i < 3; ++i) {
+        auto const r = h.replies.waitFor("/pd/widget_ask", 2000);
+        CHECK(r.has_value());
+        if (r) canvasOfWidget[r->str(2)] = r->str(1);
+    }
+    CHECK(canvasOfWidget["ai.wkone"] == oneKey);
+    CHECK(canvasOfWidget["ai.wkdup"] == "main");
+    CHECK(canvasOfWidget["ai.wknone2"] == "main");
+
+    // 10. A walk that runs out of its box budget cannot say a widget sits in one tab only (another may be beyond what it saw):
+    //     every widget is `main`. The same call with the real budget still tells.
+    std::vector<juce::String> told, starved;
+    CHECK(host->pdWait([&] {
+        told = mcpWidgetAskCanvasesLocked(processor, { "ai.wkone", "ai.wkdup" }, kAskCanvasWalkBudget);
+        starved = mcpWidgetAskCanvasesLocked(processor, { "ai.wkone", "ai.wkdup" }, 1);
+    }, 3000));
+    CHECK(told.size() == 2 && told[0].toStdString() == oneKey && told[1] == "main");
+    CHECK(starved.size() == 2 && starved[0] == "main" && starved[1] == "main");
+
+    for (t_canvas* c : { rootOne, rootDupA, rootDupB })
+        host->pdWait([&] {
+            if (!c) return;
+            t_atom force;
+            SETFLOAT(&force, 1);
+            pd_typedmess(&c->gl_pd, gensym("menuclose"), 1, &force);
+        }, 3000);
+    tabsDir.deleteRecursively();
 }
 
 // pd-lua stand-ins (Libraries/pd-lua/pdlua.c): a Lua object is CLASS_NOINLET (no inlet 0 of its own) and every inlet is an
 // inlet_new proxy; `pd.Receive` makes a "pdlua proxy receive": a 24-byte t_pd + owner + name made with flags 0, on no canvas.
 // These copy that shape (the real classes need Lua files on disk; the Lua route is covered live).
+// WHAT THEY PROVE: the NAME-based detections only: mcpResolveInlet asks plugdata's pd-lua registry (Instance::isLuaClass, which
+// pdlua fills through plugdata_register_class with the class and its `:gfx` shadow class) and send_checked recognises the proxy
+// receive by its class name. Neither stand-in has pdlua's real memory layout (t_pdlua, t_pdlua_proxyreceive's malloc'd 24
+// bytes with a Lua owner): that no code reads a proxy as a t_object, and that nothing walks past the 24 bytes, is not shown
+// here; that rests on the AddressSanitizer build (plugdata-p31-asan) and the live Lua run, not on this test.
 struct LuaLikeProxy {
     t_pd pd;
     int index;
@@ -2472,6 +2578,7 @@ struct LuaProxyReceive {
     t_symbol* name;
 };
 t_class* luaLikeClass = nullptr;
+t_class* luaPlainClass = nullptr; // the same shape and CLASS_NOINLET, but never registered as pd-lua: an ordinary class
 t_class* luaLikeProxyClass = nullptr;
 t_class* luaProxyReceiveClass = nullptr;
 std::vector<std::string> luaLikeHits; // "<inlet> <selector> <argc>" or "recv <name> <selector> <argc>"; written under the Pd lock
@@ -2486,9 +2593,9 @@ void luaProxyReceiveAnything(LuaProxyReceive* x, t_symbol* s, int argc, t_atom*)
     luaLikeHits.push_back(std::string("recv ") + x->name->s_name + " " + s->s_name + " " + std::to_string(argc));
 }
 
-void* luaLikeNew()
+void* luaLikeMake(t_class* cls)
 {
-    auto* x = reinterpret_cast<LuaLikeObject*>(pd_new(luaLikeClass));
+    auto* x = reinterpret_cast<LuaLikeObject*>(pd_new(cls));
     for (int i = 0; i < 2; ++i) {
         x->proxy[i] = reinterpret_cast<LuaLikeProxy*>(pd_new(luaLikeProxyClass));
         x->proxy[i]->index = i;
@@ -2496,6 +2603,9 @@ void* luaLikeNew()
     }
     return x;
 }
+
+void* luaLikeNew() { return luaLikeMake(luaLikeClass); }
+void* luaPlainNew() { return luaLikeMake(luaPlainClass); }
 
 void luaLikeFree(LuaLikeObject* x)
 {
@@ -2510,11 +2620,12 @@ std::vector<std::string> luaLikeHitsNow(McpHost* host)
     return out;
 }
 
-// Plan 5 overnight batch 2, items 1 and 2: `set` reaches a pd-lua object's inlets (mcpResolveInlet maps the physical inlet k of a
-// CLASS_NOINLET class to ob_inlet[k]), and send_checked counts a pd-lua `pd.Receive` proxy as a listener (never read as a t_object).
+// Plan 5 overnight batch 2, items 1 and 2: `set` reaches a pd-lua object's inlets (mcpResolveInlet maps the inlet k of a PD-LUA
+// object to ob_inlet[k]; every other class, CLASS_NOINLET or not, keeps inlet 0 = the object, k = ob_inlet[k-1]: review
+// 2026-11-17), and send_checked counts a pd-lua `pd.Receive` proxy as a listener (never read as a t_object).
 void runLuaProxyCases(Harness& h, PluginProcessor& processor)
 {
-    std::printf("pd-lua stand-ins: set reaches the proxy inlets, send_checked counts proxy receives\n");
+    std::printf("pd-lua stand-ins: set reaches the proxy inlets (pd-lua only), send_checked counts proxy receives\n");
     auto* host = processor.getMcp();
     CHECK(host->pdWait([&] {
         if (luaLikeClass) return;
@@ -2522,44 +2633,132 @@ void runLuaProxyCases(Harness& h, PluginProcessor& processor)
         class_addanything(luaLikeProxyClass, reinterpret_cast<t_method>(luaLikeProxyAnything));
         luaLikeClass = class_new(gensym("mcp_lualike"), reinterpret_cast<t_newmethod>(luaLikeNew), reinterpret_cast<t_method>(luaLikeFree),
             sizeof(LuaLikeObject), CLASS_NOINLET, static_cast<t_atomtype>(0));
+        luaPlainClass = class_new(gensym("mcp_noinlet"), reinterpret_cast<t_newmethod>(luaPlainNew), reinterpret_cast<t_method>(luaLikeFree),
+            sizeof(LuaLikeObject), CLASS_NOINLET, static_cast<t_atomtype>(0));
+        // As pdlua_class_new does through plugdata_register_class: the class and its `:gfx` shadow class. mcp_noinlet is the
+        // control: CLASS_NOINLET with proxy inlets too, but not registered, so not a pd-lua object.
+        pd::Instance::registerLuaClass("mcp_lualike");
+        pd::Instance::registerLuaClass("mcp_lualike:gfx");
         luaProxyReceiveClass = class_new(gensym("pdlua proxy receive"), nullptr, nullptr, sizeof(LuaProxyReceive), 0, static_cast<t_atomtype>(0));
         class_addanything(luaProxyReceiveClass, reinterpret_cast<t_method>(luaProxyReceiveAnything));
     }, 2000));
     luaLikeHitsNow(host);
     auto made = h.call("/pd/batch_atomic",
-        { "main", "lp1", 0, 0, 0, 3, 0,
+        { "main", "lp1", 0, 0, 0, 5, 0,
             "lp_lua", 2600, 40, "obj", "mcp_lualike", 0,
             "lp_osc", 2600, 100, "obj", "osc~", 1, "440",
             "lp_r", 2600, 160, "obj", "r", 1, "lp_recv_name",
+            "lp_r0", 2600, 220, "obj", "r", 0,
+            "lp_plain", 2600, 280, "obj", "mcp_noinlet", 0,
             0, 5, 10, 0 },
         "/pd/batch_atomic/reply/lp1");
-    CHECK(made.has_value() && made->num(0) == 3);
+    CHECK(made.has_value() && made->num(0) == 5);
 
-    // 1. The resolver itself: a CLASS_NOINLET object has no inlet 0 of its own (inlet k = ob_inlet[k]); a class with its own
-    //    first inlet is as before (inlet 0 = the object, k = ob_inlet[k-1]); a named [receive] has no inlets at all: the object.
+    // 1. The resolver itself. Review 2026-11-17 (HIGH): only a pd-lua object has no inlet 0 of its own (inlet k = ob_inlet[k]);
+    //    every other class keeps the numbering the server was built on: the bridge's inlet 0 is the OBJECT (a canvas selector like
+    //    vis/clear/loadbang for an abstraction, a click for CLICK_INLET = -1), inlet k >= 1 is ob_inlet[k-1] ("physical + 1" is
+    //    what the server sends an abstraction). Many of those classes are CLASS_NOINLET too (canvas, clone, an unnamed [r],
+    //    a gatom): the c_firstin == 0 test alone was wrong for them. A negative inlet is the object, always.
+    auto expect = [](bool ok, char const* what) {
+        if (!ok) {
+            std::printf("  FAIL %s\n", what);
+            ++failures;
+        }
+    };
+    auto inletsOf = [](t_object* o) {
+        std::vector<t_pd*> ins;
+        for (t_inlet* in = o->ob_inlet; in; in = mcp_inlet_next(in)) ins.push_back(reinterpret_cast<t_pd*>(in));
+        return ins;
+    };
+    auto classicNumbering = [&](char const* what, t_object* o, bool mustHaveInlets) {
+        expect(o != nullptr, what);
+        if (!o) return;
+        auto const ins = inletsOf(o);
+        expect(!mustHaveInlets || !ins.empty(), what); // not vacuous: there is an inlet list to mis-number
+        expect(mcpResolveInlet(o, -1) == &o->ob_pd && mcpResolveInlet(o, 0) == &o->ob_pd, what);
+        for (size_t k = 1; k <= ins.size(); ++k)
+            expect(mcpResolveInlet(o, static_cast<int>(k)) == ins[k - 1], what);
+        expect(mcpResolveInlet(o, static_cast<int>(ins.size()) + 1) == nullptr, what);
+    };
+    auto const luaClassRegistered = [](t_class* c) { return pd::Instance::isLuaClass(hash(class_getname(c))); };
+    auto addAtoms = [](t_canvas* cnv, char const* selector, std::initializer_list<t_atom> atoms) {
+        std::vector<t_atom> v(atoms);
+        pd_typedmess(&cnv->gl_pd, gensym(selector), static_cast<int>(v.size()), v.data());
+        return pd::Interface::getNewest(cnv);
+    };
+    auto sym = [](char const* s) { t_atom a; SETSYMBOL(&a, gensym(s)); return a; };
+    auto num = [](double d) { t_atom a; SETFLOAT(&a, static_cast<t_float>(d)); return a; };
     CHECK(host->pdWait([&] {
+        t_canvas* cnv = host->getCanvasBySymbol("main");
+        CHECK(cnv != nullptr);
+        if (!cnv) return;
         auto objectOf = [&](char const* id) -> t_object* {
             t_gobj* g = host->resolveStableId("main", id);
             return g ? pd::Interface::checkObject(g) : nullptr;
         };
+
+        // The Lua stand-in (registered): inlet k is ob_inlet[k]; a negative inlet is the object; past the last one nothing.
         t_object* lua = objectOf("lp_lua");
-        CHECK(lua && pd_class(&lua->ob_pd)->c_firstin == 0 && lua->ob_inlet && mcp_inlet_next(lua->ob_inlet));
+        CHECK(lua && luaClassRegistered(pd_class(&lua->ob_pd)) && pd_class(&lua->ob_pd)->c_firstin == 0);
+        CHECK(lua && lua->ob_inlet && mcp_inlet_next(lua->ob_inlet));
         if (lua && lua->ob_inlet) {
+            CHECK(mcpResolveInlet(lua, -1) == &lua->ob_pd);
             CHECK(mcpResolveInlet(lua, 0) == reinterpret_cast<t_pd*>(lua->ob_inlet));
             CHECK(mcpResolveInlet(lua, 1) == reinterpret_cast<t_pd*>(mcp_inlet_next(lua->ob_inlet)));
             CHECK(mcpResolveInlet(lua, 2) == nullptr);
         }
+        // Same shape, CLASS_NOINLET, proxy inlets, but not pd-lua: the old numbering exactly.
+        t_object* plain = objectOf("lp_plain");
+        CHECK(plain && !luaClassRegistered(pd_class(&plain->ob_pd)) && pd_class(&plain->ob_pd)->c_firstin == 0);
+        classicNumbering("non-Lua CLASS_NOINLET stand-in", plain, true);
+
+        // A class with its own first inlet; a named [receive] (no inlets at all); an unnamed [r] (CLASS_NOINLET, one inlet).
         t_object* osc = objectOf("lp_osc");
-        CHECK(osc && pd_class(&osc->ob_pd)->c_firstin != 0 && osc->ob_inlet);
-        if (osc && osc->ob_inlet) {
-            CHECK(mcpResolveInlet(osc, 0) == &osc->ob_pd);
-            CHECK(mcpResolveInlet(osc, 1) == reinterpret_cast<t_pd*>(osc->ob_inlet));
-            CHECK(mcpResolveInlet(osc, 2) == nullptr);
-        }
+        CHECK(osc && pd_class(&osc->ob_pd)->c_firstin != 0);
+        classicNumbering("osc~", osc, true);
         t_object* recv = objectOf("lp_r");
         CHECK(recv && pd_class(&recv->ob_pd)->c_firstin == 0 && !recv->ob_inlet);
-        if (recv) CHECK(mcpResolveInlet(recv, 0) == &recv->ob_pd);
-    }, 2000));
+        classicNumbering("named [r]", recv, false);
+        t_object* recv0 = objectOf("lp_r0");
+        CHECK(recv0 && pd_class(&recv0->ob_pd)->c_firstin == 0);
+        classicNumbering("unnamed [r]", recv0, true);
+
+        // A gatom (CLASS_NOINLET too), a [pd] subpatch with two [inlet]s, an abstraction with two [inlet]s and a [clone] of it.
+        juce::File dir(juce::String::fromUTF8(canvas_getdir(cnv)->s_name));
+        auto absFile = dir.getChildFile("lpabs.pd");
+        CHECK(absFile.replaceWithText("#N canvas 0 50 450 300 12;\n#X obj 10 10 inlet;\n#X obj 10 40 inlet;\n#X obj 10 80 outlet;\n"));
+        t_gobj* atom = addAtoms(cnv, "floatatom", { num(2800), num(40) });
+        t_gobj* sub = addAtoms(cnv, "obj", { num(2800), num(100), sym("pd"), sym("lpsub") });
+        if (sub && pd_class(&sub->g_pd) == canvas_class) {
+            auto* subCnv = reinterpret_cast<t_canvas*>(sub);
+            addAtoms(subCnv, "obj", { num(10), num(10), sym("inlet") });
+            addAtoms(subCnv, "obj", { num(10), num(50), sym("inlet") });
+        }
+        t_gobj* abs = addAtoms(cnv, "obj", { num(2800), num(160), sym("lpabs") });
+        t_gobj* clone = addAtoms(cnv, "obj", { num(2800), num(220), sym("clone"), sym("lpabs"), num(2) });
+        auto classic = [&](char const* what, t_gobj* g, bool wantNoInlet, bool mustHaveInlets) {
+            t_object* o = g ? pd::Interface::checkObject(g) : nullptr;
+            expect(o != nullptr, what);
+            if (!o) return;
+            if (wantNoInlet) expect(pd_class(&o->ob_pd)->c_firstin == 0, what); // the classes the first resolver got wrong
+            classicNumbering(what, o, mustHaveInlets);
+        };
+        classic("gatom", atom, true, false);
+        classic("[pd] subpatch with [inlet]s", sub, true, true);
+        classic("abstraction with [inlet]s", abs, true, true);
+        classic("[clone] of an abstraction", clone, true, true);
+        if (sub) {
+            t_object* o = pd::Interface::checkObject(sub);
+            expect(o && inletsOf(o).size() == 2, "the subpatch has its two inlets"); // inlet 1 is the first [inlet], 2 the second
+        }
+        if (abs) {
+            t_object* o = pd::Interface::checkObject(abs);
+            expect(o && inletsOf(o).size() == 2, "the abstraction has its two inlets");
+        }
+        for (t_gobj* g : { atom, sub, abs, clone })
+            if (g) glist_delete(cnv, g);
+        absFile.deleteFile();
+    }, 5000));
 
     // 2. obj_set through the bridge: inlet 0 and 1 of the Lua stand-in reach their proxies (before: "no method for 'tap'" on
     //    the object itself); an inlet it does not have is refused; osc~'s phase inlet (inlet 1) still works.
@@ -2578,6 +2777,12 @@ void runLuaProxyCases(Harness& h, PluginProcessor& processor)
         CHECK(r2.has_value() && r2->str(0).find("could not resolve inlet 2") != std::string::npos);
         auto r3 = h.call("/pd/obj_set", { "main", "lp5", "lp_osc", 1, "float", 1, 0.5 }, "/pd/obj_set/reply/lp5");
         CHECK(r3.has_value() && r3->num(0) == 1.0);
+        // The same shape, not pd-lua (mcp_noinlet): the bridge's inlet 1 is its FIRST proxy (ob_inlet[0]) as it always was,
+        // not its second: the server's "physical + 1" numbering for abstractions depends on it.
+        auto r4 = h.call("/pd/obj_set", { "main", "lp5b", "lp_plain", 1, "ping", 0 }, "/pd/obj_set/reply/lp5b");
+        CHECK(r4.has_value() && r4->num(0) == 1.0);
+        auto const plainHits = luaLikeHitsNow(host);
+        CHECK(plainHits.size() == 1 && plainHits[0] == "0 ping 0");
     }
 
     // 3. send_checked: a name only a pd-lua proxy receive listens on: bound, one proxy, no box to read back, delivered.
@@ -2636,7 +2841,7 @@ void runLuaProxyCases(Harness& h, PluginProcessor& processor)
     freeProxy(alone);
     freeProxy(beside);
 
-    h.call("/pd/batch_atomic", { "main", "lp9", 3, 0, 0, 0, 0, "lp_lua", "lp_osc", "lp_r", 0, 5, 10, 0 }, "/pd/batch_atomic/reply/lp9");
+    h.call("/pd/batch_atomic", { "main", "lp9", 5, 0, 0, 0, 0, "lp_lua", "lp_osc", "lp_r", "lp_r0", "lp_plain", 0, 5, 10, 0 }, "/pd/batch_atomic/reply/lp9");
 }
 
 void runControlTruthCases(Harness& h, PluginProcessor& processor)

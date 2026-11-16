@@ -13,20 +13,41 @@
 #include "MCPBridgePdAccessors.h"
 #include "MCPBridgeInletValues.h" // truth slice 3: read-back through the inlet facts
 
-// Resolve the pd target for a given inlet index (the PHYSICAL index, as Pd numbers it: m_obj.c obj_starttraverseinlet,
-// c_firstin + the place in ob_inlet). Walks Pd's inlet list through the fork's accessor (patches/submodules/pure-data/0004;
-// review 2026-11-06: no mirrored struct _inlet).
-//  - A class with its own first inlet (c_firstin): inlet 0 is the object itself (not in ob_inlet), inlet k >= 1 is the
-//    (k-1)-th entry of ob_inlet.
-//  - A CLASS_NOINLET class (c_firstin == 0: pd-lua objects and their `name:gfx` shadow class, every inlet of which is an
-//    inlet_new proxy): there is no inlet 0 of the object's own, so inlet k is the k-th entry of ob_inlet and a `set`
-//    reaches the Lua inlet. With no ob_inlet entry at all (a named [receive], an [inlet]) inlet 0 stays the object itself.
+// Is `o` a pd-lua object? Plugdata's own registry: Libraries/pd-lua/pdlua.c pdlua_class_new calls plugdata_register_class for
+// every Lua class AND its `name:gfx` shadow class (the class a GUI widget really is), which lands in
+// pd::Instance::registerLuaClass; pd::Instance::isLuaClass(hash(class name)) is what the editor itself asks to build a Lua
+// object (ObjectBase.cpp). Both Lua classes are CLASS_NOINLET with every inlet an inlet_new proxy, so c_firstin == 0 is
+// required too (a 32-bit name hash alone is not proof). Caller holds the Pd lock (the registry is written under it).
+inline bool mcpIsPdLuaObject(t_object* o)
+{
+    t_class* const c = pd_class(&o->ob_pd);
+    if (c->c_firstin != 0) return false;
+    char const* const name = class_getname(c);
+    return name != nullptr && pd::Instance::isLuaClass(hash(name));
+}
+
+// Resolve the pd target for a given inlet index. Walks Pd's inlet list through the fork's accessor
+// (patches/submodules/pure-data/0004; review 2026-11-06: no mirrored struct _inlet).
+//  - A NEGATIVE index is the object itself (the server's CLICK_INLET = -1), whatever the class.
+//  - A PD-LUA object (mcpIsPdLuaObject): there is no inlet 0 of the object's own (a CLASS_NOINLET class whose every inlet is
+//    an inlet_new proxy), so inlet k is the k-th entry of ob_inlet and a `set` reaches the Lua inlet. With no ob_inlet
+//    entry at all inlet 0 stays the object itself.
+//  - EVERY OTHER class keeps the numbering the server was built on (review 2026-11-17, HIGH: the first version of the Lua
+//    rule also hit every CLASS_NOINLET class: the canvas of an abstraction or [pd] with [inlet]s, [clone], an unnamed [r], a
+//    gatom, ELSE [receiver], [outlet~]): inlet 0 is the object, inlet k >= 1 is the (k-1)-th entry of ob_inlet. The
+//    server sends an abstraction's set as "physical inlet + 1" and a canvas selector (vis, clear, loadbang, dsp, coords) on
+//    inlet 0 to mean the canvas itself.
 inline t_pd *mcpResolveInlet(t_object *o, int inletIndex)
 {
     if (!o) return nullptr;
-    bool const ownFirstInlet = pd_class(&o->ob_pd)->c_firstin != 0;
-    if (inletIndex <= 0 && (ownFirstInlet || !o->ob_inlet)) return reinterpret_cast<t_pd *>(o);
-    int const skip = ownFirstInlet ? inletIndex - 1 : std::max(inletIndex, 0);
+    if (inletIndex < 0) return reinterpret_cast<t_pd *>(o);
+    int skip = inletIndex - 1; // the classic numbering: inlet 0 is the object, inlet k the (k-1)-th ob_inlet entry
+    if (mcpIsPdLuaObject(o)) {
+        if (inletIndex == 0 && !o->ob_inlet) return reinterpret_cast<t_pd *>(o);
+        skip = inletIndex;
+    } else if (inletIndex == 0) {
+        return reinterpret_cast<t_pd *>(o);
+    }
     t_inlet *in = o->ob_inlet;
     for (int i = 0; in && i < skip; ++i) in = mcp_inlet_next(in);
     return in ? reinterpret_cast<t_pd *>(in) : nullptr;

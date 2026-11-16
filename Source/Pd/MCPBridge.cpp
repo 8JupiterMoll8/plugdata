@@ -57,18 +57,25 @@ bool MCPBridge::widgetAskBound() const
 void MCPBridge::pumpWidgetAsks()
 {
     if (!widgetAsk) return;
+    std::vector<mcp::WidgetAskEvent> events;
     mcp::WidgetAskEvent e;
-    std::map<std::string, juce::String> canvasOf; // one lookup per widget per pump (a hello burst at load)
-    while (widgetAsk->queue.pop(e)) {
-        auto canvas = canvasOf.find(e.widget);
-        if (canvas == canvasOf.end())
-            canvas = canvasOf.emplace(e.widget, processor ? mcpWidgetAskCanvas(*processor, e.widget) : juce::String("main")).first;
-        juce::Array<juce::var> args;
-        args.add(juce::String(e.kind == mcp::WidgetAskKind::Hello ? "hello" : "ask"));
-        args.add(canvas->second); // the tab the widget sits in (its wire key), else "main": the focused tab, the key every verb takes
-        args.add(juce::String::fromUTF8(e.widget));
-        args.add(e.rev);
-        sendReply("/pd/widget_ask", args);
+    while (widgetAsk->queue.pop(e)) events.push_back(e);
+    if (!events.empty()) {
+        // One lock and ONE walk of the open patches for every distinct widget of this tick (a hello burst at load).
+        std::vector<std::string> widgets;
+        for (auto const& ev : events)
+            if (std::find(widgets.begin(), widgets.end(), ev.widget) == widgets.end()) widgets.emplace_back(ev.widget);
+        auto const canvases = processor ? mcpWidgetAskCanvases(*processor, widgets)
+                                        : std::vector<juce::String>(widgets.size(), juce::String("main"));
+        for (auto const& ev : events) {
+            auto const at = static_cast<std::size_t>(std::find(widgets.begin(), widgets.end(), ev.widget) - widgets.begin());
+            juce::Array<juce::var> args;
+            args.add(juce::String(ev.kind == mcp::WidgetAskKind::Hello ? "hello" : "ask"));
+            args.add(canvases[at]); // the tab the widget sits in (its wire key), else "main": the focused tab, the key every verb takes
+            args.add(juce::String::fromUTF8(ev.widget));
+            args.add(ev.rev);
+            sendReply("/pd/widget_ask", args);
+        }
     }
     auto const c = widgetAsk->queue.takeCounts();
     if (processor && (c.malformed || c.rateLimited || c.full)) {
