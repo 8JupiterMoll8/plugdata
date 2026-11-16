@@ -6409,6 +6409,73 @@ void runZeroArgCases(Harness& h)
 // back), over v2 only the router's final unknown{no_reply_verb}; two slots on the session's board (N4): busy -> the
 // activity slot only, a final say -> the line slot and activity cleared, a later busy refresh of that turn dropped;
 // cut at 90 code points; dropped after ttlMs; a say that breaks the contract changes nothing.
+// The bridge's chat lines reach the sidebar's one slot (setChatCallback) AND any number of keyed listeners
+// (addChatListener: the canvas pill's answer line), the sidebar first; a listener replaces itself per owner and
+// stops with removeChatListener; the sidebar's slot is untouched by all of it. Lines arrive on the message thread.
+void runChatListenerCases(Harness& h, MCPBridge& bridge)
+{
+    std::printf("chat listeners (pill answer line)\n");
+    std::mutex mutex;
+    std::vector<std::string> seen; // "<who>:<role>:<text>" in arrival order
+    auto const record = [&](char const* who) {
+        return [&mutex, &seen, who](juce::String const& role, juce::String const& text) {
+            std::lock_guard<std::mutex> lock(mutex);
+            seen.push_back(std::string(who) + ":" + role.toStdString() + ":" + text.toStdString());
+        };
+    };
+    auto const waitFor = [&](size_t n) {
+        for (int waited = 0; waited < 3000; waited += 10) {
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                if (seen.size() >= n) return true;
+            }
+            sleepMs(10);
+        }
+        return false;
+    };
+    auto const snapshot = [&] {
+        std::lock_guard<std::mutex> lock(mutex);
+        return seen;
+    };
+    int ownerA = 0;
+    int ownerB = 0;
+
+    // The sidebar's slot and one listener: both see the line, the sidebar first.
+    bridge.setChatCallback(record("sidebar"));
+    bridge.addChatListener(&ownerA, record("pillA"));
+    h.fire("/chat/msg", { "ai", "Warm saw." });
+    CHECK(waitFor(2));
+    auto lines = snapshot();
+    CHECK(lines.size() == 2 && lines[0] == "sidebar:ai:Warm saw." && lines[1] == "pillA:ai:Warm saw.");
+
+    // A second owner is a second listener; the same owner again replaces its listener (never two of one owner).
+    bridge.addChatListener(&ownerB, record("pillB"));
+    bridge.addChatListener(&ownerA, record("pillA2"));
+    h.fire("/chat/msg", { "detail", "The long answer." });
+    CHECK(waitFor(5));
+    lines = snapshot();
+    CHECK(lines.size() == 5 && lines[2] == "sidebar:detail:The long answer." && lines[3] == "pillA2:detail:The long answer." && lines[4] == "pillB:detail:The long answer.");
+
+    // A removed listener gets nothing more; the sidebar and the other listener still do.
+    bridge.removeChatListener(&ownerA);
+    bridge.removeChatListener(&ownerA); // removing twice is harmless
+    h.fire("/chat/msg", { "thought", "Thinking..." });
+    CHECK(waitFor(7));
+    lines = snapshot();
+    CHECK(lines.size() == 7 && lines[5] == "sidebar:thought:Thinking..." && lines[6] == "pillB:thought:Thinking...");
+
+    // The sidebar's slot cleared (the panel is gone): the listeners keep working, nothing crashes.
+    bridge.setChatCallback(nullptr);
+    h.fire("/chat/msg", { "user", "more bite" });
+    CHECK(waitFor(8));
+    lines = snapshot();
+    CHECK(lines.size() == 8 && lines[7] == "pillB:user:more bite");
+
+    bridge.removeChatListener(&ownerB);
+    sleepMs(100);
+    CHECK(snapshot().size() == 8);
+}
+
 void runAlphiSayCases(Harness& h, PluginProcessor& processor)
 {
     std::printf("Alphi says (alphi drop 1 W)\n");
@@ -6863,6 +6930,7 @@ int main()
             runMidiDevicesCases(harness, processor);
             runApprovalCases(harness, processor);
             runAlphiSayCases(harness, processor);
+            runChatListenerCases(harness, *bridge);
             runLimiterPatchCases(processor);
             runVolumeGuardCases(processor);
             runIndexRefCases(harness, processor);

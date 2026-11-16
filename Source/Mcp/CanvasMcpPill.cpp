@@ -569,3 +569,119 @@ void CanvasMcpLayer::sendPillPrompt(const juce::String& prompt, bool queueForCha
     }
     if (auto* br = canvas.pd->getMcp()->getMCPBridge()) br->sendSelectionPrompt(prompt, targetIds, queueForChat);
 }
+
+// ── The pill's answer line (McpPillAnswer.h) ─────────────────────────────────────────────────────────────────────────
+// The newest AI chat line, shown as one short line under the pill's place for ~8 s. The pill itself hides on a send, so
+// the line hangs on the pill's LAST frame (kept after the pill hides), not on the editor. Layout and the fade clock are
+// message-thread only; the text is cut to one pixel line here (the plain-text cleaning is McpPillAnswer.h).
+namespace {
+constexpr float answerChipH = 20.0f;
+constexpr float answerChipPadX = 11.0f;
+constexpr int answerHoldTickMs = 250; // while the line holds: only a tick to notice the fade start
+constexpr int answerFadeTickMs = 50;  // while it fades: smooth enough, ~20 Hz on a 20 px strip
+
+std::int64_t answerNowMs()
+{
+    return juce::Time::currentTimeMillis();
+}
+
+// Whole text if it fits `room` pixels, else the longest start of it that fits with "..." (binary search on code points).
+juce::String fitAnswerToWidth(NVGcontext* nvg, juce::String const& text, float room)
+{
+    auto const widthOf = [nvg](juce::String const& s) {
+        float b[4];
+        mcpnvg::nvgTextBounds(nvg, 0.0f, 0.0f, s.toRawUTF8(), nullptr, b);
+        return b[2] - b[0];
+    };
+    if (widthOf(text) <= room)
+        return text;
+    int lo = 0;
+    int hi = text.length();
+    while (lo < hi) {
+        int const mid = (lo + hi + 1) / 2;
+        if (widthOf(text.substring(0, mid) + "...") <= room)
+            lo = mid;
+        else
+            hi = mid - 1;
+    }
+    return text.substring(0, lo).trimEnd() + "...";
+}
+} // namespace
+
+void CanvasMcpLayer::onChatLine(juce::String const& role, juce::String const& text)
+{
+    if (!mcpPillAnswer.onChat(role.toStdString(), text.toStdString(), answerNowMs()))
+        return;
+    repaintPillAnswer(); // the new line, or the erased one
+    if (mcpPillAnswer.line().empty()) {
+        if (mcpPillAnswerTimer)
+            mcpPillAnswerTimer->stopTimer();
+        return;
+    }
+    if (!mcpPillAnswerTimer)
+        mcpPillAnswerTimer = std::make_unique<PillAnswerTimer>(this);
+    mcpPillAnswerTimer->startTimer(answerHoldTickMs);
+}
+
+void CanvasMcpLayer::PillAnswerTimer::timerCallback()
+{
+    if (!canvas) {
+        stopTimer();
+        return;
+    }
+    float const alpha = canvas->mcpPillAnswer.alpha(answerNowMs());
+    canvas->repaintPillAnswer(); // at alpha 0 this erases the last drawn chip
+    if (alpha <= 0.0f)
+        stopTimer();
+    else
+        startTimer(alpha >= 1.0f ? answerHoldTickMs : answerFadeTickMs);
+}
+
+void CanvasMcpLayer::repaintPillAnswer()
+{
+    if (mcpSelectionPillFrame.isEmpty())
+        return;
+    auto const f = mcpSelectionPillFrame;
+    auto const area = juce::Rectangle<int>(f.getX() - 4, f.getBottom() + 2, std::max(f.getWidth(), 380) + 8, static_cast<int>(answerChipH) + 14);
+    canvas.repaint(area);
+    if (auto* ed = canvas.editor) {
+        auto& surface = ed->nvgSurface;
+        auto dirty = surface.getLocalArea(&canvas, area);
+        if (canvas.viewport)
+            dirty = dirty.getIntersection(surface.getLocalArea(canvas.viewport.get(), canvas.viewport->getLocalBounds()));
+        if (!dirty.isEmpty())
+            surface.invalidateArea(dirty);
+    }
+}
+
+void CanvasMcpLayer::paintPillAnswer(NVGcontext* nvg)
+{
+    float const alpha = mcpPillAnswer.alpha(answerNowMs());
+    if (alpha <= 0.0f || mcpSelectionPillFrame.isEmpty())
+        return;
+    // An open drawer or palette sits right under the pill: no chip on top of it.
+    if (mcpSelectionPill && mcpSelectionPill->isVisible() && mcpPillDrawerMode != 0)
+        return;
+
+    auto const frame = mcpSelectionPillFrame;
+    float const maxW = static_cast<float>(std::max(frame.getWidth(), 380));
+    NVGScopedState scoped(nvg);
+    mcpnvg::nvgFontFace(nvg, "Inter");
+    mcpnvg::nvgFontSize(nvg, 11.5f);
+    mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+    auto const shown = fitAnswerToWidth(nvg, juce::String::fromUTF8(mcpPillAnswer.line().c_str()), maxW - answerChipPadX * 2.0f - 6.0f);
+    float tb[4];
+    mcpnvg::nvgTextBounds(nvg, 0.0f, 0.0f, shown.toRawUTF8(), nullptr, tb);
+    float const w = (tb[2] - tb[0]) + answerChipPadX * 2.0f + 6.0f;
+    float const x = static_cast<float>(frame.getX());
+    float const y = static_cast<float>(frame.getBottom()) + 6.0f;
+    auto const a = [alpha](float v) { return static_cast<unsigned char>(juce::jlimit(0.0f, 255.0f, v * alpha)); };
+
+    nanovg::nvgDrawRoundedRect(nvg, x, y, w, answerChipH, nanovg::nvgRGBA(18, 20, 24, a(238.0f)), nanovg::nvgRGBA(74, 158, 255, a(170.0f)), 6.0f);
+    nanovg::nvgBeginPath(nvg);
+    nanovg::nvgCircle(nvg, x + 9.0f, y + answerChipH * 0.5f, 2.5f);
+    nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(120, 190, 255, a(230.0f)));
+    nanovg::nvgFill(nvg);
+    nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(220, 232, 246, a(245.0f)));
+    mcpnvg::nvgText(nvg, x + answerChipPadX + 6.0f, y + answerChipH * 0.5f, shown.toRawUTF8(), nullptr);
+}

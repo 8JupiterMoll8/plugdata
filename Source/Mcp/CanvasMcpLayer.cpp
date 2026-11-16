@@ -23,6 +23,20 @@ CanvasMcpLayer::CanvasMcpLayer(Canvas& c)
     : canvas(c)
 {
     mcpAlphiMouseTracker = std::make_unique<AlphiMouseTracker>(*this);
+    // The pill's answer line reads the bridge's chat lines after the sidebar (one more reader, keyed by this layer).
+    if (canvas.pd) {
+        if (auto* bridge = canvas.pd->getMcp()->getMCPBridge())
+            bridge->addChatListener(this, [this](juce::String const& role, juce::String const& text) { onChatLine(role, text); });
+    }
+}
+
+CanvasMcpLayer::~CanvasMcpLayer()
+{
+    // Canvas::~Canvas resets the layer while the processor and the bridge are alive (the editors go first, McpHost.cpp).
+    if (canvas.pd) {
+        if (auto* bridge = canvas.pd->getMcp()->getMCPBridge())
+            bridge->removeChatListener(this);
+    }
 }
 
 
@@ -1080,6 +1094,9 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
             mcpPaletteFrame = {};
         }
     }
+
+    // The AI's newest chat line, one short line under the pill's place (CanvasMcpPill.cpp, McpPillAnswer.h).
+    paintPillAnswer(nvg);
 
     // Big Alphi 1a0: Alphi's corner first (no box, chip stack, pill or drawer under it), so the chips are laid out
     // around the corner it takes (CanvasMcpFlow.cpp, McpAlphiDock.h).

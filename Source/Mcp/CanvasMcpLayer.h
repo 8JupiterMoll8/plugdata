@@ -24,6 +24,7 @@
 #include "Mcp/McpApprovalState.h" // P12c / P12a.1: ApprovalRect for the chips and Alphi
 #include "Mcp/McpAlphiDock.h"     // big Alphi 1a0: where Alphi docks
 #include "Mcp/McpAlphiMotion.h"   // Alphi drop 1: motion repaints, the line clock
+#include "Mcp/McpPillAnswer.h"     // the newest AI chat line, shown briefly under the pill
 struct NVGcontext;
 
 class Canvas;
@@ -33,6 +34,7 @@ class Connection;
 class CanvasMcpLayer {
 public:
     explicit CanvasMcpLayer(Canvas& canvas);
+    ~CanvasMcpLayer();
 
     // Paint hooks, in paint order (Canvas::performRender).
     // After the grid, before the border: regions, reference images, voice and MIDI takes.
@@ -192,6 +194,20 @@ public:
         CanvasMcpLayer* canvas;
     };
     std::unique_ptr<SelectionPillAnimator> mcpPillAnimator;
+
+    // The pill's answer line: the newest AI chat line (`/chat/msg ai`) as one short line under the pill's place, holding
+    // ~7 s and fading ~1 s, cleared by the artist's next prompt (McpPillAnswer.h). The sidebar keeps every line: this
+    // layer is one more reader of the bridge's chat lines (MCPBridge::addChatListener), not a replacement of its slot.
+    mcp::PillAnswer mcpPillAnswer;
+    struct PillAnswerTimer : public juce::Timer {
+        explicit PillAnswerTimer(CanvasMcpLayer* c) : canvas(c) {}
+        void timerCallback() override;
+        CanvasMcpLayer* canvas;
+    };
+    std::unique_ptr<PillAnswerTimer> mcpPillAnswerTimer;
+    void onChatLine(juce::String const& role, juce::String const& text);
+    void paintPillAnswer(NVGcontext* nvg);
+    void repaintPillAnswer(); // the strip under the pill's last place, not the whole canvas
 
     struct SketchPoint {
         float x = 0.0f;

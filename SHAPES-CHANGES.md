@@ -112,6 +112,12 @@ as the fork now answers them. Nothing in the plan's shapes was removed or rename
 ## `/chat/msg` roles
 19d. Role `detail` (a long answer) is shown in the Copilot sidebar as an AI message. The only reader of `/chat/msg` is the sidebar
     panel (`CopilotPanel::receiveMessage`), so it appears nowhere else; roles `ai`, `error`, `user`, `thought` are unchanged.
+19e. Role `ai` is also shown on the canvas: as ONE short line under the place of the selection pill (its last frame: the pill
+    hides on a send, the answer arrives after), about 8 s (7 s hold, 1 s fade), cleared early by the artist's next prompt
+    (role `user`). The text is one plain line (breaks and control characters become spaces, markdown backticks dropped, cut at
+    160 characters with "...", then cut again by width). `detail`, `thought` and `error` are not shown there. The sidebar still
+    receives every role first: the canvas is one more reader of the bridge's chat lines (`MCPBridge::addChatListener`, keyed by
+    its owner), `setChatCallback` stays the sidebar's single slot. No wire change.
 
 ## `by` limits (truth)
 20a. **Review H2:** `by` (in `last`, `ctl[].by`, `ctl[].from[].by`) is `"ai"`, `"other"` or **null** = not known: the

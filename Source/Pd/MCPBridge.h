@@ -538,6 +538,12 @@ public:
     // AI Copilot Chat callback: role ("user", "ai", "thought", "error"), text
     void setChatCallback(std::function<void(const juce::String& role, const juce::String& text)> cb);
     void postChatMessage(const juce::String& role, const juce::String& text);
+    // More readers of the chat lines than the sidebar's one slot (setChatCallback stays CopilotPanel's single slot): the
+    // canvas layers' pill answer line registers here, keyed by its address. A listener runs on the message thread, under
+    // chatLock, after the sidebar's callback (so the sidebar always gets every line first), and must not add or remove
+    // listeners itself.
+    void addChatListener(void const* owner, std::function<void(const juce::String& role, const juce::String& text)> cb);
+    void removeChatListener(void const* owner);
     // Voice & Beatbox Capture Engine. mode: 0 = auto-classify, 1 = melody
     // (artist declared "sing"), 2 = beat (artist declared "beatbox").
     // maxSeconds = safety ceiling only — the artist decides the real length by
@@ -911,6 +917,7 @@ private:
 
     std::function<void(const juce::String&, const juce::String&)> chatCallback;
     juce::CriticalSection chatLock;
+    std::vector<std::pair<void const*, std::function<void(const juce::String&, const juce::String&)>>> chatListeners; // under chatLock
 
     std::atomic<bool> shuttingDown { false };
     juce::ThreadPool jobPool { 2 }; // P3.4 S8: offline render, voice analysis
