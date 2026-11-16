@@ -22,6 +22,7 @@
 #include "CanvasViewport.h"
 #include "Object.h"
 #include "Pd/MCPBridge.h"
+#include "Sidebar/CopilotModuleRack.h"
 
 class CopilotPanel final : public Component, private juce::Timer {
 public:
@@ -31,73 +32,6 @@ public:
         juce::String role; // "user", "thought", "ai", "error" ("detail" is stored as "ai")
         juce::String text;
         juce::Time time;
-    };
-
-    // Drag a ready-made widget onto the canvas. Upstream's ObjectDragAndDrop is a
-    // final singleton now, started with attachToMouse (same idiom as AddObjectMenu).
-    class DraggableWidgetCard final : public Component {
-    public:
-        DraggableWidgetCard(PluginEditor* e, const juce::String& name, const juce::String& sub, juce::Colour dotCol, const juce::String& patchText)
-            : editor(e), widgetName(name), subText(sub), accentDot(dotCol), patchString(patchText)
-        {}
-
-        void mouseDown(const MouseEvent&) override { dragStarted = false; }
-
-        void mouseDrag(const MouseEvent& e) override
-        {
-            if (!dragStarted && e.getDistanceFromDragStart() > 3) {
-                dragStarted = true;
-                ObjectDragAndDrop::attachToMouse(editor, patchString);
-            }
-        }
-
-        void paint(Graphics& g) override
-        {
-            auto b = getLocalBounds().toFloat().reduced(1.0f);
-            auto const bgCol = findColour(PlugDataColour::sidebarBackgroundColourId);
-            auto const activeCol = findColour(PlugDataColour::toolbarActiveColourId);
-            bool const dark = (bgCol.getPerceivedBrightness() < 0.5f);
-            bool const over = hovered; // from mouseEnter/Exit: isMouseOver() is an XQueryPointer inside paint
-
-            auto cardBg = dark ? juce::Colour(0xff181a1f) : juce::Colour(0xfff6f8fa);
-            auto cardBorder = over ? activeCol : (dark ? juce::Colour(0xff333842) : juce::Colour(0xffd0d7de));
-
-            g.setColour(cardBg);
-            g.fillRoundedRectangle(b, 6.0f);
-
-            g.setColour(cardBorder);
-            g.drawRoundedRectangle(b, 6.0f, over ? 1.5f : 1.0f);
-
-            // LED dot indicator
-            g.setColour(accentDot.withAlpha(over ? 1.0f : 0.85f));
-            g.fillEllipse(b.getX() + 8.0f, b.getCentreY() - 3.5f, 7.0f, 7.0f);
-
-            // Title
-            auto font = Fonts::getBoldFont().withHeight(12.5f);
-            g.setFont(font);
-            g.setColour(dark ? juce::Colour(0xfff0f2f5) : juce::Colour(0xff181a1f));
-            g.drawText(widgetName, juce::Rectangle<float>(b.getX() + 20.0f, b.getY() + 3.0f, b.getWidth() - 24.0f, 15.0f),
-                       juce::Justification::centredLeft, true);
-
-            // Subtitle
-            auto subFont = Fonts::getDefaultFont().withHeight(10.5f);
-            g.setFont(subFont);
-            g.setColour(dark ? juce::Colour(0xff8b949e) : juce::Colour(0xff57606a));
-            g.drawText(subText, juce::Rectangle<float>(b.getX() + 20.0f, b.getY() + 18.0f, b.getWidth() - 24.0f, 13.0f),
-                       juce::Justification::centredLeft, true);
-        }
-
-        void mouseEnter(const MouseEvent&) override { hovered = true; repaint(); }
-        void mouseExit(const MouseEvent&) override { hovered = false; repaint(); }
-
-    private:
-        PluginEditor* editor;
-        bool hovered = false;
-        bool dragStarted = false;
-        juce::String widgetName;
-        juce::String subText;
-        juce::Colour accentDot;
-        juce::String patchString;
     };
 
     class ShelfBar final : public Component {
@@ -815,8 +749,7 @@ public:
     CopilotPanel(PluginProcessor* processor, PluginEditor* parentEditor)
         : pd(processor)
         , editor(parentEditor)
-        , midiWidgetCard(parentEditor, "ai.midi", "MIDI Looper - Drag", juce::Colour(0xffb388ff), "#X obj 0 0 ai.midi 240 64;\n")
-        , voiceWidgetCard(parentEditor, "ai.voice", "Mic Capsule - Drag", juce::Colour(0xff00e676), "#X obj 0 0 ai.voice 240 64;\n")
+        , rack(parentEditor)
         , inputCapsule(this)
     {
         // Clear Button
@@ -839,15 +772,17 @@ public:
         headerTitleLabel.setColour(Label::textColourId, findColour(PlugDataColour::sidebarTextColourId));
         addAndMakeVisible(headerTitleLabel);
 
-        // Rack Label
-        rackLabel.setText("MODULE RACK  -  DRAG TO PATCH", juce::dontSendNotification);
+        // Rack Label: a click on its row folds / unfolds the rack (mouseUp below)
         rackLabel.setFont(Fonts::getBoldFont().withHeight(10.0f));
         rackLabel.setColour(Label::textColourId, findColour(PlugDataColour::sidebarTextColourId).withAlpha(0.6f));
+        rackLabel.setInterceptsMouseClicks(false, false);
+        updateRackLabel();
         addAndMakeVisible(rackLabel);
 
-        // Drag to patch widgets
-        addAndMakeVisible(midiWidgetCard);
-        addAndMakeVisible(voiceWidgetCard);
+        // The module rack: one card per ai.* widget, in groups, drag to patch (CopilotModuleRack.h)
+        rackViewport.setScrollBarsShown(true, false, false, false);
+        rackViewport.setViewedComponent(&rack, false);
+        addAndMakeVisible(rackViewport);
 
         // Chat Viewport
         viewport.setScrollBarsShown(true, false, false, false);
@@ -892,6 +827,16 @@ public:
     }
 
     void setTab(PanelTab) {}
+
+    // A click on the rack's title row folds or unfolds the module rack.
+    void mouseUp(MouseEvent const& e) override
+    {
+        if (e.mouseWasDraggedSinceMouseDown() || !rackLabelRow.contains(e.getPosition()))
+            return;
+        rackOpen = !rackOpen;
+        updateRackLabel();
+        resized();
+    }
 
     // The badge pulse: 10 Hz is smooth enough for a slow sine and costs a badge repaint each tick.
     static constexpr int thinkingTimerHz = 10;
@@ -982,16 +927,16 @@ public:
         header.removeFromRight(6);
         headerTitleLabel.setBounds(header);
 
-        // 2. Rack title (height 14)
-        auto rLabel = bounds.removeFromTop(14).reduced(10, 0);
-        rackLabel.setBounds(rLabel);
+        // 2. Rack title (height 16): the whole row is the fold click
+        rackLabelRow = bounds.removeFromTop(16);
+        rackLabel.setBounds(rackLabelRow.reduced(10, 0));
 
-        // 3. Drag-to-canvas widgets strip (height 38)
-        auto widgetsStrip = bounds.removeFromTop(38).reduced(10, 2);
-        int const cardW = (widgetsStrip.getWidth() - 8) / 2;
-        midiWidgetCard.setBounds(widgetsStrip.removeFromLeft(cardW));
-        widgetsStrip.removeFromLeft(8);
-        voiceWidgetCard.setBounds(widgetsStrip);
+        // 3. The module rack: a scrolling list of cards (rackViewH tall; folded away it takes nothing)
+        rackViewport.setVisible(rackOpen);
+        if (rackOpen) {
+            rackViewport.setBounds(bounds.removeFromTop(rackViewH).reduced(6, 2));
+            rack.setSize(std::max(10, rackViewport.getMaximumVisibleWidth()), CopilotModuleRack::getContentHeight());
+        }
 
         // 4. Bottom dock: Shelf bar (26px) + Input Capsule (46px)
         int const shelfH = 26;
@@ -1085,8 +1030,16 @@ private:
     Label rackLabel;
     SmallIconButton clearButton = SmallIconButton(Icons::Trash);
 
-    DraggableWidgetCard midiWidgetCard;
-    DraggableWidgetCard voiceWidgetCard;
+    static constexpr int rackViewH = 156; // about three cards; the list scrolls
+    bool rackOpen = true;
+    Rectangle<int> rackLabelRow;
+    CopilotModuleRack rack;
+    BouncingViewport rackViewport;
+
+    void updateRackLabel()
+    {
+        rackLabel.setText(rackOpen ? "MODULE RACK  -  DRAG TO PATCH  (click to hide)" : "MODULE RACK  (click to show)", juce::dontSendNotification);
+    }
 
     BouncingViewport viewport;
     ChatListContent chatContent;

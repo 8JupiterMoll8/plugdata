@@ -143,3 +143,14 @@ as the fork now answers them. Nothing in the plan's shapes was removed or rename
 21. Not journalled, so the ids are lost as before: encapsulate, triggerize, the children of a deleted subpatch, and a
     cut -> paste -> undo -> redo chain (the paste makes new boxes). An editor-delete id comes back only with the undo
     of that very delete (review H1), never by place alone.
+
+## The Copilot module rack (sidebar), no wire change
+19h. The sidebar's "MODULE RACK" (it held two cards, ai.midi and ai.voice) lists one card per ai.* widget in groups: IDEA KIT
+    (ai.sketch, ai.note, ai.paint, ai.grid), RHYTHM (ai.tap, ai.loop~), MELODY (ai.draw, ai.midi, ai.voice, ai.listen), SOUND
+    (ai.knob, ai.dice), SYSTEM (ai.strip, ai.jobs). A card shows the group's colour dot, the name, a one-line purpose (the gallery's
+    comments) and an optional thumbnail; dragging it to a patch creates `ai.<word>` (`ai.midi 240 64`, `ai.voice 240 72`;
+    `ai.loop~ loop<n>` with the lowest n no open tab uses, since a looper's name is its shared bus; ai.note is ELSE's
+    `note 280 16 Inter empty 0 18 18 18 0 247 194 20 1 0 sticky note`). The list scrolls inside the panel; a click on the rack's title
+    row folds it. Thumbnails are read, never made: `<app data dir>/Abstractions/thumbs/<name>.png` (odd characters in the name,
+    the `~`, become `_`: `ai.loop_.png`), looked up again each time the rack is shown. Table and helpers: `Source/Mcp/McpWidgetRack.h`
+    (JUCE-free, `Tests/mcp/widget_rack_test.cpp`); cards and list: `Source/Sidebar/CopilotModuleRack.h`.
