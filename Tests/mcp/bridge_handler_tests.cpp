@@ -56,6 +56,7 @@
 #include "Pd/MCPBridgePdAccessors.h" // slice 3 review H2: mcp_last_seq
 #include "Pd/MCPBridgeCmdCommon.h" // armedSpectralJson / renderSpectralJson (Plan 5 spectral window)
 #include "Pd/MCPBridgeBound.h" // delta review: placedAmong (clone voices, walk limit)
+#include "Pd/MCPBridgeObjectValues.h" // mcpResolveInlet: pd-lua objects are CLASS_NOINLET (set reaches their proxy inlets)
 #include <juce_cryptography/juce_cryptography.h> // juce::SHA256: the save_content hash (P11.2 V11)
 #include "Utility/PluginParameter.h" // PlugDataParameter: the master volume guard (P5.1 sink floor)
 #include "Mcp/McpPdFile.h" // P11.8 item 3: mcp::fileInPdDir
@@ -2413,6 +2414,191 @@ void runWidgetAskCases(Harness& h, PluginProcessor& processor, MCPBridge& bridge
     sendToAiAsk(host, &s_list, { symAtom("ai.tap"), numAtom(4) });
     auto again = h.replies.waitFor("/pd/widget_ask", 2000);
     CHECK(again && again->str(2) == "ai.tap" && again->num(3) == 4);
+
+}
+
+// pd-lua stand-ins (Libraries/pd-lua/pdlua.c): a Lua object is CLASS_NOINLET (no inlet 0 of its own) and every inlet is an
+// inlet_new proxy; `pd.Receive` makes a "pdlua proxy receive": a 24-byte t_pd + owner + name made with flags 0, on no canvas.
+// These copy that shape (the real classes need Lua files on disk; the Lua route is covered live).
+struct LuaLikeProxy {
+    t_pd pd;
+    int index;
+};
+struct LuaLikeObject {
+    t_object obj;
+    LuaLikeProxy* proxy[2];
+};
+struct LuaProxyReceive {
+    t_pd pd;
+    void* owner;
+    t_symbol* name;
+};
+t_class* luaLikeClass = nullptr;
+t_class* luaLikeProxyClass = nullptr;
+t_class* luaProxyReceiveClass = nullptr;
+std::vector<std::string> luaLikeHits; // "<inlet> <selector> <argc>" or "recv <name> <selector> <argc>"; written under the Pd lock
+
+void luaLikeProxyAnything(LuaLikeProxy* x, t_symbol* s, int argc, t_atom*)
+{
+    luaLikeHits.push_back(std::to_string(x->index) + " " + s->s_name + " " + std::to_string(argc));
+}
+
+void luaProxyReceiveAnything(LuaProxyReceive* x, t_symbol* s, int argc, t_atom*)
+{
+    luaLikeHits.push_back(std::string("recv ") + x->name->s_name + " " + s->s_name + " " + std::to_string(argc));
+}
+
+void* luaLikeNew()
+{
+    auto* x = reinterpret_cast<LuaLikeObject*>(pd_new(luaLikeClass));
+    for (int i = 0; i < 2; ++i) {
+        x->proxy[i] = reinterpret_cast<LuaLikeProxy*>(pd_new(luaLikeProxyClass));
+        x->proxy[i]->index = i;
+        inlet_new(&x->obj, &x->proxy[i]->pd, nullptr, nullptr); // as pdlua_object_createinlets: the Lua inlets are proxies
+    }
+    return x;
+}
+
+void luaLikeFree(LuaLikeObject* x)
+{
+    for (auto* p : x->proxy)
+        if (p) pd_free(&p->pd);
+}
+
+std::vector<std::string> luaLikeHitsNow(McpHost* host)
+{
+    std::vector<std::string> out;
+    host->pdWait([&] { out = luaLikeHits; luaLikeHits.clear(); }, 2000);
+    return out;
+}
+
+// Plan 5 overnight batch 2, items 1 and 2: `set` reaches a pd-lua object's inlets (mcpResolveInlet maps the physical inlet k of a
+// CLASS_NOINLET class to ob_inlet[k]), and send_checked counts a pd-lua `pd.Receive` proxy as a listener (never read as a t_object).
+void runLuaProxyCases(Harness& h, PluginProcessor& processor)
+{
+    std::printf("pd-lua stand-ins: set reaches the proxy inlets, send_checked counts proxy receives\n");
+    auto* host = processor.getMcp();
+    CHECK(host->pdWait([&] {
+        if (luaLikeClass) return;
+        luaLikeProxyClass = class_new(gensym("mcp_lualike_proxy"), nullptr, nullptr, sizeof(LuaLikeProxy), CLASS_PD, static_cast<t_atomtype>(0));
+        class_addanything(luaLikeProxyClass, reinterpret_cast<t_method>(luaLikeProxyAnything));
+        luaLikeClass = class_new(gensym("mcp_lualike"), reinterpret_cast<t_newmethod>(luaLikeNew), reinterpret_cast<t_method>(luaLikeFree),
+            sizeof(LuaLikeObject), CLASS_NOINLET, static_cast<t_atomtype>(0));
+        luaProxyReceiveClass = class_new(gensym("pdlua proxy receive"), nullptr, nullptr, sizeof(LuaProxyReceive), 0, static_cast<t_atomtype>(0));
+        class_addanything(luaProxyReceiveClass, reinterpret_cast<t_method>(luaProxyReceiveAnything));
+    }, 2000));
+    luaLikeHitsNow(host);
+    auto made = h.call("/pd/batch_atomic",
+        { "main", "lp1", 0, 0, 0, 3, 0,
+            "lp_lua", 2600, 40, "obj", "mcp_lualike", 0,
+            "lp_osc", 2600, 100, "obj", "osc~", 1, "440",
+            "lp_r", 2600, 160, "obj", "r", 1, "lp_recv_name",
+            0, 5, 10, 0 },
+        "/pd/batch_atomic/reply/lp1");
+    CHECK(made.has_value() && made->num(0) == 3);
+
+    // 1. The resolver itself: a CLASS_NOINLET object has no inlet 0 of its own (inlet k = ob_inlet[k]); a class with its own
+    //    first inlet is as before (inlet 0 = the object, k = ob_inlet[k-1]); a named [receive] has no inlets at all: the object.
+    CHECK(host->pdWait([&] {
+        auto objectOf = [&](char const* id) -> t_object* {
+            t_gobj* g = host->resolveStableId("main", id);
+            return g ? pd::Interface::checkObject(g) : nullptr;
+        };
+        t_object* lua = objectOf("lp_lua");
+        CHECK(lua && pd_class(&lua->ob_pd)->c_firstin == 0 && lua->ob_inlet && mcp_inlet_next(lua->ob_inlet));
+        if (lua && lua->ob_inlet) {
+            CHECK(mcpResolveInlet(lua, 0) == reinterpret_cast<t_pd*>(lua->ob_inlet));
+            CHECK(mcpResolveInlet(lua, 1) == reinterpret_cast<t_pd*>(mcp_inlet_next(lua->ob_inlet)));
+            CHECK(mcpResolveInlet(lua, 2) == nullptr);
+        }
+        t_object* osc = objectOf("lp_osc");
+        CHECK(osc && pd_class(&osc->ob_pd)->c_firstin != 0 && osc->ob_inlet);
+        if (osc && osc->ob_inlet) {
+            CHECK(mcpResolveInlet(osc, 0) == &osc->ob_pd);
+            CHECK(mcpResolveInlet(osc, 1) == reinterpret_cast<t_pd*>(osc->ob_inlet));
+            CHECK(mcpResolveInlet(osc, 2) == nullptr);
+        }
+        t_object* recv = objectOf("lp_r");
+        CHECK(recv && pd_class(&recv->ob_pd)->c_firstin == 0 && !recv->ob_inlet);
+        if (recv) CHECK(mcpResolveInlet(recv, 0) == &recv->ob_pd);
+    }, 2000));
+
+    // 2. obj_set through the bridge: inlet 0 and 1 of the Lua stand-in reach their proxies (before: "no method for 'tap'" on
+    //    the object itself); an inlet it does not have is refused; osc~'s phase inlet (inlet 1) still works.
+    {
+        auto r0 = h.call("/pd/obj_set", { "main", "lp2", "lp_lua", 0, "tap", 2, 1.0, 2.0 }, "/pd/obj_set/reply/lp2");
+        CHECK(r0.has_value() && r0->num(0) == 1.0);
+        auto r1 = h.call("/pd/obj_set", { "main", "lp3", "lp_lua", 1, "ping", 0 }, "/pd/obj_set/reply/lp3");
+        CHECK(r1.has_value() && r1->num(0) == 1.0);
+        auto const hits = luaLikeHitsNow(host);
+        CHECK(hits.size() == 2);
+        if (hits.size() == 2) {
+            CHECK(hits[0] == "0 tap 2");
+            CHECK(hits[1] == "1 ping 0");
+        }
+        auto r2 = h.call("/pd/obj_set", { "main", "lp4", "lp_lua", 2, "tap", 0 }, "/pd/obj_set/reply/lp4");
+        CHECK(r2.has_value() && r2->str(0).find("could not resolve inlet 2") != std::string::npos);
+        auto r3 = h.call("/pd/obj_set", { "main", "lp5", "lp_osc", 1, "float", 1, 0.5 }, "/pd/obj_set/reply/lp5");
+        CHECK(r3.has_value() && r3->num(0) == 1.0);
+    }
+
+    // 3. send_checked: a name only a pd-lua proxy receive listens on: bound, one proxy, no box to read back, delivered.
+    struct Spot { LuaProxyReceive* proxy = nullptr; };
+    auto bindProxy = [&](char const* name, Spot& spot) {
+        CHECK(host->pdWait([&] {
+            spot.proxy = static_cast<LuaProxyReceive*>(getbytes(sizeof(LuaProxyReceive)));
+            spot.proxy->pd = luaProxyReceiveClass; // as pdlua_proxyreceive_new: malloc'd, its class set by hand
+            spot.proxy->owner = nullptr;
+            spot.proxy->name = gensym(name);
+            pd_bind(&spot.proxy->pd, spot.proxy->name);
+        }, 2000));
+    };
+    auto freeProxy = [&](Spot& spot) {
+        CHECK(host->pdWait([&] {
+            pd_unbind(&spot.proxy->pd, spot.proxy->name);
+            freebytes(spot.proxy, sizeof(LuaProxyReceive));
+            spot.proxy = nullptr;
+        }, 2000));
+    };
+    Spot alone, beside;
+    bindProxy("lp_lua_in", alone);
+    luaLikeHitsNow(host);
+    {
+        auto r = h.call("/pd/send_checked", { "main", "lp6", "lp_lua_in", 1, 3.0 }, "/pd/send_checked/reply/lp6");
+        CHECK(r.has_value());
+        auto const json = r ? parseJson(*r) : juce::var();
+        CHECK(json["refused"].toString().isEmpty());
+        CHECK(static_cast<bool>(json["bound"]) && static_cast<bool>(json["delivered"]));
+        CHECK(static_cast<int>(json["proxies"]) == 1);
+        CHECK(json["receivers"].getArray() && json["receivers"].getArray()->isEmpty());
+        auto const hits = luaLikeHitsNow(host);
+        CHECK(hits.size() == 1 && hits[0].rfind("recv lp_lua_in ", 0) == 0 && hits[0].back() == '1'); // Pd hands an anything-only class a lone float as `list`, 1 atom
+    }
+    // ... and beside a real [r]: both get it, only the box is read back, `proxies` counts the proxy.
+    bindProxy("lp_recv_name", beside);
+    {
+        auto r = h.call("/pd/send_checked", { "main", "lp7", "lp_recv_name", 1, 5.0 }, "/pd/send_checked/reply/lp7");
+        CHECK(r.has_value());
+        auto const json = r ? parseJson(*r) : juce::var();
+        CHECK(json["refused"].toString().isEmpty());
+        CHECK(static_cast<bool>(json["bound"]) && static_cast<bool>(json["delivered"]));
+        CHECK(static_cast<int>(json["proxies"]) == 1);
+        auto const* recv = json["receivers"].getArray();
+        CHECK(recv && recv->size() == 1);
+        if (recv && recv->size() == 1) CHECK((*recv)[0]["tempId"].toString() == "lp_r" && (*recv)[0]["class"].toString() == "receive");
+        auto const hits = luaLikeHitsNow(host);
+        CHECK(hits.size() == 1 && hits[0].rfind("recv lp_recv_name ", 0) == 0 && hits[0].back() == '1');
+    }
+    // An ordinary name: `proxies` is 0 and present; nothing listens on an unbound one.
+    {
+        auto r = h.call("/pd/send_checked", { "main", "lp8", "lp_nobody_listens", 1, 1.0 }, "/pd/send_checked/reply/lp8");
+        auto const json = r ? parseJson(*r) : juce::var();
+        CHECK(r.has_value() && !static_cast<bool>(json["bound"]) && static_cast<int>(json["proxies"]) == 0);
+    }
+    freeProxy(alone);
+    freeProxy(beside);
+
+    h.call("/pd/batch_atomic", { "main", "lp9", 3, 0, 0, 0, 0, "lp_lua", "lp_osc", "lp_r", 0, 5, 10, 0 }, "/pd/batch_atomic/reply/lp9");
 }
 
 void runControlTruthCases(Harness& h, PluginProcessor& processor)
@@ -6424,6 +6610,7 @@ int main()
             runAcTapCases(harness, processor, audioControl);
             runInletValueCases(harness);
             runControlTruthCases(harness, processor);
+            runLuaProxyCases(harness, processor);
             runWidgetAskCases(harness, processor, *bridge, [&] {
                 bridge->setReplySinkForTests([&replies](juce::OSCMessage const& msg) { replies.push(msg); });
             });

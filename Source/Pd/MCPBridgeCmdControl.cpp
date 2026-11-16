@@ -155,10 +155,13 @@ void MCPBridge::handleChatDomain(const juce::String& action, const juce::OSCMess
 // A send to a Pd name that says what happened, from C++ reads: who listens (MCPBridgeBound.h), whether a console line
 // came while it was delivered (Pd prints synchronously), and per receiver what it holds now. Refuses Pd's own names
 // (fail closed: `pd`, `pd-*`, `#*`, `.*`, `mcp_host`, and any name that also reaches something that is not a box: a
-// canvas by namecanvas, an array, a dialog stub); an unbound name is answered without sending. Runs in the Pd context
+// canvas by namecanvas, an array, a dialog stub); an unbound name is answered without sending. A pd-lua `pd.Receive`
+// proxy ("pdlua proxy receive", not a box) is a listener: counted as `proxies` (never read as a t_object, review H5), the
+// name is sent to when there are boxes or proxies, and only the boxes are read back (a name with proxies alone has
+// `bound: true`, `receivers: []`, and `delivered` says a Lua object took it and no console line came). Runs in the Pd context
 // (message thread under the Pd lock). Realtime /param and /trigger stay as they are (sequences). Atoms as obj_set:
 // floats as floats, strings as symbols ("s:" prefix optional). Reply /pd/send_checked/reply/<corrId>:
-// {name, bound, receivers:[{tempId, class, readBack:{value, source, reason}}], delivered, console:[{tempId, text}],
+// {name, bound, proxies, receivers:[{tempId, class, readBack:{value, source, reason}}], delivered, console:[{tempId, text}],
 // refused[, refusedClass]}. A delivered send also writes the /param shadow (/pd/param_get). On a Pd-context timeout
 // bound is null (not known) and `error` says so.
 namespace {
@@ -173,6 +176,16 @@ juce::String refusedName(juce::String const& name)
     if (name.startsWith(".")) return "a reserved name (.x...: Pd's own window names): never sent from the AI";
     if (name == "mcp_host") return "the bridge's own name: never sent from the AI";
     return {};
+}
+
+// pd-lua's `pd.Receive` proxy (pdlua.c t_pdlua_proxyreceive: a t_pd + owner + name, 24 bytes, its class made with flags 0 so
+// pd_checkobject passes on it). It is a listener of the name, not a box: reading it as a t_object overreads the heap
+// (review H5), so it is recognised by its class NAME alone (`*b` is the class pointer: no struct field is read), counted
+// and delivered to, never read.
+bool isLuaProxyReceive(t_pd* b)
+{
+    char const* const cls = b ? class_getname(*b) : nullptr;
+    return cls && std::strcmp(cls, "pdlua proxy receive") == 0;
 }
 
 // What a receiver holds after the send: a GUI's value; else the record this send left on one of its outlet wires.
@@ -231,6 +244,7 @@ void MCPBridge::pdSendChecked(const juce::String& action, const juce::OSCMessage
     juce::var const rootVar(root);
     root->setProperty("name", name);
     root->setProperty("bound", false);
+    root->setProperty("proxies", 0);
     root->setProperty("receivers", juce::Array<juce::var>());
     root->setProperty("delivered", false);
     root->setProperty("console", juce::Array<juce::var>());
@@ -257,10 +271,18 @@ void MCPBridge::pdSendChecked(const juce::String& action, const juce::OSCMessage
         }
         t_symbol* sym = mcp::bound::findSymbolNoCreate(name.toRawUTF8());
         auto const binders = mcp::bound::bindersOf(sym);
-        std::vector<t_object*> receivers;
-        auto const placed = mcp::bound::placedAmong(binders); // review H5: only a placed box is read as a t_object
+        // pd-lua proxy receives are listeners that are not boxes: counted here, never read as a t_object (review H5), and
+        // kept out of the placed-box walk (they are on no canvas, so the walk could never stop early for them).
+        int proxies = 0;
+        std::vector<t_pd*> candidates;
         for (auto* b : binders) {
             if (mcpCtrlReceiverClass && *b == mcpCtrlReceiverClass) continue; // the bridge's own probe
+            if (isLuaProxyReceive(b)) ++proxies;
+            else candidates.push_back(b);
+        }
+        std::vector<t_object*> receivers;
+        auto const placed = mcp::bound::placedAmong(candidates); // review H5: only a placed box is read as a t_object
+        for (auto* b : candidates) {
             t_object* o = (*b == canvas_class || placed.found.count(b) == 0) ? nullptr : pd_checkobject(b);
             if (!o && *b != canvas_class && placed.walkLimit) {
                 // The walk stopped at its cap before it found this binder: it may be a box; not known, so not sent.
@@ -270,15 +292,17 @@ void MCPBridge::pdSendChecked(const juce::String& action, const juce::OSCMessage
             }
             if (!o) {
                 // Review M6, fail closed: the name also reaches something that is not a box (a canvas by namecanvas,
-                // an array, a dialog stub, a pd-lua pd.Receive proxy: review H5): never sent.
+                // an array, a dialog stub, any other class that sits on no canvas: review H5): never sent. (pd-lua's
+                // pd.Receive proxy is the one such class that is a listener: counted above.)
                 root->setProperty("refused", "non-object binder"); // server review B: the exact word
                 root->setProperty("refusedClass", juce::String::fromUTF8(class_getname(*b)));
                 return;
             }
             receivers.push_back(o);
         }
-        root->setProperty("bound", !receivers.empty());
-        if (receivers.empty()) return; // nothing listens: nothing is sent
+        root->setProperty("bound", !receivers.empty() || proxies > 0);
+        root->setProperty("proxies", proxies);
+        if (receivers.empty() && proxies == 0) return; // nothing listens: nothing is sent
 
         t_symbol* selector = atoms.empty() ? &s_bang
             : atoms.size() == 1 && atoms[0].a_type == A_FLOAT ? &s_float

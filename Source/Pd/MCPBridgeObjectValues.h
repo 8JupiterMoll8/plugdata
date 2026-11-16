@@ -13,15 +13,22 @@
 #include "MCPBridgePdAccessors.h"
 #include "MCPBridgeInletValues.h" // truth slice 3: read-back through the inlet facts
 
-// Resolve the pd target for a given inlet index. <=0 -> the object itself. Walks Pd's inlet list through the fork's
-// accessor (patches/submodules/pure-data/0004; review 2026-11-06: no mirrored struct _inlet). Inlet 0 is the object
-// itself (not in ob_inlet).
+// Resolve the pd target for a given inlet index (the PHYSICAL index, as Pd numbers it: m_obj.c obj_starttraverseinlet,
+// c_firstin + the place in ob_inlet). Walks Pd's inlet list through the fork's accessor (patches/submodules/pure-data/0004;
+// review 2026-11-06: no mirrored struct _inlet).
+//  - A class with its own first inlet (c_firstin): inlet 0 is the object itself (not in ob_inlet), inlet k >= 1 is the
+//    (k-1)-th entry of ob_inlet.
+//  - A CLASS_NOINLET class (c_firstin == 0: pd-lua objects and their `name:gfx` shadow class, every inlet of which is an
+//    inlet_new proxy): there is no inlet 0 of the object's own, so inlet k is the k-th entry of ob_inlet and a `set`
+//    reaches the Lua inlet. With no ob_inlet entry at all (a named [receive], an [inlet]) inlet 0 stays the object itself.
 inline t_pd *mcpResolveInlet(t_object *o, int inletIndex)
 {
     if (!o) return nullptr;
-    if (inletIndex <= 0) return reinterpret_cast<t_pd *>(o);
+    bool const ownFirstInlet = pd_class(&o->ob_pd)->c_firstin != 0;
+    if (inletIndex <= 0 && (ownFirstInlet || !o->ob_inlet)) return reinterpret_cast<t_pd *>(o);
+    int const skip = ownFirstInlet ? inletIndex - 1 : std::max(inletIndex, 0);
     t_inlet *in = o->ob_inlet;
-    for (int i = 1; in && i < inletIndex; ++i) in = mcp_inlet_next(in);
+    for (int i = 0; in && i < skip; ++i) in = mcp_inlet_next(in);
     return in ? reinterpret_cast<t_pd *>(in) : nullptr;
 }
 
