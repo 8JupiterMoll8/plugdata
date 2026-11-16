@@ -58,10 +58,14 @@ void MCPBridge::pumpWidgetAsks()
 {
     if (!widgetAsk) return;
     mcp::WidgetAskEvent e;
+    std::map<std::string, juce::String> canvasOf; // one lookup per widget per pump (a hello burst at load)
     while (widgetAsk->queue.pop(e)) {
+        auto canvas = canvasOf.find(e.widget);
+        if (canvas == canvasOf.end())
+            canvas = canvasOf.emplace(e.widget, processor ? mcpWidgetAskCanvas(*processor, e.widget) : juce::String("main")).first;
         juce::Array<juce::var> args;
         args.add(juce::String(e.kind == mcp::WidgetAskKind::Hello ? "hello" : "ask"));
-        args.add(juce::String("main")); // the focused tab: the key every verb takes for "main"
+        args.add(canvas->second); // the tab the widget sits in (its wire key), else "main": the focused tab, the key every verb takes
         args.add(juce::String::fromUTF8(e.widget));
         args.add(e.rev);
         sendReply("/pd/widget_ask", args);

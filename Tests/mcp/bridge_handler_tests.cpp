@@ -2415,6 +2415,44 @@ void runWidgetAskCases(Harness& h, PluginProcessor& processor, MCPBridge& bridge
     auto again = h.replies.waitFor("/pd/widget_ask", 2000);
     CHECK(again && again->str(2) == "ai.tap" && again->num(3) == 4);
 
+    // 7. The canvas of an ask is the tab the widget sits in (its identity wire key: the `key` of its /pd/list_tabs row), and
+    //    `main` (the focused tab) when it cannot be told. A box of the widget's class on the patch names the tab; so does pd-lua's
+    //    shadow class `<widget>:gfx` (the class a GUI widget really is); a widget with no box anywhere stays `main`.
+    static t_class* askPlain = nullptr;
+    static t_class* askGfx = nullptr;
+    CHECK(host->pdWait([&] {
+        if (askPlain) return;
+        askPlain = class_new(gensym("ai.wkcls"), reinterpret_cast<t_newmethod>(+[]() -> void* { return pd_new(askPlain); }), nullptr,
+            sizeof(t_object), 0, static_cast<t_atomtype>(0));
+        askGfx = class_new(gensym("ai.wkgfx:gfx"), reinterpret_cast<t_newmethod>(+[]() -> void* { return pd_new(askGfx); }), nullptr,
+            sizeof(t_object), 0, static_cast<t_atomtype>(0));
+    }, 2000));
+    auto boxes = h.call("/pd/batch_atomic",
+        { "main", "wk3", 0, 0, 0, 2, 0,
+            "wk_a", 2500, 40, "obj", "ai.wkcls", 0,
+            "wk_g", 2500, 80, "obj", "ai.wkgfx:gfx", 0,
+            0, 5, 10, 0 },
+        "/pd/batch_atomic/reply/wk3");
+    CHECK(boxes.has_value() && boxes->num(0) == 2);
+    std::string tabKey;
+    CHECK(host->pdWait([&] {
+        t_canvas* cnv = host->getCanvasBySymbolStrict("main");
+        while (cnv && cnv->gl_owner) cnv = cnv->gl_owner; // the tab is the root canvas
+        if (cnv) tabKey = host->identity.keyOf(cnv);
+    }, 2000));
+    CHECK(!tabKey.empty() && tabKey != "main");
+    h.replies.clear();
+    sendToAiAsk(host, &s_list, { symAtom("ai.wkcls"), numAtom(11) });
+    auto onPatch = h.replies.waitFor("/pd/widget_ask", 2000);
+    CHECK(onPatch && onPatch->str(0) == "ask" && onPatch->str(2) == "ai.wkcls" && onPatch->num(3) == 11 && onPatch->args.size() == 4);
+    CHECK(onPatch && onPatch->str(1) == tabKey);
+    sendToAiAsk(host, gensym("hello"), { symAtom("ai.wkgfx") });
+    auto shadow = h.replies.waitFor("/pd/widget_ask", 2000);
+    CHECK(shadow && shadow->str(0) == "hello" && shadow->str(2) == "ai.wkgfx" && shadow->str(1) == tabKey);
+    sendToAiAsk(host, &s_list, { symAtom("ai.wknone"), numAtom(12) });
+    auto nowhere = h.replies.waitFor("/pd/widget_ask", 2000);
+    CHECK(nowhere && nowhere->str(2) == "ai.wknone" && nowhere->str(1) == "main");
+    h.call("/pd/batch_atomic", { "main", "wk4", 2, 0, 0, 0, 0, "wk_a", "wk_g", 0, 5, 10, 0 }, "/pd/batch_atomic/reply/wk4");
 }
 
 // pd-lua stand-ins (Libraries/pd-lua/pdlua.c): a Lua object is CLASS_NOINLET (no inlet 0 of its own) and every inlet is an
