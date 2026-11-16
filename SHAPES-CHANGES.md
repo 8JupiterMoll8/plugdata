@@ -87,6 +87,24 @@ as the fork now answers them. Nothing in the plan's shapes was removed or rename
     delivery; send_checked counts every ERROR line during delivery (any object) plus any line a receiver printed.
     Neither sees a line Pd prints in a later tick.
 
+19b. **pd-lua `pd.Receive` proxies are listeners (overnight 2026-11-16).** A binder whose class is named `pdlua proxy receive` is
+    no box and is never read as a `t_object` (review H5); it used to be refused as `non-object binder`. Now it is counted:
+    the reply has a new integer `proxies` (always present, 0 when none). `bound` is true when there are boxes or proxies; the
+    send goes out when there is at least one of either; only the boxes are read back (`receivers[]`), so a name with proxies
+    alone is `bound: true, proxies: N, receivers: []`, and `delivered` is true when no console line came. Every other binder
+    that is not a box is still refused as before. `obj_set` / `obj_set_batch` inlet k of a CLASS_NOINLET object (pd-lua, and an
+    unnamed [receive]) is `ob_inlet[k]`; with no `ob_inlet` entry at all inlet 0 stays the object itself.
+
+## `/pd/widget_ask` (capability `widget_ask`)
+19c. The `<canvas>` argument is the tab the widget sits in: the identity wire key of the open root canvas whose patch (subpatches
+    and abstractions included) holds a box of the widget's class (`ai.tap`, pd-lua's `ai.tap:gfx` shadow class, or an
+    abstraction file `ai.tap.pd`), the `key` of that tab's `/pd/list_tabs` row. `main` (the focused tab, as before) when the widget
+    cannot be placed (a looper, a box not yet placed, a clone instance) or sits in more than one tab. Same argument count.
+
+## `/chat/msg` roles
+19d. Role `detail` (a long answer) is shown in the Copilot sidebar as an AI message. The only reader of `/chat/msg` is the sidebar
+    panel (`CopilotPanel::receiveMessage`), so it appears nowhere else; roles `ai`, `error`, `user`, `thought` are unchanged.
+
 ## `by` limits (truth)
 20a. **Review H2:** `by` (in `last`, `ctl[].by`, `ctl[].from[].by`) is `"ai"`, `"other"` or **null** = not known: the
     seq is older than the oldest AI range the bridge still keeps (a ring of 1024 ranges; back-to-back AI dispatches
