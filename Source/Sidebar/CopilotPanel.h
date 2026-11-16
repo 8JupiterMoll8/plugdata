@@ -28,7 +28,7 @@ public:
     enum class PanelTab { Unified, Notebook, Studio, Chat };
 
     struct ChatMessage {
-        juce::String role; // "user", "thought", "ai", "error"
+        juce::String role; // "user", "thought", "ai", "error" ("detail" is stored as "ai")
         juce::String text;
         juce::Time time;
     };
@@ -1045,6 +1045,13 @@ public:
         } else if (role == "ai" || role == "error") {
             setThinking(false, "");
             chatContent.addMessage(role, text);
+            updateChatLayout();
+        } else if (role == "detail") {
+            // The long answer, shown here as an AI message. The server sends role "detail" for the full text and role "ai"
+            // for the one short line; /chat/msg reaches only this panel (the canvas pill has no reader of it), so "detail"
+            // is simply not shown anywhere else.
+            setThinking(false, "");
+            chatContent.addMessage("ai", text);
             updateChatLayout();
         } else if (role == "user") {
             bool isDuplicate = false;
