@@ -154,3 +154,15 @@ as the fork now answers them. Nothing in the plan's shapes was removed or rename
     row folds it. Thumbnails are read, never made: `<app data dir>/Abstractions/thumbs/<name>.png` (odd characters in the name,
     the `~`, become `_`: `ai.loop_.png`), looked up again each time the rack is shown. Table and helpers: `Source/Mcp/McpWidgetRack.h`
     (JUCE-free, `Tests/mcp/widget_rack_test.cpp`); cards and list: `Source/Sidebar/CopilotModuleRack.h`.
+
+## Ctrl+V with a picture: refs/ and a [pic] box
+19i. Ctrl+V on the canvas with a picture on the clipboard (no paste slot waiting; the clipboard read is the same as before) on a SAVED
+    patch: the picture is written as `<patch folder>/refs/<patch>-<n>.png` (`refs/` is created; n is the lowest free number, an
+    existing file is never touched; the stored picture is at most 960 px on its longest side, never enlarged) and ONE box
+    `[pic -open refs/<file>]` is pasted at the mouse (in the middle of the view when the mouse is outside it). ELSE's [pic] opens
+    its file when it is created and on every load; a [loadbang] -> [open( chain would stay empty after a paste, because loadbang
+    fires when a patch loads, not when objects are pasted. The event `/pd/reference/image <path> <x> <y> <w> <h>` is sent as for a
+    glass picture, now with the refs file's path (the server also writes a Thread `media` entry), and a line "Picture saved as
+    refs/<file> ..." goes to the chat (sidebar and the pill's answer line). An unsaved patch, a refs/ that cannot be written, or a
+    paste slot waiting (the pill's picture button): the older way, a picture on the glass, unchanged. Names and sizes:
+    `Source/Mcp/McpRefsName.h` (JUCE-free, `Tests/mcp/refs_name_test.cpp`); the paste: `CanvasMcpTools.cpp`.
