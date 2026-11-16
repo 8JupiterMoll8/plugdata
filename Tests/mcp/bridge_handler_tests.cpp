@@ -6476,6 +6476,70 @@ void runChatListenerCases(Harness& h, MCPBridge& bridge)
     CHECK(snapshot().size() == 8);
 }
 
+// The pill's QUICK / DEEP chip (capability pill_lane): `/chat/lane <deep|quick>` sets the lane the chip shows (state only:
+// no chat line is posted), anything else is ignored; the chip's click goes out as the lane word on /pd/ui/prompt.
+void runPillLaneCases(Harness& h, MCPBridge& bridge)
+{
+    std::printf("pill lane chip (pill_lane)\n");
+    CHECK(hasCap(h, "pill_lane", "pl0"));
+    CHECK(!bridge.isPillDeepLane()); // starts quick, like the server's first lane
+
+    std::mutex mutex;
+    int chatLines = 0;
+    int owner = 0;
+    bridge.addChatListener(&owner, [&](juce::String const&, juce::String const&) {
+        std::lock_guard<std::mutex> lock(mutex);
+        ++chatLines;
+    });
+    auto const until = [&](bool want) {
+        for (int waited = 0; waited < 2000; waited += 10) {
+            if (bridge.isPillDeepLane() == want) return true;
+            sleepMs(10);
+        }
+        return bridge.isPillDeepLane() == want;
+    };
+
+    h.fire("/chat/lane", { "deep" });
+    CHECK(until(true));
+    h.fire("/chat/lane", { "quick" });
+    CHECK(until(false));
+    h.fire("/chat/lane", { "deep" });
+    CHECK(until(true));
+
+    // Not a lane word, or no word: the chip keeps what it shows.
+    h.fire("/chat/lane", { "later" });
+    h.fire("/chat/lane", { "DEEP" });
+    h.fire("/chat/lane", {});
+    h.fire("/chat/lane", { 1 });
+    sleepMs(300);
+    CHECK(bridge.isPillDeepLane());
+
+    // A lane message is state only: it never reaches the chat (the sidebar's and the pill's readers).
+    sleepMs(200);
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        CHECK(chatLines == 0);
+    }
+
+    // The chip's click: the lane word as a pill prompt, spawn mode, no selection, no chat echo.
+    h.replies.clear();
+    bridge.sendLaneChoice(false);
+    auto quick = h.replies.waitFor("/pd/ui/prompt", 2000);
+    CHECK(quick && quick->args.size() == 3 && quick->str(0) == "quick" && quick->str(1) == "spawn" && quick->num(2) == 0);
+    h.replies.clear();
+    bridge.sendLaneChoice(true);
+    auto deep = h.replies.waitFor("/pd/ui/prompt", 2000);
+    CHECK(deep && deep->args.size() == 3 && deep->str(0) == "deep" && deep->str(1) == "spawn" && deep->num(2) == 0);
+    sleepMs(200);
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        CHECK(chatLines == 0); // sendLaneChoice posts no "You: deep" line
+    }
+
+    bridge.removeChatListener(&owner);
+    bridge.setPillDeepLane(false); // later cases start from quick again
+}
+
 void runAlphiSayCases(Harness& h, PluginProcessor& processor)
 {
     std::printf("Alphi says (alphi drop 1 W)\n");
@@ -6931,6 +6995,7 @@ int main()
             runApprovalCases(harness, processor);
             runAlphiSayCases(harness, processor);
             runChatListenerCases(harness, *bridge);
+            runPillLaneCases(harness, *bridge);
             runLimiterPatchCases(processor);
             runVolumeGuardCases(processor);
             runIndexRefCases(harness, processor);

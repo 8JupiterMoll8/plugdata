@@ -125,13 +125,13 @@ void CanvasMcpLayer::updateSelectionPill()
             return;
         }
 
-        pillW = 380;
+        pillW = 380 + pillLaneChipW; // the prompt field keeps its width; the QUICK / DEEP chip sits before the send arrow
         pillH = 28;
         // Position purely in CANVAS content coords (same space as obj->getBounds()).
         pillX = bounds.getCentreX() - pillW / 2;
         pillY = bounds.getBottom() + 10;
         editorX = 30;
-        editorW = pillW - 30 - 32; // [⚡] ...prompt field... [↵]
+        editorW = pillW - 30 - 32 - pillLaneChipW; // [⚡] ...prompt field... [QUICK|DEEP] [↵]
     }
 
     mcpSelectionPillFrame = juce::Rectangle<int>(pillX, pillY, pillW, pillH);
@@ -341,13 +341,32 @@ void CanvasMcpLayer::submitSelectionPill(bool queueForChat)
 
         // C++ truth: sendPillPrompt resolves the selection's stable tempIds from the
         // bridge-owned map — the server never guesses from its identity mirror.
-        sendPillPrompt(prompt, queueForChat);
+        // The chip's lane: DEEP sends "queue" on the wire (the deep lane), QUICK "spawn" (the in-app lane).
+        auto* laneBridge = canvas.pd->getMcp()->getMCPBridge();
+        sendPillPrompt(prompt, queueForChat || (laneBridge != nullptr && laneBridge->isPillDeepLane()));
         mcpSelectionPill->setText(juce::String(), false);
     }
 
     dismissSelectionPill();
     canvas.repaint();
     if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+}
+
+// A click on the QUICK / DEEP chip: flip the lane here at once (the chip answers the click), then tell the server by the lane
+// word, the same words the artist can type; the server switches its sticky lane and pushes it back (/chat/lane).
+void CanvasMcpLayer::togglePillLane()
+{
+    if (!canvas.pd)
+        return;
+    auto* bridge = canvas.pd->getMcp()->getMCPBridge();
+    if (!bridge)
+        return;
+    bool const deep = !bridge->isPillDeepLane();
+    bridge->setPillDeepLane(deep);
+    bridge->sendLaneChoice(deep);
+    canvas.repaint();
+    if (canvas.editor)
+        canvas.editor->nvgSurface.invalidateAll();
 }
 
 bool CanvasMcpLayer::SlotPasteKeyListener::keyPressed(const juce::KeyPress& key, juce::Component*)

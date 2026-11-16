@@ -890,6 +890,24 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
                 nanovg::nvgStroke(nvg);
                 nanovg::nvgRestore(nvg);
             }
+                // QUICK / DEEP chip, before the send arrow: one click flips the lane the next sends take.
+                {
+                    bool deepLane = false;
+                    if (canvas.pd) {
+                        if (auto* laneBridge = canvas.pd->getMcp()->getMCPBridge())
+                            deepLane = laneBridge->isPillDeepLane();
+                    }
+                    auto const chip = pillLaneChipRect(panel).translated(-panel.getX(), -panel.getY()).toFloat();
+                    nanovg::nvgDrawRoundedRect(nvg, chip.getX(), chip.getY(), chip.getWidth(), chip.getHeight(),
+                        deepLane ? nanovg::nvgRGBA(110, 60, 200, 240) : nanovg::nvgRGBA(38, 42, 50, 235),
+                        deepLane ? nanovg::nvgRGBA(176, 128, 255, 255) : nanovg::nvgRGBA(160, 175, 200, 110), 4.0f);
+                    NVGScopedState scopedChip(nvg);
+                    mcpnvg::nvgFontFace(nvg, "Inter");
+                    mcpnvg::nvgFontSize(nvg, 9.0f);
+                    mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+                    nanovg::nvgFillColor(nvg, deepLane ? nanovg::nvgRGBA(255, 255, 255, 255) : nanovg::nvgRGBA(190, 203, 222, 235));
+                    mcpnvg::nvgText(nvg, chip.getCentreX(), chip.getCentreY() + 0.5f, deepLane ? "DEEP" : "QUICK", nullptr);
+                }
             } // else: object-pill controls
         }
 

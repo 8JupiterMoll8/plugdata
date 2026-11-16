@@ -544,6 +544,14 @@ public:
     // listeners itself.
     void addChatListener(void const* owner, std::function<void(const juce::String& role, const juce::String& text)> cb);
     void removeChatListener(void const* owner);
+    // The pill's QUICK / DEEP chip (capability pill_lane): the lane the artist sees, false = quick, true = deep. The server
+    // pushes its sticky lane with /chat/lane <deep|quick> (set here), the chip's click sets it here at once and tells the
+    // server (sendLaneChoice). Any thread. Starts quick, like the server's first lane.
+    bool isPillDeepLane() const { return pillDeepLane.load(); }
+    void setPillDeepLane(bool deep) { pillDeepLane.store(deep); }
+    // The chip's click: the lane word as a pill prompt (`/pd/ui/prompt deep|quick spawn 0`), the same words the artist can
+    // type. The server switches its sticky lane (and says so on the pill) and pushes the lane back. No chat line is posted.
+    void sendLaneChoice(bool deep);
     // Voice & Beatbox Capture Engine. mode: 0 = auto-classify, 1 = melody
     // (artist declared "sing"), 2 = beat (artist declared "beatbox").
     // maxSeconds = safety ceiling only — the artist decides the real length by
@@ -920,6 +928,7 @@ private:
     std::vector<std::pair<void const*, std::function<void(const juce::String&, const juce::String&)>>> chatListeners; // under chatLock
 
     std::atomic<bool> shuttingDown { false };
+    std::atomic<bool> pillDeepLane { false };
     juce::ThreadPool jobPool { 2 }; // P3.4 S8: offline render, voice analysis
 
     // Plan 3 P3.4 S1: the network thread only posts; every command runs here, one at a time, in arrival

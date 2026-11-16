@@ -174,6 +174,15 @@ public:
     // onReturnKey for a PLAIN Return (Shift+Return fails its key comparison), so
     // a KeyListener catches the Shift variant before the editor swallows it.
     void submitSelectionPill(bool queueForChat);
+    // The QUICK / DEEP chip on the object pill, between the prompt field and the send arrow. DEEP = a typed prompt goes down
+    // the deep lane (wire "queue"); QUICK = the in-app lane. The lane lives in the bridge (isPillDeepLane): the server pushes
+    // its sticky lane (/chat/lane) and a click sets it here at once and tells the server (the lane word as a prompt).
+    static constexpr int pillLaneChipW = 46; // the room the chip takes in the pill's width
+    static juce::Rectangle<int> pillLaneChipRect(juce::Rectangle<int> panel)
+    {
+        return { panel.getRight() - 32 - pillLaneChipW + 3, panel.getY() + (panel.getHeight() - 16) / 2, pillLaneChipW - 6, 16 };
+    }
+    void togglePillLane();
     struct SelectionPillKeyListener : public juce::KeyListener {
         explicit SelectionPillKeyListener(CanvasMcpLayer* c) : canvas(c) {}
         bool keyPressed(const juce::KeyPress& key, juce::Component* origin) override;

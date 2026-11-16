@@ -143,6 +143,16 @@ void MCPBridge::handleTelemetryDomain(const juce::String& /*telAction*/, const j
 
 void MCPBridge::handleChatDomain(const juce::String& action, const juce::OSCMessage& msg)
 {
+    // /chat/lane <deep|quick> (capability pill_lane): the server's sticky pill lane, pushed at connect and at every switch,
+    // so the QUICK / DEEP chip on the pill shows the word the artist typed. State only: nothing is posted to the chat. The
+    // chat domain takes every verb, so no table row or schema row is needed; anything but the two words is ignored, and an
+    // older fork that sees a one-argument message here ignores it (it reads two).
+    if (action == "lane") {
+        auto const word = msg.size() >= 1 ? getArgString(msg[0]) : juce::String();
+        if (word == "deep" || word == "quick")
+            setPillDeepLane(word == "deep");
+        return;
+    }
     // /chat/msg <role> <text>
     if (msg.size() >= 2) {
         auto role = getArgString(msg[0]);

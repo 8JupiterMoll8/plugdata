@@ -3924,6 +3924,18 @@ void MCPBridge::sendPrompt(const juce::String& promptText)
     sender.send(msg);
 }
 
+void MCPBridge::sendLaneChoice(bool deep)
+{
+    if (!canReply()) return;
+
+    // The same wire as sendSelectionPrompt, minus the chat echo: no "You: deep" bubble, no thinking badge.
+    juce::OSCMessage msg { juce::OSCAddressPattern("/pd/ui/prompt") };
+    msg.addArgument(deep ? juce::String("deep") : juce::String("quick"));
+    msg.addArgument(juce::String("spawn"));
+    msg.addArgument(static_cast<int>(0)); // no selected object
+    sender.send(msg);
+}
+
 void MCPBridge::sendLens(const juce::String& lens)
 {
     if (!canReply()) return;

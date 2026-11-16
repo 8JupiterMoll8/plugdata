@@ -430,6 +430,9 @@ std::vector<std::string> MCPBridge::capabilityList() const
         // `ai-ask <widget> <rev>` / `ai-ask hello <widget>` arrives as the event /pd/widget_ask
         // <ask|hello> <canvas> <widget> <rev> (no free text; at most one ask per widget per 2 s)
         "widget_ask",
+        // The pill's QUICK / DEEP chip: the server pushes its sticky lane as /chat/lane <deep|quick>; the chip's click
+        // is sent back as the lane word on /pd/ui/prompt (the words the artist can type), so chip and word agree.
+        "pill_lane",
     };
     // P4.1 S2: the v2 listener is up (TCP 127.0.0.1, port and token in the discovery file).
     if (v2Server.running())

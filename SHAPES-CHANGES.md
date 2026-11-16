@@ -119,6 +119,18 @@ as the fork now answers them. Nothing in the plan's shapes was removed or rename
     receives every role first: the canvas is one more reader of the bridge's chat lines (`MCPBridge::addChatListener`, keyed by
     its owner), `setChatCallback` stays the sidebar's single slot. No wire change.
 
+## `/chat/lane` (capability `pill_lane`) and the pill's QUICK / DEEP chip
+19f. NEW inbound `/chat/lane <deep|quick>`: the server's sticky pill lane, pushed at connect and at every switch. State only:
+    it sets the lane the chip on the selection pill shows (`MCPBridge::isPillDeepLane`) and posts NO chat line. It is a verb of
+    the `chat` domain, which takes every verb: no verb-table row, no schema row, no new hash. Any other word, or none, is
+    ignored; an older fork reads a one-argument `/chat/...` as nothing (it needs two). The server sends it only to a bridge
+    with capability `pill_lane`.
+19g. The chip (QUICK / DEEP, between the prompt field and the send arrow; the pill is 46 px wider, the field keeps its width)
+    flips the lane on a click. DEEP makes a typed prompt go out with mode `queue` on `/pd/ui/prompt` (the existing wire: the
+    server's deep lane), QUICK with `spawn`. A click also sends the lane word as a prompt, `/pd/ui/prompt deep|quick spawn 0`
+    (no chat echo, no selection), the words the artist can type: the server switches its sticky lane and pushes it back with
+    `/chat/lane`, so the chip and the word agree. Palette actions and the sidebar input are not changed by the chip.
+
 ## `by` limits (truth)
 20a. **Review H2:** `by` (in `last`, `ctl[].by`, `ctl[].from[].by`) is `"ai"`, `"other"` or **null** = not known: the
     seq is older than the oldest AI range the bridge still keeps (a ring of 1024 ranges; back-to-back AI dispatches
