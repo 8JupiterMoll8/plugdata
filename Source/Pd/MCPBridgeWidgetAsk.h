@@ -18,11 +18,15 @@
 // calls mcp::WidgetAskQueue::offer (no lock, no allocation, no JUCE). The pump below runs on the message
 // thread every kPumpMs, pops the events and sends them (MCPBridge::pumpWidgetAsks). Bounds and the rate limit
 // (1 ask per widget per 2 s): Source/Mcp/McpWidgetAsk.h. Included by MCPBridge.cpp only.
+//
+// The same pump also carries the live widget history (MCPBridgeWidgetState.h): a receiver on each widget's state name, and the
+// `/pd/widget_ask state ...` events it makes after 1 s of quiet (kind `state`: the kind word is free, the event address is the same).
 
 #pragma once
 
 #include "Mcp/McpWidgetAsk.h"
 #include "MCPBridgeWidgetAskCanvas.h"
+#include "MCPBridgeWidgetState.h"
 
 #include <chrono>
 
@@ -109,6 +113,7 @@ inline void ensureMcpAskReceiverClass()
 // The bridge's part: the queue, the binding and the message-thread pump.
 struct McpWidgetAskState {
     static constexpr int kPumpMs = 50;
+    static constexpr std::int64_t kStatePostGapMs = 1000; // the state refusals reach the console at most this often
 
     struct Pump final : juce::Timer {
         explicit Pump(MCPBridge& b) : bridge(b) {}
@@ -120,5 +125,9 @@ struct McpWidgetAskState {
 
     mcp::WidgetAskQueue queue;
     McpAskReceiver* receiver = nullptr; // bound to `ai-ask` while the bridge serves
+    // Live widget history: one receiver per claimed slot of the book (the fixed widgets at bind, a named looper at its hello).
+    mcp::WidgetStateBook states;
+    McpStateReceiver* stateReceivers[mcp::kWidgetStateSlots] = {};
+    std::int64_t statePostedMs = 0;
     Pump pump;
 };

@@ -35,6 +35,13 @@ void MCPBridge::bindWidgetAsk()
         rec->queue = &widgetAsk->queue;
         pd_bind(&rec->obj.ob_pd, rec->sym);
         widgetAsk->receiver = rec;
+        // Live widget history: a state receiver for each fixed widget (capability widget_state), and again for every named looper held
+        // from before a stop (it says hello once, at load: it would not be heard of again). Silent until the server switches the watch on.
+        for (char const* widget : mcp::kWidgetStateFixed)
+            bindWidgetStateLocked(widget);
+        for (int slot = 0; slot < mcp::kWidgetStateSlots; ++slot)
+            if (char const* held = widgetAsk->states.nameAt(slot))
+                bindWidgetStateLocked(held);
     }
     widgetAsk->pump.startTimer(McpWidgetAskState::kPumpMs);
 }
@@ -45,8 +52,40 @@ void MCPBridge::unbindWidgetAsk()
     widgetAsk->pump.stopTimer();
     if (!processor || !widgetAsk->receiver) return;
     McpHost::PdLockScope const lock(*processor);
+    for (auto*& rec : widgetAsk->stateReceivers) {
+        if (!rec) continue;
+        pd_free(reinterpret_cast<t_pd*>(rec)); // unbinds (mcpStateReceiverFree)
+        rec = nullptr;
+    }
+    widgetAsk->states.rewind(); // the watch is off and what was noted is forgotten (the names stay): serving again starts from the server's next `on`
     pd_free(reinterpret_cast<t_pd*>(widgetAsk->receiver)); // unbinds (mcpAskReceiverFree)
     widgetAsk->receiver = nullptr;
+}
+
+// Caller holds the Pd lock. A widget that already has a slot keeps its receiver; a name that gets none (not a watched widget) binds
+// nothing; a named looper beyond the cap takes the slot of the one idle longest (its receiver is freed first).
+void MCPBridge::bindWidgetStateLocked(char const* widget)
+{
+    if (!widgetAsk) return;
+    bool evicted = false;
+    int const slot = widgetAsk->states.claim(widget, mcpStateNowMs(), &evicted);
+    if (slot < 0) return;
+    if (evicted && widgetAsk->stateReceivers[slot]) {
+        pd_free(reinterpret_cast<t_pd*>(widgetAsk->stateReceivers[slot])); // unbinds (mcpStateReceiverFree)
+        widgetAsk->stateReceivers[slot] = nullptr;
+    }
+    if (widgetAsk->stateReceivers[slot]) return;
+    widgetAsk->stateReceivers[slot] = mcpBindStateReceiver(widgetAsk->states, slot, widget);
+}
+
+void MCPBridge::setWidgetStateWatch(bool on)
+{
+    if (widgetAsk) widgetAsk->states.setWatching(on);
+}
+
+bool MCPBridge::widgetStateWatching() const
+{
+    return widgetAsk && widgetAsk->states.watching();
 }
 
 bool MCPBridge::widgetAskBound() const
@@ -67,6 +106,18 @@ void MCPBridge::pumpWidgetAsks()
             if (std::find(widgets.begin(), widgets.end(), ev.widget) == widgets.end()) widgets.emplace_back(ev.widget);
         auto const canvases = processor ? mcpWidgetAskCanvases(*processor, widgets)
                                         : std::vector<juce::String>(widgets.size(), juce::String("main"));
+        // A named looper (ai.loop_<name>) says hello when it loads: from then on its state name is watched too (live widget history).
+        if (processor) {
+            std::vector<std::string> loopers;
+            for (auto const& ev : events)
+                if (mcp::widgetStateNamedLooperOk(ev.widget) && std::find(loopers.begin(), loopers.end(), ev.widget) == loopers.end())
+                    loopers.emplace_back(ev.widget);
+            if (!loopers.empty()) {
+                McpHost::PdLockScope const lock(*processor);
+                for (auto const& w : loopers)
+                    bindWidgetStateLocked(w.c_str());
+            }
+        }
         for (auto const& ev : events) {
             auto const at = static_cast<std::size_t>(std::find(widgets.begin(), widgets.end(), ev.widget) - widgets.begin());
             juce::Array<juce::var> args;
@@ -75,6 +126,33 @@ void MCPBridge::pumpWidgetAsks()
             args.add(juce::String::fromUTF8(ev.widget));
             args.add(ev.rev);
             sendReply("/pd/widget_ask", args);
+        }
+    }
+    // Live widget history: a widget quiet for 1 s with a new rev is ONE event. The canvas is "main": the server reads the state by
+    // the widget's name, not by tab, so no walk of the patches is made for it. Nothing is popped while no server can be told (the state
+    // would count as forwarded). The console line for what was refused is said at most once a second.
+    {
+        auto const now = mcpAskNowMs();
+        mcp::WidgetStateEvent st;
+        while (canReply() && widgetAsk->states.popDue(st, now)) {
+            juce::Array<juce::var> args;
+            args.add(juce::String("state"));
+            args.add(juce::String("main"));
+            args.add(juce::String::fromUTF8(st.widget));
+            args.add(st.rev);
+            sendReply("/pd/widget_ask", args);
+        }
+        if (processor && now - widgetAsk->statePostedMs >= McpWidgetAskState::kStatePostGapMs) {
+            auto const sc = widgetAsk->states.takeCounts();
+            if (sc.malformed || sc.namedEvicted) {
+                widgetAsk->statePostedMs = now;
+                juce::StringArray parts;
+                if (sc.malformed) parts.add(juce::String(sc.malformed) + " state frame(s) `end` without a whole-number rev");
+                if (sc.namedEvicted) parts.add(juce::String(sc.namedEvicted) + " named looper(s) beyond the " + juce::String(mcp::kWidgetStateNamedMax) + " watched: the longest idle ones were dropped from the history");
+                auto const line = "ai-state: not watched by the AI: " + parts.joinIntoString("; ");
+                McpHost::PdLockScope const lock(*processor);
+                post("%s", line.toRawUTF8());
+            }
         }
     }
     auto const c = widgetAsk->queue.takeCounts();
@@ -379,6 +457,7 @@ void MCPBridge::stop()
     stopV2(); // P3.4 S8 order: listeners before the worker
     if (!active.load()) {
         commandWorker.stop(); // P4.1 S3: started for v2 even when the UDP bind failed
+        setWidgetStateWatch(false); // a `/chat/widget_watch on` still in flight must not survive the stop (the watch is off at start)
         if (v2WasRunning && processor)
             processor->logMessage("MCP bridge stopped");
         return;
@@ -388,6 +467,7 @@ void MCPBridge::stop()
     receiver.disconnect();
     listenSocket.reset();
     commandWorker.stop(); // the running command finishes; queued ones are dropped
+    setWidgetStateWatch(false); // after the last command: an `on` in flight must not survive the stop (the watch is off at start)
     sender.disconnect();
     sender.setUdpEnabled(false);
     active.store(false);
@@ -3960,6 +4040,24 @@ void MCPBridge::sendSelectionPrompt(const juce::String& promptText, const juce::
     for (auto const& id : targetTempIds) {
         msg.addArgument(id);
     }
+    sender.send(msg);
+}
+
+void MCPBridge::sendMidiTakePrompt(const juce::String& promptText, const juce::String& takeId, int noteCount, int bpm)
+{
+    if (!canReply()) return;
+
+    postChatMessage("user", promptText);
+
+    // /pd/ui/prompt <prompt> spawn 0 ai.midi <take id> <note count> <bpm>: no selected object (count 0), then the source of the take.
+    juce::OSCMessage msg { juce::OSCAddressPattern("/pd/ui/prompt") };
+    msg.addArgument(promptText);
+    msg.addArgument(juce::String("spawn"));
+    msg.addArgument(static_cast<int>(0));
+    msg.addArgument(juce::String("ai.midi"));
+    msg.addArgument(takeId);
+    msg.addArgument(noteCount);
+    msg.addArgument(bpm);
     sender.send(msg);
 }
 

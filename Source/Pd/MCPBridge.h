@@ -501,6 +501,12 @@ public:
     void pumpWidgetAsks();
     // Tests: the receiver is bound now.
     bool widgetAskBound() const;
+    // Thread phase 2 (capability widget_state): live widget history. While the bridge serves, a receiver on every ai.* widget's state name
+    // (and on a named looper's, from its hello) notes the `end <rev>` frame; once the server switched the watch on (`/chat/widget_watch on`),
+    // a widget quiet for 1 s with a new rev is one event, `/pd/widget_ask state main <widget> <rev>`, sent by the same pump.
+    // Core and bounds: Source/Mcp/McpWidgetState.h. The watch is off at start and after every stop.
+    void setWidgetStateWatch(bool on);
+    bool widgetStateWatching() const;
 
     // Native Telemetry Dispatch (Port 19010)
     void sendSelectionTelemetry(const juce::String& selector, const SmallArray<pd::Atom>& list);
@@ -516,6 +522,10 @@ public:
     // objects' stable tempIds (resolved in C++ — the identity source of truth) so
     // the MCP server never has to guess the selection from a stale mirror.
     void sendSelectionPrompt(const juce::String& promptText, const juce::StringArray& targetTempIds, bool queue = false);
+    // ai.midi's send: the same /pd/ui/prompt as sendSelectionPrompt (no selection, spawn mode, the chat echo), plus the source of the take
+    // after the ids: `ai.midi <take id> <note count> <bpm>`. A server that reads it knows the send is ai.midi's without matching the words
+    // (capability widget_state); an older server ignores the extra arguments and matches the words as before.
+    void sendMidiTakePrompt(const juce::String& promptText, const juce::String& takeId, int noteCount, int bpm);
     void sendSketchStroke(const juce::String& subpatch, const juce::String& jsonPoints, bool isFastPath = false);
     // Phase 1B/Moodboard Chisel: the artist hit [⚡ Build] on the sketch pill —
     // ships the full multi-stroke bundle + bbox (PD patch coords) + optional
@@ -839,6 +849,7 @@ private:
     std::unique_ptr<McpWidgetAskState> widgetAsk;
     void bindWidgetAsk();
     void unbindWidgetAsk();
+    void bindWidgetStateLocked(char const* widget);
 
     // P11 V1: the armed windows' generation ids (meter and spectral). An arm bumps its id and answers it; a read
     // that names another id is refused and leaves the open window alone. Both counters and the arm/read state

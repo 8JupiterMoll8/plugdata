@@ -159,6 +159,17 @@ void MCPBridge::handleChatDomain(const juce::String& action, const juce::OSCMess
         }
         return;
     }
+    // /chat/widget_watch <on|off> (capability widget_state): the server switches the live widget history on or off. State only: nothing
+    // is posted to the chat. While it is on, a widget whose state has been quiet for 1 s with a new rev is one event
+    // `/pd/widget_ask state main <widget> <rev>` (MCPBridge::pumpWidgetAsks, Source/Mcp/McpWidgetState.h). Off at start and after every
+    // stop: a server that does not send `on` (an older one) never sees a state event. Like /chat/lane, a verb of the chat domain (which
+    // takes every verb: no table row, no schema row, no new hash); any other word, or none, is ignored.
+    if (action == "widget_watch") {
+        auto const word = msg.size() >= 1 ? getArgString(msg[0]) : juce::String();
+        if (word == "on" || word == "off")
+            setWidgetStateWatch(word == "on");
+        return;
+    }
     // /chat/msg <role> <text>
     if (msg.size() >= 2) {
         auto role = getArgString(msg[0]);

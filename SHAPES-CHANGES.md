@@ -134,6 +134,34 @@ as the fork now answers them. Nothing in the plan's shapes was removed or rename
     (no chat echo, no selection), the words the artist can type: the server switches its sticky lane and pushes it back with
     `/chat/lane`, so the chip and the word agree. Palette actions and the sidebar input are not changed by the chip.
 
+## Thread phase 2: live widget history and ai.midi's source (capability `widget_state`, no new schema hash)
+19k. NEW kind `state` of the existing event `/pd/widget_ask`: `/pd/widget_ask state main <widget> <rev>` (widget `ai.<word>`, rev a whole
+    number 0..9999999; the canvas is always `main`: the server reads a widget by its name, no walk of the patches is made for it).
+    Same address as the ask chip's `ask` / `hello` (events are listed by ADDRESS in the schema's `events` table, so the kind word is free:
+    no schema row, no new schema hash; an address that is not in the table would reach UDP only, never a v2 session). While the
+    bridge serves, a native CLASS_PD receiver is bound to the state name of every watched widget: `ai-tap-state`, `ai-draw-state`,
+    `ai-loop_0-state`, `ai-loop-state` (the legacy looper), `ai-sketch-state`, `ai-knob-state`, `ai-dice-state`, `ai-grid-state`,
+    `ai-paint-state`, `ai-strip-state`, `ai-listen-state`, and, once a named looper `ai.loop_<name>` (name `[a-z0-9_]{1,12}`) has said
+    hello on `ai-ask`, its `ai-loop_<name>-state` (at most 16 named loopers: a 17th pushes out the one idle longest, freeing its receiver, and
+    says so as one console line at most once a second; the names held survive a stop / start of the bridge, because a looper says hello only
+    once, at load). It coexists with the widget's own `[r]` / `pd.Receive` and with an armed control window on the same name (Pd keeps a bind list).
+    The receiver looks at ONE thing: a message with the selector `end` and a number (a widget's state frames end with `end <rev>`);
+    every other frame is one pointer compare. A widget whose last `end` is 1 s old is ONE event, only when its rev is not the one last
+    forwarded, and at most one event per widget per 2 s (a change inside the gap waits for it). The pump is the ask pump (message thread,
+    every 50 ms); it pops nothing while no server can be told. The rev is the only identity of a state: two instances of one widget in
+    different tabs share one state name, and a widget rebuilt at rev 0 after rev 0 is not reported again until its rev moves. The producer side (Pd's dispatch, the audio thread too) is atomics only: no lock, no allocation, no JUCE
+    (`Source/Mcp/McpWidgetState.h`, `Source/Pd/MCPBridgeWidgetState.h`; `scripts/test-bridge-safety.sh` greps both).
+19l. NEW inbound `/chat/widget_watch <on|off>` (capability `widget_state`): the server switches the history on or off. A verb of the `chat`
+    domain (takes every verb: no verb-table row, no schema row), state only, nothing is posted to the chat. The watch is OFF at start and
+    after every stop (also an `on` still in flight when the bridge stops), so an older server (which never sends `on`) never sees a `state` event; any other word, or none, is ignored.
+    `MCPBridge::setWidgetStateWatch` / `widgetStateWatching` (tests). Receivers are bound at `bindWidgetAsk` and freed at `unbindWidgetAsk`.
+19m. ai.midi's send (`AiMidiObject::transmitToAi`) names itself: `MCPBridge::sendMidiTakePrompt` sends the same `/pd/ui/prompt <prompt>
+    spawn 0` as before (and the chat echo), plus the source of the take after the (zero) selection ids: `... ai.midi <take id> <note count>
+    <bpm>`. An older server reads exactly `count` ids and ignores the rest; the new server reads the tag first and keeps the wording
+    match ("Incorporate MIDI take (...) into the patch.") as the fallback for a build without it.
+    Tests: `Tests/mcp/widget_state_test.cpp` (the book: bounds, quiet, rev, gap, off), `runWidgetStateCases` in `bridge_handler_tests.cpp`
+    (receivers bound, burst = one event, same rev none, gap, named looper by hello, off, `sendMidiTakePrompt`, stop unbinds).
+
 ## `by` limits (truth)
 20a. **Review H2:** `by` (in `last`, `ctl[].by`, `ctl[].from[].by`) is `"ai"`, `"other"` or **null** = not known: the
     seq is older than the oldest AI range the bridge still keeps (a ring of 1024 ranges; back-to-back AI dispatches

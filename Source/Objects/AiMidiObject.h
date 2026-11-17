@@ -386,7 +386,8 @@ public:
             juce::String prompt = "Incorporate MIDI take (" + takeId + ", " +
                                   juce::String(count) + " notes, " +
                                   juce::String(bpm) + " BPM) into the patch.";
-            bridge->sendSelectionPrompt(prompt, {}, false);
+            // The take's own source rides on the prompt (take id, notes, bpm): the server does not have to match the words.
+            bridge->sendMidiTakePrompt(prompt, takeId, count, bpm);
         }
         repaint();
     }

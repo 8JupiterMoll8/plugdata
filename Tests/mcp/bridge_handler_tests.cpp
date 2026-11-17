@@ -2601,6 +2601,165 @@ void runWidgetAskCases(Harness& h, PluginProcessor& processor, MCPBridge& bridge
     CHECK(waitMainIs(host, mainRoot)); // the next section's first batch goes to "main"
 }
 
+// Thread phase 2, live widget history (capability widget_state; Source/Mcp/McpWidgetState.h): a receiver on each ai.* widget's state
+// name notes the `end <rev>` frame; once the server switched the watch on (`/chat/widget_watch on`) a widget quiet for 1 s with a new rev
+// is ONE event `/pd/widget_ask state main <widget> <rev>`, at most one per widget per 2 s, the same rev again is none; a named looper's
+// hello binds its state name; the receivers exist only while the bridge serves and the watch is off again after a stop; ai.midi's send
+// carries its source on /pd/ui/prompt.
+void sendToState(McpHost* host, char const* name, char const* selector, std::vector<t_atom> atoms)
+{
+    CHECK(host->pdWait([&] {
+        auto* s = gensym(name);
+        if (s->s_thing) pd_typedmess(s->s_thing, gensym(selector), static_cast<int>(atoms.size()), atoms.empty() ? nullptr : atoms.data());
+    }, 2000));
+}
+
+// The next /pd/widget_ask event of kind `state` within timeoutMs (events of the other kinds before it are skipped).
+std::optional<Reply> nextStateEvent(Harness& h, int timeoutMs)
+{
+    auto const end = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+    for (;;) {
+        auto const left = std::chrono::duration_cast<std::chrono::milliseconds>(end - std::chrono::steady_clock::now()).count();
+        if (left <= 0) return std::nullopt;
+        auto ev = h.replies.waitFor("/pd/widget_ask", static_cast<int>(left));
+        if (!ev) return std::nullopt;
+        if (ev->str(0) == "state") return ev;
+    }
+}
+
+bool stateReceiverBound(McpHost* host, char const* name)
+{
+    bool bound = false;
+    CHECK(host->pdWait([&] { bound = gensym(name)->s_thing != nullptr; }, 2000));
+    return bound;
+}
+
+void runWidgetStateCases(Harness& h, PluginProcessor& processor, MCPBridge& bridge, std::function<void()> const& restoreSink)
+{
+    std::printf("widget history (thread phase 2, widget_state)\n");
+    auto* host = processor.getMcp();
+    CHECK(hasCap(h, "widget_state", "ws0"));
+    CHECK(bridge.widgetAskBound());
+    CHECK(!bridge.widgetStateWatching()); // off until the server says on
+
+    // 1. A receiver on every fixed widget's state name, and none on a named looper's before it has said hello.
+    for (char const* name : { "ai-tap-state", "ai-draw-state", "ai-loop_0-state", "ai-loop-state", "ai-sketch-state", "ai-knob-state", "ai-dice-state",
+                              "ai-grid-state", "ai-paint-state", "ai-strip-state", "ai-listen-state" })
+        CHECK(stateReceiverBound(host, name));
+    CHECK(!stateReceiverBound(host, "ai-loop_kick-state"));
+
+    // 2. Off: an `end` is noted by nobody and makes no event.
+    h.replies.clear();
+    sendToState(host, "ai-tap-state", "end", { numAtom(4) });
+    CHECK(!nextStateEvent(h, 1500).has_value());
+
+    // 3. On. A burst of frames (the last one `end 4`, repeated) is ONE event, 1 s after the last of them.
+    h.fire("/chat/widget_watch", { "on" });
+    for (int waited = 0; waited < 2000 && !bridge.widgetStateWatching(); waited += 10) sleepMs(10);
+    CHECK(bridge.widgetStateWatching());
+    h.fire("/chat/widget_watch", { "maybe" }); // not a word, or no word: the watch stays on
+    h.fire("/chat/widget_watch", {});
+    h.fire("/chat/widget_watch", { 1 });
+    sleepMs(300);
+    CHECK(bridge.widgetStateWatching());
+    h.replies.clear();
+    for (int i = 0; i < 5; ++i) {
+        sendToState(host, "ai-tap-state", "t1", { numAtom(4), numAtom(1) });
+        sendToState(host, "ai-tap-state", "end", { numAtom(4) });
+        sleepMs(100);
+    }
+    auto first = nextStateEvent(h, 3500);
+    CHECK(first && first->args.size() == 4 && first->str(1) == "main" && first->str(2) == "ai.tap" && first->num(3) == 4);
+    auto const firstAt = std::chrono::steady_clock::now();
+
+    // 4. At once a new rev: it is quiet for 1 s but inside the 2 s gap of the last event, so it waits for the gap (it is not lost), and
+    //    the burst made no second event (the next one is rev 5, not rev 4). Another widget has its own clock.
+    sendToState(host, "ai-tap-state", "end", { numAtom(5) });
+    sendToState(host, "ai-draw-state", "end", { numAtom(9) });
+    std::map<std::string, double> got;
+    std::chrono::steady_clock::time_point tapAt;
+    for (int i = 0; i < 2; ++i) {
+        auto const ev = nextStateEvent(h, 4500);
+        CHECK(ev.has_value());
+        if (!ev) continue;
+        got[ev->str(2)] = ev->num(3);
+        if (ev->str(2) == "ai.tap") tapAt = std::chrono::steady_clock::now();
+    }
+    CHECK(got["ai.tap"] == 5 && got["ai.draw"] == 9);
+    CHECK(std::chrono::duration_cast<std::chrono::milliseconds>(tapAt - firstAt).count() >= 1800); // 2 s after rev 4's event, not before
+
+    // 5. The same rev again (a dump of the server's own, a ghost): no event. Frames that are not `end`, an `end` with no number: none, one console line.
+    sleepMs(2200); // the 2 s gap of rev 5's event is over: only the rev dedupe can keep the same rev from being an event now
+    uint64_t const before = host->consoleSeqNow();
+    sendToState(host, "ai-tap-state", "end", { numAtom(5) });
+    sendToState(host, "ai-tap-state", "k1", { numAtom(9), numAtom(0.5) });
+    sendToState(host, "ai-tap-state", "end", {});
+    sendToState(host, "ai-tap-state", "end", { symAtom("x") });
+    CHECK(!nextStateEvent(h, 1500).has_value());
+    CHECK(consoleHas(host, before, "without a whole-number rev", 2000));
+
+    // 6. A named looper says hello: from then on its state name is watched (up to 16 of them); a name that is no looper gets no receiver.
+    h.replies.clear();
+    sendToAiAsk(host, gensym("hello"), { symAtom("ai.loop_kick") });
+    sendToAiAsk(host, gensym("hello"), { symAtom("ai.wknolooper") });
+    for (int waited = 0; waited < 2000 && !stateReceiverBound(host, "ai-loop_kick-state"); waited += 50) sleepMs(50);
+    CHECK(stateReceiverBound(host, "ai-loop_kick-state"));
+    CHECK(!stateReceiverBound(host, "ai-wknolooper-state"));
+    sendToState(host, "ai-loop_kick-state", "end", { numAtom(2) });
+    auto kick = nextStateEvent(h, 3500);
+    CHECK(kick && kick->str(2) == "ai.loop_kick" && kick->num(3) == 2 && kick->args.size() == 4);
+
+    // 6b. More named loopers than the cap (16): the one idle longest (ai.loop_kick) makes room, its receiver is freed and the newest is bound.
+    uint64_t const beforeEvict = host->consoleSeqNow();
+    for (int batch = 0; batch < 2; ++batch) {
+        for (int i = 0; i < 8; ++i) {
+            std::string const w = "ai.loop_e" + std::to_string(batch * 8 + i);
+            sendToAiAsk(host, gensym("hello"), { symAtom(w.c_str()) });
+        }
+        sleepMs(300); // the ask queue holds 16 and the pump runs every 50 ms
+    }
+    for (int waited = 0; waited < 3000 && stateReceiverBound(host, "ai-loop_kick-state"); waited += 100) sleepMs(100);
+    CHECK(!stateReceiverBound(host, "ai-loop_kick-state"));
+    CHECK(stateReceiverBound(host, "ai-loop_e15-state"));
+    CHECK(stateReceiverBound(host, "ai-loop_e0-state"));
+    CHECK(consoleHas(host, beforeEvict, "dropped from the history", 3000));
+
+    // 7. Off again: nothing, whatever the widget does.
+    h.fire("/chat/widget_watch", { "off" });
+    for (int waited = 0; waited < 2000 && bridge.widgetStateWatching(); waited += 10) sleepMs(10);
+    CHECK(!bridge.widgetStateWatching());
+    sendToState(host, "ai-draw-state", "end", { numAtom(12) });
+    CHECK(!nextStateEvent(h, 1500).has_value());
+
+    // 8. ai.midi's send: the prompt as before, then its source after the ids (`ai.midi <take id> <notes> <bpm>`).
+    h.replies.clear();
+    bridge.sendMidiTakePrompt("Incorporate MIDI take (take-7, 12 notes, 96 BPM) into the patch.", "take-7", 12, 96);
+    auto prompt = h.replies.waitFor("/pd/ui/prompt", 2000);
+    CHECK(prompt && prompt->args.size() == 7);
+    if (prompt) {
+        CHECK(prompt->str(0) == "Incorporate MIDI take (take-7, 12 notes, 96 BPM) into the patch.");
+        CHECK(prompt->str(1) == "spawn" && prompt->num(2) == 0);
+        CHECK(prompt->str(3) == "ai.midi" && prompt->str(4) == "take-7" && prompt->num(5) == 12 && prompt->num(6) == 96);
+    }
+
+    // 9. Without a running bridge no state name is bound and the watch is off; serving again binds them again, still off.
+    h.fire("/chat/widget_watch", { "on" });
+    for (int waited = 0; waited < 2000 && !bridge.widgetStateWatching(); waited += 10) sleepMs(10);
+    CHECK(bridge.widgetStateWatching());
+    bridge.stop();
+    CHECK(!bridge.widgetAskBound());
+    CHECK(!bridge.widgetStateWatching());
+    CHECK(!stateReceiverBound(host, "ai-tap-state"));
+    CHECK(!stateReceiverBound(host, "ai-loop_kick-state"));
+    restoreSink();
+    CHECK(bridge.startV2ForTests()); // stop() ended the v2 listener: later cases connect to it
+    CHECK(bridge.widgetAskBound());
+    CHECK(!bridge.widgetStateWatching());
+    CHECK(stateReceiverBound(host, "ai-tap-state"));
+    CHECK(stateReceiverBound(host, "ai-loop_e15-state")); // a named looper held from before the stop is bound again (it said hello once, at load)
+    CHECK(!stateReceiverBound(host, "ai-loop_kick-state")); // the one that was pushed out is not
+}
+
 // pd-lua stand-ins (Libraries/pd-lua/pdlua.c): a Lua object is CLASS_NOINLET (no inlet 0 of its own) and every inlet is an
 // inlet_new proxy; `pd.Receive` makes a "pdlua proxy receive": a 24-byte t_pd + owner + name made with flags 0, on no canvas.
 // These copy that shape (the real classes need Lua files on disk; the Lua route is covered live).
@@ -7019,6 +7178,9 @@ int main()
             runControlTruthCases(harness, processor);
             runLuaProxyCases(harness, processor);
             runWidgetAskCases(harness, processor, *bridge, [&] {
+                bridge->setReplySinkForTests([&replies](juce::OSCMessage const& msg) { replies.push(msg); });
+            });
+            runWidgetStateCases(harness, processor, *bridge, [&] {
                 bridge->setReplySinkForTests([&replies](juce::OSCMessage const& msg) { replies.push(msg); });
             });
             runWireActivityCases(harness);

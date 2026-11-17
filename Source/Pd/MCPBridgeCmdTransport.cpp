@@ -433,6 +433,10 @@ std::vector<std::string> MCPBridge::capabilityList() const
         // The pill's QUICK / DEEP chip: the server pushes its sticky lane as /chat/lane <deep|quick>; the chip's click
         // is sent back as the lane word on /pd/ui/prompt (the words the artist can type), so chip and word agree.
         "pill_lane",
+        // Thread phase 2, live widget history (Source/Mcp/McpWidgetState.h): a receiver on each ai.* widget's state name; the server's
+        // `/chat/widget_watch on` switches it on, then a widget quiet for 1 s with a new rev is one /pd/widget_ask event of kind `state`
+        // (<state> main <widget> <rev>). Also: ai.midi's send carries its source on /pd/ui/prompt (see MCPBridge::sendMidiTakePrompt).
+        "widget_state",
     };
     // P4.1 S2: the v2 listener is up (TCP 127.0.0.1, port and token in the discovery file).
     if (v2Server.running())
