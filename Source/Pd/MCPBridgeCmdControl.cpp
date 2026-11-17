@@ -149,8 +149,14 @@ void MCPBridge::handleChatDomain(const juce::String& action, const juce::OSCMess
     // older fork that sees a one-argument message here ignores it (it reads two).
     if (action == "lane") {
         auto const word = msg.size() >= 1 ? getArgString(msg[0]) : juce::String();
-        if (word == "deep" || word == "quick")
-            setPillDeepLane(word == "deep");
+        if (word == "deep" || word == "quick") {
+            bool const deep = word == "deep";
+            bool const changed = isPillDeepLane() != deep;
+            setPillDeepLane(deep);
+            // The chip is drawn from this flag: a switch the server made (a typed `deep` / `quick`, a reconnect) repaints the pills.
+            if (changed && processor)
+                postMessage([p = processor] { p->getMcp()->gui().repaintAll(); });
+        }
         return;
     }
     // /chat/msg <role> <text>

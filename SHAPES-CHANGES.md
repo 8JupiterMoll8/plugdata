@@ -120,8 +120,11 @@ as the fork now answers them. Nothing in the plan's shapes was removed or rename
     its owner), `setChatCallback` stays the sidebar's single slot. No wire change.
 
 ## `/chat/lane` (capability `pill_lane`) and the pill's QUICK / DEEP chip
-19f. NEW inbound `/chat/lane <deep|quick>`: the server's sticky pill lane, pushed at connect and at every switch. State only:
-    it sets the lane the chip on the selection pill shows (`MCPBridge::isPillDeepLane`) and posts NO chat line. It is a verb of
+19f. NEW inbound `/chat/lane <deep|quick>`: the server's sticky pill lane, pushed after every successful bridge handshake (first
+    connect, reconnect, a PlugData restart with a new boot token, a late handshake, a cap refresh) and at every switch. State only:
+    it sets the lane the chip on the selection pill shows (`MCPBridge::isPillDeepLane`) and posts NO chat line. When the word
+    CHANGES the lane, the fork posts one repaint of every canvas (`McpGuiHost::repaintAll`) so the chip shows it at once (review
+    2026-11-17, finding 8); the same word again repaints nothing. It is a verb of
     the `chat` domain, which takes every verb: no verb-table row, no schema row, no new hash. Any other word, or none, is
     ignored; an older fork reads a one-argument `/chat/...` as nothing (it needs two). The server sends it only to a bridge
     with capability `pill_lane`.
@@ -165,4 +168,22 @@ as the fork now answers them. Nothing in the plan's shapes was removed or rename
     glass picture, now with the refs file's path (the server also writes a Thread `media` entry), and a line "Picture saved as
     refs/<file> ..." goes to the chat (sidebar and the pill's answer line). An unsaved patch, a refs/ that cannot be written, or a
     paste slot waiting (the pill's picture button): the older way, a picture on the glass, unchanged. Names and sizes:
-    `Source/Mcp/McpRefsName.h` (JUCE-free, `Tests/mcp/refs_name_test.cpp`); the paste: `CanvasMcpTools.cpp`.
+    `Source/Mcp/McpRefsName.h` (JUCE-free, `Tests/mcp/refs_name_test.cpp`); the clipboard read and the paste:
+    `Source/Mcp/McpPicturePaste.cpp` (moved out of `CanvasMcpTools.cpp`; see 19j for what changed after the 2026-11-17 review).
+
+## Review 2026-11-17 of 19f..19i: follow-ups, no wire change
+19j. (1) **A pasted picture keeps `refs/` when the patch is saved.** `PictureObject::openFile` cut the stored name of every [pic] down
+    to its bare file name, so `[pic -open refs/a.png]` was saved as `pic 0 a.png ...` and no longer opened from the patch's folder
+    at the next load. A name RELATIVE to the patch (`refs/a.png`, `./a.png`, `../x/a.png`) is now kept as given; an absolute path
+    is still cut to its file name (upstream's behaviour). Upstream file `Source/Objects/PictureObject.h`: two hunks tagged
+    `MCP-CARRIED(pic-keep-relative)` (SEAM.md), the rule in `mcp::picKeptFilename` (`McpRefsName.h`, `Tests/mcp/refs_name_test.cpp`).
+    (2) **Ctrl+V starts no clipboard tool for text.** `Canvas::pasteSelection` asks for a picture first; when the JUCE clipboard
+    holds any non-empty text, that is returned at once unless the text is the path of an image file (`/x.png`, `file:///x.png`):
+    no xclip / wl-paste process, no wait of up to 3 x 3.5 s on the message thread (it stalled while PlugData itself owned the
+    clipboard). Only a clipboard WITHOUT text (a screenshot, "copy image") runs the tools; a tool that outlives its 3.5 s is killed
+    and reaped (`waitpid` through `ChildProcess::isRunning`). A clipboard that holds both an image and text now pastes the text.
+    (3) **`refs/` only for a normal saved user patch.** The picture goes to the glass instead (the older way) when the canvas is
+    locked or in presentation mode (`dragAndDropPaste` unlocks it, so it is not called), when the patch file is inside the app
+    data dir (Documentation, Abstractions, Extra, Patches, Externals, ...), or when the patch's folder is not writable.
+    (4) A canvas that never laid out a pill (a graph, one locked from the start) ignores chat lines: no state, no answer-line timer.
+    The paste code is `Source/Mcp/McpPicturePaste.{h,cpp}`.

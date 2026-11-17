@@ -629,6 +629,9 @@ juce::String fitAnswerToWidth(NVGcontext* nvg, juce::String const& text, float r
 
 void CanvasMcpLayer::onChatLine(juce::String const& role, juce::String const& text)
 {
+    // A canvas that never laid out a pill (a graph, one that is locked from the start) has no place for the line: no state, no timer.
+    if (mcpSelectionPillFrame.isEmpty())
+        return;
     if (!mcpPillAnswer.onChat(role.toStdString(), text.toStdString(), answerNowMs()))
         return;
     repaintPillAnswer(); // the new line, or the erased one
