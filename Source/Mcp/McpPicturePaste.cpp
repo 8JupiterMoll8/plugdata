@@ -130,9 +130,12 @@ bool canTakeRefsPicture(Canvas& canvas)
     auto const patchFile = canvas.patch.getCurrentFile();
     if (!patchFile.existsAsFile())
         return false;
-    // The app's own folders (Documentation, Abstractions, Extra, Patches, ...) are not the artist's patches.
-    if (patchFile.isAChildOf(ProjectInfo::appDataDir))
-        return false;
+    // The app's own folders (help patches, libraries, versions) are not the artist's patches; the artist's own projects
+    // live under the app data dir too (e.g. ~/Documents/plugdata/Alphi Ideas/...), so only these system folders refuse.
+    for (auto const* sys : { "Documentation", "Abstractions", "Extra", "Externals", "Library", "Versions", "Toolchain", "Deken" }) {
+        if (patchFile.isAChildOf(ProjectInfo::appDataDir.getChildFile(sys)))
+            return false;
+    }
     return patchFile.getParentDirectory().hasWriteAccess();
 }
 
