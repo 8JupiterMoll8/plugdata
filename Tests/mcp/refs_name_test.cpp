@@ -2,7 +2,9 @@
 //  - the file name `<patch>-<n>.png`: the stem is the patch's name made safe, n is the lowest free number, a name that exists is
 //    never returned (so a paste never overwrites a file);
 //  - the stored size: at most 960 px on the longest side, the ratio kept, never enlarged;
-//  - the pasted object: one `[pic -open refs/<file>]` line, relative to the patch's folder.
+//  - the pasted object: one `[pic -open refs/<file>]` line, relative to the patch's folder;
+//  - the name a [pic] keeps and SAVES once it opened its file: `refs/<file>` stays (a bare name would no longer open from the
+//    patch's folder after the next load: the 2026-11-17 review's finding 1), an absolute path cuts down to its file name.
 // Build + run: scripts/test-bridge-safety.sh
 #include "../../Source/Mcp/McpRefsName.h"
 
@@ -74,6 +76,38 @@ void objectText()
     CHECK(mcp::refsPatchText("tape-echo-1.png") == "#X obj 0 0 pic -open refs/tape-echo-1.png;\n");
 }
 
+// What the saved patch line holds for a pasted picture: ELSE's pic_save writes `pic <outline> <x_filename> <send> <receive> <size>
+// <latch>` and its creation reads the filename from the second argument, so what must survive is the kept name.
+void savedNameReopens()
+{
+    std::string const file = "tape-echo-1.png";
+    std::string const location = "refs/" + file; // what the pasted `[pic -open refs/<file>]` carried
+    auto const kept = mcp::picKeptFilename(location, file); // PictureObject::openFile: location + the found file's bare name
+    CHECK(kept == location);
+    CHECK("pic 0 " + kept + " empty empty 0 0" == "pic 0 refs/tape-echo-1.png empty empty 0 0");
+    // the old behaviour (the bare name) is exactly what lost the folder
+    CHECK(file != kept);
+}
+
+void keptFilenames()
+{
+    CHECK(mcp::picKeptFilename("refs/a.png", "a.png") == "refs/a.png");
+    CHECK(mcp::picKeptFilename("./refs/a.png", "a.png") == "./refs/a.png");
+    CHECK(mcp::picKeptFilename("../shared/a.png", "a.png") == "../shared/a.png");
+    CHECK(mcp::picKeptFilename("a.png", "a.png") == "a.png"); // bare: unchanged
+    CHECK(mcp::picKeptFilename("/home/me/pics/a.png", "a.png") == "a.png"); // absolute: upstream's bare name
+    CHECK(mcp::picKeptFilename("~/pics/a.png", "a.png") == "a.png");
+    CHECK(mcp::picKeptFilename("C:\\pics\\a.png", "a.png") == "a.png");
+    CHECK(mcp::picKeptFilename("c:/pics/a.png", "a.png") == "a.png");
+    CHECK(mcp::picKeptFilename("\\\\server\\share\\a.png", "a.png") == "a.png");
+    CHECK(mcp::picKeptFilename("/x/a.png", "") == "/x/a.png"); // no bare name to keep: the location stays
+    CHECK(mcp::picKeptFilename("", "a.png") == "a.png");
+    CHECK(!mcp::picIsAbsolute("refs/a.png"));
+    CHECK(!mcp::picIsAbsolute("x"));                     // a lone letter is not a drive
+    CHECK(!mcp::picIsAbsolute("1:/a.png"));              // a digit is not a drive letter
+    CHECK(mcp::picIsAbsolute("Z:a.png"));
+}
+
 } // namespace
 
 int main()
@@ -82,6 +116,8 @@ int main()
     names();
     sizes();
     objectText();
+    keptFilenames();
+    savedNameReopens();
     if (failures != 0) {
         std::printf("refs_name_test: %d failure(s)\n", failures);
         return 1;

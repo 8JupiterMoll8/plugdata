@@ -1,6 +1,6 @@
 // A picture pasted onto a canvas (overnight queue 2026-11-16, Batch 2 item 6): it is saved as a PNG in the patch's `refs/`
 // folder, next to the .pd, and shown by a [pic] box. This header is the JUCE-free part: the file name (never an existing one),
-// the size the box gets, the pasted object text. The clipboard read, the write and the paste are CanvasMcpTools.cpp.
+// the size the box gets, the pasted object text. The clipboard read, the write and the paste are McpPicturePaste.cpp.
 // Tested by Tests/mcp/refs_name_test.cpp.
 //
 //  - the name is `<patch>-<n>.png`: the patch's file name without its extension, lower case, only [a-z0-9_-] (anything else
@@ -9,6 +9,8 @@
 //  - the box is `[pic -open refs/<file>]`: ELSE's pic opens the file when it is created (and every time the patch loads),
 //    relative to the patch's folder. A [loadbang] chain would not do: loadbang fires when a patch loads, not when objects are
 //    pasted, so the picture would stay empty until the next load;
+//  - a [pic] keeps, and so SAVES, the name it was opened with when that is relative to the patch (`refs/<file>`): PictureObject.h
+//    used to cut every name down to its bare file name, which no longer opened from the patch's folder after the next load;
 //  - a picture is stored at most `refsMaxEdge` pixels on its longest side (never enlarged): a pasted 4K screenshot would
 //    otherwise be a 3840 px box on a patch.
 #pragma once
@@ -80,6 +82,27 @@ inline std::pair<int, int> refsFitSize(int width, int height, int maxEdge = refs
 inline std::string refsPicObject(std::string_view fileName)
 {
     return "pic -open refs/" + std::string(fileName);
+}
+
+/** True for a path that does not depend on the patch's folder: `/x`, `~/x`, `\\x`, `C:\\x` / `C:/x`. */
+inline bool picIsAbsolute(std::string_view location)
+{
+    if (location.empty())
+        return false;
+    if (location.front() == '/' || location.front() == '\\' || location.front() == '~')
+        return true;
+    return location.size() >= 2 && location[1] == ':'
+        && ((location[0] >= 'a' && location[0] <= 'z') || (location[0] >= 'A' && location[0] <= 'Z'));
+}
+
+/** The name a [pic] keeps (and writes to the patch file) for the file it was opened with: a location relative to the patch
+ *  (`refs/a.png`, `./a.png`) as given, so it opens again from the patch's folder; an absolute one cuts down to its bare file name
+ *  (upstream's behaviour); an empty bare name keeps the location. */
+inline std::string picKeptFilename(std::string_view location, std::string_view bareName)
+{
+    if (location.empty() || (picIsAbsolute(location) && !bareName.empty()))
+        return std::string(bareName);
+    return std::string(location);
 }
 
 /** The patch text a paste takes: one `#X obj` line at the origin. */

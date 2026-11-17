@@ -5,6 +5,8 @@
  */
 #pragma once
 
+#include "../Mcp/McpRefsName.h" // MCP-CARRIED(pic-keep-relative)
+
 class PictureObject final : public ObjectBase
     , public AsyncUpdater {
 
@@ -305,7 +307,10 @@ public:
         auto const pathString = imageFile.getFullPathName();
         auto const fileNameString = imageFile.getFileName();
 
-        auto* rawFileName = fileNameString.toRawUTF8();
+        // MCP-CARRIED(pic-keep-relative): a path relative to the patch (`refs/a.png`) is kept as given, so [pic] saves and reopens it
+        auto const keptUtf8 = mcp::picKeptFilename(location.toStdString(), fileNameString.toStdString());
+        auto const keptName = String::fromUTF8(keptUtf8.c_str(), static_cast<int>(keptUtf8.size()));
+        auto* rawFileName = keptName.toRawUTF8();
         auto* rawPath = pathString.toRawUTF8();
 
         img = ImageFileFormat::loadFrom(imageFile).convertedToFormat(Image::ARGB);
