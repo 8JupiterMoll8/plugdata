@@ -22,7 +22,7 @@
 #include "Objects/ObjectBase.h"
 #include "Pd/MCPBridge.h"
 #include "Mcp/McpHost.h"
-#include "Mcp/McpRefsName.h"
+#include "Mcp/McpPicturePaste.h"
 
 void CanvasMcpLayer::setSketchToolActive(bool active)
 {
@@ -379,131 +379,9 @@ void CanvasMcpLayer::clearAllInk()
 // Phase 2 — Reference Images (pasted schematics on the canvas glass)
 //===----------------------------------------------------------------------===//
 
-namespace {
-// JUCE 7.0's SystemClipboard only speaks text. Image paste therefore tries, in order:
-//  1. Linux/X11 + Wayland clipboard tools (xclip / wl-paste), bounded by `timeout`;
-//  2. a text-path heuristic — many apps copy "file:///path/img.png" as clipboard text.
-juce::Image loadImageFromClipboard()
-{
-    auto const clipboardText = juce::SystemClipboard::getTextFromClipboard().trim();
-    if (clipboardText.isNotEmpty() && clipboardText.length() < 4096) {
-        juce::File file;
-        if (clipboardText.startsWithIgnoreCase("file://"))
-            file = juce::URL(clipboardText).getLocalFile();
-        else if (juce::File::isAbsolutePath(clipboardText))
-            file = juce::File(clipboardText);
-
-        if (file.existsAsFile()) {
-            if (auto image = juce::ImageFileFormat::loadFrom(file); image.isValid()) {
-                return image;
-            }
-        }
-    }
-
-#if JUCE_LINUX
-    auto const tmp = juce::File::getSpecialLocation(juce::File::tempDirectory)
-                         .getChildFile("plugdata_paste_" + juce::String(juce::Random::getSystemRandom().nextInt64()) + ".img");
-    auto const quotedPath = "'" + tmp.getFullPathName().replace("'", "'\\''") + "'";
-    juce::StringArray attempts;
-    attempts.add("timeout 3 xclip -selection clipboard -t image/png -o > " + quotedPath);
-    attempts.add("timeout 3 wl-paste --type image/png > " + quotedPath);
-    attempts.add("timeout 3 wl-paste > " + quotedPath);
-    for (auto const& command : attempts) {
-        tmp.deleteFile();
-        juce::ChildProcess proc;
-        if (!proc.start(juce::StringArray { "/bin/sh", "-c", command })) {
-            continue;
-        }
-        proc.waitForProcessToFinish(3500);
-        if (proc.isRunning()) proc.kill();
-        if (tmp.existsAsFile() && tmp.getSize() > 0) {
-            if (auto image = juce::ImageFileFormat::loadFrom(tmp); image.isValid()) {
-                tmp.deleteFile();
-                return image;
-            }
-        }
-    }
-    tmp.deleteFile();
-#endif
-
-    return {};
-}
-
-// A picture pasted onto the canvas (no paste slot waiting for it): a PNG in the patch's `refs/` folder, beside the .pd, and a
-// `[pic -open refs/<file>]` box at the mouse that shows it (McpRefsName.h has the rules: the name `<patch>-<n>.png` is never an
-// existing file, the picture is stored at most 960 px on its longest side). A patch that is not saved has no folder to keep a
-// refs/ in (and one in a read-only folder cannot write it): then false, and the caller keeps the older way (a picture on the
-// glass). Message thread only.
-bool pastePictureAsPicBox(Canvas& canvas, juce::Image const& picture)
-{
-    auto const patchFile = canvas.patch.getCurrentFile();
-    if (!patchFile.existsAsFile())
-        return false;
-    auto const refsDir = patchFile.getParentDirectory().getChildFile("refs");
-    if (!refsDir.createDirectory().wasOk())
-        return false;
-
-    auto const name = mcp::refsFileName(patchFile.getFileNameWithoutExtension().toStdString(),
-        [&refsDir](std::string const& candidate) { return refsDir.getChildFile(juce::String(candidate)).exists(); });
-    if (name.empty())
-        return false;
-
-    auto const [fitW, fitH] = mcp::refsFitSize(picture.getWidth(), picture.getHeight());
-    if (fitW <= 0 || fitH <= 0)
-        return false;
-    auto const stored = (fitW == picture.getWidth() && fitH == picture.getHeight())
-        ? picture
-        : picture.rescaled(fitW, fitH, juce::Graphics::highResamplingQuality);
-    juce::MemoryOutputStream pngData;
-    if (!juce::PNGImageFormat().writeImageToStream(stored, pngData))
-        return false;
-
-    // The name was free a moment ago on this (the message) thread; the stream is opened only for a file that is not there.
-    auto const target = refsDir.getChildFile(juce::String(name));
-    if (target.exists())
-        return false;
-    bool created = false;
-    bool written = false;
-    {
-        juce::FileOutputStream out(target);
-        created = !out.failedToOpen();
-        if (created && out.write(pngData.getData(), pngData.getDataSize())) {
-            out.flush();
-            written = out.getStatus().wasOk();
-        }
-    }
-    if (!written) {
-        if (created)
-            target.deleteFile(); // no half-written picture stays behind
-        return false;
-    }
-
-    // At the mouse; with the mouse outside the visible part of the canvas, in the middle of what the artist sees.
-    auto mouse = canvas.getMouseXYRelative();
-    if (canvas.viewport) {
-        auto const view = canvas.viewport->getViewArea().toNearestInt();
-        if (!view.contains(mouse))
-            mouse = view.getCentre();
-    }
-    canvas.dragAndDropPaste(juce::String(mcp::refsPatchText(name)), mouse - canvas.canvasOrigin, fitW, fitH);
-
-    // The AI is told a picture arrived by the same event as a glass reference image (/pd/reference/image <path> x y w h);
-    // the artist reads it on the pill and in the sidebar.
-    if (canvas.pd) {
-        if (auto* bridge = canvas.pd->getMcp()->getMCPBridge()) {
-            auto const at = mouse - canvas.canvasOrigin;
-            bridge->sendReferenceImage(target.getFullPathName(), static_cast<float>(at.x - fitW / 2), static_cast<float>(at.y - fitH / 2),
-                static_cast<float>(fitW), static_cast<float>(fitH));
-            bridge->postChatMessage("ai", "Picture saved as refs/" + juce::String(name) + " and shown in a [pic] box.");
-        }
-    }
-    return true;
-}
-} // namespace
-
 bool CanvasMcpLayer::pasteImageFromClipboard()
 {
-    auto const clipboardImage = loadImageFromClipboard();
+    auto const clipboardImage = mcp::paste::imageFromClipboard();
     if (!clipboardImage.isValid()) {
         // Slot is open but the clipboard has no image yet — coach, keep the slot.
         if (mcpImageSlotActive) {
@@ -517,7 +395,7 @@ bool CanvasMcpLayer::pasteImageFromClipboard()
     if (!canvas.pd) return true; // consume the paste; there is nowhere to put it
 
     // On the canvas itself (no paste slot waiting): a file in the patch's refs/ folder and a [pic] box.
-    if (!mcpImageSlotActive && pastePictureAsPicBox(canvas, clipboardImage))
+    if (!mcpImageSlotActive && mcp::paste::pasteAsPicBox(canvas, clipboardImage))
         return true;
 
     // Encode once: hash names the cache file, bytes are reused for the disk write.
