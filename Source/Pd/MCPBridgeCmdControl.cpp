@@ -8,7 +8,7 @@
 
 #include "MCPBridgeCmdCommon.h"
 #include "MCPBridgeBound.h"          // truth slice 3: send_checked's receivers
-#include "MCPBridgeControlWindow.h"  // mcpCtrlReceiverClass: the bridge's own probes are no receivers
+#include "MCPBridgeOwnReceivers.h"   // mcpIsBridgeOwnReceiverClass: the bridge's own probes (control, ai-ask, widget state) are no receivers
 #include "MCPBridgePdAccessors.h"
 
 void MCPBridge::handleParamDomain(const juce::String& /*paramName*/, const juce::OSCMessage& msg)
@@ -303,7 +303,7 @@ void MCPBridge::pdSendChecked(const juce::String& action, const juce::OSCMessage
         int proxies = 0;
         std::vector<t_pd*> candidates;
         for (auto* b : binders) {
-            if (mcpCtrlReceiverClass && *b == mcpCtrlReceiverClass) continue; // the bridge's own probe
+            if (mcpIsBridgeOwnReceiverClass(*b)) continue; // the bridge's own probes (control window, ai-ask, widget state): no listener, never refused
             if (isLuaProxyReceive(b)) ++proxies;
             else candidates.push_back(b);
         }

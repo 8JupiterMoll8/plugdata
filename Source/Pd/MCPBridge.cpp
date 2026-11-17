@@ -50,23 +50,28 @@ void MCPBridge::unbindWidgetAsk()
 {
     if (!widgetAsk) return;
     widgetAsk->pump.stopTimer();
-    if (!processor || !widgetAsk->receiver) return;
+    if (!processor) return;
     McpHost::PdLockScope const lock(*processor);
+    // The state receivers go first and whatever the ask receiver is: they are bound to Pd names too, and a state receiver left bound
+    // would keep its book pointer past the bridge.
     for (auto*& rec : widgetAsk->stateReceivers) {
         if (!rec) continue;
         pd_free(reinterpret_cast<t_pd*>(rec)); // unbinds (mcpStateReceiverFree)
         rec = nullptr;
     }
     widgetAsk->states.rewind(); // the watch is off and what was noted is forgotten (the names stay): serving again starts from the server's next `on`
-    pd_free(reinterpret_cast<t_pd*>(widgetAsk->receiver)); // unbinds (mcpAskReceiverFree)
-    widgetAsk->receiver = nullptr;
+    if (widgetAsk->receiver) {
+        pd_free(reinterpret_cast<t_pd*>(widgetAsk->receiver)); // unbinds (mcpAskReceiverFree)
+        widgetAsk->receiver = nullptr;
+    }
 }
 
 // Caller holds the Pd lock. A widget that already has a slot keeps its receiver; a name that gets none (not a watched widget) binds
-// nothing; a named looper beyond the cap takes the slot of the one idle longest (its receiver is freed first).
+// nothing; a named looper beyond the cap takes the slot of the one idle longest (its receiver is freed first). Nothing is bound while
+// the bridge does not serve (no ask receiver): unbindWidgetAsk frees the state receivers on that same condition.
 void MCPBridge::bindWidgetStateLocked(char const* widget)
 {
-    if (!widgetAsk) return;
+    if (!widgetAsk || !widgetAsk->receiver) return;
     bool evicted = false;
     int const slot = widgetAsk->states.claim(widget, mcpStateNowMs(), &evicted);
     if (slot < 0) return;
@@ -128,6 +133,11 @@ void MCPBridge::pumpWidgetAsks()
             sendReply("/pd/widget_ask", args);
         }
     }
+    // Live widget history: a server that switched the watch on and is gone (no v2 session, nothing for 15 s) is not told: the watch goes
+    // off, so the receivers cost one atomic read again and no event is made for nobody. A server that comes back says `on` again with
+    // its next handshake. Checked only while the watch is on (the session list takes a lock).
+    if (widgetAsk->states.watching() && serverQuiet())
+        widgetAsk->states.setWatching(false);
     // Live widget history: a widget quiet for 1 s with a new rev is ONE event. The canvas is "main": the server reads the state by
     // the widget's name, not by tab, so no walk of the patches is made for it. Nothing is popped while no server can be told (the state
     // would count as forwarded). The console line for what was refused is said at most once a second.
@@ -435,6 +445,11 @@ bool MCPBridge::startV2ForTests()
     return startV2();
 }
 
+void MCPBridge::ageServerActivityForTests(juce::uint32 agoMs)
+{
+    lastServerActivity.store(static_cast<juce::int64>(static_cast<juce::uint32>(juce::Time::getMillisecondCounter() - agoMs)));
+}
+
 void MCPBridge::setReplySinkForTests(std::function<void(juce::OSCMessage const&)> sink)
 {
     sender.setSink(std::move(sink));
@@ -495,7 +510,7 @@ juce::String MCPBridge::getStatus() const
     if (last == 0) return "waiting for server";
 
     auto const elapsed = juce::Time::getMillisecondCounter() - last;
-    if (elapsed > 15000) {
+    if (elapsed > kServerQuietMs) {
         // Server went quiet. Emit once (lazily — the Advanced panel polls
         // getStatus(), which is where an artist would look).
         if (!reportedLost && processor) {
@@ -506,6 +521,13 @@ juce::String MCPBridge::getStatus() const
     }
 
     return "connected";
+}
+
+bool MCPBridge::serverQuiet() const
+{
+    if (!v2Router.sessionsSummary().empty()) return false; // a v2 session sends no UDP heartbeat: it is there while it is open
+    auto const last = lastServerActivity.load();
+    return last == 0 || static_cast<juce::uint32>(juce::Time::getMillisecondCounter() - static_cast<juce::uint32>(last)) > kServerQuietMs;
 }
 
 void MCPBridge::noteServerActivity()

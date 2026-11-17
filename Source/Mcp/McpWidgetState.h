@@ -49,6 +49,9 @@ inline constexpr char const* kWidgetStateFixed[] = {
     "ai.tap", "ai.draw", "ai.loop_0", "ai.loop", "ai.sketch", "ai.knob", "ai.dice", "ai.grid", "ai.paint", "ai.strip", "ai.listen",
 };
 constexpr int kWidgetStateFixedCount = static_cast<int>(sizeof(kWidgetStateFixed) / sizeof(kWidgetStateFixed[0]));
+// A hello burst at load (every fixed widget and every named looper the history can hold, in one pump tick) must fit the ask queue: a hello
+// that finds it full is dropped, and a named looper dropped there is never watched (it says hello once, at load).
+static_assert(kWidgetAskQueueSlots >= kWidgetStateFixedCount + kWidgetStateNamedMax, "a hello burst must fit the ask queue");
 
 enum class WidgetStateOutcome : int { Noted, Off, Malformed };
 

@@ -162,6 +162,22 @@ as the fork now answers them. Nothing in the plan's shapes was removed or rename
     Tests: `Tests/mcp/widget_state_test.cpp` (the book: bounds, quiet, rev, gap, off), `runWidgetStateCases` in `bridge_handler_tests.cpp`
     (receivers bound, burst = one event, same rev none, gap, named looper by hello, off, `sendMidiTakePrompt`, stop unbinds).
 
+19n. Review of 19k-19m (2026-11-17); no shape or schema change, five fixes:
+    - The bridge's own receivers on a state name (`ai-<widget>-state`) and on `ai-ask` are bridge probes, like the armed control window's
+      (`MCPBridgeOwnReceivers.h`, told apart by class pointer). `/pd/send_checked` skips them: a checked send to `ai-tap-state` with a pd-lua
+      widget's `pd.Receive` bound is delivered to the widget (`proxies: 1`) and is no longer refused as "non-object binder" (refusedClass
+      `mcp_ai_state`); with the bridge's receiver alone nothing listens (`bound: false`, nothing sent, `refused` empty). `/pd/bound` leaves
+      them out of its walk (no walk of the patches for them) and reports them in `other` as `kind: "bridge_probe"`.
+    - The watch is switched off by the bridge itself when no server talks to it any more: no v2 session is open and no message came for 15 s
+      (what the status line calls "disconnected"). A server that returns says `on` again with its next handshake; an open v2 session keeps
+      the watch on however quiet it is (it sends no UDP heartbeat).
+    - The ask queue holds 32 events (was 16): a hello burst at load (11 fixed widgets and up to 16 named loopers) fits, so no named looper is
+      dropped from the history by a full queue. Every ask limit is as before.
+    - `unbindWidgetAsk` frees the state receivers whether or not the ask receiver is bound; `bindWidgetStateLocked` binds nothing while the
+      ask receiver is not bound. Each state receiver keeps its own `end` symbol (taken at bind), not a process-wide one.
+    Tests: `runWidgetStateSeamCases` in `bridge_handler_tests.cpp` (own receivers alone / beside a pd-lua stand-in, for `ai-tap-state`,
+    `ai-loop_0-state` and `ai-ask`; the watch ends with the server, not with an open v2 session), `helloBurstFitsTheAskQueue` in `widget_state_test.cpp`.
+
 ## `by` limits (truth)
 20a. **Review H2:** `by` (in `last`, `ctl[].by`, `ctl[].from[].by`) is `"ai"`, `"other"` or **null** = not known: the
     seq is older than the oldest AI range the bridge still keeps (a ring of 1024 ranges; back-to-back AI dispatches

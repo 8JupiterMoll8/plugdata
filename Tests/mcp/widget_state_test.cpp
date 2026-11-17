@@ -238,10 +238,27 @@ void rewindKeepsNamesDropsState()
     CHECK(b.popDue(e, 11100) && e.rev == 3);
 }
 
+// Review 2026-11-17: a hello burst at load (every fixed widget and every named looper the history can hold, in one pump tick) must fit the
+// ask queue: a hello that finds it full is dropped, and a named looper dropped there is never watched (it says hello once).
+void helloBurstFitsTheAskQueue()
+{
+    mcp::WidgetAskQueue q;
+    char name[mcp::kWidgetAskNameLen + 1];
+    int queued = 0;
+    for (int i = 0; i < mcp::kWidgetStateFixedCount + mcp::kWidgetStateNamedMax; ++i) {
+        std::snprintf(name, sizeof name, "ai.loop_h%d", i);
+        if (q.offer(mcp::WidgetAskKind::Hello, name, 0, 1000) == mcp::WidgetAskOutcome::Queued) ++queued;
+    }
+    CHECK(queued == mcp::kWidgetStateFixedCount + mcp::kWidgetStateNamedMax);
+    CHECK(q.takeCounts().full == 0);
+    CHECK(mcp::kWidgetAskQueueSlots >= 32);
+}
+
 } // namespace
 
 int main()
 {
+    helloBurstFitsTheAskQueue();
     names();
     claiming();
     offUntilWatched();

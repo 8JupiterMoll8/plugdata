@@ -21,7 +21,7 @@
 // per call. kind of a receiver: control, signal, table (arrays, tables) or delay (delwrite~).
 
 #include "MCPBridgeCmdCommon.h"
-#include "MCPBridgeControlWindow.h" // mcpCtrlReceiverClass: the bridge's own control probes
+#include "MCPBridgeOwnReceivers.h" // mcpIsBridgeOwnReceiverClass: the bridge's own probes (control window, ai-ask, widget state)
 #include "MCPBridgeBound.h" // bindersOf, findSymbolNoCreate (truth slice 3: shared with the stop facts and send_checked)
 
 #include <chrono>
@@ -131,7 +131,7 @@ void MCPBridge::pdBound(const juce::String& action, const juce::OSCMessage& msg)
         for (auto const& name : names) {
             binders.push_back(bindersOf(findSymbolNoCreate(name.toRawUTF8())));
             for (auto* b : binders.back())
-                if (*b != canvas_class && !(mcpCtrlReceiverClass && *b == mcpCtrlReceiverClass))
+                if (*b != canvas_class && !mcpIsBridgeOwnReceiverClass(*b))
                     wanted.insert(b);
         }
         // 2. One walk for exactly those binders, oldest root first, early exit, budget.
@@ -171,7 +171,7 @@ void MCPBridge::pdBound(const juce::String& action, const juce::OSCMessage& msg)
                 auto* o = new juce::DynamicObject();
                 if (cl == canvas_class)
                     o->setProperty("kind", "canvas");
-                else if (mcpCtrlReceiverClass && cl == mcpCtrlReceiverClass)
+                else if (mcpIsBridgeOwnReceiverClass(cl))
                     o->setProperty("kind", "bridge_probe");
                 else if (walk.truncated)
                     o->setProperty("kind", "unresolved"); // the budget stopped the walk before it was reached

@@ -31,7 +31,7 @@
 namespace mcp {
 
 constexpr int kWidgetAskNameLen = 32;   // ai.<word>, the terminating NUL not counted
-constexpr int kWidgetAskQueueSlots = 16;
+constexpr int kWidgetAskQueueSlots = 32; // a hello burst at load: every fixed widget and every named looper of the widget history (McpWidgetState.h) fit
 constexpr int kWidgetAskRateSlots = 16;
 constexpr std::int64_t kWidgetAskMinGapMs = 2000;
 constexpr int kWidgetAskMaxRev = 9999999;

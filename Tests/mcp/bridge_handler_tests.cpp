@@ -2672,6 +2672,8 @@ void runWidgetStateCases(Harness& h, PluginProcessor& processor, MCPBridge& brid
     CHECK(first && first->args.size() == 4 && first->str(1) == "main" && first->str(2) == "ai.tap" && first->num(3) == 4);
     auto const firstAt = std::chrono::steady_clock::now();
 
+    // The server's heartbeat (a UDP server pings every 2.5 s: the watch ends only for a server that went quiet: runWidgetStateSeamCases).
+    bridge.ageServerActivityForTests(0);
     // 4. At once a new rev: it is quiet for 1 s but inside the 2 s gap of the last event, so it waits for the gap (it is not lost), and
     //    the burst made no second event (the next one is rev 5, not rev 4). Another widget has its own clock.
     sendToState(host, "ai-tap-state", "end", { numAtom(5) });
@@ -2688,6 +2690,7 @@ void runWidgetStateCases(Harness& h, PluginProcessor& processor, MCPBridge& brid
     CHECK(got["ai.tap"] == 5 && got["ai.draw"] == 9);
     CHECK(std::chrono::duration_cast<std::chrono::milliseconds>(tapAt - firstAt).count() >= 1800); // 2 s after rev 4's event, not before
 
+    bridge.ageServerActivityForTests(0); // the server's heartbeat
     // 5. The same rev again (a dump of the server's own, a ghost): no event. Frames that are not `end`, an `end` with no number: none, one console line.
     sleepMs(2200); // the 2 s gap of rev 5's event is over: only the rev dedupe can keep the same rev from being an event now
     uint64_t const before = host->consoleSeqNow();
@@ -2698,6 +2701,7 @@ void runWidgetStateCases(Harness& h, PluginProcessor& processor, MCPBridge& brid
     CHECK(!nextStateEvent(h, 1500).has_value());
     CHECK(consoleHas(host, before, "without a whole-number rev", 2000));
 
+    bridge.ageServerActivityForTests(0); // the server's heartbeat
     // 6. A named looper says hello: from then on its state name is watched (up to 16 of them); a name that is no looper gets no receiver.
     h.replies.clear();
     sendToAiAsk(host, gensym("hello"), { symAtom("ai.loop_kick") });
@@ -2709,6 +2713,7 @@ void runWidgetStateCases(Harness& h, PluginProcessor& processor, MCPBridge& brid
     auto kick = nextStateEvent(h, 3500);
     CHECK(kick && kick->str(2) == "ai.loop_kick" && kick->num(3) == 2 && kick->args.size() == 4);
 
+    bridge.ageServerActivityForTests(0); // the server's heartbeat
     // 6b. More named loopers than the cap (16): the one idle longest (ai.loop_kick) makes room, its receiver is freed and the newest is bound.
     uint64_t const beforeEvict = host->consoleSeqNow();
     for (int batch = 0; batch < 2; ++batch) {
@@ -2716,7 +2721,7 @@ void runWidgetStateCases(Harness& h, PluginProcessor& processor, MCPBridge& brid
             std::string const w = "ai.loop_e" + std::to_string(batch * 8 + i);
             sendToAiAsk(host, gensym("hello"), { symAtom(w.c_str()) });
         }
-        sleepMs(300); // the ask queue holds 16 and the pump runs every 50 ms
+        sleepMs(300); // the pump runs every 50 ms (the ask queue holds 32, a whole burst of them)
     }
     for (int waited = 0; waited < 3000 && stateReceiverBound(host, "ai-loop_kick-state"); waited += 100) sleepMs(100);
     CHECK(!stateReceiverBound(host, "ai-loop_kick-state"));
@@ -6861,6 +6866,136 @@ void runIemLabelCases(Harness& h)
     clearMain(h, "il9");
 }
 
+// Review 2026-11-17 (live widget history), findings 1 and 3.
+// 1. The bridge's own native receivers on a state name (`ai-<widget>-state`) and on `ai-ask` are bridge probes, like the armed control
+//    window's: a checked send is not refused as "non-object binder" because of them, and /pd/bound does not put them in its walk (a full
+//    walk of the patches for a name nothing else holds) and reports them as `bridge_probe`. A pd-lua widget's own `pd.Receive` on the
+//    same name (a "pdlua proxy receive": the stand-in of runLuaProxyCases) is the listener: the send is delivered to it.
+// 3. The watch is switched off again when no server talks to the bridge any more (no v2 session and nothing for 15 s); a v2 session
+//    that is open keeps it on however quiet it is (the v2 session sends no UDP heartbeat).
+void runWidgetStateSeamCases(Harness& h, PluginProcessor& processor, MCPBridge& bridge)
+{
+    std::printf("widget history seams (review 2026-11-17: own receivers are probes, the watch ends with the server)\n");
+    auto* host = processor.getMcp();
+    CHECK(bridge.widgetAskBound());
+    CHECK(luaProxyReceiveClass != nullptr);
+    if (!luaProxyReceiveClass) return;
+
+    auto bindProxy = [&](char const* name) {
+        LuaProxyReceive* proxy = nullptr;
+        CHECK(host->pdWait([&] {
+            proxy = static_cast<LuaProxyReceive*>(getbytes(sizeof(LuaProxyReceive)));
+            proxy->pd = luaProxyReceiveClass; // as pdlua_proxyreceive_new: malloc'd, its class set by hand
+            proxy->owner = nullptr;
+            proxy->name = gensym(name);
+            pd_bind(&proxy->pd, proxy->name);
+        }, 2000));
+        return proxy;
+    };
+    auto freeProxy = [&](LuaProxyReceive*& proxy) {
+        CHECK(host->pdWait([&] {
+            pd_unbind(&proxy->pd, proxy->name);
+            freebytes(proxy, sizeof(LuaProxyReceive));
+            proxy = nullptr;
+        }, 2000));
+    };
+    auto checkedDump = [&](char const* corr, char const* name) {
+        return h.call("/pd/send_checked", { "main", corr, name, 1, "dump" }, std::string("/pd/send_checked/reply/") + corr);
+    };
+
+    int corr = 0;
+    for (char const* name : { "ai-tap-state", "ai-loop_0-state", "ai-ask" }) {
+        auto const id = [&](char const* tag) { return std::string(tag) + std::to_string(++corr); };
+        // The bridge's receiver alone: nothing listens (nobody to deliver to), and nothing is refused.
+        {
+            luaLikeHitsNow(host);
+            auto const c = id("sa");
+            auto r = checkedDump(c.c_str(), name);
+            CHECK(r.has_value());
+            auto const json = r ? parseJson(*r) : juce::var();
+            CHECK(json["refused"].toString().isEmpty());
+            CHECK(!static_cast<bool>(json["bound"]) && !static_cast<bool>(json["delivered"]) && static_cast<int>(json["proxies"]) == 0);
+            auto const b = id("sb");
+            auto entry = boundEntry(h.call("/pd/bound", { b.c_str(), name }, "/pd/bound/reply/" + b, 3000), name);
+            CHECK(entry.has_value());
+            if (entry) {
+                CHECK(!static_cast<bool>((*entry)["bound"]) && static_cast<int>((*entry)["count"]) == 0);
+                auto const* other = (*entry)["other"].getArray();
+                CHECK(other && other->size() == 1 && (*other)[0]["kind"].toString() == "bridge_probe");
+            }
+            // ...and no walk of the patches was made for it: its own receiver is not something the walk looks for.
+            auto const w = id("sw");
+            auto walked = h.call("/pd/bound", { w.c_str(), name }, "/pd/bound/reply/" + w, 3000);
+            CHECK(walked.has_value() && static_cast<int>(parseJson(*walked)["walkObjects"]) == 0);
+        }
+        // A pd-lua widget's own receiver beside it: delivered to the widget (a proxy: counted, never read), the bridge's receiver is no listener.
+        {
+            auto* proxy = bindProxy(name);
+            luaLikeHitsNow(host);
+            auto const c = id("sc");
+            auto r = checkedDump(c.c_str(), name);
+            CHECK(r.has_value());
+            auto const json = r ? parseJson(*r) : juce::var();
+            CHECK(json["refused"].toString().isEmpty());
+            CHECK(static_cast<bool>(json["bound"]) && static_cast<bool>(json["delivered"]) && static_cast<int>(json["proxies"]) == 1);
+            CHECK(json["receivers"].getArray() && json["receivers"].getArray()->isEmpty());
+            auto const hits = luaLikeHitsNow(host);
+            CHECK(hits.size() == 1 && hits[0] == std::string("recv ") + name + " symbol 1");
+            auto const b = id("sd");
+            auto entry = boundEntry(h.call("/pd/bound", { b.c_str(), name }, "/pd/bound/reply/" + b, 3000), name);
+            CHECK(entry.has_value());
+            if (entry) {
+                int probes = 0;
+                if (auto const* other = (*entry)["other"].getArray())
+                    for (auto const& o : *other)
+                        if (o["kind"].toString() == "bridge_probe") ++probes;
+                CHECK(probes == 1 && static_cast<int>((*entry)["count"]) == 0);
+            }
+            freeProxy(proxy);
+        }
+        std::printf("  %s: probe alone / beside a widget's receiver\n", name);
+    }
+
+    // 3. The watch ends with the server. `on` comes by the command worker (it notes the server's activity, like any message).
+    auto watchOn = [&] {
+        h.fire("/chat/widget_watch", { "on" });
+        for (int waited = 0; waited < 2000 && !bridge.widgetStateWatching(); waited += 10) sleepMs(10);
+    };
+    auto waitWatchOff = [&](int timeoutMs) {
+        for (int waited = 0; waited < timeoutMs && bridge.widgetStateWatching(); waited += 20) sleepMs(20);
+    };
+    CHECK(!bridge.getStatus().startsWith("connected: ")); // no v2 session open: only the UDP side's silence counts
+    watchOn();
+    CHECK(bridge.widgetStateWatching());
+    sleepMs(300);
+    CHECK(bridge.widgetStateWatching()); // a server that spoke just now keeps it
+    bridge.ageServerActivityForTests(16000); // ...and the server dies: nothing for 16 s
+    waitWatchOff(2000);
+    CHECK(!bridge.widgetStateWatching());
+    watchOn(); // the server came back (its handshake says `on` again)
+    CHECK(bridge.widgetStateWatching());
+
+    // An open v2 session is a server that is there, quiet or not.
+    auto const [port, token] = v2Discovery();
+    CHECK(port > 0 && !token.empty());
+    {
+        V2Link link(port);
+        link.client.sendFrame(mcp::v2::test::helloJson(token));
+        CHECK(link.take([](auto const& v) { return field(v, "t") == "welcome"; }, 3000).has_value());
+        CHECK(bridge.getStatus().startsWith("connected: "));
+        bridge.ageServerActivityForTests(16000);
+        sleepMs(600); // twelve pump ticks
+        CHECK(bridge.widgetStateWatching());
+    }
+    waitWatchOff(5000); // the session closed (a read thread sees the end of the stream): the same silence now ends the watch
+    CHECK(!bridge.widgetStateWatching());
+    watchOn();
+    CHECK(bridge.widgetStateWatching());
+    h.fire("/chat/widget_watch", { "off" }); // as it was found
+    waitWatchOff(2000);
+    CHECK(!bridge.widgetStateWatching());
+}
+
 // P4.1 S3: the handler cases a second time, through a v2 session of the bridge's own listener, with the same
 // expectations on the decoded replies (the evidence that the handlers did not change), then the v2-only cases.
 void runV2Pass(Harness& v1, MCPBridge& bridge)
@@ -7183,6 +7318,7 @@ int main()
             runWidgetStateCases(harness, processor, *bridge, [&] {
                 bridge->setReplySinkForTests([&replies](juce::OSCMessage const& msg) { replies.push(msg); });
             });
+            runWidgetStateSeamCases(harness, processor, *bridge);
             runWireActivityCases(harness);
             runFactCases(harness, processor);
             runOutputCeilingCases(harness, processor, audioControl);

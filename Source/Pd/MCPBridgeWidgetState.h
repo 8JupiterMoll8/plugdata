@@ -23,6 +23,7 @@ struct McpStateReceiver {
     t_object obj; // ob_pd at offset 0: bindable
     t_symbol* sym = nullptr;
     mcp::WidgetStateBook* book = nullptr;
+    t_symbol* end = nullptr; // gensym("end"), taken at bind: a symbol of the instance that bound it (a global would be one instance's for all)
     int slot = -1;
 };
 
@@ -32,7 +33,6 @@ inline std::int64_t mcpStateNowMs()
 }
 
 inline t_class* mcpStateReceiverClass = nullptr;
-inline t_symbol* mcpStateEndSym = nullptr;
 
 inline void mcpStateReceiverFree(McpStateReceiver* x)
 {
@@ -46,7 +46,7 @@ inline void mcpStateReceiverFree(McpStateReceiver* x)
 // anything method too (Pd's defaults), with their own selector: none of them is `end`.
 inline void mcpStateReceiverAnything(McpStateReceiver* x, t_symbol* s, int argc, t_atom* argv)
 {
-    if (!x || !x->book || s != mcpStateEndSym) return;
+    if (!x || !x->book || s != x->end) return;
     if (!x->book->watching()) return;
     if (argc < 1 || argv[0].a_type != A_FLOAT) {
         x->book->noteMalformed();
@@ -59,7 +59,6 @@ inline void mcpStateReceiverAnything(McpStateReceiver* x, t_symbol* s, int argc,
 inline void ensureMcpStateReceiverClass()
 {
     if (mcpStateReceiverClass) return;
-    mcpStateEndSym = gensym("end");
     mcpStateReceiverClass = class_new(gensym("mcp_ai_state"), nullptr, reinterpret_cast<t_method>(mcpStateReceiverFree),
         sizeof(McpStateReceiver), CLASS_PD, static_cast<t_atomtype>(0));
     class_addanything(mcpStateReceiverClass, reinterpret_cast<t_method>(mcpStateReceiverAnything));
@@ -74,6 +73,7 @@ inline McpStateReceiver* mcpBindStateReceiver(mcp::WidgetStateBook& book, int sl
     auto* rec = reinterpret_cast<McpStateReceiver*>(pd_new(mcpStateReceiverClass));
     rec->sym = gensym(name);
     rec->book = &book;
+    rec->end = gensym("end");
     rec->slot = slot;
     pd_bind(&rec->obj.ob_pd, rec->sym);
     return rec;

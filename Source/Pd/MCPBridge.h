@@ -470,6 +470,8 @@ public:
     // Tests only: starts the v2 listener alone (no UDP), discovery file under the current HOME. False if it could
     // not start. stop() stops it.
     bool startV2ForTests();
+    // Tests only: the server's last message is taken to have come `agoMs` ago (the live widget history's staleness check reads it).
+    void ageServerActivityForTests(juce::uint32 agoMs);
 
     // Status for the GUI / console. Returns a short human-readable state:
     // "connected" | "listening" | "stopped" | "error: <detail>".
@@ -801,6 +803,10 @@ private:
     std::optional<mcp::v2::RequestAnswer> admitV2(int session, mcp::v2::Request request);
     // Replies may be sent: the UDP socket is ours, or a v2 listener runs (UDP output is then dropped by `sender`).
     bool canReply() const { return active.load() || v2Server.running(); }
+    // No server talks to this bridge: no v2 session is open and the UDP server said nothing for kServerQuietMs (what getStatus calls
+    // "disconnected"; a bridge no server has ever spoken to counts as quiet). The live widget history switches itself off on it.
+    static constexpr juce::uint32 kServerQuietMs = 15000;
+    bool serverQuiet() const;
 
     std::vector<MorphJob> morphJobs;
     juce::CriticalSection morphLock;
