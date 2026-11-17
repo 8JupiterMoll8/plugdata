@@ -391,6 +391,58 @@ struct AudioControl {
     std::atomic<std::thread::id> messageThreadId {};
 };
 
+// "main" is the focused root, which the host republishes on a 50 ms timer (McpHost::refreshFocusedRoot) and reads only while
+// it is still an open root patch. A test that opens roots moves it to the newest one; right after a test closes the root it
+// names, it still names the closed tab and "main" resolves to NOTHING for up to 50 ms: a batch to "main" is then refused
+// ("canvas 'pd-main' not found", created 0; wire activity after the widget-ask tabs, contentVersion after the save cases, 1 run
+// in 4). A test that opens roots reads the patch "main" names before and waits for it again after its closes.
+// The patch "main" names now; waits (bounded) while it resolves to nothing. nullptr = still nothing after ~3 s.
+t_canvas* mainRootNow(McpHost* host)
+{
+    t_canvas* root = nullptr;
+    for (int i = 0; i < 60 && !root; ++i) {
+        host->pdWait([&] { root = host->getCanvasBySymbol("main"); }, 2000);
+        if (!root)
+            sleepMs(50);
+    }
+    return root;
+}
+
+// Waits (bounded, ~3 s) until "main" names `want` again; false = it never did.
+bool waitMainIs(McpHost* host, t_canvas* want)
+{
+    for (int i = 0; i < 60 && want; ++i) {
+        bool named = false;
+        host->pdWait([&] { named = host->getCanvasBySymbol("main") == want; }, 2000);
+        if (named)
+            return true;
+        sleepMs(50);
+    }
+    return false;
+}
+
+// Opens a patch file as a root the way a patch's [pd open( does, and waits until its canvas is there. `pd open` only queues
+// the open: glob_open does nothing (plugdata handles it on the message thread, PluginProcessor::receiveSysMessage, from the gui
+// message queue), so the canvas of the file appears a moment AFTER the pdWait that sent the message, and a lookup straight after
+// it sometimes finds nothing (every test that opened a file saw this once in a while). The canvas, or nullptr when it never
+// appeared (~3 s).
+t_canvas* openRootAndWait(McpHost* host, juce::File const& f)
+{
+    host->pdWait([&] {
+        t_atom a[2];
+        SETSYMBOL(&a[0], gensym(f.getFileName().toRawUTF8()));
+        SETSYMBOL(&a[1], gensym(f.getParentDirectory().getFullPathName().toRawUTF8()));
+        pd_typedmess(gensym("pd")->s_thing, gensym("open"), 2, a);
+    }, 3000);
+    t_canvas* root = nullptr;
+    for (int i = 0; i < 100 && !root; ++i) {
+        host->pdWait([&] { root = host->getCanvasBySymbol(f.getFullPathName()); }, 2000);
+        if (!root)
+            sleepMs(30);
+    }
+    return root;
+}
+
 void runPdContextCases(PluginProcessor& processor, AudioControl& audio)
 {
     std::printf("pd context\n");
@@ -2498,6 +2550,8 @@ void runWidgetAskCases(Harness& h, PluginProcessor& processor, MCPBridge& bridge
         askDup = class_new(gensym("ai.wkdup"), reinterpret_cast<t_newmethod>(+[]() -> void* { return pd_new(askDup); }), nullptr,
             sizeof(t_object), 0, static_cast<t_atomtype>(0));
     }, 2000));
+    t_canvas* const mainRoot = mainRootNow(host); // see mainRootNow: "main" must name this patch again after the closes below
+    CHECK(mainRoot != nullptr);
     auto const tabsDir = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("mcp_wk_tabs");
     tabsDir.deleteRecursively();
     tabsDir.createDirectory();
@@ -2505,17 +2559,7 @@ void runWidgetAskCases(Harness& h, PluginProcessor& processor, MCPBridge& bridge
     CHECK(tabsDir.getChildFile("wkone.pd").replaceWithText(rootWith("ai.wkone")));
     CHECK(tabsDir.getChildFile("wkdup_a.pd").replaceWithText(rootWith("ai.wkdup")));
     CHECK(tabsDir.getChildFile("wkdup_b.pd").replaceWithText(rootWith("ai.wkdup")));
-    auto const openRoot = [&](juce::File const& f) {
-        host->pdWait([&] {
-            t_atom a[2];
-            SETSYMBOL(&a[0], gensym(f.getFileName().toRawUTF8()));
-            SETSYMBOL(&a[1], gensym(f.getParentDirectory().getFullPathName().toRawUTF8()));
-            pd_typedmess(gensym("pd")->s_thing, gensym("open"), 2, a);
-        }, 3000);
-        t_canvas* c = nullptr;
-        host->pdWait([&] { c = host->getCanvasBySymbol(f.getFullPathName()); }, 3000);
-        return c;
-    };
+    auto const openRoot = [&](juce::File const& f) { return openRootAndWait(host, f); };
     t_canvas* const rootOne = openRoot(tabsDir.getChildFile("wkone.pd"));
     t_canvas* const rootDupA = openRoot(tabsDir.getChildFile("wkdup_a.pd"));
     t_canvas* const rootDupB = openRoot(tabsDir.getChildFile("wkdup_b.pd"));
@@ -2554,6 +2598,7 @@ void runWidgetAskCases(Harness& h, PluginProcessor& processor, MCPBridge& bridge
             pd_typedmess(&c->gl_pd, gensym("menuclose"), 1, &force);
         }, 3000);
     tabsDir.deleteRecursively();
+    CHECK(waitMainIs(host, mainRoot)); // the next section's first batch goes to "main"
 }
 
 // pd-lua stand-ins (Libraries/pd-lua/pdlua.c): a Lua object is CLASS_NOINLET (no inlet 0 of its own) and every inlet is an
@@ -3648,18 +3693,15 @@ void runCloneSendCases(Harness& h, PluginProcessor& processor)
 {
     std::printf("send_checked into every clone instance (-s 1)\n");
     auto* host = processor.getMcp();
+    t_canvas* const mainRoot = mainRootNow(host); // see mainRootNow
+    CHECK(mainRoot != nullptr);
     auto base = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("mcp_clone_s1");
     base.deleteRecursively();
     base.createDirectory();
     base.getChildFile("cs1voice.pd").replaceWithText("#N canvas 0 50 450 300 12;\n#X obj 10 10 r cs1_x;\n#X obj 10 50 f;\n#X connect 0 0 1 0;\n");
     auto hostPd = base.getChildFile("cs1host.pd");
     hostPd.replaceWithText("#N canvas 0 50 450 300 12;\n#X obj 10 10 clone -s 1 cs1voice 3;\n");
-    CHECK(host->pdWait([&] {
-        t_atom a[2];
-        SETSYMBOL(&a[0], gensym(hostPd.getFileName().toRawUTF8()));
-        SETSYMBOL(&a[1], gensym(base.getFullPathName().toRawUTF8()));
-        pd_typedmess(gensym("pd")->s_thing, gensym("open"), 2, a);
-    }, 3000));
+    CHECK(openRootAndWait(host, hostPd) != nullptr);
     t_canvas* c = nullptr;
     int instances = 0;
     host->pdWait([&] {
@@ -3694,6 +3736,7 @@ void runCloneSendCases(Harness& h, PluginProcessor& processor)
         pd_typedmess(&c->gl_pd, gensym("menuclose"), 1, &force);
     }, 3000);
     base.deleteRecursively();
+    CHECK(waitMainIs(host, mainRoot));
 }
 
 // Review H1 (proof3, pd-lua patch 0002): a widget that keeps its state with self:set_args marks its patch changed, so
@@ -3702,6 +3745,8 @@ void runLuaSetArgsDirtyCases(PluginProcessor& processor)
 {
     std::printf("pd-lua set_args marks the patch changed (H1)\n");
     auto* host = processor.getMcp();
+    t_canvas* const mainRoot = mainRootNow(host); // see mainRootNow
+    CHECK(mainRoot != nullptr);
     auto base = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("mcp_h1_setargs");
     base.deleteRecursively();
     base.createDirectory();
@@ -3713,12 +3758,7 @@ void runLuaSetArgsDirtyCases(PluginProcessor& processor)
     // A pd-lua object takes messages through its inlet proxies (pd_float on the box itself: "no method for 'float'"),
     // so the float comes as in a patch: [r h1go] -> [h1dirty].
     host_pd.replaceWithText("#N canvas 0 50 450 300 12;\n#X obj 10 10 h1dirty;\n#X obj 10 60 r h1go;\n#X connect 1 0 0 0;\n");
-    CHECK(host->pdWait([&] {
-        t_atom a[2];
-        SETSYMBOL(&a[0], gensym(host_pd.getFileName().toRawUTF8()));
-        SETSYMBOL(&a[1], gensym(base.getFullPathName().toRawUTF8()));
-        pd_typedmess(gensym("pd")->s_thing, gensym("open"), 2, a);
-    }, 3000));
+    CHECK(openRootAndWait(host, host_pd) != nullptr);
     t_canvas* c = nullptr;
     bool isLua = false;
     host->pdWait([&] {
@@ -3757,12 +3797,15 @@ void runLuaSetArgsDirtyCases(PluginProcessor& processor)
         pd_typedmess(&c->gl_pd, gensym("menuclose"), 1, &force);
     }, 3000);
     base.deleteRecursively();
+    CHECK(waitMainIs(host, mainRoot));
 }
 
 void runPathCanvasCases(PluginProcessor& processor)
 {
     std::printf("canvas by full file path (P11.6 M1)\n");
     auto* host = processor.getMcp();
+    t_canvas* const mainRoot = mainRootNow(host); // see mainRootNow
+    CHECK(mainRoot != nullptr);
     auto base = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("mcp_p116_twins");
     base.deleteRecursively();
     auto fa = base.getChildFile("a").getChildFile("p116twin.pd");
@@ -3771,14 +3814,7 @@ void runPathCanvasCases(PluginProcessor& processor)
     fb.getParentDirectory().createDirectory();
     fa.replaceWithText("#N canvas 0 50 450 300 12;\n#X obj 10 10 r p116_a;\n");
     fb.replaceWithText("#N canvas 0 50 450 300 12;\n#X obj 10 10 r p116_b;\n");
-    auto open = [&](juce::File const& f) {
-        host->pdWait([&] {
-            t_atom a[2];
-            SETSYMBOL(&a[0], gensym(f.getFileName().toRawUTF8()));
-            SETSYMBOL(&a[1], gensym(f.getParentDirectory().getFullPathName().toRawUTF8()));
-            pd_typedmess(gensym("pd")->s_thing, gensym("open"), 2, a);
-        }, 3000);
-    };
+    auto open = [&](juce::File const& f) { openRootAndWait(host, f); };
     open(fa);
     open(fb);
     t_canvas* ca = nullptr;
@@ -3818,6 +3854,7 @@ void runPathCanvasCases(PluginProcessor& processor)
         }
     }, 3000);
     base.deleteRecursively();
+    CHECK(waitMainIs(host, mainRoot));
 }
 
 // P11.8 item 1 (lost work, live check 2026-11-03): `manage_patch_files save filename:X` wrote the FOCUSED canvas into
@@ -3834,6 +3871,8 @@ void runSaveGuardCases(Harness& h, PluginProcessor& processor)
     CHECK(mcp::fileInPdDir("/tmp", "x.pd") == juce::File("/tmp/x.pd"));
 
     auto* host = processor.getMcp();
+    t_canvas* const mainRoot = mainRootNow(host); // see mainRootNow
+    CHECK(mainRoot != nullptr);
     auto base = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("mcp_p118_save");
     base.deleteRecursively();
     auto fa = base.getChildFile("a").getChildFile("p118own.pd");
@@ -3849,14 +3888,7 @@ void runSaveGuardCases(Harness& h, PluginProcessor& processor)
     fx.replaceWithText(textX);
     auto const onDiskB = fb.loadFileAsString(); // replaceWithText writes \r\n: compare against what is on disk
     auto const onDiskX = fx.loadFileAsString();
-    auto open = [&](juce::File const& f) {
-        host->pdWait([&] {
-            t_atom a[2];
-            SETSYMBOL(&a[0], gensym(f.getFileName().toRawUTF8()));
-            SETSYMBOL(&a[1], gensym(f.getParentDirectory().getFullPathName().toRawUTF8()));
-            pd_typedmess(gensym("pd")->s_thing, gensym("open"), 2, a);
-        }, 3000);
-    };
+    auto open = [&](juce::File const& f) { openRootAndWait(host, f); };
     open(fa);
     open(fb);
     t_canvas* ca = nullptr;
@@ -4022,6 +4054,7 @@ void runSaveGuardCases(Harness& h, PluginProcessor& processor)
         }
     }, 3000);
     base.deleteRecursively();
+    CHECK(waitMainIs(host, mainRoot)); // contentVersion and selection_get go to "main" next
 }
 
 void runBoundCases(Harness& h, PluginProcessor& processor)
