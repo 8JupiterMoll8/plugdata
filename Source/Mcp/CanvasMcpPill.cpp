@@ -175,7 +175,7 @@ void CanvasMcpLayer::updateSelectionPill()
                 return;
             }
             if (mcpSelectionPill) mcpSelectionPill->setText(juce::String(), false);
-            dismissSelectionPill();
+            dismissSelectionPill(); // Escape closes and sends nothing (and gives a widget chip's edit mode back)
         };
         mcpSelectionPill->onTextChange = [this] {
             canvas.repaint();
@@ -216,6 +216,7 @@ void CanvasMcpLayer::updateSelectionPill()
 
 void CanvasMcpLayer::hideSelectionPill()
 {
+    mcpWidgetFocus = {}; // the pill is gone by another way than the chip's own (restoreRunMode ran first where it applies): the artist took over
     if (mcpPillAnimator) {
         mcpPillAnimator->stopTimer();
     }
@@ -231,6 +232,7 @@ void CanvasMcpLayer::hideSelectionPill()
 
 void CanvasMcpLayer::dismissSelectionPill()
 {
+    restoreRunMode(); // every artist dismissal (send, Escape, park, a click away): a widget chip put the canvas in edit mode, it goes back
     mcpPillDrawerMode = 0;
     mcpPillDrawerFrame = {};
     mcpPaletteFrame = {};
@@ -241,6 +243,75 @@ void CanvasMcpLayer::dismissSelectionPill()
     // re-selecting the same object later always brings it back.
     mcpSelectionPillHideUntil = juce::Time::getMillisecondCounter() + 700;
     hideSelectionPill();
+}
+
+// An ai.* widget's chip ("AI...") = select the widget, open the pill (McpWidgetFocus.h). The chip is pressed in run mode (a locked canvas
+// hands the click to the widget) and the pill is an edit-mode thing: the canvas goes to edit mode for it. The order matters: the
+// lock change deselects everything, so the selection comes after it.
+bool CanvasMcpLayer::focusPillOn(Object* object, mcp::WidgetPillTarget const& target)
+{
+    if (!object || canvas.isGraph || !canvas.isShowing() || ObjectBase::isBeingEdited())
+        return false;
+    bool const wasLocked = getValue<bool>(canvas.locked);
+    bool const wasPresentation = getValue<bool>(canvas.presentationMode);
+    if (wasPresentation) {
+        canvas.presentationMode = false;
+        canvas.presentationMode.getValueSource().sendChangeMessage(true);
+    }
+    if (wasLocked) {
+        canvas.locked = false;
+        canvas.locked.getValueSource().sendChangeMessage(true);
+    }
+    canvas.deselectAll();
+    canvas.setSelected(object, true);
+    mcpSelectionPillHideUntil = 0;
+    mcpPillSketchMode = false;
+    mcpPillRequested = true;
+    mcpPillDrawerMode = 0;
+    mcpPaletteFrame = {};
+    updateSelectionPill();
+    if (!mcpSelectionPill || !mcpSelectionPill->isVisible()) {
+        // nothing to type into: give the canvas its mode back, the widget asks at once (it hears no `focused`)
+        mcpWidgetFocus = { true, wasLocked, wasPresentation, nullptr, {} };
+        restoreRunMode();
+        mcpPillRequested = false;
+        return false;
+    }
+    mcpSelectionPill->setText(juce::String(), false);
+    mcpSelectionPill->grabKeyboardFocus();
+    mcpWidgetFocus = { true, wasLocked, wasPresentation, object->getPointer(), target };
+    return true;
+}
+
+void CanvasMcpLayer::restoreRunMode()
+{
+    auto const focus = mcpWidgetFocus;
+    mcpWidgetFocus = {};
+    if (!focus.active)
+        return;
+    if (focus.wasLocked && !getValue<bool>(canvas.locked)) {
+        canvas.locked = true;
+        canvas.locked.getValueSource().sendChangeMessage(true);
+    }
+    if (focus.wasPresentation && !getValue<bool>(canvas.presentationMode)) {
+        canvas.presentationMode = true;
+        canvas.presentationMode.getValueSource().sendChangeMessage(true);
+    }
+    if (canvas.editor) canvas.editor->updateCommandStatus(); // the lock change refreshed the toolbar before presentation was back
+}
+
+// The widget the pill acts on when Enter finds no text: the one the chip focused (it knows its pd-lua object), else the askable widget
+// the one selected box is or holds (a widget the artist selected by hand). Not a single widget = invalid.
+mcp::WidgetPillTarget CanvasMcpLayer::selectedWidgetTarget(SmallArray<Object*> const& selected)
+{
+    if (selected.size() != 1 || !canvas.pd || !selected[0])
+        return {};
+    t_gobj* const box = selected[0]->getPointer();
+    if (mcpWidgetFocus.active && mcpWidgetFocus.box == box && mcpWidgetFocus.target.valid())
+        return mcpWidgetFocus.target;
+    if (auto* bridge = canvas.pd->getMcp()->getMCPBridge())
+        return bridge->widgetTargetOfBox(box);
+    return {};
 }
 
 // Shift+Enter: park, don't wake the AI. The typed intent becomes a tape note
@@ -304,7 +375,20 @@ void CanvasMcpLayer::submitSelectionPill(bool queueForChat)
         return;
     }
 
-    if (prompt.isNotEmpty() && canvas.pd) {
+    // What Enter means (McpWidgetFocus.h): text = a normal pill message; no text and exactly one ai.* widget selected = "complete it" (the widget
+    // is told to ask, as its chip did before the pill); anything else just closes.
+    auto const selected = canvas.getSelectionOfType<Object>();
+    mcp::WidgetPillTarget widgetTarget;
+    if (prompt.isEmpty())
+        widgetTarget = selectedWidgetTarget(selected);
+    auto const outcome = mcp::pillAction(mcp::PillKey::Enter, prompt.isEmpty(), static_cast<int>(selected.size()), widgetTarget.valid());
+    if (outcome == mcp::PillOutcome::CompleteWidget && canvas.pd) {
+        auto* bridge = canvas.pd->getMcp()->getMCPBridge();
+        if (!bridge || !bridge->askWidget(widgetTarget))
+            canvas.pd->logMessage("AI: " + juce::String(widgetTarget.widget) + " is not listening (nothing is bound to its ai-in name); nothing was asked");
+    }
+
+    if (outcome == mcp::PillOutcome::SendPrompt && canvas.pd) {
         // Find selection stable tempIds & compute group bounding box
         juce::StringArray targetIds;
         bool first = true;
@@ -347,7 +431,7 @@ void CanvasMcpLayer::submitSelectionPill(bool queueForChat)
         mcpSelectionPill->setText(juce::String(), false);
     }
 
-    dismissSelectionPill();
+    dismissSelectionPill(); // (it gives a widget chip's edit mode back)
     canvas.repaint();
     if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
 }

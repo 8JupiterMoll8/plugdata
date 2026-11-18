@@ -8,6 +8,7 @@
 #include "MCPBridgeCmdCommon.h"
 #include "MCPBridgeTraceTaps.h"
 #include "MCPBridgeWidgetAsk.h" // proof3 3c: the ai-ask receiver
+#include "MCPBridgeWidgetFocus.h" // the widget chip -> selection pill shortcut
 #include "Mcp/McpRtGuard.h"
 #include "Mcp/McpAudit.h"
 #include "Mcp/McpCeilingPlayer.h" // P9 round 1: playVoiceTake's own callback is clamped
@@ -98,12 +99,84 @@ bool MCPBridge::widgetAskBound() const
     return widgetAsk && widgetAsk->receiver != nullptr;
 }
 
+bool MCPBridge::focusWidgetPill(std::string const& widget, std::uint64_t ptr)
+{
+    if (!processor || !widgetAsk || ptr == 0) return false;
+    std::vector<McpFocusLink> chain;
+    {
+        McpHost::PdLockScope const lock(*processor);
+        chain = mcpWidgetFocusChainLocked(ptr, kFocusWalkBudget);
+    }
+    mcp::WidgetPillTarget target;
+    target.widget = widget;
+    target.luaPtr = ptr;
+    // Innermost first: the canvas that holds the widget shows it when the artist opened it; else the box that holds that canvas on the
+    // canvas the artist sees. The links are only compared with what the views hold (a box may be gone by now).
+    for (auto const& link : chain) {
+        bool const took = widgetAsk->focusSinkForTests ? widgetAsk->focusSinkForTests(link.cnv, link.box, target)
+                                                       : processor->getMcp()->gui().focusWidgetPill(link.cnv, link.box, target);
+        if (!took) continue;
+        McpHost::PdLockScope const lock(*processor);
+        mcpTellWidgetLocked(widget.c_str(), "focused", ptr);
+        return true;
+    }
+    return false;
+}
+
+mcp::WidgetPillTarget MCPBridge::widgetTargetOfBox(t_gobj* box)
+{
+    if (!processor) return {};
+    McpHost::PdLockScope const lock(*processor);
+    return mcpWidgetTargetOfBoxLocked(box);
+}
+
+bool MCPBridge::askWidget(mcp::WidgetPillTarget const& target)
+{
+    if (!processor || !target.valid()) return false;
+    McpHost::PdLockScope const lock(*processor);
+    return mcpTellWidgetLocked(target.widget.c_str(), "ask", target.luaPtr);
+}
+
+void MCPBridge::setWidgetFocusSinkForTests(std::function<bool(t_canvas*, t_gobj*, mcp::WidgetPillTarget const&)> sink)
+{
+    if (widgetAsk) widgetAsk->focusSinkForTests = std::move(sink);
+}
+
+void MCPBridge::setWidgetFocusMouseHeldForTests(std::function<bool()> held)
+{
+    if (widgetAsk) widgetAsk->mouseHeldForTests = std::move(held);
+}
+
 void MCPBridge::pumpWidgetAsks()
 {
     if (!widgetAsk) return;
     std::vector<mcp::WidgetAskEvent> events;
     mcp::WidgetAskEvent e;
-    while (widgetAsk->queue.pop(e)) events.push_back(e);
+    // A focus is not an event for the server: the newest one is kept and carried out below (once the mouse button is up).
+    while (widgetAsk->queue.pop(e)) {
+        if (e.kind != mcp::WidgetAskKind::Focus) {
+            events.push_back(e);
+            continue;
+        }
+        auto& pending = widgetAsk->pendingFocus;
+        pending.active = true;
+        pending.widget = e.widget;
+        pending.ptr = e.ptr;
+        pending.sinceMs = mcpAskNowMs();
+    }
+    if (widgetAsk->pendingFocus.active) {
+        auto& pending = widgetAsk->pendingFocus;
+        bool const waited = mcpAskNowMs() - pending.sinceMs >= McpWidgetAskState::kFocusWaitMs;
+        bool const held = widgetAsk->mouseHeldForTests ? widgetAsk->mouseHeldForTests() : juce::ModifierKeys::currentModifiers.isAnyMouseButtonDown();
+        if (waited) {
+            pending = {}; // the button is still down after all that time: the widget asks at once (it heard no `focused`)
+        } else if (!held) {
+            auto const widget = pending.widget;
+            auto const ptr = pending.ptr;
+            pending = {};
+            focusWidgetPill(widget, ptr);
+        }
+    }
     if (!events.empty()) {
         // One lock and ONE walk of the open patches for every distinct widget of this tick (a hello burst at load).
         std::vector<std::string> widgets;
@@ -169,7 +242,7 @@ void MCPBridge::pumpWidgetAsks()
     if (processor && (c.malformed || c.rateLimited || c.full)) {
         juce::StringArray parts;
         if (c.rateLimited) parts.add(juce::String(c.rateLimited) + " within 2 s of the same widget's last ask");
-        if (c.malformed) parts.add(juce::String(c.malformed) + " without a widget name (ai.<word>) and a whole-number rev");
+        if (c.malformed) parts.add(juce::String(c.malformed) + " without a widget name (ai.<word>) and a whole-number rev (a focus also needs the widget object's address)");
         if (c.full) parts.add(juce::String(c.full) + " while the ask queue was full");
         // A Pd console line (post), not logMessage: the artist sees it and the AI's console history has it too.
         auto const line = "ai-ask: not sent to the AI: " + parts.joinIntoString("; ");

@@ -59,6 +59,7 @@
 #include "Pd/MCPBridgeBound.h" // delta review: placedAmong (clone voices, walk limit)
 #include "Pd/MCPBridgeObjectValues.h" // mcpResolveInlet: pd-lua objects are CLASS_NOINLET (set reaches their proxy inlets)
 #include "Pd/MCPBridgeWidgetAskCanvas.h" // the tab of an ask: one walk for every widget of a pump tick
+#include "Pd/MCPBridgeWidgetFocus.h" // the chip -> selection pill shortcut: the chain of boxes a widget sits in
 #include <juce_cryptography/juce_cryptography.h> // juce::SHA256: the save_content hash (P11.2 V11)
 #include "Utility/PluginParameter.h" // PlugDataParameter: the master volume guard (P5.1 sink floor)
 #include "Mcp/McpPdFile.h" // P11.8 item 3: mcp::fileInPdDir
@@ -2600,6 +2601,387 @@ void runWidgetAskCases(Harness& h, PluginProcessor& processor, MCPBridge& bridge
         }, 3000);
     tabsDir.deleteRecursively();
     CHECK(waitMainIs(host, mainRoot)); // the next section's first batch goes to "main"
+}
+
+// The widget chip -> selection pill shortcut (Source/Mcp/McpWidgetFocus.h). A widget's chip sends `ai-ask focus <widget> <rev> <ptr>`
+// (ptr = the pd-lua object's address, hex); the pump finds the box it belongs to in the open patches and offers each view that could
+// show it, innermost first (a box inside a wrapper abstraction: the object's own canvas, then the wrapper's box on the canvas that
+// holds it), to the GUI (here: a recording sink, the headless instance has no editor). The first view that takes it wins and the
+// widget is told `focused <ptr>` on its in-name; none takes it = nothing is told (the widget then asks at once). Enter on no text
+// tells the widget `ask <ptr>` (askWidget) and it asks as its chip did: `ai-ask <widget> <rev>` -> /pd/widget_ask.
+namespace focuscases {
+struct Call {
+    t_canvas* cnv = nullptr;
+    t_gobj* box = nullptr;
+    std::string widget;
+    std::uint64_t ptr = 0;
+};
+std::mutex lock;
+std::vector<Call> calls;
+std::vector<std::string> seen;       // what the probe on the widget's in-name received: "<selector> <atoms...>"
+std::string ownHex;                  // the probe answers `ask <ownHex>` the way a widget does: `ai-ask ai.knob 7` (guarded by `lock`)
+// The fake widgets are registered for the rest of the run (Pd has no class_free): later sections that create [ai.knob] get these ones.
+t_class* probeClass = nullptr;
+t_class* knobClass = nullptr;
+t_class* diceClass = nullptr;
+t_class* gridClass = nullptr;
+
+void probeAnything(t_object*, t_symbol* s, int argc, t_atom* argv)
+{
+    std::string line = s->s_name;
+    for (int i = 0; i < argc; ++i) {
+        char buf[MAXPDSTRING] = {};
+        atom_string(argv + i, buf, sizeof(buf));
+        line += std::string(" ") + buf;
+    }
+    {
+        std::lock_guard<std::mutex> g(lock);
+        seen.push_back(line);
+    }
+    // a widget that is told `ask <its own address>` asks (Tap:ask: `ai-ask <widget> <rev>`)
+    bool mine = false;
+    if (s == &s_list && argc == 2 && argv[0].a_type == A_SYMBOL && std::strcmp(argv[0].a_w.w_symbol->s_name, "ask") == 0 && argv[1].a_type == A_SYMBOL) {
+        std::lock_guard<std::mutex> g(lock);
+        mine = ownHex == argv[1].a_w.w_symbol->s_name;
+    }
+    if (mine) {
+        t_symbol* const askName = gensym("ai-ask");
+        t_atom ask[2];
+        SETSYMBOL(&ask[0], gensym("ai.knob"));
+        SETFLOAT(&ask[1], 7);
+        if (askName->s_thing) pd_typedmess(askName->s_thing, &s_list, 2, ask);
+    }
+}
+
+std::string hexOf(t_gobj const* g)
+{
+    char buf[mcp::kWidgetFocusPtrChars + 1] = {};
+    mcp::widgetFocusPtrText(static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(g)), buf, sizeof(buf));
+    return buf;
+}
+
+bool waitFor(std::function<bool()> const& done, int timeoutMs)
+{
+    for (int waited = 0; waited <= timeoutMs; waited += 20) {
+        if (done()) return true;
+        sleepMs(20);
+    }
+    return false;
+}
+
+std::vector<Call> callsNow()
+{
+    std::lock_guard<std::mutex> g(lock);
+    return calls;
+}
+
+std::vector<std::string> seenNow()
+{
+    std::lock_guard<std::mutex> g(lock);
+    return seen;
+}
+
+void clearAll()
+{
+    std::lock_guard<std::mutex> g(lock);
+    calls.clear();
+    seen.clear();
+}
+} // namespace focuscases
+
+void runWidgetFocusCases(Harness& h, PluginProcessor& processor, MCPBridge& bridge)
+{
+    using namespace focuscases;
+    std::printf("widget focus (chip -> selection pill)\n");
+    auto* host = processor.getMcp();
+    CHECK(bridge.widgetAskBound());
+
+    // The fake widgets: ai.knob (a plain box), ai.dice:gfx (pd-lua's shadow class), ai-grid:gfx (the object inside a wrapper abstraction),
+    // and a probe bound to the in-names of knob and grid (what the widgets' own receivers are).
+    CHECK(host->pdWait([&] {
+        if (probeClass) return;
+        probeClass = class_new(gensym("mcp_test_focus_probe"), nullptr, nullptr, sizeof(t_object), CLASS_PD, static_cast<t_atomtype>(0));
+        class_addanything(probeClass, reinterpret_cast<t_method>(probeAnything));
+        knobClass = class_new(gensym("ai.knob"), reinterpret_cast<t_newmethod>(+[]() -> void* { return pd_new(knobClass); }), nullptr,
+            sizeof(t_object), 0, static_cast<t_atomtype>(0));
+        diceClass = class_new(gensym("ai.dice:gfx"), reinterpret_cast<t_newmethod>(+[]() -> void* { return pd_new(diceClass); }), nullptr,
+            sizeof(t_object), 0, static_cast<t_atomtype>(0));
+        gridClass = class_new(gensym("ai-grid:gfx"), reinterpret_cast<t_newmethod>(+[]() -> void* { return pd_new(gridClass); }), nullptr,
+            sizeof(t_object), 0, static_cast<t_atomtype>(0));
+    }, 2000));
+    t_object* knobProbe = nullptr;
+    t_object* gridProbe = nullptr;
+    CHECK(host->pdWait([&] {
+        knobProbe = reinterpret_cast<t_object*>(pd_new(probeClass));
+        pd_bind(&knobProbe->ob_pd, gensym("ai-knob-in"));
+        gridProbe = reinterpret_cast<t_object*>(pd_new(probeClass));
+        pd_bind(&gridProbe->ob_pd, gensym("ai-grid-in"));
+    }, 2000));
+
+    auto made = h.call("/pd/batch_atomic",
+        { "main", "fk1", 0, 0, 0, 3, 0,
+            "fk_a", 2600, 40, "obj", "ai.knob", 0,
+            "fk_b", 2600, 80, "obj", "ai.knob", 0,
+            "fk_d", 2600, 120, "obj", "ai.dice:gfx", 0,
+            0, 5, 10, 0 },
+        "/pd/batch_atomic/reply/fk1");
+    CHECK(made.has_value() && made->num(0) == 3);
+    t_gobj* boxA = nullptr;
+    t_gobj* boxB = nullptr;
+    t_gobj* boxD = nullptr;
+    t_canvas* mainRoot = nullptr;
+    CHECK(host->pdWait([&] {
+        boxA = host->resolveStableId("main", "fk_a");
+        boxB = host->resolveStableId("main", "fk_b");
+        boxD = host->resolveStableId("main", "fk_d");
+        mainRoot = host->getCanvasBySymbolStrict("main");
+        while (mainRoot && mainRoot->gl_owner) mainRoot = mainRoot->gl_owner;
+    }, 2000));
+    CHECK(boxA && boxB && boxD && boxA != boxB && mainRoot);
+
+    // A recording stand-in for the GUI: takes the first view it is offered unless `refuse` says no.
+    static std::atomic<bool> refuse;
+    static std::atomic<int> refusedFirst; // refuse this many offers, then take
+    static std::atomic<bool> mouseDown;   // stands in for a held mouse button
+    refuse = false;
+    refusedFirst = 0;
+    mouseDown = false;
+    // Both stand-ins are set while no focus is pending and read only by the pump (the message thread) while one is.
+    bridge.setWidgetFocusSinkForTests([](t_canvas* cnv, t_gobj* box, mcp::WidgetPillTarget const& target) {
+        std::lock_guard<std::mutex> g(lock);
+        calls.push_back({ cnv, box, target.widget, target.luaPtr });
+        if (refuse) return false;
+        if (refusedFirst > 0) { --refusedFirst; return false; }
+        return true;
+    });
+    bridge.setWidgetFocusMouseHeldForTests([] { return mouseDown.load(); });
+
+    // 1. The pressed instance of two on one canvas is the one selected (the pointer names it), the widget is told `focused <its ptr>`,
+    //    and no event goes to the server (a focus is not an ask).
+    clearAll();
+    h.replies.clear();
+    sendToAiAsk(host, &s_list, { symAtom("focus"), symAtom("ai.knob"), numAtom(5), symAtom(hexOf(boxB).c_str()) });
+    CHECK(waitFor([] { return !callsNow().empty() && !seenNow().empty(); }, 3000));
+    {
+        auto const c = callsNow();
+        CHECK(c.size() == 1);
+        if (c.size() == 1) {
+            CHECK(c[0].box == boxB && c[0].cnv == mainRoot && c[0].widget == "ai.knob" && c[0].ptr == static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(boxB)));
+        }
+        auto const told = seenNow();
+        CHECK(told.size() == 1 && told[0] == "list focused " + hexOf(boxB));
+    }
+    CHECK(!h.replies.waitFor("/pd/widget_ask", 400).has_value());
+
+    // 1b. The other instance: its own box (a focus 300 ms apart is not the same press).
+    sleepMs(350);
+    clearAll();
+    sendToAiAsk(host, gensym("focus"), { symAtom("ai.knob"), numAtom(6), symAtom(hexOf(boxA).c_str()) }); // the [s ai-ask] spelling
+    CHECK(waitFor([] { return !callsNow().empty(); }, 3000));
+    {
+        auto const c = callsNow();
+        CHECK(c.size() == 1 && c[0].box == boxA);
+    }
+
+    // 2. No view takes it: every candidate is offered, nothing is told to the widget.
+    sleepMs(350);
+    clearAll();
+    refuse = true;
+    sendToAiAsk(host, &s_list, { symAtom("focus"), symAtom("ai.knob"), numAtom(5), symAtom(hexOf(boxB).c_str()) });
+    CHECK(waitFor([] { return !callsNow().empty(); }, 3000));
+    sleepMs(300);
+    CHECK(callsNow().size() == 1);
+    CHECK(seenNow().empty());
+    refuse = false;
+
+    // 3. A pointer that is no box of any open patch (forged, stale, a widget that is gone): the GUI is never asked, nothing is told.
+    sleepMs(350);
+    clearAll();
+    sendToAiAsk(host, &s_list, { symAtom("focus"), symAtom("ai.knob"), numAtom(5), symAtom("10") });
+    sleepMs(350); // two instances (two addresses) are two budgets, but a pointer is one message at a time here
+    sendToAiAsk(host, &s_list, { symAtom("focus"), symAtom("ai.knob"), numAtom(5), symAtom("deadbeef0") });
+    sleepMs(500);
+    CHECK(callsNow().empty() && seenNow().empty());
+
+    // 4. A focus that does not parse (no pointer, a number for the pointer, a pointer of zero, a bad rev, a bad name) is refused with one
+    //    console line and goes nowhere.
+    sleepMs(350);
+    clearAll();
+    uint64_t const beforeBad = host->consoleSeqNow();
+    sendToAiAsk(host, &s_list, { symAtom("focus"), symAtom("ai.knob"), numAtom(5) });
+    sendToAiAsk(host, &s_list, { symAtom("focus"), symAtom("ai.knob"), numAtom(5), numAtom(12345) });
+    sendToAiAsk(host, &s_list, { symAtom("focus"), symAtom("ai.knob"), numAtom(5), symAtom("0") });
+    sendToAiAsk(host, &s_list, { symAtom("focus"), symAtom("ai.knob"), numAtom(-1), symAtom(hexOf(boxA).c_str()) });
+    sendToAiAsk(host, &s_list, { symAtom("focus"), symAtom("pd"), numAtom(5), symAtom(hexOf(boxA).c_str()) });
+    CHECK(consoleHas(host, beforeBad, "without a widget name", 2000));
+    sleepMs(300);
+    CHECK(callsNow().empty() && seenNow().empty());
+
+    // 5. Legacy: a widget file that still sends `ai-ask <widget> <rev>` asks at once, as before: one /pd/widget_ask event, the GUI untouched.
+    sleepMs(350);
+    clearAll();
+    h.replies.clear();
+    sendToAiAsk(host, &s_list, { symAtom("ai.knob"), numAtom(9) });
+    auto legacy = h.replies.waitFor("/pd/widget_ask", 2000);
+    CHECK(legacy && legacy->str(0) == "ask" && legacy->str(2) == "ai.knob" && legacy->num(3) == 9);
+    sleepMs(200);
+    CHECK(callsNow().empty() && seenNow().empty());
+
+    // 6. Which widget a box is: a plain box of an askable class, the shadow class, not a widget; a wrapper abstraction with the pd-lua
+    //    object inside (its address is the one the pill tells).
+    mcp::WidgetPillTarget tKnob, tDice, tNot;
+    tKnob = bridge.widgetTargetOfBox(boxA);
+    tDice = bridge.widgetTargetOfBox(boxD);
+    tNot = bridge.widgetTargetOfBox(nullptr);
+    CHECK(tKnob.valid() && tKnob.widget == "ai.knob" && tKnob.luaPtr == static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(boxA)));
+    CHECK(tDice.valid() && tDice.widget == "ai.dice");
+    CHECK(!tNot.valid());
+    t_gobj* absBox = nullptr;
+    t_gobj* luaInside = nullptr;
+    juce::File absFile;
+    CHECK(host->pdWait([&] {
+        absFile = juce::File(juce::String::fromUTF8(canvas_getdir(mainRoot)->s_name)).getChildFile("ai.grid.pd");
+        if (!absFile.replaceWithText("#N canvas 0 50 450 300 12;\n#X obj 10 10 ai-grid:gfx;\n#X obj 10 40 r ai-grid-in;\n#X coords 0 -1 1 1 100 60 1 0 0;\n")) return;
+        t_atom a[3];
+        SETFLOAT(a, 2600);
+        SETFLOAT(a + 1, 160);
+        SETSYMBOL(a + 2, gensym("ai.grid"));
+        pd_typedmess(&mainRoot->gl_pd, gensym("obj"), 3, a);
+        absBox = pd::Interface::getNewest(mainRoot);
+        if (absBox && pd_class(&absBox->g_pd) == canvas_class) {
+            auto* inner = reinterpret_cast<t_canvas*>(absBox);
+            if (inner->gl_list) luaInside = inner->gl_list; // the first box of the file
+        }
+    }, 3000));
+    CHECK(absBox && luaInside);
+    mcp::WidgetPillTarget const tGrid = bridge.widgetTargetOfBox(absBox);
+    CHECK(tGrid.valid() && tGrid.widget == "ai.grid" && tGrid.luaPtr == static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(luaInside)));
+
+    // 7. A widget inside a wrapper abstraction: the candidates come innermost first: the object's own canvas (no tab shows it: refused), then
+    //    the wrapper's box on the canvas the artist sees. The first one the GUI takes wins.
+    sleepMs(350);
+    clearAll();
+    refusedFirst = 1;
+    sendToAiAsk(host, &s_list, { symAtom("focus"), symAtom("ai.grid"), numAtom(3), symAtom(hexOf(luaInside).c_str()) });
+    CHECK(waitFor([] { return callsNow().size() >= 2 && !seenNow().empty(); }, 3000));
+    {
+        auto const c = callsNow();
+        CHECK(c.size() == 2);
+        if (c.size() == 2) {
+            CHECK(c[0].box == luaInside && c[0].cnv == reinterpret_cast<t_canvas*>(absBox));
+            CHECK(c[1].box == absBox && c[1].cnv == mainRoot);
+            CHECK(c[1].ptr == static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(luaInside)));
+        }
+        auto const told = seenNow();
+        CHECK(told.size() == 1 && told[0] == "list focused " + hexOf(luaInside)); // on ai-grid-in: the probe on ai-knob-in heard nothing
+    }
+
+    // 7b. A plain (not graph-on-parent) abstraction shows its widgets only in a view of its own: the chain does not climb to the box that holds
+    //     it on the parent (a view of the parent could not show the widget). Only the object's own canvas is offered.
+    t_gobj* plainBox = nullptr;
+    t_gobj* luaInPlain = nullptr;
+    juce::File plainFile;
+    CHECK(host->pdWait([&] {
+        plainFile = juce::File(juce::String::fromUTF8(canvas_getdir(mainRoot)->s_name)).getChildFile("ai.wkplain.pd");
+        if (!plainFile.replaceWithText("#N canvas 0 50 450 300 12;\n#X obj 10 10 ai-grid:gfx;\n")) return;
+        t_atom a[3];
+        SETFLOAT(a, 2600);
+        SETFLOAT(a + 1, 200);
+        SETSYMBOL(a + 2, gensym("ai.wkplain"));
+        pd_typedmess(&mainRoot->gl_pd, gensym("obj"), 3, a);
+        plainBox = pd::Interface::getNewest(mainRoot);
+        if (plainBox && pd_class(&plainBox->g_pd) == canvas_class) {
+            auto* inner = reinterpret_cast<t_canvas*>(plainBox);
+            if (inner->gl_list) luaInPlain = inner->gl_list;
+        }
+    }, 3000));
+    CHECK(plainBox && luaInPlain);
+    sleepMs(350);
+    clearAll();
+    refuse = true;
+    sendToAiAsk(host, &s_list, { symAtom("focus"), symAtom("ai.grid"), numAtom(3), symAtom(hexOf(luaInPlain).c_str()) });
+    CHECK(waitFor([] { return !callsNow().empty(); }, 3000));
+    sleepMs(300);
+    {
+        auto const c = callsNow();
+        CHECK(c.size() == 1 && c[0].box == luaInPlain && c[0].cnv == reinterpret_cast<t_canvas*>(plainBox));
+    }
+    refuse = false;
+    CHECK(host->pdWait([&] {
+        if (plainBox && mainRoot) glist_delete(mainRoot, plainBox);
+        plainFile.deleteFile();
+    }, 2000));
+
+    // 8. Enter on no text with a widget selected: the widget (and only the one at that address) is told `ask <ptr>`; the widget asks as its chip
+    //    did, and the event reaches the server as the existing /pd/widget_ask ask <canvas> <widget> <rev>. Nobody on an in-name = false.
+    sleepMs(2100); // ai.knob's ask budget from case 5
+    clearAll();
+    h.replies.clear();
+    {
+        std::lock_guard<std::mutex> g(lock);
+        ownHex = hexOf(boxA);
+    }
+    CHECK(bridge.askWidget(tKnob));
+    auto completed = h.replies.waitFor("/pd/widget_ask", 2000);
+    CHECK(completed && completed->str(0) == "ask" && completed->str(2) == "ai.knob" && completed->num(3) == 7 && completed->args.size() == 4);
+    {
+        auto const heard = seenNow();
+        CHECK(heard.size() == 1 && heard[0] == "list ask " + hexOf(boxA));
+    }
+    // another instance's address: told, but that widget is not the probe's own: it does not ask
+    sleepMs(2100);
+    clearAll();
+    h.replies.clear();
+    mcp::WidgetPillTarget other = tKnob;
+    other.luaPtr = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(boxB));
+    CHECK(bridge.askWidget(other));
+    CHECK(!h.replies.waitFor("/pd/widget_ask", 500).has_value());
+    // dice has no listener on ai-dice-in: nobody to tell
+    CHECK(!bridge.askWidget(tDice));
+    CHECK(!bridge.askWidget(mcp::WidgetPillTarget {}));
+
+    // 9. The chip fires on the mouse PRESS: a focus waits while a button is down (the canvas must not change its mode under a held button), the
+    //    newest one wins, and one that waits longer than 1.2 s is dropped (the widget then asks at once, it heard no `focused`).
+    sleepMs(2100); // the ask budget of ai.knob (case 8) and the focus gap
+    clearAll();
+    mouseDown = true;
+    sendToAiAsk(host, &s_list, { symAtom("focus"), symAtom("ai.knob"), numAtom(5), symAtom(hexOf(boxA).c_str()) });
+    sleepMs(100);
+    sendToAiAsk(host, &s_list, { symAtom("focus"), symAtom("ai.knob"), numAtom(5), symAtom(hexOf(boxB).c_str()) });
+    sleepMs(500);
+    CHECK(callsNow().empty() && seenNow().empty()); // held: nothing yet
+    mouseDown = false;
+    CHECK(waitFor([] { return !callsNow().empty(); }, 3000));
+    sleepMs(200);
+    {
+        auto const c = callsNow();
+        CHECK(c.size() == 1 && c[0].box == boxB); // the newest press only
+    }
+    sleepMs(350);
+    clearAll();
+    mouseDown = true;
+    sendToAiAsk(host, &s_list, { symAtom("focus"), symAtom("ai.knob"), numAtom(5), symAtom(hexOf(boxA).c_str()) });
+    sleepMs(1500);
+    mouseDown = false;
+    sleepMs(300);
+    CHECK(callsNow().empty() && seenNow().empty()); // held too long: dropped, nobody told
+
+    bridge.setWidgetFocusSinkForTests({});
+    bridge.setWidgetFocusMouseHeldForTests({});
+    CHECK(host->pdWait([&] {
+        // a CLASS_PD without a free method is not unbound by pd_free: unbind first
+        if (knobProbe) { pd_unbind(&knobProbe->ob_pd, gensym("ai-knob-in")); pd_free(&knobProbe->ob_pd); }
+        if (gridProbe) { pd_unbind(&gridProbe->ob_pd, gensym("ai-grid-in")); pd_free(&gridProbe->ob_pd); }
+    }, 2000));
+    h.call("/pd/batch_atomic", { "main", "fk9", 3, 0, 0, 0, 0, "fk_a", "fk_b", "fk_d", 0, 5, 10, 0 }, "/pd/batch_atomic/reply/fk9");
+    // The pill asks about a box the GUI held: one the AI deleted a moment ago (or a forged address) is read only after it is found in an
+    // open patch, so it is simply no widget (never a read of freed memory).
+    CHECK(!bridge.widgetTargetOfBox(boxA).valid());
+    CHECK(!bridge.widgetTargetOfBox(reinterpret_cast<t_gobj*>(static_cast<std::uintptr_t>(0x10))).valid());
+    host->pdWait([&] {
+        if (absBox && mainRoot) glist_delete(mainRoot, absBox);
+        absFile.deleteFile();
+    }, 2000);
 }
 
 // Thread phase 2, live widget history (capability widget_state; Source/Mcp/McpWidgetState.h): a receiver on each ai.* widget's state
@@ -7569,6 +7951,7 @@ int main()
             runWidgetAskCases(harness, processor, *bridge, [&] {
                 bridge->setReplySinkForTests([&replies](juce::OSCMessage const& msg) { replies.push(msg); });
             });
+            runWidgetFocusCases(harness, processor, *bridge);
             runWidgetStateCases(harness, processor, *bridge, [&] {
                 bridge->setReplySinkForTests([&replies](juce::OSCMessage const& msg) { replies.push(msg); });
             });

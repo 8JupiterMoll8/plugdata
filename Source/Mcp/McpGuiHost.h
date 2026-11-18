@@ -19,6 +19,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include "Mcp/McpVisibleTab.h"
+#include "Mcp/McpWidgetFocus.h"
 
 extern "C" {
 #include <m_pd.h>
@@ -85,6 +86,10 @@ public:
         std::vector<t_gobj*> objects;
     };
     virtual LiveSelection liveSelection(t_canvas* cnv) = 0;
+    // A widget's chip ("AI..."): if an open view shows `cnv`, selects `box` there (the pd-lua widget, or the box that holds it), brings
+    // that view to edit mode and opens its selection pill with the cursor in it (CanvasMcpLayer::focusPillOn). Never opens a tab.
+    // False when no view shows `cnv`, the box has no component there, or the pill cannot be shown. Message thread.
+    virtual bool focusWidgetPill(t_canvas* cnv, t_gobj* box, mcp::WidgetPillTarget const& target) = 0;
 
     // Encapsulate: number of distinct components for `objects`, or -1 when one of
     // them has no component. encapsulate() then wraps exactly those components.

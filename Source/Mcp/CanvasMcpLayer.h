@@ -25,6 +25,7 @@
 #include "Mcp/McpAlphiDock.h"     // big Alphi 1a0: where Alphi docks
 #include "Mcp/McpAlphiMotion.h"   // Alphi drop 1: motion repaints, the line clock
 #include "Mcp/McpPillAnswer.h"     // the newest AI chat line, shown briefly under the pill
+#include "Mcp/McpWidgetFocus.h"    // the widget chip -> selection pill shortcut, and what Enter means on it
 struct NVGcontext;
 
 class Canvas;
@@ -170,6 +171,24 @@ public:
     void updateSelectionPill();
     void hideSelectionPill();
     void dismissSelectionPill();
+    // An ai.* widget's chip ("AI...") is a shortcut for "select it, the pill opens" (McpWidgetFocus.h). `object` is the widget's box, or the box
+    // that holds it (a wrapper abstraction, a graph-on-parent subpatch). The chip is pressed in run mode and the pill lives in edit mode: the canvas
+    // goes to edit mode for it and goes back when the artist sends, presses Enter on nothing or Escape (restoreRunMode). False when the pill cannot
+    // be shown here (a graph, a box being typed in, a canvas not on screen): then nothing changed.
+    bool focusPillOn(Object* object, mcp::WidgetPillTarget const& target);
+    // Enter on no text: if the one selected box is an ai.* widget, tells it to ask (the pill's "complete it"). Fills `target` for the
+    // decision (McpWidgetFocus.h pillAction); false = not a single widget.
+    mcp::WidgetPillTarget selectedWidgetTarget(SmallArray<Object*> const& selected);
+    // The canvas goes back to the mode the chip found it in (run mode / presentation), once, and only when it is still in the edit mode the chip
+    // put it in; any other way the pill goes away forgets it (the artist took over).
+    void restoreRunMode();
+    struct WidgetFocus {
+        bool active = false;
+        bool wasLocked = false;
+        bool wasPresentation = false;
+        struct _gobj* box = nullptr; // compared only
+        mcp::WidgetPillTarget target;
+    } mcpWidgetFocus;
     // Enter = live (spawn), Shift+Enter = queue for chat. TextEditor only fires
     // onReturnKey for a PLAIN Return (Shift+Return fails its key comparison), so
     // a KeyListener catches the Shift variant before the editor swallows it.

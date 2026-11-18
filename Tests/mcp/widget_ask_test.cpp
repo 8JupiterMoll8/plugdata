@@ -7,6 +7,7 @@
 //  - no free text: the event carries no words (review M4);
 //  - rate: at most one ask per widget per 2 s (a hello has its own budget), refused asks are counted, not queued;
 //  - the queue is fixed (no allocation): a full queue drops and counts.
+//  - the chip's focus word (`ai-ask focus <widget> <rev> <ptr>`): a kind of its own, with the pointer and a short budget;
 // Build + run: scripts/test-bridge-safety.sh
 #include "../../Source/Mcp/McpWidgetAsk.h"
 
@@ -144,6 +145,70 @@ void inName()
     CHECK(!mcp::widgetAskInName("pd", out, sizeof(out)));
 }
 
+// The chip's focus word (`ai-ask focus <widget> <rev> <ptr>`): the pressed widget asks the fork to select it and open the pill.
+// It carries the pointer of the pd-lua object that sent it (compared by the fork, never dereferenced), has its own short
+// budget (a double press is one focus; an ask a moment later is not refused by it) and is no ask.
+void focusKind()
+{
+    WidgetAskQueue q;
+    CHECK(q.offer(WidgetAskKind::Focus, "ai.tap", 7, 1000, 0x55d0c8a3b2a0ULL) == WidgetAskOutcome::Queued);
+    mcp::WidgetAskEvent e;
+    CHECK(q.pop(e));
+    CHECK(e.kind == WidgetAskKind::Focus && std::strcmp(e.widget, "ai.tap") == 0 && e.rev == 7);
+    CHECK(e.ptr == 0x55d0c8a3b2a0ULL);
+    // a focus without a pointer names no object: malformed. A bad rev too.
+    CHECK(q.offer(WidgetAskKind::Focus, "ai.tap", 7, 5000, 0) == WidgetAskOutcome::Malformed);
+    CHECK(q.offer(WidgetAskKind::Focus, "ai.tap", -1, 5000, 0x10) == WidgetAskOutcome::Malformed);
+    CHECK(q.offer(WidgetAskKind::Focus, "pd", 1, 5000, 0x10) == WidgetAskOutcome::Malformed);
+    CHECK(!q.pop(e));
+    // its own budget: not the ask's 2 s, a short one against a double press
+    CHECK(q.offer(WidgetAskKind::Focus, "ai.knob", 1, 10000, 0x10) == WidgetAskOutcome::Queued);
+    CHECK(q.offer(WidgetAskKind::Focus, "ai.knob", 1, 10000 + mcp::kWidgetFocusMinGapMs - 1, 0x10) == WidgetAskOutcome::RateLimited);
+    CHECK(q.offer(WidgetAskKind::Focus, "ai.knob", 1, 10000 + mcp::kWidgetFocusMinGapMs, 0x10) == WidgetAskOutcome::Queued);
+    // the budget is the instance's: another instance of the same widget is not refused, and the console hears nothing of a double press
+    CHECK(q.offer(WidgetAskKind::Focus, "ai.knob", 1, 20500, 0x20) == WidgetAskOutcome::Queued);
+    CHECK(q.offer(WidgetAskKind::Focus, "ai.knob", 1, 20510, 0x21) == WidgetAskOutcome::Queued);
+    CHECK(q.offer(WidgetAskKind::Focus, "ai.knob", 1, 20520, 0x21) == WidgetAskOutcome::RateLimited);
+    CHECK(q.takeCounts().rateLimited == 0);
+    {
+        mcp::WidgetAskEvent drain;
+        while (q.pop(drain)) { }
+    }
+    // a focus does not spend the ask's budget of the same widget, and an ask does not spend the focus's
+    CHECK(q.offer(WidgetAskKind::Ask, "ai.knob", 1, 10100) == WidgetAskOutcome::Queued);
+    CHECK(q.offer(WidgetAskKind::Focus, "ai.dice", 1, 20000, 0x10) == WidgetAskOutcome::Queued);
+    CHECK(q.offer(WidgetAskKind::Ask, "ai.dice", 1, 20010) == WidgetAskOutcome::Queued);
+    CHECK(q.offer(WidgetAskKind::Ask, "ai.dice", 1, 20020) == WidgetAskOutcome::RateLimited);
+    // an ask or a hello with a pointer given keeps no pointer (the event of those kinds never carries one)
+    mcp::WidgetAskEvent a;
+    while (q.pop(a)) { }
+    CHECK(q.offer(WidgetAskKind::Ask, "ai.grid", 3, 30000, 0x99) == WidgetAskOutcome::Queued);
+    CHECK(q.pop(a) && a.kind == WidgetAskKind::Ask && a.ptr == 0);
+}
+
+void focusPtrText()
+{
+    std::uint64_t v = 1;
+    CHECK(mcp::widgetFocusPtrParse("55d0c8a3b2a0", v) && v == 0x55d0c8a3b2a0ULL);
+    CHECK(mcp::widgetFocusPtrParse("0x55D0C8A3B2A0", v) && v == 0x55d0c8a3b2a0ULL); // Lua's tostring spelling, upper case too
+    CHECK(mcp::widgetFocusPtrParse("1", v) && v == 1);
+    CHECK(mcp::widgetFocusPtrParse("ffffffffffffffff", v) && v == 0xffffffffffffffffULL);
+    CHECK(!mcp::widgetFocusPtrParse("", v));
+    CHECK(!mcp::widgetFocusPtrParse("0x", v));
+    CHECK(!mcp::widgetFocusPtrParse("0", v));                 // null names nothing
+    CHECK(!mcp::widgetFocusPtrParse("00000000", v));
+    CHECK(!mcp::widgetFocusPtrParse("12345678901234567", v)); // more than 16 digits
+    CHECK(!mcp::widgetFocusPtrParse("userdata:", v));
+    CHECK(!mcp::widgetFocusPtrParse("55d0 c8", v));
+    CHECK(!mcp::widgetFocusPtrParse("-5", v));
+    CHECK(!mcp::widgetFocusPtrParse(nullptr, v));
+    char out[mcp::kWidgetFocusPtrChars + 1] = {};
+    mcp::widgetFocusPtrText(0x55d0c8a3b2a0ULL, out, sizeof(out));
+    CHECK(std::strcmp(out, "55d0c8a3b2a0") == 0);
+    std::uint64_t back = 0;
+    CHECK(mcp::widgetFocusPtrParse(out, back) && back == 0x55d0c8a3b2a0ULL);
+}
+
 void producerConsumerThreads()
 {
     // One producer (the Pd lock serialises every receiver call) and one consumer (the message thread's pump).
@@ -186,6 +251,8 @@ int main()
     rateTableBounded();
     queueFull();
     inName();
+    focusKind();
+    focusPtrText();
     producerConsumerThreads();
     if (failures) {
         std::printf("widget_ask_test: %d failure(s)\n", failures);

@@ -32,6 +32,7 @@
 #include "Pd/MCPBridgeV2Server.h" // v2 TCP listener (Plan 4 P4.1)
 #include "Pd/MCPBridgeV2Router.h" // v2 reply routing (P4.1 S3)
 #include "Pd/MCPBridgeAcLevel.h"  // V1 AC taps: DC blocker + AC/DC levels (JUCE-free)
+#include "Mcp/McpWidgetFocus.h"   // the widget chip -> selection pill shortcut (JUCE-free)
 #include "Pd/MCPBridgeSoundVerdict.h" // truth slice 2: the one sound verdict per read (JUCE-free)
 
 class PluginProcessor;
@@ -503,6 +504,18 @@ public:
     void pumpWidgetAsks();
     // Tests: the receiver is bound now.
     bool widgetAskBound() const;
+    // The widget chip's shortcut to the selection pill (Source/Mcp/McpWidgetFocus.h), all on the message thread:
+    //  - focusWidgetPill: the pd-lua object at `ptr` (what `ai-ask focus <widget> <rev> <ptr>` named) is found in the open patches, the first
+    //    view that shows it (or the box that holds it) selects it and opens the pill, and the widget is told `focused <ptr>`. False: not found
+    //    or no view could take it (nothing is told: the widget then asks at once, as its chip did before the pill).
+    //  - widgetTargetOfBox: the askable ai.* widget a box is (or holds), with its pd-lua object's address; invalid when it is none.
+    //  - askWidget: Enter on no text: the widget is told `ask <ptr>` and asks as its chip did (`ai-ask <widget> <rev>`). False: nobody listens.
+    bool focusWidgetPill(std::string const& widget, std::uint64_t ptr);
+    mcp::WidgetPillTarget widgetTargetOfBox(t_gobj* box);
+    bool askWidget(mcp::WidgetPillTarget const& target);
+    // Tests: replaces the GUI in focusWidgetPill (empty = the real one).
+    void setWidgetFocusSinkForTests(std::function<bool(t_canvas*, t_gobj*, mcp::WidgetPillTarget const&)> sink);
+    void setWidgetFocusMouseHeldForTests(std::function<bool()> held);
     // Thread phase 2 (capability widget_state): live widget history. While the bridge serves, a receiver on every ai.* widget's state name
     // (and on a named looper's, from its hello) notes the `end <rev>` frame; once the server switched the watch on (`/chat/widget_watch on`),
     // a widget quiet for 1 s with a new rev is one event, `/pd/widget_ask state main <widget> <rev>`, sent by the same pump.

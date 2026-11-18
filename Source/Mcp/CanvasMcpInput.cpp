@@ -472,7 +472,7 @@ bool CanvasMcpLayer::keyPressedForCanvas(KeyPress const& key)
         }
         if (key.getKeyCode() == juce::KeyPress::escapeKey) {
             mcpPillRequested = false;
-            dismissSelectionPill();
+            dismissSelectionPill(); // Escape sends nothing (and gives a widget chip's edit mode back)
             return true;
         }
     }

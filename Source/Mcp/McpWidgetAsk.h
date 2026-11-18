@@ -10,6 +10,9 @@
 // Pd side (MCPBridgeWidgetAsk.h): the bridge binds a receiver to `ai-ask` while it serves. A message
 //   ai-ask <widget> <rev>                the widget's ask chip ("complete it"), rev = the widget's state revision
 //   ai-ask hello <widget>                a widget that was made (or loaded) asks whether anyone hears
+//   ai-ask focus <widget> <rev> <ptr>    the widget's chip ("AI..."): select THIS widget, open the selection pill (the artist then
+//                                        types, or presses Enter on nothing = complete it). ptr = the sending pd-lua object's
+//                                        address as hex text; the fork only compares it with the boxes of the open patches.
 // is parsed by the receiver and handed to WidgetAskQueue::offer. The receiver runs wherever Pd dispatches (the audio
 // thread too), always under the Pd lock: offer never locks, never allocates and never calls JUCE; one offer runs at a
 // time (the Pd lock). The bridge's message-thread pump pops the events and sends /pd/widget_ask.
@@ -34,14 +37,17 @@ constexpr int kWidgetAskNameLen = 32;   // ai.<word>, the terminating NUL not co
 constexpr int kWidgetAskQueueSlots = 32; // a hello burst at load: every fixed widget and every named looper of the widget history (McpWidgetState.h) fit
 constexpr int kWidgetAskRateSlots = 16;
 constexpr std::int64_t kWidgetAskMinGapMs = 2000;
+constexpr std::int64_t kWidgetFocusMinGapMs = 300; // a double press of the chip is one focus
 constexpr int kWidgetAskMaxRev = 9999999;
+constexpr int kWidgetFocusPtrChars = 16; // a 64-bit address as hex digits
 
-enum class WidgetAskKind : int { Ask = 0, Hello = 1 };
+enum class WidgetAskKind : int { Ask = 0, Hello = 1, Focus = 2 };
 enum class WidgetAskOutcome : int { Queued, Malformed, RateLimited, Full };
 
 struct WidgetAskEvent {
     WidgetAskKind kind = WidgetAskKind::Ask;
     int rev = 0;
+    std::uint64_t ptr = 0; // Focus only: the address of the pd-lua object that sent it
     char widget[kWidgetAskNameLen + 1] = {};
 };
 
@@ -72,6 +78,36 @@ inline bool widgetAskRevOk(double rev)
     return std::isfinite(rev) && rev >= 0.0 && rev <= kWidgetAskMaxRev && rev == std::floor(rev);
 }
 
+// The hex text of a pointer as a widget writes it (Lua: tostring of its object, "userdata: 0x55d0c8a3b2a0", cut to the digits):
+// 1..16 hex digits, an optional 0x, a value that is not 0. No allocation, nothing is dereferenced: the number is only compared.
+inline bool widgetFocusPtrParse(char const* text, std::uint64_t& out)
+{
+    if (!text) return false;
+    if (text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) text += 2;
+    std::uint64_t v = 0;
+    int digits = 0;
+    for (; *text; ++text, ++digits) {
+        char const c = *text;
+        int d = -1;
+        if (c >= '0' && c <= '9') d = c - '0';
+        else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
+        if (d < 0 || digits >= kWidgetFocusPtrChars) return false;
+        v = (v << 4) | static_cast<std::uint64_t>(d);
+    }
+    if (digits == 0 || v == 0) return false;
+    out = v;
+    return true;
+}
+
+// The same number as lower-case hex digits, no 0x (outLen >= kWidgetFocusPtrChars + 1).
+inline void widgetFocusPtrText(std::uint64_t v, char* out, std::size_t outLen)
+{
+    if (!out || outLen == 0) return;
+    int const n = std::snprintf(out, outLen, "%llx", static_cast<unsigned long long>(v));
+    if (n < 0 || static_cast<std::size_t>(n) >= outLen) out[0] = 0;
+}
+
 // ai.draw -> ai-draw-in. False (out untouched) for a name widgetAskNameOk refuses or a buffer too small.
 inline bool widgetAskInName(char const* widget, char* out, std::size_t outLen)
 {
@@ -83,15 +119,19 @@ inline bool widgetAskInName(char const* widget, char* out, std::size_t outLen)
 // Single producer (the Pd lock), single consumer (the bridge's message-thread pump). Fixed storage.
 class WidgetAskQueue {
 public:
-    WidgetAskOutcome offer(WidgetAskKind kind, char const* widget, double rev, std::int64_t nowMs)
+    // `ptr`: the Focus kind's pointer (a focus without one names no object); the other kinds keep none.
+    WidgetAskOutcome offer(WidgetAskKind kind, char const* widget, double rev, std::int64_t nowMs, std::uint64_t ptr = 0)
     {
-        if (!widgetAskNameOk(widget) || (kind == WidgetAskKind::Ask && !widgetAskRevOk(rev))) {
+        bool const wantsRev = kind == WidgetAskKind::Ask || kind == WidgetAskKind::Focus;
+        if (!widgetAskNameOk(widget) || (wantsRev && !widgetAskRevOk(rev)) || (kind == WidgetAskKind::Focus && ptr == 0)) {
             malformed.fetch_add(1, std::memory_order_relaxed);
             return WidgetAskOutcome::Malformed;
         }
-        RateSlot* slot = rateSlotFor(kind, widget);
-        if (slot && slot->used && nowMs >= slot->lastMs && nowMs - slot->lastMs < kWidgetAskMinGapMs) {
-            rateLimited.fetch_add(1, std::memory_order_relaxed);
+        RateSlot* slot = rateSlotFor(kind, widget, ptr);
+        std::int64_t const gap = kind == WidgetAskKind::Focus ? kWidgetFocusMinGapMs : kWidgetAskMinGapMs;
+        if (slot && slot->used && nowMs >= slot->lastMs && nowMs - slot->lastMs < gap) {
+            // a double press of the chip is no news for the console (only the asks' limit is: it is said once)
+            if (kind != WidgetAskKind::Focus) rateLimited.fetch_add(1, std::memory_order_relaxed);
             return WidgetAskOutcome::RateLimited;
         }
         unsigned const head = writeIndex.load(std::memory_order_relaxed);
@@ -102,13 +142,15 @@ public:
         }
         WidgetAskEvent& e = slots[head % kWidgetAskQueueSlots];
         e.kind = kind;
-        e.rev = kind == WidgetAskKind::Ask ? static_cast<int>(rev) : 0;
+        e.rev = wantsRev ? static_cast<int>(rev) : 0;
+        e.ptr = kind == WidgetAskKind::Focus ? ptr : 0;
         copyName(e.widget, widget);
         writeIndex.store(head + 1, std::memory_order_release);
 
         if (!slot) slot = claimRateSlot();
         slot->used = true;
         slot->kind = kind;
+        slot->ptr = kind == WidgetAskKind::Focus ? ptr : 0;
         copyName(slot->widget, widget);
         slot->lastMs = nowMs;
         return WidgetAskOutcome::Queued;
@@ -139,14 +181,15 @@ private:
         bool used = false;
         WidgetAskKind kind = WidgetAskKind::Ask;
         char widget[kWidgetAskNameLen + 1] = {};
+        std::uint64_t ptr = 0; // Focus: the instance (two instances of one widget are two budgets)
         std::int64_t lastMs = 0;
     };
 
     // Producer only.
-    RateSlot* rateSlotFor(WidgetAskKind kind, char const* widget)
+    RateSlot* rateSlotFor(WidgetAskKind kind, char const* widget, std::uint64_t ptr)
     {
         for (auto& s : rate)
-            if (s.used && s.kind == kind && std::strcmp(s.widget, widget) == 0) return &s;
+            if (s.used && s.kind == kind && std::strcmp(s.widget, widget) == 0 && (kind != WidgetAskKind::Focus || s.ptr == ptr)) return &s;
         return nullptr;
     }
 

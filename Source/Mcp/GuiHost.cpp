@@ -309,6 +309,21 @@ public:
         return selection;
     }
 
+    bool focusWidgetPill(t_canvas* cnv, t_gobj* box, mcp::WidgetPillTarget const& target) override
+    {
+        // Open views only (a chip press never opens a tab), every one of them: a split view or a second window shows a patch twice, and the
+        // one that is on screen takes it (focusPillOn refuses a view that is not showing).
+        for (auto* editor : proc->getEditors()) {
+            if (!editor) continue;
+            for (auto* view : editor->getCanvases()) {
+                if (!view || view->patch.getPointer().get() != cnv) continue;
+                if (Object* objComp = findObjectComponent(view, box); objComp && view->getMcpLayer().focusPillOn(objComp, target))
+                    return true;
+            }
+        }
+        return false;
+    }
+
     LiveSelection liveSelection(t_canvas* cnv) override
     {
         LiveSelection out;
