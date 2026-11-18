@@ -62,6 +62,7 @@
 #include <juce_cryptography/juce_cryptography.h> // juce::SHA256: the save_content hash (P11.2 V11)
 #include "Utility/PluginParameter.h" // PlugDataParameter: the master volume guard (P5.1 sink floor)
 #include "Mcp/McpPdFile.h" // P11.8 item 3: mcp::fileInPdDir
+#include "Mcp/McpVoiceEngine.h" // the hidden voice engine (ai-voices.pd)
 #include "Pd/MCPBridgeSaveTarget.h" // P11.8 delta review: mcp::saveTargetOf with tabs
 
 namespace {
@@ -5781,6 +5782,259 @@ void runOutputCeilingCases(Harness& h, PluginProcessor& processor, AudioControl&
     audio.paused = false;
 }
 
+// The hidden voice engine (ai-voices.pd): a root canvas only Pd knows, so an ai.* widget sounds with nothing wired. The patch
+// lives in the mcp-server repo (.agents/skills/plugdata-ai-widgets/widgets): PLUGDATA_AI_VOICES_PD names the file, else the case
+// is skipped. It is copied into the SCRATCH home's Abstractions folder (refused anywhere else), opened through the same call
+// McpHost::createBridge makes, and rendered through processBlock: kick / snare / hat on ai-voice-tap, notes on ai-voice-note,
+// the level / tune / decay set messages, no broken box, no tab, not in `patches`, never dirty, "main" never names it.
+int brokenBoxes(t_canvas* cnv)
+{
+    int n = 0;
+    for (t_gobj* g = cnv->gl_list; g; g = g->g_next) {
+        if (pd_class(&g->g_pd) == canvas_class)
+            n += brokenBoxes(reinterpret_cast<t_canvas*>(g));
+        else if (pd_class(&g->g_pd) == text_class && reinterpret_cast<t_text*>(g)->te_type == T_OBJECT)
+            ++n;
+    }
+    return n;
+}
+
+void runVoiceEngineCases(Harness& h, PluginProcessor& processor, AudioControl& audio)
+{
+    std::printf("voice engine (ai-voices.pd, hidden)\n");
+    char const* source = std::getenv("PLUGDATA_AI_VOICES_PD");
+    if (!source || !juce::File(source).existsAsFile()) {
+        std::printf("  SKIP: set PLUGDATA_AI_VOICES_PD to .agents/skills/plugdata-ai-widgets/widgets/ai-voices.pd to run it\n");
+        return;
+    }
+    auto* host = processor.getMcp();
+    auto const dest = mcp::voice::engineFile();
+    char const* home = std::getenv("MCP_TESTS_HOME");
+    bool const inScratch = home != nullptr && dest.isAChildOf(juce::File(home)); // never write outside the scratch home
+    CHECK(inScratch);
+    if (!inScratch) return;
+    dest.deleteFile(); // a file left by an aborted run would have been opened by the constructor's look
+    CHECK(!mcp::voice::engineLoaded(processor)); // no file yet: nothing runs
+    CHECK(dest.getParentDirectory().createDirectory().wasOk());
+    auto const sourceText = juce::File(source).loadFileAsString();
+    CHECK(sourceText.isNotEmpty());
+    auto const inThePast = [] { return juce::Time::getCurrentTime() - juce::RelativeTime::seconds(30); };
+    auto const writeEngine = [&](juce::String const& text) { // the file as an installer leaves it: a while ago
+        CHECK(dest.replaceWithText(text));
+        CHECK(dest.setLastModificationTime(inThePast()));
+    };
+
+    auto const patchesBefore = processor.patches.size();
+    // A file written a moment ago may be mid-copy: not opened yet.
+    CHECK(dest.replaceWithText(sourceText));
+    bool opened = true;
+    host->onMessageThread([&] { opened = mcp::voice::openEngine(processor); return true; }, 5000, "test");
+    CHECK(!opened && !mcp::voice::engineLoaded(processor));
+    CHECK(dest.setLastModificationTime(inThePast()));
+    host->onMessageThread([&] { opened = mcp::voice::lookNow(processor); return true; }, 5000, "test");
+    CHECK(opened);
+    CHECK(mcp::voice::engineLoaded(processor));
+    CHECK(processor.patches.size() == patchesBefore); // not a tab's patch
+    CHECK(processor.getEditors().empty());            // and no tab was made for it
+    t_canvas* root = nullptr;
+    int broken = -1;
+    bool named = false, isEngine = false;
+    host->pdWait([&] {
+        root = mcp::voice::engineRoot(processor);
+        if (root) {
+            broken = brokenBoxes(root);
+            named = root->gl_name && std::string(root->gl_name->s_name) == mcp::voice::engineFileName;
+            isEngine = mcp::voice::isEngineRoot(root);
+        }
+    }, 3000);
+    CHECK(root != nullptr && named && isEngine);
+    CHECK(broken == 0); // every object of the patch was created (ELSE's tanh~ included)
+    // The bridge never addresses it: "main" is the focused editor's root, a name or a path finds nothing, its subpatches
+    // take no wire keys (an artist's own [pd kick] keeps pd-kick).
+    t_canvas* mainRoot = nullptr;
+    t_canvas* byName = root;
+    t_canvas* byPath = root;
+    t_canvas* bySub = root;
+    host->pdWait([&] {
+        mainRoot = host->getCanvasBySymbol("main");
+        byName = host->getCanvasBySymbol("ai-voices.pd");
+        byPath = host->getCanvasBySymbol(dest.getFullPathName());
+        host->registerOpenCanvases();
+        bySub = host->getCanvasBySymbol("pd-kick");
+    }, 3000);
+    CHECK(mainRoot == nullptr || mainRoot != root);
+    CHECK(byName == nullptr && byPath == nullptr);
+    CHECK(bySub == nullptr || bySub->gl_owner != root);
+
+    // Through processBlock, this file's audio thread paused.
+    audio.paused = true;
+    sleepMs(60);
+    h.fire("/pd/dsp", { 1 });
+    sleepMs(200);
+    int const outputs = processor.getTotalNumOutputChannels();
+    juce::AudioBuffer<float> buffer(std::max(2, outputs), 512);
+    juce::MidiBuffer midi;
+    float everPeak = 0.0f;
+    bool finite = true;
+    // Renders `blocks` blocks and returns the peak of the last `tail` of them.
+    auto render = [&](int blocks, int tail) {
+        float peak = 0.0f;
+        for (int k = 0; k < blocks; ++k) {
+            buffer.clear();
+            midi.clear();
+            processor.processBlock(buffer, midi);
+            finite = finite && bufferFinite(buffer);
+            float const p = bufferPeak(buffer);
+            everPeak = std::max(everPeak, p);
+            if (k >= blocks - tail) peak = std::max(peak, p);
+        }
+        return peak;
+    };
+    auto send = [&](char const* receiver, char const* selector, std::initializer_list<float> atoms) {
+        host->pdWait([&] {
+            SmallArray<pd::Atom> list;
+            for (float a : atoms) list.add(pd::Atom(a));
+            processor.sendMessage(receiver, selector, list);
+        }, 3000);
+    };
+    auto hit = [&](char const* drum, float velocity) {
+        render(60, 1); // let the previous hit die
+        send("ai-voice-tap", drum, { velocity });
+        return render(24, 24);
+    };
+
+    CHECK(render(40, 40) < 1e-4f); // idle: silent
+    float const kick = hit("kick", 100.0f);
+    float const snare = hit("snare", 100.0f);
+    float const hat = hit("hat", 100.0f);
+    std::printf("  peaks at vel 100: kick %.3f snare %.3f hat %.3f\n", kick, snare, hat);
+    CHECK(kick > 0.05f && kick < 0.6f);
+    CHECK(snare > 0.02f && snare < 0.6f);
+    CHECK(hat > 0.01f && hat < 0.6f);
+    CHECK(hit("kick", 30.0f) < kick); // softer velocity, softer hit
+    CHECK(hit("kick", 0.0f) < 1e-4f); // velocity 0 does not sound
+
+    // level, tune, decay
+    send("ai-voice-tap-set", "level", { 0.0f });
+    CHECK(hit("kick", 100.0f) < 1e-4f);
+    send("ai-voice-tap-set", "level", { 5.0f }); // clipped to 1: never louder than the default
+    float const loud = hit("kick", 100.0f);
+    CHECK(loud > 0.05f && loud < 0.6f && std::abs(loud - kick) < 0.05f);
+    send("ai-voice-tap-set", "decay", { 0.3f });
+    render(60, 1);
+    send("ai-voice-tap", "kick", { 100.0f });
+    render(24, 1); // 280 ms (~24 blocks) is long over for a decay of 84 ms
+    CHECK(render(12, 12) < 1e-3f);
+    send("ai-voice-tap-set", "decay", { 3.0f });
+    render(80, 1);
+    send("ai-voice-tap", "kick", { 100.0f });
+    render(24, 1);
+    CHECK(render(8, 8) > 0.02f); // a decay of 840 ms still rings at 280 ms
+    send("ai-voice-tap-set", "decay", { 1.0f });
+    send("ai-voice-tap-set", "tune", { 2.0f });
+    CHECK(hit("kick", 100.0f) > 0.05f);
+    send("ai-voice-tap-set", "tune", { 1.0f });
+
+    // notes: <midi> <vel> as a list and as `note`, velocity 0 = off, four voices, the note level
+    render(60, 1);
+    send("ai-voice-note", "list", { 60.0f, 100.0f });
+    float const note = render(30, 10);
+    std::printf("  peak of one held note: %.3f\n", note);
+    CHECK(note > 0.01f && note < 0.5f);
+    send("ai-voice-note", "list", { 60.0f, 0.0f });
+    render(40, 1); // the 280 ms release
+    CHECK(render(20, 20) < 1e-3f);
+    send("ai-voice-note", "note", { 64.0f, 100.0f });
+    CHECK(render(30, 10) > 0.01f);
+    send("ai-voice-note", "note", { 64.0f, 0.0f });
+    render(60, 1);
+    for (float pitch : { 48.0f, 55.0f, 60.0f, 64.0f, 67.0f }) // five notes on four voices: one is stolen
+        send("ai-voice-note", "list", { pitch, 127.0f });
+    CHECK(render(40, 20) > 0.05f);
+    for (float pitch : { 48.0f, 55.0f, 60.0f, 64.0f, 67.0f })
+        send("ai-voice-note", "list", { pitch, 0.0f });
+    render(60, 1);
+    send("ai-voice-note-set", "level", { 0.0f });
+    send("ai-voice-note", "list", { 60.0f, 100.0f });
+    CHECK(render(30, 20) < 1e-4f);
+    send("ai-voice-note", "list", { 60.0f, 0.0f });
+    send("ai-voice-note-set", "level", { 1.0f });
+    render(60, 1);
+
+    // everything at once stays under full scale (master 0.4)
+    send("ai-voice-tap", "kick", { 127.0f });
+    send("ai-voice-tap", "snare", { 127.0f });
+    send("ai-voice-tap", "hat", { 127.0f });
+    for (float pitch : { 48.0f, 55.0f, 60.0f, 64.0f }) send("ai-voice-note", "list", { pitch, 127.0f });
+    render(30, 30);
+    std::printf("  peak of everything at full velocity: %.3f (max over the run %.3f)\n", render(1, 1), everPeak);
+    CHECK(everPeak < 1.0f);
+    CHECK(finite);
+    for (float pitch : { 48.0f, 55.0f, 60.0f, 64.0f }) send("ai-voice-note", "list", { pitch, 0.0f });
+
+    // the canvas was never marked changed (no quit prompt, no autosave): nothing here edits it
+    bool dirty = true;
+    host->pdWait([&] { root = mcp::voice::engineRoot(processor); dirty = root ? root->gl_dirty != 0 : true; }, 3000);
+    CHECK(!dirty);
+
+    // a changed file is swapped in (the old root goes only when the new one is whole); a changed file with a box Pd cannot
+    // create is thrown away and the old one keeps playing; the same bad file is not tried again
+    writeEngine(sourceText + "#X text 1 1 swapped;\n");
+    host->onMessageThread([&] { opened = mcp::voice::lookNow(processor); return true; }, 5000, "test");
+    CHECK(opened);
+    t_canvas* swapped = nullptr;
+    int swappedBroken = -1;
+    host->pdWait([&] { swapped = mcp::voice::engineRoot(processor); swappedBroken = swapped ? brokenBoxes(swapped) : -1; }, 3000);
+    CHECK(swapped != nullptr && swappedBroken == 0);
+    CHECK(hit("kick", 100.0f) > 0.05f); // the swapped engine sounds
+    auto consoleCount = [&](juce::String const& text) {
+        return host->onMessageThread([&processor, text] {
+            int n = 0;
+            for (auto const& m : processor.getConsoleMessages())
+                if (std::get<1>(m).contains(text)) n += std::get<4>(m);
+            return n;
+        }, 2000, "test").value_or(-1);
+    };
+    int const refusedBefore = consoleCount("Pd could not create");
+    writeEngine(sourceText + "#X obj 1 1 no_such_object_zzz;\n");
+    for (int look = 0; look < 2; ++look)
+        host->onMessageThread([&] { opened = mcp::voice::lookNow(processor); return true; }, 5000, "test");
+    CHECK(opened); // still the engine that was running
+    t_canvas* kept = nullptr;
+    host->pdWait([&] { kept = mcp::voice::engineRoot(processor); }, 3000);
+    CHECK(kept == swapped); // not replaced
+    int refused = refusedBefore; // the console is filled from the message thread a moment later
+    for (int waited = 0; waited < 3000 && refused == refusedBefore; waited += 50) {
+        sleepMs(50);
+        refused = consoleCount("Pd could not create");
+    }
+    sleepMs(300);
+    std::printf("  refused swap lines: %d before, %d after\n", refusedBefore, consoleCount("Pd could not create"));
+    CHECK(consoleCount("Pd could not create") == refusedBefore + 1); // said once, not on every look
+    CHECK(hit("kick", 100.0f) > 0.05f);
+
+    // close: the voices are gone, the file stays; open again (the good file back first)
+    writeEngine(sourceText);
+    host->onMessageThread([&] { mcp::voice::closeEngine(processor); return true; }, 5000, "test");
+    CHECK(!mcp::voice::engineLoaded(processor));
+    render(60, 1);
+    send("ai-voice-tap", "kick", { 100.0f });
+    CHECK(render(24, 24) < 1e-4f); // nobody listens
+    host->onMessageThread([&] { opened = mcp::voice::openEngine(processor); return true; }, 5000, "test");
+    CHECK(opened && mcp::voice::engineLoaded(processor));
+    CHECK(hit("kick", 100.0f) > 0.05f);
+
+    // no file: nothing opens and nothing is reported
+    host->onMessageThread([&] { mcp::voice::closeEngine(processor); return true; }, 5000, "test");
+    CHECK(dest.deleteFile());
+    host->onMessageThread([&] { opened = mcp::voice::openEngine(processor); return true; }, 5000, "test");
+    CHECK(!opened && !mcp::voice::engineLoaded(processor)); // no file: nothing, no error
+    host->onMessageThread([&] { mcp::voice::closeEngine(processor); return true; }, 5000, "test");
+
+    audio.paused = false;
+    sleepMs(100);
+}
+
 // MIDI device awareness: /pd/midi_devices <corrId> answers {"inputs":[{name,identifier,enabled}],"outputs":[...]}:
 // every device JUCE lists (as PlugData's MidiDeviceManager holds them) and whether PlugData's MIDI settings have it on
 // (enabled = it sits in a numbered port; null in the plugin build, where the host routes MIDI). Read-only: the port
@@ -7322,6 +7576,7 @@ int main()
             runWireActivityCases(harness);
             runFactCases(harness, processor);
             runOutputCeilingCases(harness, processor, audioControl);
+            runVoiceEngineCases(harness, processor, audioControl);
             runMidiDevicesCases(harness, processor);
             runApprovalCases(harness, processor);
             runAlphiSayCases(harness, processor);

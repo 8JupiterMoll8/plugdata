@@ -21,6 +21,7 @@
 #include "Mcp/McpRtGuard.h"
 #include "Mcp/McpNativeUndo.h"
 #include "Mcp/McpPdFile.h" // P11.8 item 3
+#include "Mcp/McpVoiceEngine.h" // the hidden voice engine of the ai.* widgets
 
 extern "C" int ugen_getsortno(void); // d_ugen.c (P3.4 S5)
 
@@ -177,7 +178,8 @@ void McpHost::registerOpenCanvases()
     };
     std::vector<t_canvas*> roots; // pd_canvaslist is newest first: walk it oldest first
     for (t_canvas* c = pd_this->pd_canvaslist; c; c = c->gl_next)
-        roots.push_back(c);
+        if (!mcp::voice::isEngineRoot(c)) // the hidden voice engine takes no wire keys (its [pd kick] is not the artist's)
+            roots.push_back(c);
     for (auto it = roots.rbegin(); it != roots.rend(); ++it)
         walk(*it);
     if (edited)
@@ -347,6 +349,7 @@ void McpHost::shutdown()
     }
     focusTimer.stopTimer();
     ceilingTimer.stopTimer();
+    mcp::voice::closeEngine(processor); // before the patches go
     if (mcpBridge)
         mcpBridge->shutdown();
     {
@@ -402,6 +405,9 @@ void McpHost::createBridge()
     if (!mcpEnabled) {
         mcpBridge->stop();
     }
+    // The ai.* widgets' voices: ai-voices.pd opened with no tab (not in `patches`), after the libraries and search paths
+    // are set up. No file = nothing happens; a timer picks it up when it appears (McpVoiceEngine.h).
+    mcp::voice::openEngine(processor);
 }
 
 // P9: the settings panel's toggle. The only way the ceiling goes off while PlugData runs (the AI has no verb for it,
@@ -715,7 +721,7 @@ t_canvas* McpHost::getCanvasBySymbol(const String& canvas_symbol)
         t_canvas* found = nullptr;
         int matches = 0;
         for (t_canvas* c = pd_this ? pd_this->pd_canvaslist : nullptr; c; c = c->gl_next) {
-            if (c->gl_owner || !c->gl_name || !c->gl_name->s_name)
+            if (c->gl_owner || !c->gl_name || !c->gl_name->s_name || mcp::voice::isEngineRoot(c))
                 continue;
             auto* dir = canvas_getdir(c);
             if (!dir || !dir->s_name || dir->s_name[0] == 0)
@@ -737,6 +743,9 @@ t_canvas* McpHost::getCanvasBySymbol(const String& canvas_symbol)
     // per-request Pd symbol.
     // Review H4: the records already known answer first (no walk on the hot path: batch connects resolve per
     // wire); only an unknown name walks every open canvas (new canvases, renamed ones) and asks again.
+    // The hidden voice engine is no patch the AI can address: nobody sees it, nobody saves it.
+    if (canvas_symbol == mcp::voice::engineFileName || canvas_symbol == juce::String("pd-") + mcp::voice::engineFileName)
+        return nullptr;
     PdLockScope lock(processor);
     auto const key = canvas_symbol.toStdString();
     if (auto* known = identity.canvasByKey(key))
