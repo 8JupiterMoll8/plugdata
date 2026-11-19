@@ -12,6 +12,7 @@
 #include "Utility/NVGTextShim.h"
 
 #include "Mcp/CanvasMcpLayer.h"
+#include "Mcp/McpAiGeometry.h"
 #include "Mcp/McpAiStyle.h"
 #include "Mcp/McpAlphi.h"
 #include "Mcp/McpAlphiStrip.h"
@@ -195,6 +196,7 @@ CanvasMcpLayer::AnnotationFrame CanvasMcpLayer::getAnnotationFrame(size_t annInd
     auto const origin = juce::Point<float>(static_cast<float>(canvas.canvasOrigin.x), static_cast<float>(canvas.canvasOrigin.y));
     float const tagW = std::min(annotationMaxWidthPx, mcp::aiTagWidthPx(static_cast<size_t>(a.text.length())) + annotationCloseSlotPx);
     float const tagH = mcp::aiTagHeightPx;
+    bool stackedOnLine = false;
 
     if (!grpBounds.isEmpty()) {
         frame.group = grpBounds.toFloat().translated(origin.x, origin.y);
@@ -211,35 +213,41 @@ CanvasMcpLayer::AnnotationFrame CanvasMcpLayer::getAnnotationFrame(size_t annInd
                 shares = shares || ids.contains(p);
             if (shares) ++stack;
         }
-        // 1. Right of the boxes, vertically centred, unless another box lies there.
-        juce::Rectangle<float> const right(frame.group.getRight() + mcp::aiTagLeaderPx, frame.group.getCentreY() - tagH * 0.5f + static_cast<float>(stack) * (tagH + 2.0f), tagW, tagH);
-        auto const rightPatch = right.translated(-origin.x, -origin.y).expanded(2.0f);
+        // 1. Next to the boxes, 14 px from them (live review 2026-11-19): right of them, vertically centred, else above, else below,
+        //    else left of them, taking the first side where neither the tag nor its leader line touches another box (a tag whose
+        //    right was taken used to go to the bridge's far place, and its long leader crossed a box). All in patch coordinates.
         std::vector<Object const*> targets; // looked up once: the scan below visits every box of the canvas
         for (auto const& tid : ids)
             targets.push_back(findObjectByStableId(tid));
-        bool blocked = false;
+        std::vector<mcp::AiRectF> obstacles;
+        obstacles.reserve(static_cast<size_t>(canvas.objects.size()));
         for (auto* obj : canvas.objects) {
-            if (!obj || blocked) continue;
-            bool const isTarget = std::find(targets.begin(), targets.end(), obj) != targets.end();
-            if (!isTarget && obj->getObjectBounds().toFloat().intersects(rightPatch))
-                blocked = true;
+            if (!obj || std::find(targets.begin(), targets.end(), obj) != targets.end())
+                continue;
+            auto const ob = obj->getObjectBounds().toFloat();
+            obstacles.push_back({ ob.getX(), ob.getY(), ob.getWidth(), ob.getHeight() });
         }
-        if (!blocked)
-            frame.tag = right;
+        auto const placed = mcp::aiTagPlace({ static_cast<float>(grpBounds.getX()), static_cast<float>(grpBounds.getY()), static_cast<float>(grpBounds.getWidth()), static_cast<float>(grpBounds.getHeight()) },
+            tagW, tagH, stack, obstacles);
+        if (placed.side != mcp::AiTagSide::None) {
+            frame.tag = juce::Rectangle<float>(placed.tag.x + origin.x, placed.tag.y + origin.y, placed.tag.w, placed.tag.h);
+            // A tag stacked on a tag above or below the boxes has no leader of its own (it would run through the tag between).
+            stackedOnLine = stack > 0 && (placed.side == mcp::AiTagSide::Above || placed.side == mcp::AiTagSide::Below);
+        }
     }
     // 2. As before: where the bridge put it (above the target, or on the side it found free; free-floating at its own x, y).
     if (frame.tag.isEmpty())
         frame.tag = juce::Rectangle<float>(origin.x + rawAx, origin.y + rawAy, tagW, tagH);
 
-    // The leader: from the nearest point of the boxes to the nearest point of the tag (a straight grey line, none when they touch).
+    // The leader: from the nearest point of the boxes to the nearest point of the tag, a straight grey line of at most 14 px
+    // (mcp::aiTagLeader cuts a longer reach at the tag's end), none when they touch.
     if (!frame.group.isEmpty()) {
         auto const& g = frame.group;
         auto const& t = frame.tag;
-        juce::Point<float> const from(juce::jlimit(g.getX(), g.getRight(), t.getCentreX()), juce::jlimit(g.getY(), g.getBottom(), t.getCentreY()));
-        juce::Point<float> const to(juce::jlimit(t.getX(), t.getRight(), from.x), juce::jlimit(t.getY(), t.getBottom(), from.y));
-        frame.leaderFrom = from;
-        frame.leaderTo = to;
-        frame.hasLeader = from.getDistanceFrom(to) > 1.0f;
+        auto const leader = mcp::aiTagLeader({ g.getX(), g.getY(), g.getWidth(), g.getHeight() }, { t.getX(), t.getY(), t.getWidth(), t.getHeight() });
+        frame.leaderFrom = { leader.from.x, leader.from.y };
+        frame.leaderTo = { leader.to.x, leader.to.y };
+        frame.hasLeader = leader.visible && !stackedOnLine;
     }
     return frame;
 }
