@@ -73,6 +73,21 @@ uint64_t guiPropsStamp(t_object* ob, uint64_t h)
     return h;
 }
 
+// Flow step 1 (F4): the ai.* widgets hear the switch as `flow <0|1>` on "ai-flow-switch", a name only the fork sends to
+// (the server refuses it in every send, set[] and created box). Under the Pd lock: the audio thread may be running.
+void tellWidgetsFlow(PluginProcessor& processor, bool on)
+{
+    processor.lockAudioThread();
+    libpd_set_instance(static_cast<t_pdinstance*>(processor.instance));
+    t_symbol* const s = gensym("ai-flow-switch");
+    if (s && s->s_thing) {
+        t_atom a;
+        SETFLOAT(&a, on ? 1.0f : 0.0f);
+        pd_typedmess(s->s_thing, gensym("flow"), 1, &a);
+    }
+    processor.unlockAudioThread();
+}
+
 // Repaint every canvas on the message thread (the badge and the chips), whichever thread changed the state.
 void repaintFlowLater(McpHost& host)
 {
@@ -114,6 +129,7 @@ bool McpHost::alphiClicked(std::int64_t nowMs)
     processor.logMessage("Flow mode ON: the AI changes and deletes its own objects without asking (Ctrl+Z undoes; click Alphi again to stop)");
     if (mcpBridge)
         mcpBridge->sendFlowModeChanged(true, "artist");
+    tellWidgetsFlow(processor, true);
     repaintFlowLater(*this);
     return true;
 }
@@ -286,6 +302,7 @@ bool McpHost::flowModeOff(juce::String const& by)
         processor.logMessage("Flow mode OFF (" + by + "): the AI asks again before deleting");
         if (mcpBridge)
             mcpBridge->sendFlowModeChanged(false, by);
+        tellWidgetsFlow(processor, false);
         repaintFlowLater(*this);
     }
     return was;
