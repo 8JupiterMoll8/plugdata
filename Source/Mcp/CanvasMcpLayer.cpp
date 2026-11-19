@@ -89,55 +89,70 @@ void CanvasMcpLayer::paintUnderObjects(NVGcontext* nvg, Rectangle<int> invalidRe
     // Alphi drop 1 D11: with no free spot on the right edge his tab is drawn under the boxes (CanvasMcpAlphiSay.cpp).
     if (mcpAlphiTabUnder && !mcpAlphiTabFrameUnder.isEmpty())
         paintAlphiTab(nvg);
-    // PRD overlay: titled regions drawn BEHIND the objects (structure at a glance). Design round 2026-11-19 B1: ONE grey
-    // tint with a plain grey title; the rectangles come from mcp::aiRegionRects (padded, never crossing, never cutting a
-    // member box), the region's kind no longer picks a colour.
+    // PRD overlay: titled regions drawn BEHIND the objects (structure at a glance). Design round 2026-11-19 B1, changed by the
+    // owner the same evening (region-no-grey-options.png, option A): NO grey fill. A region is a 3 px ink bar down the left
+    // edge of its rectangle plus its name (ink at 75 %, 12 px Inter-Medium, never under 11 screen px when zoomed out; at the
+    // top right when a wire or a step disc would cover it on the left). The rectangles come from mcp::aiRegionRects (padded,
+    // never crossing, never cutting a member box, stacked ones share the squeeze evenly and keep 8 px under the upper one's boxes).
     if (canvas.pd && shouldShowAIRegions() && !canvas.pd->getMcp()->session.getMcpRegions().empty()) {
         auto const regions = canvas.pd->getMcp()->session.getMcpRegions();
         // Every region that holds boxes: the bounding box of its live members (all deleted -> auto-prune); a region with
-        // no targets keeps the rectangle it was given.
+        // no targets keeps the rectangle it was given. Pd comments are left out of the bounds (a note lies beside the boxes it
+        // describes and stretched the rectangle to itself); a region of nothing but comments keeps them.
+        auto const boundsOfMembers = [this](juce::StringArray const& ids, bool withComments, juce::Rectangle<int>& out) {
+            bool any = false;
+            for (auto const& tid : ids) {
+                auto* obj = findObjectByStableId(tid);
+                if (!obj || (!withComments && obj->getType(false) == "comment"))
+                    continue;
+                out = any ? out.getUnion(obj->getObjectBounds()) : obj->getObjectBounds();
+                any = true;
+            }
+            return any;
+        };
         std::vector<mcp::ApprovalRect> members;
         std::vector<size_t> memberOf; // members[k] belongs to regions[memberOf[k]]
         for (size_t ri = 0; ri < regions.size(); ++ri) {
             auto const& r = regions[ri];
             if (r.targetIds.size() == 0)
                 continue;
-            bool first = true;
-            int minX = 0, minY = 0, maxX = 0, maxY = 0;
-            for (auto const& tid : r.targetIds) {
-                if (auto* obj = findObjectByStableId(tid)) {
-                    auto const b = obj->getObjectBounds();
-                    minX = first ? b.getX() : std::min(minX, b.getX());
-                    minY = first ? b.getY() : std::min(minY, b.getY());
-                    maxX = first ? b.getRight() : std::max(maxX, b.getRight());
-                    maxY = first ? b.getBottom() : std::max(maxY, b.getBottom());
-                    first = false;
-                }
-            }
-            if (first)
+            juce::Rectangle<int> bounds;
+            if (!boundsOfMembers(r.targetIds, false, bounds) && !boundsOfMembers(r.targetIds, true, bounds))
                 continue;
-            members.push_back({ minX, minY, maxX - minX, maxY - minY });
+            members.push_back({ bounds.getX(), bounds.getY(), bounds.getWidth(), bounds.getHeight() });
             memberOf.push_back(ri);
         }
         auto const rects = mcp::aiRegionRects(members);
 
+        float const zoom = canvas.viewport ? canvas.viewport->getViewScale() : getValue<float>(canvas.zoomScale);
+        float const titleSize = mcp::aiRegionTitleSizeFor(zoom);
+        auto const steps = spotlightSteps(); // the order discs a name may have to step aside for (empty without a spotlight)
+
         auto const drawRegion = [&](float rx, float ry, float rw, float rh, juce::String const& title) {
-            // Outside what this render redraws: nothing of it would land (its title may run past rw).
-            if (!juce::Rectangle<float>(rx, ry, std::max(rw, 240.0f), std::max(rh, 20.0f)).expanded(4.0f).intersects(invalidRegion.toFloat()))
+            // Outside what this render redraws: nothing of it would land (its title may run past rw, and grows when zoomed out).
+            if (!juce::Rectangle<float>(rx, ry, std::max(rw, 240.0f * titleSize / mcp::aiRegionTitleSize), std::max(rh, titleSize * 2.0f)).expanded(4.0f).intersects(invalidRegion.toFloat()))
                 return;
             NVGScopedState scopedRegion(nvg);
             if (rw > 0.0f && rh > 0.0f) {
+                // the 3 px ink bar down the left edge; no fill, no outline
                 nanovg::nvgBeginPath(nvg);
-                nanovg::nvgRoundedRect(nvg, rx, ry, rw, rh, mcp::aiRadius);
-                nanovg::nvgFillColor(nvg, mcpai::colour(mcp::aiRegionTint));
+                nanovg::nvgRect(nvg, rx, ry, mcp::aiRegionBarWidth, rh);
+                nanovg::nvgFillColor(nvg, mcpai::colour(mcp::aiInk));
                 nanovg::nvgFill(nvg);
             }
             if (title.isNotEmpty()) {
-                mcpnvg::nvgFontSize(nvg, mcp::aiHintSize);
-                mcpnvg::nvgFontFace(nvg, "Inter");
+                mcpnvg::nvgFontSize(nvg, titleSize);
+                mcpnvg::nvgFontFace(nvg, "Inter-Medium");
                 mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
-                nanovg::nvgFillColor(nvg, mcpai::colour(mcp::aiGrey));
-                mcpnvg::nvgText(nvg, rx + 8.0f, ry + 6.0f, title.toRawUTF8(), nullptr);
+                float bounds[4];
+                mcpnvg::nvgTextBounds(nvg, 0.0f, 0.0f, title.toRawUTF8(), nullptr, bounds);
+                float const titleW = bounds[2] - bounds[0];
+                float const titleH = bounds[3] - bounds[1];
+                // Left, unless a wire or a step disc would lie on the name there and the right is clear.
+                auto const place = mcp::aiRegionTitlePlace({ rx, ry, rw, rh }, titleW, titleH,
+                    regionTitleCovers({ rx, ry + mcp::aiRegionTitleTop, std::max(rw, titleW + 2.0f * mcp::aiRegionTitleInset), titleH }, steps));
+                nanovg::nvgFillColor(nvg, mcpai::colour(mcp::aiInk, mcp::aiRegionTitleAlpha));
+                mcpnvg::nvgText(nvg, place.x, place.y, title.toRawUTF8(), nullptr);
             }
         };
 
@@ -1214,12 +1229,15 @@ void CanvasMcpLayer::paintScreenOverlay(NVGcontext* nvg)
 
 bool CanvasMcpLayer::decorateObject(NVGcontext* nvg, Object& object, juce::Rectangle<int> b)
 {
-    // The spotlight (design round B5): a box that is not on the path gets a veil, the canvas colour at 70 %, over its bounds.
+    // The spotlight (design round B5, live review 2026-11-19): a box that is not on the path gets a veil over its bounds, 50 %
+    // (it was 70 %: the faded parts were unreadable). Over a light canvas the veil is a warm paper white, so ink text under it
+    // reads as a warm grey (about #8C8576) and the box stays white-ish; over a dark canvas it is the canvas colour (mcp::aiVeilColour).
     // Never a selected (or dragged) box. The object's drawing is cached: updateOverlays repaints the boxes when the targets change.
     if (spotlightHere() && !isTargeted(&object) && !object.isSelected()) {
         NVGScopedState scopedVeil(nvg);
-        auto veil = nvgColour(getThemeColours(canvas).canvasBackgroundColour);
-        veil.a *= 0.7f;
+        auto const bg = getThemeColours(canvas).canvasBackgroundColour;
+        auto const rgba = mcp::aiVeilColour({ bg.getRed(), bg.getGreen(), bg.getBlue(), 255 });
+        auto const veil = nanovg::nvgRGBA(rgba.r, rgba.g, rgba.b, rgba.a);
         nanovg::nvgBeginPath(nvg);
         nanovg::nvgRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), getPlugDataLook(object).getObjectCornerRadius());
         nanovg::nvgFillColor(nvg, veil);
@@ -1772,7 +1790,14 @@ NVGcolor CanvasMcpLayer::spotlightWire(Connection const* c, NVGcolor normal) con
         return normal; // no host, no targets, another canvas, or a wire the artist holds: the normal colour
     if (isTargeted(c))
         return mcpai::colour(mcp::aiInk);
-    normal.a *= 0.25f;
+    return spotlightFade(c, normal);
+}
+
+NVGcolor CanvasMcpLayer::spotlightFade(Connection const* c, NVGcolor normal) const
+{
+    if (!c || !spotlightHere() || c->isSelected() || isTargeted(c))
+        return normal;
+    normal.a *= mcp::aiOffPathCordAlpha; // control and signal cords alike: a signal cord's dark dashes fade with its body
     return normal;
 }
 
@@ -1793,10 +1818,11 @@ void CanvasMcpLayer::paintSpotlightActivity(NVGcontext* nvg, Connection const& c
     nanovg::nvgFill(nvg);
 }
 
-void CanvasMcpLayer::paintSpotlightOrder(NVGcontext* nvg)
+std::vector<CanvasMcpLayer::SpotlightStep> CanvasMcpLayer::spotlightSteps() const
 {
+    std::vector<SpotlightStep> out;
     if (canvas.isGraph || !spotlightHere())
-        return;
+        return out;
     auto const order = canvas.pd->getMcp()->session.getMcpOverlayOrder();
     auto const rankOf = [&order](Object const* obj) -> std::size_t {
         if (!obj)
@@ -1809,7 +1835,7 @@ void CanvasMcpLayer::paintSpotlightOrder(NVGcontext* nvg)
     struct Step {
         std::size_t outRank, inRank;
         int outIdx, inIdx;
-        juce::Point<float> start;
+        juce::Point<float> middle;
     };
     std::vector<Step> steps;
     for (auto* c : canvas.connections) {
@@ -1819,17 +1845,52 @@ void CanvasMcpLayer::paintSpotlightOrder(NVGcontext* nvg)
         auto const inRank = rankOf(c->inobj.get());
         if (outRank >= order.size() || inRank >= order.size())
             continue; // a wire that only touches the path is not a step of it
-        steps.push_back({ outRank, inRank, c->outIdx, c->inIdx, c->getStartPoint() });
+        // The middle of the wire (live review 2026-11-19): two steps that leave the same outlet used to put their discs on one
+        // spot, and the later covered the earlier (the picture showed 2, 3, 4 and no 1). A wire without a length keeps its start.
+        auto const& wire = c->getPath();
+        auto const length = wire.getLength();
+        auto const middle = length >= 1.0f ? wire.getPointAlongPath(length * 0.5f) : c->getStartPoint();
+        steps.push_back({ outRank, inRank, c->outIdx, c->inIdx, middle });
     }
     std::sort(steps.begin(), steps.end(), [](Step const& a, Step const& b) {
         return std::tie(a.outRank, a.inRank, a.outIdx, a.inIdx) < std::tie(b.outRank, b.inRank, b.outIdx, b.inIdx);
     });
     int n = 0;
+    for (auto const& step : steps)
+        out.push_back({ step.middle, ++n }); // numbered from 1
+    return out;
+}
+
+void CanvasMcpLayer::paintSpotlightOrder(NVGcontext* nvg)
+{
+    for (auto const& step : spotlightSteps())
+        mcpai::drawGlyph(nvg, mcp::AiTag::Step, step.centre.x, step.centre.y, step.number);
+}
+
+std::vector<mcp::AiRectF> CanvasMcpLayer::regionTitleCovers(mcp::AiRectF band, std::vector<SpotlightStep> const& steps) const
+{
+    std::vector<mcp::AiRectF> covers;
+    juce::Rectangle<float> const area(band.x, band.y, band.w, band.h);
+    constexpr float disc = mcp::aiStepDiscSize;
     for (auto const& step : steps) {
-        ++n;
-        // left of the wire's start, a little below its box
-        mcpai::drawGlyph(nvg, mcp::AiTag::Step, step.start.x - 11.0f, step.start.y + 11.0f, n);
+        juce::Rectangle<float> const d(step.centre.x - disc * 0.5f, step.centre.y - disc * 0.5f, disc, disc);
+        if (d.intersects(area))
+            covers.push_back({ d.getX(), d.getY(), d.getWidth(), d.getHeight() });
     }
+    // A wire is sampled every 4 px along its path; the samples inside the band become 4 px squares.
+    constexpr float sample = 4.0f;
+    for (auto* c : canvas.connections) {
+        if (!c || !c->getBounds().toFloat().expanded(sample).intersects(area))
+            continue;
+        auto const& wire = c->getPath();
+        auto const length = wire.getLength();
+        for (float at = 0.0f; at <= length; at += sample) {
+            auto const p = wire.getPointAlongPath(at);
+            if (area.contains(p))
+                covers.push_back({ p.x - sample * 0.5f, p.y - sample * 0.5f, sample, sample });
+        }
+    }
+    return covers;
 }
 
 void CanvasMcpLayer::updateOverlays(int const overlayState)

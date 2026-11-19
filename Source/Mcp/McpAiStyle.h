@@ -42,8 +42,6 @@ constexpr AiRgba aiRed { 0xDC, 0x29, 0x1F, 255 };    // "I changed this" (a circ
 constexpr AiRgba aiYellow { 0xF7, 0xC2, 0x14, 255 }; // "look here" (a triangle)
 constexpr AiRgba aiBlue { 0x14, 0x3D, 0x9E, 255 };   // "a measurement" (a square), a message on a wire
 constexpr AiRgba aiNoteYellow { 0xF6, 0xE7, 0xA6, 255 }; // the sticky note (ai.note)
-// DEPRECATED, drawn by nothing from the next commit on (regions have no grey fill any more): removed with the region drawing.
-constexpr AiRgba aiRegionTint { 0x8C, 0x85, 0x76, 36 };
 // The spotlight's veil on a box that is not on the lit path, over a LIGHT canvas: a warm paper white at 50 %, so ink text
 // under it reads as a warm grey (about #8C8576) and the box itself stays white-ish ("faded things stay readable grey on
 // white"). Over a DARK canvas the veil is the canvas colour itself (see aiVeilColour).

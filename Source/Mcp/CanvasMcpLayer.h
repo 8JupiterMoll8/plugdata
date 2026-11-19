@@ -21,6 +21,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "Utility/Config.h"
 #include "Utility/NVGUtils.h"
+#include "Mcp/McpAiGeometry.h"   // live review 2026-11-19: where a tag and a region's name stand (JUCE-free)
 #include "Mcp/McpApprovalState.h" // P12c / P12a.1: ApprovalRect for the chips and Alphi
 #include "Mcp/McpAlphiDock.h"     // big Alphi 1a0: where Alphi docks
 #include "Mcp/McpAlphiMotion.h"   // Alphi drop 1: motion repaints, the line clock
@@ -64,11 +65,24 @@ public:
     // A wire's colour under a spotlight: ink on the path, the normal colour at 25 % off it. Unchanged without targets, on a canvas
     // the spotlight is not on, and for a selected wire. (Connection::render, MCP-HOOK(overlayTarget).)
     NVGcolor spotlightWire(Connection const* c, NVGcolor normal) const;
+    // Any colour of a wire that is not on the lit path (a signal cord's dashes too) at 25 %: aiOffPathCordAlpha. Unchanged on the
+    // path, for a selected wire, without targets and on a canvas the spotlight is not on. (Connection::render, MCP-HOOK(overlayTarget).)
+    NVGcolor spotlightFade(Connection const* c, NVGcolor normal) const;
     // The blue square (6 px) on a targeted wire while it carries a message: `progress` is the wire's own activity animation (0..1);
     // nothing is drawn at 0 or 1 or without a spotlight. No animation of its own. (Connection::render, MCP-HOOK(overlayTarget).)
     void paintSpotlightActivity(NVGcontext* nvg, Connection const& c, float progress) const;
-    // The order discs: a black disc with a white number at the start of each wire between two targets, in the order the AI listed them.
+    // The order discs: a black disc with a white number in the middle of each wire between two targets, numbered from 1 in the
+    // order the AI listed them. spotlightSteps is where they go (canvas component coordinates): paintSpotlightOrder draws them, and
+    // a region's name steps aside for them.
+    struct SpotlightStep {
+        juce::Point<float> centre;
+        int number = 0;
+    };
+    std::vector<SpotlightStep> spotlightSteps() const;
     void paintSpotlightOrder(NVGcontext* nvg);
+    // What would lie on a region's name inside `band` (canvas component coordinates): the order discs (`steps`) and a sample of every wire
+    // that runs through the band, as small rectangles (mcp::aiRegionTitlePlace decides left or right from them).
+    std::vector<mcp::AiRectF> regionTitleCovers(mcp::AiRectF band, std::vector<SpotlightStep> const& steps) const;
 
     // Writes the overlay bit mask into the settings (lock or edit set) and re-reads them.
     void setOverlayMask(int mask);

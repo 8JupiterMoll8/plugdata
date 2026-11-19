@@ -175,6 +175,7 @@ void Connection::render(NVGcontext* nvg)
         dashColor.g *= 0.4f;
         dashColor.b *= 0.4f;
     }
+    dashColor = cnv->getMcpLayer().spotlightFade(this, dashColor); // MCP-HOOK(overlayTarget): an off-path signal cord's dark dashes fade with its body
 
     float cableThickness = getPathWidth();
 
