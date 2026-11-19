@@ -91,15 +91,25 @@ void regionTitleSize()
     CHECK(mcp::aiRegionTitleSizeFor(1.0f) == 12.0f);
     CHECK(mcp::aiRegionTitleSizeFor(3.0f) == 12.0f);
     CHECK(mcp::aiRegionTitleSizeFor(11.0f / 12.0f) == 12.0f);
-    CHECK(mcp::aiRegionTitleSizeFor(0.4f) == 24.0f); // below zoom 0.5 the cap wins over the 11 px floor
-    for (float zoom : { 0.5f, 0.75f, 0.9f }) {
+    // The cap: a name of this size (with Inter's line height) is as high as the title band leaves it (28 - 6 = 22 px),
+    // so the text of a zoomed-out canvas never runs past its band over the members below (review: 24 px made a 29 px
+    // line in a 28 px band that starts 6 px down).
+    CHECK(mcp::aiRegionTitleMaxSize == 18.0f);
+    CHECK(mcp::aiRegionTitleMaxSize * mcp::aiInterLineHeight <= static_cast<float>(mcp::aiRegionPadTop) - mcp::aiRegionTitleTop);
+    CHECK(mcp::aiRegionTitleSizeFor(0.4f) == mcp::aiRegionTitleMaxSize); // far out the cap wins over the 11 px floor
+    CHECK(mcp::aiRegionTitleSizeFor(0.25f) == mcp::aiRegionTitleMaxSize);
+    CHECK(mcp::aiRegionTitleSizeFor(0.5f) == mcp::aiRegionTitleMaxSize);
+    // Down to the zoom where the cap and the floor meet (11 / 18 = 0.611) the name is still 11 screen px or more.
+    for (float zoom : { 0.62f, 0.7f, 0.75f, 0.9f }) {
         float const size = mcp::aiRegionTitleSizeFor(zoom);
         CHECK(size >= 12.0f);
         CHECK(size * zoom >= mcp::aiRegionTitleMinScreenPx - 0.001f); // on the screen: 11 px at least
     }
-    CHECK(std::fabs(mcp::aiRegionTitleSizeFor(0.5f) - 22.0f) < 0.001f);
+    CHECK(std::fabs(mcp::aiRegionTitleSizeFor(0.62f) - 11.0f / 0.62f) < 0.001f);
+    // Whatever the zoom, the line fits the band.
+    for (float zoom = 0.02f; zoom < 8.0f; zoom *= 1.07f)
+        CHECK(mcp::aiRegionTitleSizeFor(zoom) * mcp::aiInterLineHeight <= static_cast<float>(mcp::aiRegionPadTop) - mcp::aiRegionTitleTop + 0.001f);
     // Nonsense zooms fall back to the plain 12.
-    CHECK(mcp::aiRegionTitleSizeFor(0.25f) == 24.0f); // capped: fits the 28 px title band
     CHECK(mcp::aiRegionTitleSizeFor(0.0f) == 12.0f);
     CHECK(mcp::aiRegionTitleSizeFor(-1.0f) == 12.0f);
     CHECK(mcp::aiRegionTitleSizeFor(std::numeric_limits<float>::quiet_NaN()) == 12.0f);

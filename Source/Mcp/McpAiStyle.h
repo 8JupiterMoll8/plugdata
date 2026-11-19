@@ -131,15 +131,18 @@ constexpr float aiRegionTitleSize = 12.0f;      // the name, Inter-Medium, in pa
 constexpr float aiRegionTitleMinScreenPx = 11.0f; // ... but never smaller than this on the screen when zoomed out
 constexpr float aiRegionTitleInset = 8.0f;      // from the rectangle's left edge (the bar and 5 px of air) to the name
 constexpr float aiRegionTitleTop = 6.0f;        // from the rectangle's top edge to the name
+constexpr float aiInterLineHeight = 1.21f;      // Inter's line box as a multiple of its font size (nvgTextBounds' height)
+constexpr float aiRegionTitleMaxSize = 18.0f;   // the name's size cap: 18 x 1.21 = 21.8 px fits what the 28 px band leaves under the 6 px top (22)
 
 /** The name's size in patch px for a canvas zoom: 12 px, or more when the zoom would make it smaller than 11 screen px
- *  (a zoomed-out canvas must still show what a part is called). A zoom that is not a positive number counts as 1. */
+ *  (a zoomed-out canvas must still show what a part is called), but never more than aiRegionTitleMaxSize (18): a bigger
+ *  line would run past its 28 px title band over the members below, so under zoom 11/18 = 0.61 the name gets smaller on
+ *  the screen than 11 px. A zoom that is not a positive number counts as 1. */
 inline float aiRegionTitleSizeFor(float zoom)
 {
     if (!(zoom > 0.0f) || !std::isfinite(zoom))
         return aiRegionTitleSize;
-    // capped at 24 canvas px so the name always fits the 28 px title band (far out it gets smaller than 11 screen px)
-    return std::min(24.0f, std::max(aiRegionTitleSize, aiRegionTitleMinScreenPx / zoom));
+    return std::min(aiRegionTitleMaxSize, std::max(aiRegionTitleSize, aiRegionTitleMinScreenPx / zoom));
 }
 
 /** The veil's colour (alpha included) for a canvas background: over a light canvas the warm paper white, over a dark one
