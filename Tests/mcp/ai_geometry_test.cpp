@@ -215,9 +215,16 @@ void titleStaysWhereItMust()
     AiRectF const empty { 100, 200, 0, 0 };
     auto const e = mcp::aiRegionTitlePlace(empty, 80.0f, 15.0f, { { 100, 200, 100, 30 } });
     CHECK(!e.right && near(e.x, 100.0f + mcp::aiRegionTitleInset));
-    // A rectangle too narrow for the name on the right without lying on the left spot: stays left.
+    // A rectangle too narrow for an inner right spot (owner 2026-11-19: regions have no fill, a name may leave its
+    // rectangle): a covered name steps right by aiRegionTitleNudge when that is clear, else it stays left.
     AiRectF const narrow { 100, 200, 90, 300 };
-    CHECK(!mcp::aiRegionTitlePlace(narrow, 80.0f, 15.0f, { { 118, 204, 14, 14 } }).right);
+    auto const n = mcp::aiRegionTitlePlace(narrow, 80.0f, 15.0f, { { 100, 204, 14, 14 } });
+    CHECK(n.right && near(n.x, 100.0f + mcp::aiRegionTitleInset + mcp::aiRegionTitleNudge));
+    CHECK(!mcp::aiRegionTitlePlace(narrow, 80.0f, 15.0f, { { 100, 204, 14, 14 }, { 150, 204, 14, 14 } }).right);
+    // aiRegionTitleAt draws a remembered side where aiRegionTitlePlace put it (wide: inner right; narrow: the nudge).
+    CHECK(near(mcp::aiRegionTitleAt(narrow, 80.0f, true).x, n.x));
+    AiRectF const wide { 100, 200, 300, 400 };
+    CHECK(near(mcp::aiRegionTitleAt(wide, 80.0f, true).x, mcp::aiRegionTitleSpot(wide, 80.0f, true).x));
     // A cover below the name's line (a wire under it) does not move it.
     CHECK(!mcp::aiRegionTitlePlace({ 100, 200, 300, 400 }, 80.0f, 15.0f, { { 110, 230, 14, 14 } }).right);
 }
@@ -242,11 +249,12 @@ void titlePlaceByAsksLazily()
     // Both covered: it stays left.
     calls = 0;
     CHECK(!mcp::aiRegionTitlePlaceBy(rect, 80.0f, 15.0f, [&](AiRectF) { ++calls; return true; }).right && calls == 2);
-    // A name that cannot move (a title-only rectangle, one too narrow for two places) asks nothing at all.
+    // A title-only rectangle asks nothing at all; a narrow one asks the left spot, then the nudge only.
     calls = 0;
     CHECK(!mcp::aiRegionTitlePlaceBy(AiRectF { 100, 200, 0, 0 }, 80.0f, 15.0f, [&](AiRectF) { ++calls; return true; }).right);
-    CHECK(!mcp::aiRegionTitlePlaceBy(AiRectF { 100, 200, 90, 300 }, 80.0f, 15.0f, [&](AiRectF) { ++calls; return true; }).right);
     CHECK(calls == 0);
+    CHECK(!mcp::aiRegionTitlePlaceBy(AiRectF { 100, 200, 90, 300 }, 80.0f, 15.0f, [&](AiRectF) { ++calls; return true; }).right);
+    CHECK(calls == 2);
 }
 
 void titlePlaceByEqualsTheVectorVersion()
@@ -287,11 +295,11 @@ void titleSpotsAndMobility()
     CHECK(!mcp::aiRegionTitleCanMove({ 100, 200, 90, 300 }, 80.0f)); // too narrow
     CHECK(!mcp::aiRegionTitleCanMove({ 100, 200, 183, 300 }, 80.0f)); // 8 + 80 + 8 + 80 + 8 = 184 px are needed
     CHECK(mcp::aiRegionTitleCanMove({ 100, 200, 184, 300 }, 80.0f));
-    // ... and that edge is exactly where aiRegionTitlePlaceBy stops asking.
+    // ... and a free left spot is asked once in every rectangle with a width (none in a title-only one).
     for (float w = 0.0f; w < 400.0f; w += 7.0f) {
         int calls = 0;
         mcp::aiRegionTitlePlaceBy(AiRectF { 100, 200, w, 300 }, 80.0f, 15.0f, [&](AiRectF) { ++calls; return false; });
-        CHECK((calls > 0) == mcp::aiRegionTitleCanMove({ 100, 200, w, 300 }, 80.0f));
+        CHECK(calls == (w > 0.0f ? 1 : 0));
     }
 }
 

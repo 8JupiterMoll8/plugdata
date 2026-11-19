@@ -157,10 +157,25 @@ struct AiTitlePlace {
 
 /** The name's top left on one side of `rect`: the left spot (aiRegionTitleInset from the left edge, aiRegionTitleTop from the
  *  top) or the right spot (the same distance from the right edge). */
+/** How far a covered name steps right when it cannot take the inner right spot: past a step disc (18 px) and its air. */
+inline constexpr float aiRegionTitleNudge = 28.0f;
+
 inline AiTitlePlace aiRegionTitleSpot(AiRectF rect, float titleW, bool right)
 {
     return right ? AiTitlePlace { rect.right() - aiRegionTitleInset - titleW, rect.y + aiRegionTitleTop, true }
                  : AiTitlePlace { rect.x + aiRegionTitleInset, rect.y + aiRegionTitleTop, false };
+}
+
+/** Where a name stands for a remembered side: left; right = the inner right spot (wide) or the nudge (narrow). */
+inline bool aiRegionTitleCanMove(AiRectF rect, float titleW);
+inline AiTitlePlace aiRegionTitleAt(AiRectF rect, float titleW, bool right)
+{
+    if (!right)
+        return aiRegionTitleSpot(rect, titleW, false);
+    if (aiRegionTitleCanMove(rect, titleW))
+        return aiRegionTitleSpot(rect, titleW, true);
+    auto const left = aiRegionTitleSpot(rect, titleW, false);
+    return AiTitlePlace { left.x + aiRegionTitleNudge, left.y, true };
 }
 
 /** A name can move to the other side only in a rectangle that is more than a title (some width) and has room for the name
@@ -181,12 +196,19 @@ template <class Covered>
 inline AiTitlePlace aiRegionTitlePlaceBy(AiRectF rect, float titleW, float titleH, Covered&& covered)
 {
     auto const left = aiRegionTitleSpot(rect, titleW, false);
-    if (!aiRegionTitleCanMove(rect, titleW))
+    if (rect.w <= 0.0f)
         return left;
     if (!covered(AiRectF { left.x, left.y, titleW, titleH }))
         return left;
-    auto const right = aiRegionTitleSpot(rect, titleW, true);
-    return covered(AiRectF { right.x, right.y, titleW, titleH }) ? left : right;
+    if (aiRegionTitleCanMove(rect, titleW)) {
+        auto const right = aiRegionTitleSpot(rect, titleW, true);
+        return covered(AiRectF { right.x, right.y, titleW, titleH }) ? left : right;
+    }
+    // Owner 2026-11-19 (regions have no fill any more): a name may leave its rectangle. In a region too narrow for an
+    // inner right spot, a covered name steps right past a step disc or a cord (aiRegionTitleNudge) if that spot is clear.
+    // So `right` means the inner right spot in a wide rectangle and the nudge in a narrow one (aiRegionTitleAt).
+    auto const nudged = aiRegionTitleAt(rect, titleW, true);
+    return covered(AiRectF { nudged.x, nudged.y, titleW, titleH }) ? left : nudged;
 }
 
 /** The same with the covers as a list of rectangles (a wire sampled as small rectangles, a step disc). */

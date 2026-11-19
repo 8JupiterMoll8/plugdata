@@ -171,17 +171,16 @@ void CanvasMcpLayer::paintUnderObjects(NVGcontext* nvg, Rectangle<int> invalidRe
                 // Left, unless a wire or a step disc would lie on the name there and the right is clear. The answer is remembered
                 // per region and asked again only when its inputs changed (the rectangle, the name's size, the wires, the discs).
                 mcp::AiRectF const rect { rx, ry, rw, rh };
-                bool const movable = mcp::aiRegionTitleCanMove(rect, titleW);
                 auto key = mcp::aiHashSeed;
                 for (float const v : { rx, ry, rw, rh, titleW, titleH })
                     key = mcp::aiHashMix(key, v);
-                key = mcp::aiHashMix(key, movable ? sceneKeyOnce() : std::uint64_t { 0 }); // a name that cannot move ignores the wires
+                key = mcp::aiHashMix(key, rw > 0.0f ? sceneKeyOnce() : std::uint64_t { 0 }); // a title-only rectangle ignores the wires
                 auto const side = mcpTitleSides.get(slot, key, [&] {
                     return mcp::aiRegionTitlePlaceBy(rect, titleW, titleH, [&](mcp::AiRectF spot) { return regionTitleCovered(spot, steps); }).right;
                 });
                 if (side.changed) // drawn on the other side before: this render is scissored to the damage and would tear it
-                    flippedBands.push_back(juce::Rectangle<float>(rx, ry + mcp::aiRegionTitleTop, std::max(rw, titleW + 2.0f * mcp::aiRegionTitleInset), titleH).expanded(3.0f).getSmallestIntegerContainer());
-                auto const place = mcp::aiRegionTitleSpot(rect, titleW, side.right);
+                    flippedBands.push_back(juce::Rectangle<float>(rx, ry + mcp::aiRegionTitleTop, std::max(rw, titleW + 2.0f * mcp::aiRegionTitleInset + mcp::aiRegionTitleNudge), titleH).expanded(3.0f).getSmallestIntegerContainer());
+                auto const place = mcp::aiRegionTitleAt(rect, titleW, side.right);
                 nanovg::nvgFillColor(nvg, mcpai::colour(mcp::aiInk, mcp::aiRegionTitleAlpha));
                 mcpnvg::nvgText(nvg, place.x, place.y, title.toRawUTF8(), nullptr);
             }
