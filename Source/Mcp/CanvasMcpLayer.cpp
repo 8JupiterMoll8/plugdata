@@ -1095,6 +1095,10 @@ void CanvasMcpLayer::paintScreenOverlay(NVGcontext* nvg)
             hudInRender = render.intersects(band);
         }
         if (hud.active && hudInRender && shouldShowAIHud()) {
+            // Design round B4: a cream card, no shadow, no gradient, no glass border; a 3 px ink bar on the left, ONE mark
+            // (mcp::aiCardMark: empty ring = sent / waiting, red dot = built, blue square = measured, yellow triangle =
+            // silent or an error, none otherwise), the title 13 px medium in ink, the second line 12 px grey. The card
+            // keeps its place (centred at the bottom) and stays inside hudBandHeight, so repaintHudArea still covers it.
             NVGScopedState scopedHud(nvg);
             float const vw = static_cast<float>(canvas.viewport ? canvas.viewport->getWidth() : canvas.getWidth());
             float const vh = static_cast<float>(canvas.viewport ? canvas.viewport->getHeight() : canvas.getHeight());
@@ -1104,10 +1108,13 @@ void CanvasMcpLayer::paintScreenOverlay(NVGcontext* nvg)
             bool const hasTool = hud.tool.isNotEmpty();
             bool const hasChapter = hud.chapter.isNotEmpty();
 
-            // Card title (Chapter, action name, or tool)
+            // Card title (Chapter, action name, or tool). The server's chapter words come in capitals ("SENT"): shown as a
+            // sentence ("Sent"); a title the AI wrote itself keeps its case.
             juce::String cardTitle;
             if (hasChapter) cardTitle = hud.chapter;
             else if (hasTool) cardTitle = hud.tool;
+            if (cardTitle.isNotEmpty() && cardTitle == cardTitle.toUpperCase())
+                cardTitle = cardTitle.substring(0, 1).toUpperCase() + cardTitle.substring(1).toLowerCase();
 
             // Direct action statement
             juce::String cardDesc;
@@ -1120,155 +1127,82 @@ void CanvasMcpLayer::paintScreenOverlay(NVGcontext* nvg)
                 cleanDesc = cleanDesc.replace("\n\n", " \xE2\x80\xA2 ");
             cleanDesc = cleanDesc.replaceCharacter('\n', ' ').trim();
 
-            // Sizing: floating centered card with title-safe margins
+            // Sizing: floating centred card with title-safe margins; the text starts after the bar and the mark.
             constexpr float maxCardW = 760.0f;
+            constexpr float barW = 3.0f;
+            constexpr float markCentreX = 15.0f; // from the bar
+            constexpr float textInset = 28.0f;   // from the bar
+            constexpr float padY = 12.0f;
+            constexpr float titleH = 18.0f;
+            constexpr float rightPad = 16.0f;
             float const cardW = jmin(vw - 48.0f, maxCardW);
             float const cardX = (vw - cardW) * 0.5f;
-            float const innerPadX = 18.0f;
-            float const breakWidth = cardW - (innerPadX * 2.0f);
+            float const textLeft = cardX + barW + textInset;
+            float const breakWidth = cardW - barW - textInset - rightPad;
 
-            // Compute text height via nvgTextBoxBounds for multi-line wrapped text
+            // Text height via nvgTextBoxBounds for the wrapped second line
             float descH = 0.0f;
             if (cleanDesc.isNotEmpty()) {
-                mcpnvg::nvgFontSize(nvg, 14.5f);
+                mcpnvg::nvgFontSize(nvg, mcp::aiTagTextSize);
                 mcpnvg::nvgFontFace(nvg, "Inter");
                 float bounds[4];
                 mcpnvg::nvgTextBoxBounds(nvg, 0, 0, breakWidth, cleanDesc.toRawUTF8(), nullptr, bounds);
-                descH = bounds[3] - bounds[1];
-                descH = jlimit(18.0f, 85.0f, descH);
+                descH = jlimit(16.0f, 85.0f, bounds[3] - bounds[1]);
             }
 
-            float cardH = 50.0f;
-            if (cardTitle.isNotEmpty() && cleanDesc.isNotEmpty()) {
-                cardH = 13.0f + 22.0f + 9.0f + descH + 14.0f;
-            } else if (cleanDesc.isNotEmpty()) {
-                cardH = 14.0f + descH + 14.0f;
-            }
+            float cardH = padY * 2.0f + titleH;
+            if (cardTitle.isNotEmpty() && cleanDesc.isNotEmpty())
+                cardH = padY * 2.0f + titleH + 2.0f + descH;
+            else if (cleanDesc.isNotEmpty())
+                cardH = padY * 2.0f + descH;
             float const cardY = vh - cardH - 34.0f;
 
-            // Determine status accent color based on chapter
-            juce::String const upperChapter = hud.chapter.toUpperCase();
-            NVGcolor accentCol = nanovg::nvgRGBA(56, 189, 248, 255);    // Electric Cyan default (THINKING / WORKING / BUILDING)
-            NVGcolor badgeBg = nanovg::nvgRGBA(56, 189, 248, 30);
-            NVGcolor badgeBorder = nanovg::nvgRGBA(56, 189, 248, 110);
-
-            if (upperChapter.contains("DONE") || upperChapter.contains("VOICE")) {
-                accentCol = nanovg::nvgRGBA(16, 185, 129, 255);          // Emerald Green
-                badgeBg = nanovg::nvgRGBA(16, 185, 129, 32);
-                badgeBorder = nanovg::nvgRGBA(16, 185, 129, 120);
-            } else if (upperChapter.contains("WAITING")) {
-                accentCol = nanovg::nvgRGBA(245, 158, 11, 255);          // Amber Gold
-                badgeBg = nanovg::nvgRGBA(245, 158, 11, 40);
-                badgeBorder = nanovg::nvgRGBA(245, 158, 11, 140);
-            } else if (upperChapter.contains("ERROR") || upperChapter.contains("DENIED") || upperChapter.contains("FAIL")) {
-                accentCol = nanovg::nvgRGBA(244, 63, 94, 255);           // Coral Red
-                badgeBg = nanovg::nvgRGBA(244, 63, 94, 40);
-                badgeBorder = nanovg::nvgRGBA(244, 63, 94, 140);
-            }
-
-            // 1. Soft Ambient Box-Gradient Shadow
-            NVGpaint shadowPaint = nanovg::nvgBoxGradient(nvg, cardX, cardY + 5.0f, cardW, cardH, 14.0f, 24.0f, nanovg::nvgRGBA(0, 0, 0, 160), nanovg::nvgRGBA(0, 0, 0, 0));
+            // 1. The cream card and its ink bar.
             nanovg::nvgBeginPath(nvg);
-            nanovg::nvgRect(nvg, cardX - 20.0f, cardY - 12.0f, cardW + 40.0f, cardH + 44.0f);
-            nanovg::nvgFillPaint(nvg, shadowPaint);
+            nanovg::nvgRoundedRect(nvg, cardX, cardY, cardW, cardH, mcp::aiRadius);
+            nanovg::nvgFillColor(nvg, mcpai::colour(mcp::aiCream));
+            nanovg::nvgFill(nvg);
+            nanovg::nvgBeginPath(nvg);
+            nanovg::nvgRect(nvg, cardX, cardY, barW, cardH);
+            nanovg::nvgFillColor(nvg, mcpai::colour(mcp::aiInk));
             nanovg::nvgFill(nvg);
 
-            // 2. Obsidian Glass Body with subtle linear gradient
-            NVGpaint bodyPaint = nanovg::nvgLinearGradient(nvg, cardX, cardY, cardX, cardY + cardH,
-                                                   nanovg::nvgRGBA(18, 22, 32, 246),
-                                                   nanovg::nvgRGBA(10, 12, 17, 252));
-            nanovg::nvgBeginPath(nvg);
-            nanovg::nvgRoundedRect(nvg, cardX, cardY, cardW, cardH, 13.0f);
-            nanovg::nvgFillPaint(nvg, bodyPaint);
-            nanovg::nvgFill(nvg);
-
-            // 3. Subtle Frosted Border
-            nanovg::nvgBeginPath(nvg);
-            nanovg::nvgRoundedRect(nvg, cardX, cardY, cardW, cardH, 13.0f);
-            nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(255, 255, 255, 30));
-            nanovg::nvgStrokeWidth(nvg, 1.0f);
-            nanovg::nvgStroke(nvg);
-
-            // 4. Specular Top Highlight
-            nanovg::nvgBeginPath(nvg);
-            nanovg::nvgRoundedRect(nvg, cardX + 1.5f, cardY + 1.0f, cardW - 3.0f, 1.5f, 1.0f);
-            nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(255, 255, 255, 45));
-            nanovg::nvgFill(nvg);
-
-            // 5. Header Row (LED Capsule Badge + Tool Tag + Meta)
-            float const headerY = cardY + 13.0f;
-            float nextHeaderX = cardX + innerPadX;
-
+            // 2. Title row: the mark, the title, the tool in grey, telemetry / latency at the right.
+            float const titleMidY = cardY + padY + titleH * 0.5f;
             if (cardTitle.isNotEmpty()) {
-                mcpnvg::nvgFontSize(nvg, 11.5f);
-                mcpnvg::nvgFontFace(nvg, "Inter-Bold");
-                float titleBounds[4];
-                mcpnvg::nvgTextBounds(nvg, 0, 0, cardTitle.toRawUTF8(), nullptr, titleBounds);
-                float const pillTextW = titleBounds[2] - titleBounds[0];
-                float const pillH = 22.0f;
-                float const pillW = pillTextW + 28.0f;
+                mcpai::drawCardMark(nvg, mcp::aiCardMark(cardTitle.toStdString()), cardX + barW + markCentreX, titleMidY);
 
-                // Pill Background
-                nanovg::nvgBeginPath(nvg);
-                nanovg::nvgRoundedRect(nvg, nextHeaderX, headerY, pillW, pillH, 11.0f);
-                nanovg::nvgFillColor(nvg, badgeBg);
-                nanovg::nvgFill(nvg);
-                nanovg::nvgStrokeColor(nvg, badgeBorder);
-                nanovg::nvgStrokeWidth(nvg, 1.0f);
-                nanovg::nvgStroke(nvg);
-
-                // Glowing LED Dot
-                float const ledX = nextHeaderX + 10.0f;
-                float const ledY = headerY + pillH * 0.5f;
-                NVGpaint ledGlow = nanovg::nvgRadialGradient(nvg, ledX, ledY, 1.5f, 6.5f, accentCol, nanovg::nvgRGBA(0, 0, 0, 0));
-                nanovg::nvgBeginPath(nvg);
-                nanovg::nvgCircle(nvg, ledX, ledY, 6.5f);
-                nanovg::nvgFillPaint(nvg, ledGlow);
-                nanovg::nvgFill(nvg);
-
-                nanovg::nvgBeginPath(nvg);
-                nanovg::nvgCircle(nvg, ledX, ledY, 3.0f);
-                nanovg::nvgFillColor(nvg, accentCol);
-                nanovg::nvgFill(nvg);
-
-                // Title Text inside Pill
-                mcpnvg::nvgFontSize(nvg, 11.0f);
-                mcpnvg::nvgFontFace(nvg, "Inter-Bold");
+                mcpnvg::nvgFontSize(nvg, mcp::aiNameSize);
+                mcpnvg::nvgFontFace(nvg, "Inter-Medium");
                 mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
-                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(248, 250, 252, 255));
-                mcpnvg::nvgText(nvg, nextHeaderX + 18.0f, headerY + pillH * 0.5f + 0.5f, cardTitle.toRawUTF8(), nullptr);
+                nanovg::nvgFillColor(nvg, mcpai::colour(mcp::aiInk));
+                float const afterTitle = mcpnvg::nvgText(nvg, textLeft, titleMidY, cardTitle.toRawUTF8(), nullptr);
 
-                nextHeaderX += pillW + 10.0f;
+                if (hasTool && hud.tool != hud.chapter && hud.tool != cardTitle) {
+                    mcpnvg::nvgFontSize(nvg, mcp::aiHintSize);
+                    mcpnvg::nvgFontFace(nvg, "Inter");
+                    nanovg::nvgFillColor(nvg, mcpai::colour(mcp::aiGrey));
+                    mcpnvg::nvgText(nvg, afterTitle + 8.0f, titleMidY, hud.tool.toRawUTF8(), nullptr);
+                }
             }
 
-            // Secondary Tool Tag
-            if (hasTool && hud.tool != cardTitle) {
-                mcpnvg::nvgFontSize(nvg, 12.0f);
-                mcpnvg::nvgFontFace(nvg, "Inter");
-                mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
-                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(148, 163, 184, 210));
-                juce::String const toolStr = "// " + hud.tool;
-                mcpnvg::nvgText(nvg, nextHeaderX, headerY + 11.0f, toolStr.toRawUTF8(), nullptr);
-            }
-
-            // Right-aligned Telemetry / Latency
             juce::String const metaRight = hud.latency.isNotEmpty() ? hud.latency : hud.telemetry;
             if (metaRight.isNotEmpty()) {
-                mcpnvg::nvgFontSize(nvg, 11.5f);
+                mcpnvg::nvgFontSize(nvg, mcp::aiHintSize);
                 mcpnvg::nvgFontFace(nvg, "Inter-Tabular");
                 mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
-                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(100, 116, 139, 230));
-                mcpnvg::nvgText(nvg, cardX + cardW - innerPadX, headerY + 11.0f, metaRight.toRawUTF8(), nullptr);
+                nanovg::nvgFillColor(nvg, mcpai::colour(mcp::aiGrey));
+                mcpnvg::nvgText(nvg, cardX + cardW - rightPad, titleMidY, metaRight.toRawUTF8(), nullptr);
             }
 
-            // 6. Direct Description with Word Wrapping (nvgTextBox)
+            // 3. The second line (word wrapped): 12 px grey.
             if (cleanDesc.isNotEmpty()) {
-                float const descY = cardTitle.isNotEmpty() ? (headerY + 22.0f + 8.0f) : (cardY + 13.0f);
-                mcpnvg::nvgFontSize(nvg, 14.5f);
+                float const descY = cardTitle.isNotEmpty() ? (cardY + padY + titleH + 2.0f) : (cardY + padY);
+                mcpnvg::nvgFontSize(nvg, mcp::aiTagTextSize);
                 mcpnvg::nvgFontFace(nvg, "Inter");
                 mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
-                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(226, 232, 240, 245));
-                mcpnvg::nvgTextBox(nvg, cardX + innerPadX, descY, breakWidth, cleanDesc.toRawUTF8(), nullptr);
+                nanovg::nvgFillColor(nvg, mcpai::colour(mcp::aiGrey));
+                mcpnvg::nvgTextBox(nvg, textLeft, descY, breakWidth, cleanDesc.toRawUTF8(), nullptr);
             }
         }
     }

@@ -10,6 +10,7 @@
 #include "Utility/NVGTextShim.h"
 
 #include "Mcp/CanvasMcpLayer.h"
+#include "Mcp/CanvasMcpAiDraw.h"
 #include "Sidebar/Sidebar.h"
 #include "Sidebar/CopilotPanel.h"
 #include "Canvas.h"
@@ -776,18 +777,17 @@ void CanvasMcpLayer::paintPillAnswer(NVGcontext* nvg)
     mcpnvg::nvgFontSize(nvg, 11.5f);
     mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
     auto const shown = fitAnswerToWidth(nvg, juce::String::fromUTF8(mcpPillAnswer.line().c_str()), maxW - answerChipPadX * 2.0f - 6.0f);
-    float tb[4];
-    mcpnvg::nvgTextBounds(nvg, 0.0f, 0.0f, shown.toRawUTF8(), nullptr, tb);
-    float const w = (tb[2] - tb[0]) + answerChipPadX * 2.0f + 6.0f;
     float const x = static_cast<float>(frame.getX());
     float const y = static_cast<float>(frame.getBottom()) + 6.0f;
-    auto const a = [alpha](float v) { return static_cast<unsigned char>(juce::jlimit(0.0f, 255.0f, v * alpha)); };
-
-    nanovg::nvgDrawRoundedRect(nvg, x, y, w, answerChipH, nanovg::nvgRGBA(18, 20, 24, a(238.0f)), nanovg::nvgRGBA(74, 158, 255, a(170.0f)), 6.0f);
+    // Design round B4: no dark chip. The line is a small filled ink circle (5 px) and the text in ink with a halo in the
+    // canvas colour (so it reads over a wire); both fade with the line. A real tag shape waits for the server to say the
+    // kind (open question 4).
+    float const midY = y + answerChipH * 0.5f;
     nanovg::nvgBeginPath(nvg);
-    nanovg::nvgCircle(nvg, x + 9.0f, y + answerChipH * 0.5f, 2.5f);
-    nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(120, 190, 255, a(230.0f)));
+    nanovg::nvgCircle(nvg, x + 3.5f, midY, 2.5f);
+    nanovg::nvgFillColor(nvg, mcpai::colour(mcp::aiInk, alpha));
     nanovg::nvgFill(nvg);
-    nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(220, 232, 246, a(245.0f)));
-    mcpnvg::nvgText(nvg, x + answerChipPadX + 6.0f, y + answerChipH * 0.5f, shown.toRawUTF8(), nullptr);
+    auto halo = nvgColour(getThemeColours(canvas).canvasBackgroundColour);
+    halo.a *= alpha;
+    mcpai::drawHaloText(nvg, x + 12.0f, midY, shown.toRawUTF8(), halo, mcpai::colour(mcp::aiInk, alpha), "Inter", 11.5f);
 }
