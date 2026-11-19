@@ -298,10 +298,12 @@ public:
         applyTimerStep(timerPolicy.evaluate(activityOf(midi), mcp::aiMidiSnapshotOf(*midi)));
     }
 
-    /** The 4 Hz idle check. No Pd lock: ai_midi.c never tells the editor about a [play( / [stop( / [record( message, it only
-        flips an int in the struct, so the editor looks at the struct. Only reads; the aligned ints cannot tear, and a stale
-        read costs one extra repaint or a 250 ms later wake-up. The object can only vanish under the message thread's own
-        remove call (never between this check and the read), and getRaw() already says no once Pd has cleared the reference. */
+    /** The idle check (kAiMidiIdleHz). No Pd lock: ai_midi.c never tells the editor about a [play( / [stop( / [record( message,
+        it only flips an int in the struct, so the editor looks at the struct. Only reads, no pointer followed; formally a data
+        race with the Pd thread (a TSan sweep will name it), in practice aligned ints and a bounded string: a stale read costs
+        one extra repaint or one tick later wake-up. getRaw() only checks the reference flag: a box freed by the patch's own
+        dynamic patching off the message thread can be read once after free; the result is a garbage snapshot, never a
+        write or a pointer chase. (Fable review 2026-11-19; a sys_trylock() around the read is the clean option, unverified.) */
     void idleCheck()
     {
         auto const* midi = ptr.getRaw<t_fake_aimidi>();

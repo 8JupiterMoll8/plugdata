@@ -7,11 +7,11 @@
 // Now the timer has two speeds and only the fast one takes the Pd lock:
 //   Active (60 Hz): the widget records, plays, auditions or counts in. Its tick takes the lock, runs the count-in click, the
 //                   playback sequencer and the repaint, exactly as before.
-//   Idle (4 Hz):    nothing is going on. The tick reads a SNAPSHOT of the object's fields WITHOUT the Pd lock (ai_midi.c tells
+//   Idle (30 Hz):   nothing is going on. The tick reads a SNAPSHOT of the object's fields WITHOUT the Pd lock (ai_midi.c tells
 //                   the editor nothing: a [play( / [stop( / [record( message only flips an int in the struct, so the editor has to
 //                   look). A recording or playing flag wakes the fast timer; any other change of what the face shows repaints once.
 // The lock-free read is a few aligned ints, a float and a short string. A torn read can only give a wrong snapshot, which costs
-// one extra repaint or a 250 ms later wake-up; nothing is written through it.
+// one extra repaint or a ~33 ms later wake-up; nothing is written through it.
 #pragma once
 
 #include <cstddef>
@@ -20,7 +20,7 @@
 namespace mcp {
 
 constexpr int kAiMidiActiveHz = 60;
-constexpr int kAiMidiIdleHz = 4;
+constexpr int kAiMidiIdleHz = 30; // lock-free read, cheap: a [play( / [record 1( from Pd starts within ~33 ms (4 Hz made it up to 250 ms late on a beat)
 
 // What decides the speed: the object's flags (read under the Pd lock) and the editor's own state.
 struct AiMidiActivity {

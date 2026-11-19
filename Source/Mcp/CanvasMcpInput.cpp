@@ -487,6 +487,7 @@ void CanvasMcpLayer::canvasDestroyed()
 
 void CanvasMcpLayer::canvasSynchronised()
 {
+    mcpSpotVersion = ~std::uint64_t(0); // a recreated target box (retype, undo/redo) keeps the count but not the pointer: re-decide the spotlight (Fable review 2026-11-19)
     for (auto* c : canvas.connections) {
         c->updatePath();
     }

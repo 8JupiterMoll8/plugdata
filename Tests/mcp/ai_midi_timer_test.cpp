@@ -53,6 +53,7 @@ void fastTimerOnlyWhileSomethingRuns()
     a.clickOn = true;
     CHECK(mcp::aiMidiNeedsFastTimer(a));
     CHECK(mcp::kAiMidiIdleHz < mcp::kAiMidiActiveHz);
+    CHECK(mcp::kAiMidiIdleHz >= 25); // a [play( from Pd on a beat must start within ~40 ms (Fable review 2026-11-19)
 }
 
 void quietIdleNeverWakesAndNeverRepaints()
