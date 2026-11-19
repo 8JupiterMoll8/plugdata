@@ -1,0 +1,230 @@
+/*
+ // Copyright (c) 2026 PlugData MCP Team
+ // For information on usage and redistribution, and for a DISCLAIMER OF ALL
+ // WARRANTIES, see the file, "LICENSE.txt," in this distribution.
+*/
+#pragma once
+
+// The one AI style table (design round 2026-11-19, step A): every colour, size and tag shape of what the AI draws on
+// the canvas lives here, in one place, for the C++ overlays (CanvasMcpLayer.cpp, CanvasMcpNotes.cpp, CanvasMcpPill.cpp,
+// the Copilot panel). The Lua widgets cannot share a module; each carries a byte-identical palette block whose values a
+// TS test compares with this file. JUCE-free, so Tests/mcp/ai_style_test.cpp compiles it alone; the drawing code turns
+// an AiRgba into its own colour type.
+//
+// The look is the owner's picture "AI overlays, language A" with grey regions: one ink, three shapes for what the AI
+// says (square = a measurement, circle = a change, triangle = look here), pale see-through grey for parts of the patch.
+
+#include "McpApprovalState.h" // ApprovalRect, rectsIntersect
+
+#include <algorithm>
+#include <array>
+#include <cctype>
+#include <cstddef>
+#include <cstdint>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace mcp {
+
+// -------------------------------------------------------------------------------------------------------- colours
+
+struct AiRgba {
+    std::uint8_t r = 0, g = 0, b = 0, a = 255;
+};
+
+constexpr AiRgba aiCream { 0xEC, 0xE5, 0xD3, 255 };  // paper
+constexpr AiRgba aiInk { 0x1A, 0x1A, 0x1A, 255 };    // the one ink: text, lines, the artist's own marks
+constexpr AiRgba aiGrey { 0x8C, 0x85, 0x76, 255 };   // hints, leader lines, region titles
+constexpr AiRgba aiRed { 0xDC, 0x29, 0x1F, 255 };    // "I changed this" (a circle), "recording", "now"
+constexpr AiRgba aiYellow { 0xF7, 0xC2, 0x14, 255 }; // "look here" (a triangle)
+constexpr AiRgba aiBlue { 0x14, 0x3D, 0x9E, 255 };   // "a measurement" (a square), a message on a wire
+constexpr AiRgba aiNoteYellow { 0xF6, 0xE7, 0xA6, 255 }; // the sticky note (ai.note)
+// A part of the patch: the grey at 14 % (36 of 255). The one region tint; the region's kind no longer picks a colour.
+constexpr AiRgba aiRegionTint { 0x8C, 0x85, 0x76, 36 };
+
+// -------------------------------------------------------------------------------------------------------- sizes
+
+constexpr float aiLineWidth = 1.0f;       // every line
+constexpr float aiLineWidthActive = 2.0f; // the active line
+constexpr float aiRadius = 2.0f;          // every corner
+constexpr int aiHeaderHeight = 24;        // a widget's header row
+constexpr int aiPadding = 12;             // the air around content
+constexpr float aiNameSize = 13.0f;       // a name (widget, card title), Inter-Medium
+constexpr float aiHintSize = 11.0f;       // a hint, a region title, a second line
+constexpr float aiTagTextSize = 12.0f;    // the text of a tag on the canvas
+constexpr float aiTagGlyphSize = 9.0f;    // the shape before a tag's text
+constexpr float aiGhostAlpha = 0.6f;      // a ghost is ink at 60 %
+constexpr float aiStepDiscSize = 14.0f;   // the spotlight's order disc: it carries a number, so it is bigger than a tag glyph
+
+// A tag is one frame: a leader, a glyph slot of 16 px, then the text. The width is an estimate by character count (an
+// exact measure would need a font); the tag's paint AND its hit test (hover, close cross, chips drawer) call this one
+// function, so a tag can never be drawn where it cannot be clicked.
+constexpr float aiTagGlyphSlotPx = 16.0f;
+constexpr float aiTagCharPx = 6.4f;
+constexpr float aiTagHeightPx = 18.0f;
+constexpr float aiTagLeaderPx = 14.0f; // the grey leader from the object's right edge to the tag
+
+constexpr float aiTagWidthPx(std::size_t characters)
+{
+    return aiTagGlyphSlotPx + static_cast<float>(characters) * aiTagCharPx;
+}
+
+// -------------------------------------------------------------------------------------------------------- tags
+
+enum class AiTag { None, Fact, Guess, Changed, Proposed, Look, Ask, Step };
+
+namespace aistyle_detail {
+
+inline std::string lower(std::string_view s)
+{
+    std::string out(s);
+    for (auto& c : out)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return out;
+}
+
+} // namespace aistyle_detail
+
+/** The tag a kind word asks for. New words: fact, guess, changed, proposed, look, ask, step. Old words keep working
+ *  (info -> guess, change -> changed, warn -> look, artist -> none: the artist's own note is plain ink text). Anything
+ *  unknown or empty is a guess: an unmarked claim is never shown as measured. Only the exact word counts (no trimming);
+ *  the case does not matter. */
+inline AiTag aiTagOf(std::string_view kind)
+{
+    auto const k = aistyle_detail::lower(kind);
+    if (k == "fact") return AiTag::Fact;
+    if (k == "guess") return AiTag::Guess;
+    if (k == "changed" || k == "change") return AiTag::Changed;
+    if (k == "proposed") return AiTag::Proposed;
+    if (k == "look" || k == "warn") return AiTag::Look;
+    if (k == "ask") return AiTag::Ask;
+    if (k == "step") return AiTag::Step;
+    if (k == "artist") return AiTag::None;
+    return AiTag::Guess; // "info", "" and everything the server does not know
+}
+
+/** The glyph's size in px: 9 for the tag shapes (never above 10), the disc's own size for a step, 0 for none. */
+constexpr float aiGlyphSize(AiTag tag)
+{
+    switch (tag) {
+    case AiTag::None: return 0.0f;
+    case AiTag::Step: return aiStepDiscSize;
+    default: return aiTagGlyphSize;
+    }
+}
+
+// ------------------------------------------------------------------------------------------------------- regions
+
+constexpr int aiRegionPadTop = 28; // room for the title above the members
+constexpr int aiRegionGap = 4;     // the least air between two regions' rectangles
+
+/** One rectangle per region, from the bounding box of the region's member boxes (patch coordinates):
+ *  - padded by aiPadding (12) on three sides and aiRegionPadTop (28, the title) on top;
+ *  - where two padded rectangles meet (or come closer than aiRegionGap), both shrink toward their members to a 4 px gap
+ *    (to as much as the members allow: a rectangle never cuts a member box, so members closer than 4 px leave less).
+ *    Side by side the free band is split in the middle; one above the other the lower region keeps the room for its
+ *    title as long as the space between the members allows it;
+ *  - a region whose members lie on an EARLIER region's members (any earlier one, an emptied one too) gets an empty
+ *    rectangle at the place its title goes (x = members.x - padding, y = members.y - 28, w = h = 0): title only;
+ *  - a member box without area also gets an empty rectangle.
+ *  The result has one entry per input, in the same order; an empty one has w == 0 and h == 0. */
+inline std::vector<ApprovalRect> aiRegionRects(std::vector<ApprovalRect> const& memberBounds)
+{
+    std::size_t const n = memberBounds.size();
+    std::vector<ApprovalRect> out(n);
+    // lo/hi per axis (0 = x, 1 = y) of every padded rectangle; `kept` = the region has a rectangle.
+    std::vector<std::array<int, 2>> lo(n), hi(n);
+    std::vector<bool> kept(n, false);
+    for (std::size_t i = 0; i < n; ++i) {
+        auto const m = memberBounds[i];
+        out[i] = { m.x - aiPadding, m.y - aiRegionPadTop, 0, 0 }; // the title's place, whatever follows
+        if (m.w <= 0 || m.h <= 0)
+            continue;
+        bool lies = false;
+        for (std::size_t j = 0; j < i && !lies; ++j)
+            lies = rectsIntersect(m, memberBounds[j]);
+        if (lies)
+            continue;
+        kept[i] = true;
+        lo[i] = { m.x - aiPadding, m.y - aiRegionPadTop };
+        hi[i] = { m.x + m.w + aiPadding, m.y + m.h + aiPadding };
+    }
+
+    auto const mlo = [&](std::size_t i, int axis) { return axis == 0 ? memberBounds[i].x : memberBounds[i].y; };
+    auto const mhi = [&](std::size_t i, int axis) { return axis == 0 ? memberBounds[i].x + memberBounds[i].w : memberBounds[i].y + memberBounds[i].h; };
+
+    for (std::size_t i = 0; i < n; ++i) {
+        if (!kept[i])
+            continue;
+        for (std::size_t j = i + 1; j < n; ++j) {
+            if (!kept[j])
+                continue;
+            // The axis the members are best separated on (they never overlap; touching = gap 0).
+            int const gapX = std::max(mlo(j, 0) - mhi(i, 0), mlo(i, 0) - mhi(j, 0));
+            int const gapY = std::max(mlo(j, 1) - mhi(i, 1), mlo(i, 1) - mhi(j, 1));
+            int const a = gapX >= gapY ? 0 : 1;
+            // Two rectangles that are 4 px or more apart on either axis do not meet (negative = they overlap there).
+            int const sepX = std::max(lo[j][0] - hi[i][0], lo[i][0] - hi[j][0]);
+            int const sepY = std::max(lo[j][1] - hi[i][1], lo[i][1] - hi[j][1]);
+            if (sepX >= aiRegionGap || sepY >= aiRegionGap)
+                continue;
+            std::size_t const first = mhi(i, a) <= mlo(j, a) ? i : j;
+            std::size_t const second = first == i ? j : i;
+            int const g = mlo(second, a) - mhi(first, a); // the free band between the two member sets
+            int newFirstHi = hi[first][a];
+            if (a == 0) {
+                // Side by side: the free band is split in the middle, the gap in the middle of it.
+                newFirstHi = g >= aiRegionGap ? std::min(hi[first][a], mhi(first, a) + (g - aiRegionGap) / 2) : mhi(first, a);
+            } else {
+                // One above the other: the upper one gives way first, the lower one keeps its title room.
+                newFirstHi = std::min(hi[first][a], std::max(mhi(first, a), lo[second][a] - aiRegionGap));
+            }
+            newFirstHi = std::max(newFirstHi, mhi(first, a));
+            int newSecondLo = std::max(lo[second][a], newFirstHi + aiRegionGap);
+            newSecondLo = std::min(newSecondLo, mlo(second, a));
+            hi[first][a] = newFirstHi;
+            lo[second][a] = newSecondLo;
+        }
+    }
+
+    for (std::size_t i = 0; i < n; ++i)
+        if (kept[i])
+            out[i] = { lo[i][0], lo[i][1], hi[i][0] - lo[i][0], hi[i][1] - lo[i][1] };
+    return out;
+}
+
+// ---------------------------------------------------------------------------------------------------------- card
+
+/** The one mark on the card at the bottom of the canvas (the same shapes as the tags). */
+enum class AiCardMark { None, Ring, RedDot, BlueSquare, YellowTriangle };
+
+/** The mark for a card's title, decided by its FIRST word (case and a leading blank or trailing colon do not matter):
+ *  - sent, waiting, thinking, working (the server's chapter words while the AI has not answered): an empty ring;
+ *  - built (the AI says it changed the patch): a red dot;
+ *  - measured (the AI says it measured): a blue square. Only the AI's own title says this, with a reading in the same
+ *    turn; the software never infers it;
+ *  - silent, error, denied: a yellow triangle (look here);
+ *  - anything else (DONE, MODE, CHAT, BACK, KEEP, BAG, SONG, VOICE, FALLBACK, a free text): no mark. A bare DONE
+ *    claims neither a change nor a measurement. */
+inline AiCardMark aiCardMark(std::string_view title)
+{
+    std::size_t begin = 0;
+    while (begin < title.size() && std::isspace(static_cast<unsigned char>(title[begin])))
+        ++begin;
+    std::size_t end = begin;
+    while (end < title.size() && std::isalpha(static_cast<unsigned char>(title[end])))
+        ++end;
+    auto const word = aistyle_detail::lower(title.substr(begin, end - begin));
+    if (word == "sent" || word == "waiting" || word == "thinking" || word == "working")
+        return AiCardMark::Ring;
+    if (word == "built")
+        return AiCardMark::RedDot;
+    if (word == "measured")
+        return AiCardMark::BlueSquare;
+    if (word == "silent" || word == "error" || word == "denied")
+        return AiCardMark::YellowTriangle;
+    return AiCardMark::None;
+}
+
+} // namespace mcp
