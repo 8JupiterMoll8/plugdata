@@ -319,18 +319,36 @@ struct McpSession {
     // order, object activity) to specific objects/cords instead of canvas-wide.
     std::unordered_set<t_gobj*> mcpOverlayTargets;
     bool mcpOverlayStrictCables = false;
+    // The targets in the order the AI gave them (the spotlight numbers its wires by it), and a number that changes whenever
+    // the targets are set or cleared (the canvas repaints its boxes once on a change: their veil is cached).
+    std::vector<t_gobj*> mcpOverlayOrder;
+    std::uint64_t mcpOverlayTargetsVersion = 0;
 
-    void setMcpOverlayTargets(std::unordered_set<t_gobj*> targets, bool strictCables = false)
+    void setMcpOverlayTargets(std::unordered_set<t_gobj*> targets, bool strictCables = false, std::vector<t_gobj*> order = {})
     {
         juce::ScopedLock sl(mcpOverlayLock);
         mcpOverlayTargets = std::move(targets);
         mcpOverlayStrictCables = strictCables;
+        mcpOverlayOrder = std::move(order);
+        ++mcpOverlayTargetsVersion;
     }
     void clearMcpOverlayTargets()
     {
         juce::ScopedLock sl(mcpOverlayLock);
         mcpOverlayTargets.clear();
         mcpOverlayStrictCables = false;
+        mcpOverlayOrder.clear();
+        ++mcpOverlayTargetsVersion;
+    }
+    std::vector<t_gobj*> getMcpOverlayOrder() const
+    {
+        juce::ScopedLock sl(mcpOverlayLock);
+        return mcpOverlayOrder;
+    }
+    std::uint64_t getMcpOverlayTargetsVersion() const
+    {
+        juce::ScopedLock sl(mcpOverlayLock);
+        return mcpOverlayTargetsVersion;
     }
     bool hasMcpOverlayTargets() const
     {
@@ -375,6 +393,8 @@ struct McpSession {
         mcpAiOverlay.clear();
         mcpOverlayTargets.clear();
         mcpOverlayStrictCables = false;
+        mcpOverlayOrder.clear();
+        ++mcpOverlayTargetsVersion;
         mcpHud = McpHud();
     }
 

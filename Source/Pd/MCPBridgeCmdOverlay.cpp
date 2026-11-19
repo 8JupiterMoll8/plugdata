@@ -496,13 +496,14 @@ void MCPBridge::pdSetOverlays(const juce::String& action, const juce::OSCMessage
                     if (targetsVar.isArray()) {
                         auto* arr = targetsVar.getArray();
                         std::unordered_set<t_gobj*> targetGobjs;
+                        std::vector<t_gobj*> targetOrder; // the order the AI gave them: the spotlight numbers its wires by it
                         for (int i = 0; i < arr->size(); ++i) {
                             juce::String id = (*arr)[i].toString();
                             t_gobj* g = proc->getMcp()->resolveStableId(canvasName, id);
-                            if (g) targetGobjs.insert(g);
+                            if (g && targetGobjs.insert(g).second) targetOrder.push_back(g);
                         }
                         bool strict = o->hasProperty("strictCables") ? static_cast<bool>(o->getProperty("strictCables")) : false;
-                        proc->getMcp()->session.setMcpOverlayTargets(std::move(targetGobjs), strict);
+                        proc->getMcp()->session.setMcpOverlayTargets(std::move(targetGobjs), strict, std::move(targetOrder));
                     }
                 }
             }

@@ -57,6 +57,19 @@ public:
     bool isTargeted(Object const* obj) const;
     bool isTargeted(Connection const* c) const;
 
+    // The spotlight (design round B5): a spotlight is on AND this canvas (not a graph-on-parent box) holds one of its boxes. Only
+    // then do the boxes outside the path get a veil, the wires change colour and the order discs show: another tab, or a GOP box
+    // drawn inside this one, never fades because the AI looks at something else. Cached per targets version and box count.
+    bool spotlightHere() const;
+    // A wire's colour under a spotlight: ink on the path, the normal colour at 25 % off it. Unchanged without targets, on a canvas
+    // the spotlight is not on, and for a selected wire. (Connection::render, MCP-HOOK(overlayTarget).)
+    NVGcolor spotlightWire(Connection const* c, NVGcolor normal) const;
+    // The blue square (6 px) on a targeted wire while it carries a message: `progress` is the wire's own activity animation (0..1);
+    // nothing is drawn at 0 or 1 or without a spotlight. No animation of its own. (Connection::render, MCP-HOOK(overlayTarget).)
+    void paintSpotlightActivity(NVGcontext* nvg, Connection const& c, float progress) const;
+    // The order discs: a black disc with a white number at the start of each wire between two targets, in the order the AI listed them.
+    void paintSpotlightOrder(NVGcontext* nvg);
+
     // Writes the overlay bit mask into the settings (lock or edit set) and re-reads them.
     void setOverlayMask(int mask);
     // Canvas::updateOverlays: takes the AI bits of the overlay state.
@@ -133,6 +146,11 @@ public:
     mutable std::uint64_t mcpIdCacheVersion = 0;
     mutable std::uint64_t mcpIdCacheObjects = 0;
     mutable bool mcpIdCacheValid = false;
+    // spotlightHere's cache (render thread) and the targets version updateOverlays last saw (message thread).
+    mutable std::uint64_t mcpSpotVersion = ~std::uint64_t(0);
+    mutable std::size_t mcpSpotObjects = ~std::size_t(0);
+    mutable bool mcpSpotHere = false;
+    std::uint64_t mcpSeenTargetsVersion = 0;
     bool getAnnotationLiveBounds(juce::String const& targetId, juce::StringArray const& targetIds, float fallbackX, float fallbackY, float fallbackLx, float fallbackLy, bool fallbackHasLeader, float& outAx, float& outAy, float& outLx, float& outLy, bool& outHasLeader, juce::Rectangle<int>* outGroupBounds = nullptr) const;
     bool getAnnotationLiveBounds(juce::String const& targetId, float fallbackX, float fallbackY, float fallbackLx, float fallbackLy, bool fallbackHasLeader, float& outAx, float& outAy, float& outLx, float& outLy, bool& outHasLeader) const;
     // The frame of one AI tag (design round B2): the ONE place a tag is drawn AND hit-tested (hover, the close cross, the chips drawer

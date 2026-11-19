@@ -164,6 +164,7 @@ NVGcolor Connection::getConnectionColour() const
 void Connection::render(NVGcontext* nvg)
 {
     auto connectionColour = getConnectionColour();
+    connectionColour = cnv->getMcpLayer().spotlightWire(this, connectionColour); // MCP-HOOK(overlayTarget): the AI's path turns ink, the rest steps back
     nanovg::nvgTranslate(nvg, getX(), getY());
 
     bool isSignalCable = cableType == SignalCable && connectionStyle != PlugDataLook::ConnectionStyleVanilla;
@@ -198,7 +199,7 @@ void Connection::render(NVGcontext* nvg)
 
     float dashSize = isSignalCable ? numSignalChannels <= 1 ? 2.5f : 1.5f : 0.0f;
     auto useGradientLook = getPlugDataLook(*this).getUseGradientConnectionLook() && !(isSelected() || isHovering);
-    auto showActivity = cableType == DataCable && cnv->shouldShowConnectionActivity() && cnv->getMcpLayer().isTargeted(this); // MCP-HOOK(overlayTarget)
+    auto showActivity = cableType == DataCable && cnv->shouldShowConnectionActivity() && cnv->getMcpLayer().isTargeted(this) && !cnv->getMcpLayer().spotlightHere(); // MCP-HOOK(overlayTarget): under a spotlight the activity mark is a blue square (below)
     nanovg::nvgStrokePaint(nvg, nanovg::nvgDoubleStroke(nvg, connectionColour, shadowColour, dashColor, dashSize, useGradientLook, showActivity, offset));
     nanovg::nvgStrokeWidth(nvg, cableThickness);
 
@@ -211,6 +212,8 @@ void Connection::render(NVGcontext* nvg)
         nanovg::nvgStroke(nvg);
         cachedPath.save(nvg);
     }
+
+    cnv->getMcpLayer().paintSpotlightActivity(nvg, *this, offset); // MCP-HOOK(overlayTarget): the blue square on a targeted wire that carries a message
 
     if (isSelected() && isHovering) {
         auto expandedStartHandle = isInStartReconnectHandle ? startReconnectHandle.expanded(3.0f) : startReconnectHandle;

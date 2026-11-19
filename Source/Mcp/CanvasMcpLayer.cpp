@@ -3,6 +3,9 @@
  // (performRender blocks, the AI overlay helpers) and Source/Object.cpp (the AI state
  // mark); implicit Canvas members became `canvas.` accesses. See CanvasMcpLayer.h.
  */
+#include <algorithm>
+#include <tuple>
+#include <vector>
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "Utility/Config.h"
 #include "Utility/Fonts.h"
@@ -274,6 +277,9 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
             }
         }
     }
+
+    // The spotlight's order discs (design round B5): nothing unless a spotlight is on and holds boxes of this canvas.
+    paintSpotlightOrder(nvg);
 
     // PRD overlay: draw the inline note editor INTO the GPU frame (same trick as
     // Object's text editor) so what the artist types is visible live.
@@ -1208,6 +1214,17 @@ void CanvasMcpLayer::paintScreenOverlay(NVGcontext* nvg)
 
 bool CanvasMcpLayer::decorateObject(NVGcontext* nvg, Object& object, juce::Rectangle<int> b)
 {
+    // The spotlight (design round B5): a box that is not on the path gets a veil, the canvas colour at 70 %, over its bounds.
+    // Never a selected (or dragged) box. The object's drawing is cached: updateOverlays repaints the boxes when the targets change.
+    if (spotlightHere() && !isTargeted(&object) && !object.isSelected()) {
+        NVGScopedState scopedVeil(nvg);
+        auto veil = nvgColour(getThemeColours(canvas).canvasBackgroundColour);
+        veil.a *= 0.7f;
+        nanovg::nvgBeginPath(nvg);
+        nanovg::nvgRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), getPlugDataLook(object).getObjectCornerRadius());
+        nanovg::nvgFillColor(nvg, veil);
+        nanovg::nvgFill(nvg);
+    }
     if (!shouldShowAIState())
         return false;
     // PRD overlay: AI state marker drawn per-object (1=changed, 2=proposed, 3=error). Design round B3: the same shapes as
@@ -1726,8 +1743,108 @@ bool CanvasMcpLayer::isTargeted(Connection const* c) const
     return canvas.pd->getMcp()->session.isMcpConnectionTargeted(outPtr, inPtr);
 }
 
+bool CanvasMcpLayer::spotlightHere() const
+{
+    if (canvas.isGraph || !canvas.pd)
+        return false;
+    auto const& session = canvas.pd->getMcp()->session;
+    auto const version = session.getMcpOverlayTargetsVersion();
+    auto const objects = static_cast<std::size_t>(canvas.objects.size());
+    if (version != mcpSpotVersion || objects != mcpSpotObjects) {
+        mcpSpotHere = false;
+        if (session.hasMcpOverlayTargets()) {
+            for (auto* obj : canvas.objects) {
+                if (obj && session.isMcpTargeted(obj->getPointer())) {
+                    mcpSpotHere = true;
+                    break;
+                }
+            }
+        }
+        mcpSpotVersion = version;
+        mcpSpotObjects = objects;
+    }
+    return mcpSpotHere;
+}
+
+NVGcolor CanvasMcpLayer::spotlightWire(Connection const* c, NVGcolor normal) const
+{
+    if (!c || !spotlightHere() || c->isSelected())
+        return normal; // no host, no targets, another canvas, or a wire the artist holds: the normal colour
+    if (isTargeted(c))
+        return mcpai::colour(mcp::aiInk);
+    normal.a *= 0.25f;
+    return normal;
+}
+
+void CanvasMcpLayer::paintSpotlightActivity(NVGcontext* nvg, Connection const& c, float progress) const
+{
+    if (progress <= 0.0f || progress >= 1.0f || !spotlightHere() || !isTargeted(&c) || !canvas.shouldShowConnectionActivity())
+        return;
+    auto const& wire = c.getPath();
+    float const length = wire.getLength();
+    if (length < 1.0f)
+        return;
+    // Connection::render draws in the wire's own coordinates (its position is subtracted from the canvas path)
+    auto const p = wire.getPointAlongPath(length * progress) - c.getPosition().toFloat();
+    NVGScopedState scopedMark(nvg);
+    nanovg::nvgBeginPath(nvg);
+    nanovg::nvgRect(nvg, p.x - 3.0f, p.y - 3.0f, 6.0f, 6.0f);
+    nanovg::nvgFillColor(nvg, mcpai::colour(mcp::aiBlue));
+    nanovg::nvgFill(nvg);
+}
+
+void CanvasMcpLayer::paintSpotlightOrder(NVGcontext* nvg)
+{
+    if (canvas.isGraph || !spotlightHere())
+        return;
+    auto const order = canvas.pd->getMcp()->session.getMcpOverlayOrder();
+    auto const rankOf = [&order](Object const* obj) -> std::size_t {
+        if (!obj)
+            return order.size();
+        for (std::size_t i = 0; i < order.size(); ++i)
+            if (order[i] == obj->getPointer())
+                return i;
+        return order.size();
+    };
+    struct Step {
+        std::size_t outRank, inRank;
+        int outIdx, inIdx;
+        juce::Point<float> start;
+    };
+    std::vector<Step> steps;
+    for (auto* c : canvas.connections) {
+        if (!c || !isTargeted(c))
+            continue;
+        auto const outRank = rankOf(c->outobj.get());
+        auto const inRank = rankOf(c->inobj.get());
+        if (outRank >= order.size() || inRank >= order.size())
+            continue; // a wire that only touches the path is not a step of it
+        steps.push_back({ outRank, inRank, c->outIdx, c->inIdx, c->getStartPoint() });
+    }
+    std::sort(steps.begin(), steps.end(), [](Step const& a, Step const& b) {
+        return std::tie(a.outRank, a.inRank, a.outIdx, a.inIdx) < std::tie(b.outRank, b.inRank, b.outIdx, b.inIdx);
+    });
+    int n = 0;
+    for (auto const& step : steps) {
+        ++n;
+        // left of the wire's start, a little below its box
+        mcpai::drawGlyph(nvg, mcp::AiTag::Step, step.start.x - 11.0f, step.start.y + 11.0f, n);
+    }
+}
+
 void CanvasMcpLayer::updateOverlays(int const overlayState)
 {
+    // The spotlight's targets changed (set, or cleared by itself): the boxes draw their veil into a cached command buffer, so each
+    // repaints once. One shot, no timer. (The caller, Canvas::updateOverlays, repaints the canvas itself.)
+    if (canvas.pd) {
+        auto const version = canvas.pd->getMcp()->session.getMcpOverlayTargetsVersion();
+        if (version != mcpSeenTargetsVersion) {
+            mcpSeenTargetsVersion = version;
+            for (auto* obj : canvas.objects)
+                if (obj)
+                    obj->repaint();
+        }
+    }
     showAiState = overlayState & AIState;
     showAiRegions = overlayState & AIRegions;
     showAiAnnotations = overlayState & AIAnnotations;
