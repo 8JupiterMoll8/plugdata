@@ -52,6 +52,10 @@ struct CopilotMarkdown {
         s = s.replace(juce::String::fromUTF8("\xe2\x96\xb8"), " > ");  // ▸
         s = s.replace(juce::String::fromUTF8("\xe2\x96\xba"), " > ");  // ►
 
+        // The ellipsis: an answer the server had to cut ends in it; three dots every font draws (design round 2026-11-19: a cut line
+        // ended in an arrow-like mark on the owner's screen).
+        s = s.replace(juce::String::fromUTF8("\xe2\x80\xa6"), "..."); // …
+
         // Dashes
         s = s.replace(juce::String::fromUTF8("\xe2\x80\x94"), " - ");  // —
         s = s.replace(juce::String::fromUTF8("\xe2\x80\x93"), " - ");  // –

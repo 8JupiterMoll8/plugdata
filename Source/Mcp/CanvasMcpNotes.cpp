@@ -722,20 +722,13 @@ bool CanvasMcpLayer::handleNoteClick(Point<int> canvasPt)
             return true;
         }
 
-        // 3. Body click on tape header:
-        // Select module objects & open note in Sidebar Master Notebook
+        // 3. Body click on a tag: select the boxes it is about. The tag's text stays on the canvas: it is NOT added to the Copilot
+        // talk (design round 2026-11-19: canvas tags leaked into the talk as AI lines), and the sidebar is left as it is.
         if (a.targetIds.size() > 0 || a.targetId.isNotEmpty()) {
             canvas.deselectAll();
             auto const ids = a.targetIds.size() > 0 ? a.targetIds : juce::StringArray(a.targetId);
             for (auto const& tid : ids) {
                 if (auto* obj = findObjectByStableId(tid)) canvas.setSelected(obj, true);
-            }
-        }
-        if (auto* copilotSidebar = canvas.editor ? canvas.editor->getSidebarForPanel(Sidebar::CopilotChatPanel) : nullptr) {
-            copilotSidebar->showSidebar(true);
-            copilotSidebar->showPanel(Sidebar::CopilotChatPanel);
-            if (auto* cp = canvas.editor->getCopilotPanel()) {
-                cp->showAnnotationNote(a.text, a.kind, a.targetIds);
             }
         }
         canvas.repaint();

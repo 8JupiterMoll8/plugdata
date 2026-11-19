@@ -6,7 +6,13 @@
 //  - `thought` (the working status) and unknown roles never become a line; blank text neither;
 //  - at most 400 lines, the oldest dropped;
 //  - talkMark: error -> Look, waiting -> None, an AI line ending in `?` -> Ask, everything else None (no guessing of
-//    "measured" or "changed" from the words).
+//    "measured" or "changed" from the words);
+//  - the server's mark (design round 2026-11-19, "who is who"): the optional third word of /chat/msg on an ai / detail line,
+//    `changed=<n>` / `changed`, `explained`, `measured=<dB>`, parsed by parseTalkWork; it becomes the line's mark (red circle,
+//    blue outline square, blue square) and the grey header "alphi · changed 4 · measured -14 dB"; a malformed word is no mark;
+//  - groups: one artist ask and the answers after it are one group (talkGroups); the grey header of an AI line shows once per
+//    run of the same fact; the context label of an artist line ("random 8", "ai.tap", "hsl +2");
+//  - canvas tags (roles tag / annotation / hud) never become a line; an answer is stored whole (no cut, no "->").
 // Build + run: scripts/test-bridge-safety.sh
 #include "../../Source/Mcp/McpCopilotTalk.h"
 
@@ -27,6 +33,8 @@ using mcp::TalkChange;
 using mcp::TalkLine;
 using mcp::TalkList;
 using mcp::TalkMark;
+using mcp::TalkWork;
+using mcp::TalkWorkKind;
 
 namespace {
 
@@ -256,6 +264,271 @@ void talkMarkIsOnlyWhatTheSoftwareKnows()
     CHECK(talkMark(line("ai", "")) == TalkMark::None);
 }
 
+
+// ── the server's mark ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+void theWireWordIsParsed()
+{
+    auto w = mcp::parseTalkWork("changed=4 measured=-18.0");
+    CHECK(w.kind == TalkWorkKind::Changed && w.changes == 4 && w.hasDb && w.db == -18.0);
+    w = mcp::parseTalkWork("changed");
+    CHECK(w.kind == TalkWorkKind::Changed && w.changes == 0 && !w.hasDb); // a change whose count is not known
+    w = mcp::parseTalkWork("explained");
+    CHECK(w.kind == TalkWorkKind::Explained && !w.hasDb);
+    w = mcp::parseTalkWork("explained measured=-14.3");
+    CHECK(w.kind == TalkWorkKind::Explained && w.hasDb && w.db == -14.3);
+    w = mcp::parseTalkWork("measured=-9.5");
+    CHECK(w.kind == TalkWorkKind::Measured && w.hasDb && w.db == -9.5);
+    w = mcp::parseTalkWork("measured=-100.0");
+    CHECK(w.kind == TalkWorkKind::Measured && w.db == -100.0);
+    w = mcp::parseTalkWork("  measured=3  changed=12  "); // any order, any blanks
+    CHECK(w.kind == TalkWorkKind::Changed && w.changes == 12 && w.hasDb && w.db == 3.0);
+    w = mcp::parseTalkWork("changed=2 explained"); // a fact that changed beats one that only explained
+    CHECK(w.kind == TalkWorkKind::Changed && w.changes == 2);
+}
+
+void aMalformedWireWordIsNoMark()
+{
+    for (char const* bad : { "", "   ", "changed=0", "changed=-3", "changed=abc", "changed=1e3", "changed=", "measured=", "measured=loud",
+                             "measured=-", "measured=--3", "measured=1.2.3", "measured=-500", "measured=900", "Changed=2", "measured=nan",
+                             "measured=inf", "explained=1", "something else" }) {
+        auto const w = mcp::parseTalkWork(bad);
+        CHECK(w.kind == TalkWorkKind::None);
+        CHECK(!w.hasDb);
+    }
+    // one bad token does not spoil a good one next to it
+    auto w = mcp::parseTalkWork("changed=abc explained");
+    CHECK(w.kind == TalkWorkKind::Explained);
+    w = mcp::parseTalkWork("changed=3 measured=loud");
+    CHECK(w.kind == TalkWorkKind::Changed && w.changes == 3 && !w.hasDb);
+    // a huge count is no count
+    w = mcp::parseTalkWork("changed=99999999999999999999");
+    CHECK(w.kind == TalkWorkKind::None);
+}
+
+void theMarkRidesOnlyOnAnswerLines()
+{
+    TalkList t;
+    t.add("user", "variate this");
+    CHECK(t.add("ai", "Faster clock.", "", "changed=4 measured=-18.0") == TalkChange::Appended);
+    CHECK(t.lines()[1].work.kind == TalkWorkKind::Changed && t.lines()[1].work.changes == 4);
+    CHECK(t.add("detail", "More words.", "", "explained") == TalkChange::Appended);
+    CHECK(t.lines()[2].work.kind == TalkWorkKind::Explained);
+    // the artist's own line, an error and a waiting line never wear one, whatever the wire said
+    CHECK(t.add("user", "more", "", "changed=9") == TalkChange::Appended);
+    CHECK(t.lines()[3].work.kind == TalkWorkKind::None);
+    CHECK(t.add("waiting", "has not answered yet", "", "changed=9") == TalkChange::Appended);
+    CHECK(t.lines()[4].work.kind == TalkWorkKind::None);
+}
+
+void anAnswerReplacingAWaitingLineBringsItsMark()
+{
+    TalkList t;
+    t.add("user", "a bassline");
+    t.add("waiting", "Claude Code has not answered yet");
+    CHECK(t.add("ai", "Bassline built.", "", "changed=7") == TalkChange::Replaced);
+    CHECK(t.size() == 2);
+    CHECK(!t.lines()[1].waiting);
+    CHECK(t.lines()[1].work.kind == TalkWorkKind::Changed && t.lines()[1].work.changes == 7);
+}
+
+void anAnswerWithoutAMarkStaysUnmarked()
+{
+    TalkList t;
+    t.add("user", "hello");
+    t.add("ai", "I changed the cutoff to 900 Hz and it measured -11 dB.", "", "");
+    CHECK(t.lines()[1].work.kind == TalkWorkKind::None); // the words are never read for a mark
+    CHECK(talkMark(t.lines()[1]) == TalkMark::None);
+    CHECK(mcp::talkHeaderText(t.lines()[1]) == "alphi");
+    t.add("ai", "Done.", "", "garbage");
+    CHECK(t.lines()[2].work.kind == TalkWorkKind::None);
+}
+
+void aRepeatedLineAdoptsAMarkItLacked()
+{
+    TalkList t;
+    t.add("ai", "Same.");
+    CHECK(t.add("ai", "Same.", "", "changed=2") == TalkChange::Replaced); // the same words, now with what the turn proved
+    CHECK(t.size() == 1);
+    CHECK(t.lines()[0].work.kind == TalkWorkKind::Changed);
+    CHECK(t.add("ai", "Same.", "", "changed=2") == TalkChange::None);
+    CHECK(t.add("ai", "Same.") == TalkChange::None);
+}
+
+void theMarkOfALine()
+{
+    auto const withWork = [](std::string wire, std::string role = "ai") {
+        TalkLine l = line(std::move(role), "Done.");
+        l.work = mcp::parseTalkWork(wire);
+        return l;
+    };
+    CHECK(talkMark(withWork("changed=4")) == TalkMark::Changed);
+    CHECK(talkMark(withWork("changed")) == TalkMark::Changed);
+    CHECK(talkMark(withWork("explained")) == TalkMark::Explained);
+    CHECK(talkMark(withWork("measured=-14.0")) == TalkMark::Measured);
+    CHECK(talkMark(withWork("changed=1 measured=-14.0")) == TalkMark::Changed); // the change leads; the reading is in the words of the header
+    // a known fact beats the question mark of the words; an error stays an error
+    auto q = withWork("changed=2");
+    q.text = "Done. Louder?";
+    CHECK(talkMark(q) == TalkMark::Changed);
+    CHECK(talkMark(withWork("changed=2", "error")) == TalkMark::Look);
+}
+
+void theHeaderTextSaysWhatTheTurnProved()
+{
+    auto const header = [](std::string wire, std::string text = "Done.", std::string role = "ai") {
+        TalkLine l = line(std::move(role), std::move(text));
+        l.work = mcp::parseTalkWork(wire);
+        return mcp::talkHeaderText(l);
+    };
+    std::string const dot = " \xC2\xB7 ";
+    CHECK(header("changed=4 measured=-18.0") == "alphi" + dot + "changed 4" + dot + "measured -18 dB");
+    CHECK(header("changed=3 measured=-14.2") == "alphi" + dot + "changed 3" + dot + "measured -14.2 dB");
+    CHECK(header("changed") == "alphi" + dot + "changed");
+    CHECK(header("explained") == "alphi" + dot + "explained");
+    CHECK(header("explained measured=-9.0") == "alphi" + dot + "explained" + dot + "measured -9 dB");
+    CHECK(header("measured=-9.5") == "alphi" + dot + "measured -9.5 dB");
+    CHECK(header("measured=-100.0") == "alphi" + dot + "measured silent"); // a silent reading is a reading
+    CHECK(header("") == "alphi");                                        // unknown: nothing extra
+    CHECK(header("", "Louder?") == "alphi" + dot + "asks");
+    CHECK(header("", "The bridge is not connected.", "error") == "alphi" + dot + "look here");
+}
+
+// ── groups ────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+void anAskAndItsAnswersAreOneGroup()
+{
+    TalkList t;
+    t.add("user", "one");
+    t.add("ai", "answer one");
+    t.add("detail", "more of one");
+    t.add("user", "two");
+    t.add("ai", "answer two");
+    auto const g = mcp::talkGroups(t.lines());
+    CHECK(g.size() == 2);
+    CHECK(g[0].first == 0 && g[0].count == 3 && g[0].hasAsk);
+    CHECK(g[1].first == 3 && g[1].count == 2 && g[1].hasAsk);
+}
+
+void answersBeforeAnyAskAreAGroupWithoutAsk()
+{
+    TalkList t;
+    t.add("ai", "Picture saved as refs/x.png.");
+    t.add("user", "go");
+    t.add("ai", "Done.");
+    auto const g = mcp::talkGroups(t.lines());
+    CHECK(g.size() == 2);
+    CHECK(g[0].first == 0 && g[0].count == 1 && !g[0].hasAsk);
+    CHECK(g[1].first == 1 && g[1].count == 2 && g[1].hasAsk);
+}
+
+void twoAsksInARowAreTwoGroups()
+{
+    TalkList t;
+    t.add("user", "Extremer");
+    t.add("user", "Variiere die Klangfarbe");
+    t.add("ai", "Varied.");
+    auto const g = mcp::talkGroups(t.lines());
+    CHECK(g.size() == 2);
+    CHECK(g[0].first == 0 && g[0].count == 1 && g[0].hasAsk);
+    CHECK(g[1].first == 1 && g[1].count == 2 && g[1].hasAsk);
+}
+
+void anEmptyListHasNoGroups()
+{
+    TalkList t;
+    CHECK(mcp::talkGroups(t.lines()).empty());
+}
+
+void theHeaderShowsOncePerRunOfTheSameFact()
+{
+    TalkList t;
+    t.add("user", "one");
+    t.add("ai", "Short line.", "", "changed=2");
+    t.add("detail", "The long answer.", "", "changed=2");
+    t.add("user", "two");
+    t.add("ai", "Explained.", "", "explained");
+    t.add("ai", "And a thing I measured.", "", "measured=-12.0");
+    t.add("ai", "No new fact.");
+    auto const& l = t.lines();
+    CHECK(mcp::talkHeaderShown(l, 1));  // the first answer after an ask
+    CHECK(!mcp::talkHeaderShown(l, 2)); // the same fact again: no second header
+    CHECK(mcp::talkHeaderShown(l, 4));
+    CHECK(mcp::talkHeaderShown(l, 5));  // a different fact
+    CHECK(!mcp::talkHeaderShown(l, 6)); // an unknown line after a known one adds nothing to say
+}
+
+void aWaitingLineAndAnArtistLineHaveNoHeader()
+{
+    TalkList t;
+    t.add("user", "go");
+    t.add("waiting", "Claude Code has not answered yet");
+    CHECK(!mcp::talkHeaderShown(t.lines(), 0)); // the artist line
+    CHECK(!mcp::talkHeaderShown(t.lines(), 1)); // the dotted waiting line
+}
+
+void aLeadingAnswerAndAnErrorAfterAnAnswerHaveAHeader()
+{
+    TalkList t;
+    t.add("ai", "Picture saved.");
+    CHECK(mcp::talkHeaderShown(t.lines(), 0)); // no ask before it: still its own header
+    t.add("error", "Then it broke.");
+    CHECK(mcp::talkHeaderShown(t.lines(), 1)); // another role
+}
+
+void theContextLabelNamesTheBoxTheAskWasAbout()
+{
+    CHECK(mcp::talkContextLabel("random 8", 1) == "random 8");
+    CHECK(mcp::talkContextLabel("  random   8 ", 1) == "random 8");
+    CHECK(mcp::talkContextLabel("osc~ 440", 1) == "osc~ 440");
+    CHECK(mcp::talkContextLabel("hsl 128 15 0 127 0 0 empty empty empty -2 -8 0 10 -262144 -1 -1 0 1", 1) == "hsl"); // a long IEM box: its class
+    CHECK(mcp::talkContextLabel("expr ($f1*7)%24+36 and more and more", 1) == "expr");
+    CHECK(mcp::talkContextLabel("ai.tap 8 4", 1) == "ai.tap");  // an ai widget: its name
+    CHECK(mcp::talkContextLabel("ai.tap", 1) == "ai.tap");
+    CHECK(mcp::talkContextLabel("random 8", 3) == "random 8 +2"); // more boxes selected
+    CHECK(mcp::talkContextLabel("", 1).empty());
+    CHECK(mcp::talkContextLabel("   ", 2).empty());
+    CHECK(mcp::talkContextLabel("random 8", 0) == "random 8");
+}
+
+// ── tags stay on the canvas; answers are whole ────────────────────────────────────────────────────────────────────────
+
+void canvasTagsNeverBecomeTalkLines()
+{
+    TalkList t;
+    // whatever role a tag, a note card or the HUD might arrive with, nothing becomes a line
+    for (char const* role : { "tag", "annotation", "annotate", "hud", "note", "overlay", "ghost", "region" }) {
+        CHECK(t.add(role, "rolls 0-7 every 250 ms") == TalkChange::None);
+        CHECK(t.add(role, "jumps by itself: each note picks 500-3100 Hz", "", "explained") == TalkChange::None);
+    }
+    CHECK(t.empty());
+    // a tag's text inside a real answer line is the answer's own words: only the role decides, the text is never matched
+    CHECK(t.add("ai", "It rolls 0-7 every 250 ms.") == TalkChange::Appended);
+    CHECK(t.size() == 1);
+}
+
+void aLongAnswerIsStoredWholeWithoutACut()
+{
+    std::string text = "[expr ($f1*7)%24+36] turns the dice number into a note: times 7 semitones makes steps of a fifth (0, 7, 14, 21, 28), "
+                       "%24 folds them back into two octaves (28 becomes 4), +36 starts at C2. So you hear C, G, D, A, E: a pentatonic. "
+                       "The note goes to mtof, which makes it a frequency for the saw.";
+    TalkList t;
+    CHECK(t.add("ai", text, "", "explained") == TalkChange::Appended);
+    CHECK(t.lines()[0].text == text);
+    CHECK(text.size() > 280);
+    CHECK(t.lines()[0].text.find("->") == std::string::npos);
+    // thousands of characters stay whole
+    std::string big;
+    for (int i = 0; i < 400; ++i) big += "word" + std::to_string(i) + " ";
+    CHECK(big.size() > 2000);
+    TalkList u;
+    u.add("detail", big);
+    CHECK(u.lines()[0].text == TalkList::trim(big));
+    TalkList v;
+    v.add("user", big);
+    CHECK(v.lines()[0].text == TalkList::trim(big)); // the artist's long ask as well
+}
+
 } // namespace
 
 int main()
@@ -276,6 +549,24 @@ int main()
     aReplaceNeverGrowsTheList();
     clearEmptiesEverything();
     talkMarkIsOnlyWhatTheSoftwareKnows();
+    theWireWordIsParsed();
+    aMalformedWireWordIsNoMark();
+    theMarkRidesOnlyOnAnswerLines();
+    anAnswerReplacingAWaitingLineBringsItsMark();
+    anAnswerWithoutAMarkStaysUnmarked();
+    aRepeatedLineAdoptsAMarkItLacked();
+    theMarkOfALine();
+    theHeaderTextSaysWhatTheTurnProved();
+    anAskAndItsAnswersAreOneGroup();
+    answersBeforeAnyAskAreAGroupWithoutAsk();
+    twoAsksInARowAreTwoGroups();
+    anEmptyListHasNoGroups();
+    theHeaderShowsOncePerRunOfTheSameFact();
+    aWaitingLineAndAnArtistLineHaveNoHeader();
+    aLeadingAnswerAndAnErrorAfterAnAnswerHaveAHeader();
+    theContextLabelNamesTheBoxTheAskWasAbout();
+    canvasTagsNeverBecomeTalkLines();
+    aLongAnswerIsStoredWholeWithoutACut();
     if (failures != 0) {
         std::printf("copilot_talk_test: %d failure(s)\n", failures);
         return 1;

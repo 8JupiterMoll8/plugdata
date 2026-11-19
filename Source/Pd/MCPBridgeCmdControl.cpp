@@ -170,11 +170,14 @@ void MCPBridge::handleChatDomain(const juce::String& action, const juce::OSCMess
             setWidgetStateWatch(word == "on");
         return;
     }
-    // /chat/msg <role> <text>
+    // /chat/msg <role> <text> [<mark>]: the optional third word is what the turn's tool results proved for an AI answer
+    // ("changed=4 measured=-18.0", "explained"; the server's services/talk-mark.ts, parsed by McpCopilotTalk.h). An older server
+    // sends two arguments, and an older fork reads two: both keep working.
     if (msg.size() >= 2) {
         auto role = getArgString(msg[0]);
         auto text = getArgString(msg[1]);
-        postChatMessage(role, text);
+        auto mark = msg.size() >= 3 ? getArgString(msg[2]) : juce::String();
+        postChatMessage(role, text, mark);
     }
 }
 

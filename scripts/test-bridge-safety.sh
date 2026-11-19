@@ -80,6 +80,16 @@ if [ -n "$userPaths" ]; then
   echo "test-bridge-safety: fork source names a hard-coded user path (take it from the config or leave the file to the TS)" >&2
   exit 1
 fi
+# Talk, design round 2026-11-19: canvas tags stay on the canvas. A click on a tag selects its boxes and adds NO line to the Copilot
+# talk (it used to put the tag's text in as an AI line), and nothing feeds the talk but the chat lines (McpCopilotTalk.h drops every
+# other role). The panel has no entry for a tag, and the notes code never writes to the talk with a tag's text.
+tagCode() { grep -vE '^[^:]+:[0-9]+:[[:space:]]*//' || true; }
+tagTalk="$(grep -rnE "showAnnotationNote|receiveMessage\(\"ai\", *a\.text|receiveMessage\(\"ai\", *annotation" "$root"/Source --include=*.cpp --include=*.h | tagCode || true)"
+if [ -n "$tagTalk" ]; then
+  echo "$tagTalk" >&2
+  echo "test-bridge-safety: a canvas tag writes into the Copilot talk (tags stay on the canvas)" >&2
+  exit 1
+fi
 # P12a A3 / P12a.1: flow mode goes ON only through the artist's click on Alphi, the robot face on the canvas. The one
 # call of artistTurnOn is in McpHost::alphiClicked (Source/Mcp/McpFlow.cpp), and the one call of alphiClicked is the
 # canvas click (CanvasMcpLayer::handleAlphiClick, Source/Mcp/CanvasMcpFlow.cpp). Review L4: any mention counts (a

@@ -562,7 +562,11 @@ public:
     juce::String const& getBootToken() const { return bootToken; }
     // AI Copilot Chat callback: role ("user", "ai", "thought", "error"), text
     void setChatCallback(std::function<void(const juce::String& role, const juce::String& text)> cb);
-    void postChatMessage(const juce::String& role, const juce::String& text);
+    // The sidebar's talk takes its lines through this slot instead: the same role and text plus the server's `mark`, the optional
+    // third word of /chat/msg (what the turn's tool results proved, McpCopilotTalk.h parseTalkWork; empty = nothing proved, and
+    // always empty from an older server). Both slots may be set; the callback above runs first. Message thread, under chatLock.
+    void setChatLineCallback(std::function<void(const juce::String& role, const juce::String& text, const juce::String& mark)> cb);
+    void postChatMessage(const juce::String& role, const juce::String& text, const juce::String& mark = {});
     // More readers of the chat lines than the sidebar's one slot (setChatCallback stays CopilotPanel's single slot): the
     // canvas layers' pill answer line registers here, keyed by its address. A listener runs on the message thread, under
     // chatLock, after the sidebar's callback (so the sidebar always gets every line first), and must not add or remove
@@ -954,6 +958,7 @@ private:
     juce::String previewTakeId;
 
     std::function<void(const juce::String&, const juce::String&)> chatCallback;
+    std::function<void(const juce::String&, const juce::String&, const juce::String&)> chatLineCallback; // under chatLock
     juce::CriticalSection chatLock;
     std::vector<std::pair<void const*, std::function<void(const juce::String&, const juce::String&)>>> chatListeners; // under chatLock
 

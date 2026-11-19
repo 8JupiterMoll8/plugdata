@@ -27,19 +27,24 @@ inline juce::Colour grey() { return colour(mcp::aiGrey); }
 /** The chosen tab and a hovered card: the ink at a low alpha over the cream (a slightly darker cream, no colour of its own). */
 inline juce::Colour wash(float alpha = 0.09f) { return ink(alpha); }
 
-/** The tag a talk mark stands for (talk marks are the canvas tags: look = yellow triangle, ask = half circle). */
+/** The tag a talk mark stands for (talk marks are the canvas tags: look = yellow triangle, ask = half circle, changed = red circle,
+ *  explained = blue outline square (a guess tag: tags only, nothing changed), measured = blue square (a fact)). */
 constexpr mcp::AiTag tagOfMark(mcp::TalkMark mark)
 {
     switch (mark) {
     case mcp::TalkMark::Look: return mcp::AiTag::Look;
     case mcp::TalkMark::Ask: return mcp::AiTag::Ask;
+    case mcp::TalkMark::Changed: return mcp::AiTag::Changed;
+    case mcp::TalkMark::Explained: return mcp::AiTag::Guess;
+    case mcp::TalkMark::Measured: return mcp::AiTag::Fact;
     case mcp::TalkMark::None: break;
     }
     return mcp::AiTag::None;
 }
 
 /** The mark of a talk line, centred on (cx, cy); nothing for TalkMark::None. Same shapes and size (9) as the canvas tags:
- *  look = yellow triangle with a 60 % ink outline, ask = a circle with its left half filled, in ink. */
+ *  look = yellow triangle with a 60 % ink outline, ask = a circle with its left half filled, in ink, changed = filled red circle,
+ *  explained = blue outline square, measured = filled blue square. */
 inline void drawMark(juce::Graphics& g, mcp::TalkMark mark, float cx, float cy)
 {
     float const size = mcp::aiGlyphSize(tagOfMark(mark));
@@ -47,6 +52,18 @@ inline void drawMark(juce::Graphics& g, mcp::TalkMark mark, float cx, float cy)
         return;
     float const half = size * 0.5f;
     switch (mark) {
+    case mcp::TalkMark::Changed:
+        g.setColour(colour(mcp::aiRed));
+        g.fillEllipse(cx - half, cy - half, size, size);
+        break;
+    case mcp::TalkMark::Explained:
+        g.setColour(colour(mcp::aiBlue));
+        g.drawRect(cx - half + 0.5f, cy - half + 0.5f, size - 1.0f, size - 1.0f, mcp::aiLineWidth);
+        break;
+    case mcp::TalkMark::Measured:
+        g.setColour(colour(mcp::aiBlue));
+        g.fillRect(cx - half, cy - half, size, size);
+        break;
     case mcp::TalkMark::Look: {
         juce::Path triangle;
         triangle.addTriangle(cx, cy - half, cx + half, cy + half - 0.5f, cx - half, cy + half - 0.5f);

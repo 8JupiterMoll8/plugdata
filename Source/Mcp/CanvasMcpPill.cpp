@@ -421,11 +421,11 @@ void CanvasMcpLayer::submitSelectionPill(bool queueForChat)
             }
         }
 
-        // Park the prompt in the Sidebar Copilot chat log (no clutter on canvas), with the widget it was about ("ai.tap") when
-        // one ai.* widget is the selection. The /chat/msg echo of this prompt is dropped by the talk list's duplicate rule.
+        // Park the prompt in the Sidebar Copilot chat log (no clutter on canvas), with the box it was about ("random 8", "ai.tap",
+        // "hsl +2"). The /chat/msg echo of this prompt is dropped by the talk list's duplicate rule.
         if (canvas.editor) {
             if (auto* cp = canvas.editor->getCopilotPanel()) {
-                cp->addArtistLine(prompt, juce::String(selectedWidgetTarget(selected).widget));
+                cp->addArtistLine(prompt, CopilotPanel::contextOfSelection(selected));
             }
         }
 

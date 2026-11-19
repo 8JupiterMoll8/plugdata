@@ -7735,6 +7735,31 @@ void runChatListenerCases(Harness& h, MCPBridge& bridge)
     bridge.removeChatListener(&ownerB);
     sleepMs(100);
     CHECK(snapshot().size() == 8);
+
+    // The sidebar's talk takes its lines through setChatLineCallback, with the server's mark: the optional third word of
+    // /chat/msg (what the turn's tool results proved). An older server sends two arguments: the mark is empty then. The
+    // two-argument slots above never see it (a seen line is "<role>:<text>" only).
+    std::vector<std::string> marked;
+    bridge.setChatLineCallback([&mutex, &marked](juce::String const& role, juce::String const& text, juce::String const& mark) {
+        std::lock_guard<std::mutex> lock(mutex);
+        marked.push_back(role.toStdString() + ":" + text.toStdString() + ":" + mark.toStdString());
+    });
+    h.fire("/chat/msg", { "ai", "Faster clock.", "changed=4 measured=-18.0" });
+    h.fire("/chat/msg", { "ai", "An older server's line." });
+    for (int waited = 0; waited < 3000; waited += 10) {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (marked.size() >= 2) break;
+        }
+        sleepMs(10);
+    }
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        CHECK(marked.size() == 2);
+        CHECK(marked.size() >= 1 && marked[0] == "ai:Faster clock.:changed=4 measured=-18.0");
+        CHECK(marked.size() >= 2 && marked[1] == "ai:An older server's line.:");
+    }
+    bridge.setChatLineCallback(nullptr);
 }
 
 // The pill's QUICK / DEEP chip (capability pill_lane): `/chat/lane <deep|quick>` sets the lane the chip shows (state only:

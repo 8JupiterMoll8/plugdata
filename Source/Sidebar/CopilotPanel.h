@@ -6,14 +6,16 @@
 // The Copilot sidebar panel (design round 2026-11-19, picture P): cream paper, ink text, in every theme. A title row, three
 // tabs, and the input docked at the bottom on every tab:
 //   widgets  the module rack, one card per ai.* widget with its thumbnail, drag a card to the patch (CopilotModuleRack.h)
-//   talk     the conversation as a notebook (CopilotTalkView.h; the lines are Mcp/McpCopilotTalk.h's TalkList)
+//   talk     the conversation as a notebook (CopilotTalkView.h; the lines are Mcp/McpCopilotTalk.h's TalkList): the artist's
+//            words as a black block, the AI's answer as plain text under it, one ask and its answers one group
 //   tapes    the takes and images the shelf bar counted before
 // The chosen tab lives in memory only. A new AI or waiting line while another tab shows puts a small ink dot after the word
-// "talk"; nothing here switches the tab by itself except the artist's own send and click (sendMessage, showAnnotationNote).
+// "talk"; nothing here switches the tab by itself except the artist's own send (sendMessage). A click on a canvas tag adds NO line
+// to the talk: tags stay on the canvas.
 //
 // Threads: everything here runs on the message thread. receiveMessage is called by the bridge's chat callback, which
 // MCPBridge::postChatMessage reaches through MessageManager::callAsync (guarded by a SafePointer), and by the canvas on the
-// artist's own clicks; every write to the TalkList goes through it or addArtistLine.
+// artist's own sends; every write to the TalkList goes through it or addArtistLine.
 #pragma once
 
 #include <array>
@@ -307,9 +309,10 @@ public:
         // Register listener with MCPBridge if present
         if (pd) {
             if (auto* bridge = pd->getMcp()->getMCPBridge()) {
-                bridge->setChatCallback([safeThis = SafePointer<CopilotPanel>(this)](const juce::String& role, const juce::String& text) {
+                // The line slot of the bridge: role, text and the server's mark (what the turn's tool results proved).
+                bridge->setChatLineCallback([safeThis = SafePointer<CopilotPanel>(this)](const juce::String& role, const juce::String& text, const juce::String& mark) {
                     if (safeThis != nullptr) {
-                        safeThis->receiveMessage(role, text);
+                        safeThis->receiveMessage(role, text, mark);
                     }
                 });
             }
@@ -324,7 +327,7 @@ public:
         stopTimer();
         if (pd) {
             if (auto* bridge = pd->getMcp()->getMCPBridge()) {
-                bridge->setChatCallback(nullptr);
+                bridge->setChatLineCallback(nullptr);
             }
         }
     }
@@ -463,14 +466,14 @@ public:
         juce::String context;
         if (editor) {
             if (auto* cnv = editor->getCurrentCanvas()) {
-                for (auto* obj : cnv->getSelectionOfType<Object>()) {
+                auto const selection = cnv->getSelectionOfType<Object>();
+                for (auto* obj : selection) {
                     if (auto* ptr = obj->getPointer()) {
                         auto const tid = pd->getMcp()->getStableId(ptr);
                         if (tid.isNotEmpty()) targetIds.add(tid);
                     }
-                    if (context.isEmpty())
-                        context = widgetNameOf(obj);
                 }
+                context = contextOfSelection(selection);
             }
         }
 
@@ -494,17 +497,21 @@ public:
         }
     }
 
-    // A click on a tag on the canvas: its note goes into the talk, which shows.
-    void showAnnotationNote(const juce::String& text, const juce::String& kind, const juce::StringArray& targetIds)
+    // The label an artist line names its box by: the text of the first selected box, "+n" for the others of a bigger selection
+    // ("random 8", "ai.tap", "hsl +2"); empty with nothing selected (McpCopilotTalk.h talkContextLabel). Also used by the pill.
+    static juce::String contextOfSelection(SmallArray<Object*> const& selection)
     {
-        juce::ignoreUnused(kind, targetIds);
-        setTab(PanelTab::Talk);
-        receiveMessage("ai", text);
+        if (selection.size() == 0)
+            return {};
+        auto const label = mcp::talkContextLabel(boxTextOf(selection[0]).toStdString(), static_cast<size_t>(selection.size()));
+        return juce::String::fromUTF8(label.data(), static_cast<int>(label.size()));
     }
 
     // One chat line (role: user, ai, detail, error, waiting, thought). Message thread only. A waiting line is replaced in place
-    // by the next ai, detail or error line (TalkList).
-    void receiveMessage(const juce::String& role, const juce::String& text)
+    // by the next ai, detail or error line (TalkList). `mark` is the server's word for what the turn's tool results proved for an
+    // AI answer ("changed=4 measured=-18.0", "explained"), empty when nothing is proved. A canvas tag is never a line: the server
+    // does not send one, a click on a tag adds none, and the list drops any role it does not know.
+    void receiveMessage(const juce::String& role, const juce::String& text, const juce::String& mark = {})
     {
         jassert(MessageManager::getInstance()->isThisTheMessageThread());
         if (role == "thought") {
@@ -513,7 +520,7 @@ public:
             // "detail" is the long answer: the server sends it with role "detail" and the one short line with role "ai"; /chat/msg
             // reaches this panel (the canvas pill shows only the "ai" line).
             setThinking(false, "");
-            auto const change = talkView.addLine(role, text);
+            auto const change = talkView.addLine(role, text, {}, mark);
             if (change != mcp::TalkChange::None && currentTab != PanelTab::Talk)
                 setTalkDot(true);
             updateTalkLayout();
@@ -541,13 +548,12 @@ private:
     };
     static constexpr int inputBarH = 40;
 
-    // The class name of an ai.* widget box ("ai.tap", "ai.loop~"), or empty: what an artist line was about.
-    static juce::String widgetNameOf(Object* obj)
+    // The text of a box as typed ("random 8", "hsl 128 15 ..."), or empty: what an artist line was about.
+    static juce::String boxTextOf(Object* obj)
     {
         if (!obj || !obj->gui)
             return {};
-        auto const tokens = juce::StringArray::fromTokens(obj->gui->getText().toString(), false);
-        return tokens.size() > 0 && tokens[0].startsWith("ai.") ? tokens[0] : juce::String();
+        return obj->gui->getText().toString();
     }
 
     void setTalkDot(bool const shouldShow)

@@ -4075,13 +4075,22 @@ void MCPBridge::removeChatListener(void const* owner)
     std::erase_if(chatListeners, [owner](auto const& entry) { return entry.first == owner; });
 }
 
-void MCPBridge::postChatMessage(const juce::String& role, const juce::String& text)
+void MCPBridge::setChatLineCallback(std::function<void(const juce::String& role, const juce::String& text, const juce::String& mark)> cb)
 {
-    postMessage([this, role, text]() {
+    juce::ScopedLock sl(chatLock);
+    chatLineCallback = std::move(cb);
+}
+
+void MCPBridge::postChatMessage(const juce::String& role, const juce::String& text, const juce::String& mark)
+{
+    postMessage([this, role, text, mark]() {
         juce::ScopedLock sl(chatLock);
         // The sidebar first and unchanged; the other readers (the pill's answer line) after it.
         if (chatCallback) {
             chatCallback(role, text);
+        }
+        if (chatLineCallback) {
+            chatLineCallback(role, text, mark);
         }
         for (size_t i = 0; i < chatListeners.size(); ++i)
             chatListeners[i].second(role, text);
