@@ -14,6 +14,12 @@ class NoteObject final : public ObjectBase
     , public AsyncUpdater {
     BorderSize<int> border { 1, 7, 1, 0 };
 
+    // MCP-CARRIED(note-padding): a note with a background (the Copilot rack's ai.note sticky) is a card with 12 px of air on
+    // every side; a note without one keeps upstream's border. The width of the text area is the box width minus 2 * padding
+    // minus the editor's 2 px cursor space, so a one-line note needs paddedExtraWidth more than its text.
+    static constexpr int padding = 12;
+    static constexpr int paddedExtraWidth = 2 * padding + 2;
+
     String currentNoteText;
     TextEditor noteEditor;
 
@@ -116,6 +122,17 @@ public:
         return true;
     }
 
+    // MCP-CARRIED(note-padding)
+    bool isPadded() { return getValue<bool>(fillBackground); }
+
+    // MCP-CARRIED(note-padding)
+    void applyPadding()
+    {
+        bool const padded = isPadded();
+        noteEditor.setBorder(padded ? BorderSize<int>(padding) : border);
+        noteEditor.setIndents(0, padded ? 0 : 2);
+    }
+
     bool hideInlet() override
     {
         // we want to hide the note inlet regardless if it's symbol or not in locked mode
@@ -137,7 +154,7 @@ public:
                 bool const selected = object->isSelected() && !cnv->isGraph;
                 outlineColour = nvgColour(selected ? colours.objectSelectedOutlineColour : colours.objectOutlineColour);
             }
-            nanovg::nvgDrawRoundedRect(nvg, 0, 0, getWidth(), getHeight(), fillColour, outlineColour, getPlugDataLook(*this).getObjectCornerRadius());
+            nanovg::nvgDrawRoundedRect(nvg, 0, 0, getWidth(), getHeight(), fillColour, outlineColour, isPadded() ? 2.0f : getPlugDataLook(*this).getObjectCornerRadius()); // MCP-CARRIED(note-padding)
         }
 
         cnv->editor->getNanoLLGC()->renderComponent(noteEditor);
@@ -171,6 +188,7 @@ public:
             receiveSymbol = receiveSym == "empty" ? "" : note->x_rcv_raw->s_name;
         }
 
+        applyPadding(); // MCP-CARRIED(note-padding)
         updateFont();
 
         triggerAsyncUpdate();
@@ -180,7 +198,7 @@ public:
     {
         auto const newFont = getFont();
 
-        noteEditor.setIndents(0, 2);
+        applyPadding(); // MCP-CARRIED(note-padding)
         noteEditor.setFont(newFont);
         noteEditor.setText(currentNoteText);
         noteEditor.applyColourToAllText(getValue<Colour>(primaryColour));
@@ -234,7 +252,7 @@ public:
 
     void resized() override
     {
-        noteEditor.setBounds(getLocalBounds().withTrimmedRight(-6));
+        noteEditor.setBounds(getLocalBounds().withTrimmedRight(isPadded() ? 0 : -6)); // MCP-CARRIED(note-padding)
     }
 
     void mouseEnter(MouseEvent const& e) override
@@ -262,7 +280,7 @@ public:
     int getTextHeightForWidth(int const width)
     {
         auto const editorBounds = noteEditor.getBounds();
-        noteEditor.setBounds(editorBounds.getX(), editorBounds.getY(), width + 6, 1);
+        noteEditor.setBounds(editorBounds.getX(), editorBounds.getY(), width + (isPadded() ? 0 : 6), 1); // MCP-CARRIED(note-padding)
         auto const textHeight = noteEditor.getTextHeight();
         noteEditor.setBounds(editorBounds);
 
@@ -271,12 +289,12 @@ public:
 
     Rectangle<int> getPdBounds() override
     {
-        auto const stringWidth = CachedFontStringWidth::get()->calculateStringWidth(getFont(), getNote()) + 12;
+        auto const stringWidth = CachedFontStringWidth::get()->calculateStringWidth(getFont(), getNote()) + (isPadded() ? paddedExtraWidth : 12); // MCP-CARRIED(note-padding)
 
         if (auto note = ptr.get<t_fake_note>()) {
             int const width = note->x_resized ? note->x_max_pixwidth : stringWidth;
 
-            return { note->x_obj.te_xpix, note->x_obj.te_ypix, width, getTextHeightForWidth(width) + 2 };
+            return { note->x_obj.te_xpix, note->x_obj.te_ypix, width, getTextHeightForWidth(width) + (isPadded() ? 2 * padding : 2) }; // MCP-CARRIED(note-padding)
         }
 
         return { };
@@ -394,6 +412,8 @@ public:
         } else if (v.refersToSameSourceAs(fillBackground)) {
             if (auto note = ptr.get<t_fake_note>())
                 note->x_bg_flag = getValue<int>(fillBackground);
+            applyPadding(); // MCP-CARRIED(note-padding)
+            object->updateBounds(); // MCP-CARRIED(note-padding)
             needsRepaint = true;
             repaint();
         } else if (v.refersToSameSourceAs(receiveSymbol)) {

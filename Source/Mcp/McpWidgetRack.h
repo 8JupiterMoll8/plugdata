@@ -52,10 +52,12 @@ struct RackWidget {
     std::string_view object;  // the object text a drag creates (after "#X obj 0 0 "); "{name}" = a free looper name
 };
 
-/** In the order the rack shows them: grouped, groups in kRackGroups order. */
+/** In the order the rack shows them: grouped, groups in kRackGroups order. ai.note is ELSE's [note] with width 280, size 14,
+ *  font Inter, no receive, face 0, ink 26 26 26, underline off, background 246 231 166 (F6E7A6, the pale yellow of the
+ *  Bauhaus family) on, left-justified; its 12 px of padding is NoteObject.h's (MCP-CARRIED(note-padding)). */
 inline constexpr RackWidget kRackWidgets[] = {
     { "ai.sketch", "Pencil pad for ideas; the AI can suggest a stroke", RackGroup::IdeaKit, "ai.sketch" },
-    { "ai.note", "A sticky note; double-click to write, the AI reads it", RackGroup::IdeaKit, "note 280 16 Inter empty 0 18 18 18 0 247 194 20 1 0 sticky note" },
+    { "ai.note", "A sticky note; double-click to write, the AI reads it", RackGroup::IdeaKit, "note 280 14 Inter empty 0 26 26 26 0 246 231 166 1 0 sticky note" },
     { "ai.paint", "Paint the music with colours and brushes", RackGroup::IdeaKit, "ai.paint" },
     { "ai.grid", "Compose a Bauhaus poster; shapes are sounds", RackGroup::IdeaKit, "ai.grid" },
     { "ai.tap", "Tap a beat on three pads; keeps your feel, the AI adds ghost hits", RackGroup::Rhythm, "ai.tap" },

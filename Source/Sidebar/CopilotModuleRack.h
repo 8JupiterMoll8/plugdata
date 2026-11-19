@@ -3,7 +3,8 @@
  // drag a card to the patch. The data (name, one-line purpose, group, the object a drag creates) is Mcp/McpWidgetRack.h
  // (JUCE-free, unit-tested); this file is the list and the cards. Included by CopilotPanel.h.
  //
- // A card shows its group's colour dot, the name, the purpose in up to two lines and, when the file exists, a thumbnail:
+ // A card (design round 2026-11-19, picture P: cream, 1 px ink outline, no colour dots) shows the name, the purpose in up to
+ // three lines and, when the file exists, a 56 px thumbnail on the right:
  //   <app data dir>/Abstractions/thumbs/<name>.png   (`~` and other odd characters in the name become `_`: ai.loop~ -> ai.loop_.png)
  // The folder is read when the rack is built and again each time it is shown; nothing is generated. All of it runs on the
  // message thread.
@@ -17,14 +18,15 @@
 #include <vector>
 
 #include "Mcp/McpWidgetRack.h"
+#include "Sidebar/CopilotLook.h"
 
 class CopilotModuleRack final : public Component {
 public:
-    static constexpr int headerH = 20;
-    static constexpr int cardH = 48;
-    static constexpr int cardGap = 4;
-    static constexpr int thumbSize = 38;
-    static constexpr int sidePad = 4;
+    static constexpr int headerH = 22;
+    static constexpr int cardH = 68;
+    static constexpr int cardGap = 6;
+    static constexpr int thumbSize = 56;
+    static constexpr int sidePad = 12;
 
     // One card. Drag (after 3 px) pastes the widget at the drop point, like the object menu's drag and drop.
     class Card final : public Component {
@@ -62,42 +64,37 @@ public:
         void paint(Graphics& g) override
         {
             auto b = getLocalBounds().toFloat().reduced(1.0f);
-            auto const bgCol = findColour(PlugDataColour::sidebarBackgroundColourId);
-            auto const activeCol = findColour(PlugDataColour::toolbarActiveColourId);
-            bool const dark = (bgCol.getPerceivedBrightness() < 0.5f);
             bool const over = hovered; // from mouseEnter/Exit: isMouseOver() is an XQueryPointer inside paint
 
-            g.setColour(dark ? Colour(0xff181a1f) : Colour(0xfff6f8fa));
-            g.fillRoundedRectangle(b, 6.0f);
-            g.setColour(over ? activeCol : (dark ? Colour(0xff333842) : Colour(0xffd0d7de)));
-            g.drawRoundedRectangle(b, 6.0f, over ? 1.5f : 1.0f);
+            // Cream with a 1 px ink outline and a 2 px corner; a hovered card has a 2 px outline.
+            g.setColour(copilotlook::cream());
+            g.fillRoundedRectangle(b, mcp::aiRadius);
+            g.setColour(copilotlook::ink());
+            g.drawRoundedRectangle(over ? b.reduced(0.5f) : b, mcp::aiRadius, over ? mcp::aiLineWidthActive : mcp::aiLineWidth);
 
-            // The group's dot
-            g.setColour(Colour(mcp::rackGroupColour(widget.group)).withAlpha(over ? 1.0f : 0.85f));
-            g.fillEllipse(b.getX() + 8.0f, b.getY() + 10.0f, 7.0f, 7.0f);
-
-            float textRight = b.getRight() - 8.0f;
+            float const textLeft = b.getX() + static_cast<float>(mcp::aiPadding);
+            float textRight = b.getRight() - static_cast<float>(mcp::aiPadding);
             if (thumb.isValid()) {
                 auto const box = Rectangle<float>(b.getRight() - 6.0f - thumbSize, b.getCentreY() - thumbSize * 0.5f, static_cast<float>(thumbSize), static_cast<float>(thumbSize));
                 Path clip;
-                clip.addRoundedRectangle(box, 4.0f);
+                clip.addRoundedRectangle(box, mcp::aiRadius);
                 g.saveState();
                 g.reduceClipRegion(clip);
                 g.drawImage(thumb, box, RectanglePlacement::centred | RectanglePlacement::onlyReduceInSize, false);
                 g.restoreState();
-                textRight = box.getX() - 6.0f;
+                textRight = box.getX() - 8.0f;
             }
 
-            g.setFont(Fonts::getBoldFont().withHeight(12.5f));
-            g.setColour(dark ? Colour(0xfff0f2f5) : Colour(0xff181a1f));
-            g.drawText(String(std::string(widget.name)), Rectangle<float>(b.getX() + 20.0f, b.getY() + 4.0f, textRight - (b.getX() + 20.0f), 15.0f),
+            g.setFont(Fonts::getSemiBoldFont().withHeight(mcp::aiNameSize));
+            g.setColour(copilotlook::ink());
+            g.drawText(String(std::string(widget.name)), Rectangle<float>(textLeft, b.getY() + 8.0f, textRight - textLeft, 16.0f),
                 Justification::centredLeft, true);
 
-            g.setFont(Fonts::getDefaultFont().withHeight(10.5f));
-            g.setColour(dark ? Colour(0xff8b949e) : Colour(0xff57606a));
+            g.setFont(Fonts::getDefaultFont().withHeight(mcp::aiHintSize));
+            g.setColour(copilotlook::grey());
             g.drawFittedText(String(std::string(widget.purpose)),
-                Rectangle<float>(b.getX() + 20.0f, b.getY() + 20.0f, textRight - (b.getX() + 20.0f), b.getHeight() - 22.0f).toNearestInt(),
-                Justification::topLeft, 2, 1.0f);
+                Rectangle<float>(textLeft, b.getY() + 26.0f, textRight - textLeft, b.getHeight() - 32.0f).toNearestInt(),
+                Justification::topLeft, 3, 1.0f);
         }
 
     private:
@@ -194,15 +191,11 @@ public:
 
     void paint(Graphics& g) override
     {
-        auto const textCol = findColour(PlugDataColour::sidebarTextColourId);
-        g.setFont(Fonts::getBoldFont().withHeight(9.5f));
-        for (auto const& header : headers) {
-            g.setColour(Colour(mcp::rackGroupColour(header.group)).withAlpha(0.9f));
-            g.fillEllipse(static_cast<float>(sidePad + 3), static_cast<float>(header.y + headerH / 2 - 2), 4.0f, 4.0f);
-            g.setColour(textCol.withAlpha(0.65f));
-            g.drawText(String(std::string(mcp::rackGroupTitle(header.group))), Rectangle<int>(sidePad + 12, header.y, getWidth() - sidePad * 2 - 12, headerH),
+        g.setFont(Fonts::getDefaultFont().withHeight(mcp::aiHintSize));
+        g.setColour(copilotlook::grey());
+        for (auto const& header : headers)
+            g.drawText(String(std::string(mcp::rackGroupTitle(header.group))).toLowerCase(), Rectangle<int>(sidePad, header.y, getWidth() - sidePad * 2, headerH),
                 Justification::centredLeft, false);
-        }
     }
 
 private:

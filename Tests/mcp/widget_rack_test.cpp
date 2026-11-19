@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <set>
 #include <string>
+#include <vector>
 
 static int failures = 0;
 #define CHECK(cond)                                                            \
@@ -82,7 +83,44 @@ void patchText()
     CHECK(loop && mcp::rackPatchText(*loop, "loop3") == "#X obj 0 0 ai.loop~ loop3;\n");
     CHECK(loop && mcp::rackPatchText(*loop, "") == "#X obj 0 0 ai.loop~ loop1;\n"); // never a nameless looper
     auto const* note = find("ai.note");
-    CHECK(note && mcp::rackPatchText(*note, "") == "#X obj 0 0 note 280 16 Inter empty 0 18 18 18 0 247 194 20 1 0 sticky note;\n");
+    CHECK(note && mcp::rackPatchText(*note, "") == "#X obj 0 0 note 280 14 Inter empty 0 26 26 26 0 246 231 166 1 0 sticky note;\n");
+}
+
+// D1 (design round 2026-11-19): ai.note is a pale yellow card, 14 px dark ink, no outline. The argument order of ELSE [note]
+// (note_new in pd-else): width, font size, font, receive, face (0 = no bold/italic/outline), text r g b, underline,
+// background r g b, background flag, justification, then the text.
+void noteSticky()
+{
+    auto const* note = find("ai.note");
+    CHECK(note != nullptr);
+    if (!note)
+        return;
+    std::string const object(note->object);
+    std::vector<std::string> t;
+    std::string cur;
+    for (char const c : object) {
+        if (c == ' ') {
+            t.push_back(cur);
+            cur.clear();
+        } else {
+            cur.push_back(c);
+        }
+    }
+    t.push_back(cur);
+    CHECK(t.size() >= 16);
+    if (t.size() < 16)
+        return;
+    CHECK(t[0] == "note");
+    CHECK(t[1] == "280");  // width (the 12 px padding is inside it)
+    CHECK(t[2] == "14");   // font size
+    CHECK(t[3] == "Inter");
+    CHECK(t[4] == "empty"); // no receive name
+    CHECK(t[5] == "0");     // face: no bold, italic or outline
+    CHECK(t[6] == "26" && t[7] == "26" && t[8] == "26"); // ink 1A1A1A
+    CHECK(t[9] == "0");                                   // underline off
+    CHECK(t[10] == "246" && t[11] == "231" && t[12] == "166"); // pale yellow F6E7A6
+    CHECK(t[13] == "1");   // background on
+    CHECK(t[14] == "0");   // left-justified
 }
 
 void thumbFileName()
@@ -111,6 +149,7 @@ int main()
     tableIsSound();
     everyGroupHasWidgetsAndATitle();
     patchText();
+    noteSticky();
     thumbFileName();
     freeLooperName();
     if (failures != 0) {
