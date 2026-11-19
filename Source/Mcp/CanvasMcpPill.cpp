@@ -150,11 +150,15 @@ void CanvasMcpLayer::updateSelectionPill()
         mcpSelectionPill->setReturnKeyStartsNewLine(false);
         mcpSelectionPill->setWantsKeyboardFocus(true);
         mcpSelectionPill->setColour(juce::TextEditor::backgroundColourId, juce::Colours::transparentBlack);
-        mcpSelectionPill->setColour(juce::TextEditor::textColourId, juce::Colours::white);
+        // The pill body is cream paper (design round 2026-11-19): ink text, an ink caret, a grey selection with ink text.
+        auto const inkColour = juce::Colour(mcp::aiInk.r, mcp::aiInk.g, mcp::aiInk.b);
+        auto const greyColour = juce::Colour(mcp::aiGrey.r, mcp::aiGrey.g, mcp::aiGrey.b);
+        mcpSelectionPill->setColour(juce::TextEditor::textColourId, inkColour);
         mcpSelectionPill->setColour(juce::TextEditor::outlineColourId, juce::Colours::transparentBlack);
         mcpSelectionPill->setColour(juce::TextEditor::focusedOutlineColourId, juce::Colours::transparentBlack);
-        mcpSelectionPill->setColour(juce::TextEditor::highlightColourId, juce::Colour(0xff4a9eff));
-        mcpSelectionPill->setColour(juce::CaretComponent::caretColourId, juce::Colours::white);
+        mcpSelectionPill->setColour(juce::TextEditor::highlightColourId, greyColour.withAlpha(0.35f));
+        mcpSelectionPill->setColour(juce::TextEditor::highlightedTextColourId, inkColour);
+        mcpSelectionPill->setColour(juce::CaretComponent::caretColourId, inkColour);
         mcpSelectionPill->setFont(juce::Font("Inter", 13.0f, juce::Font::plain));
         mcpSelectionPill->applyFontToAllText(juce::Font("Inter", 13.0f, juce::Font::plain));
         mcpSelectionPill->setBorder(juce::BorderSize<int>(0, 0, 0, 0));

@@ -302,12 +302,18 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
         }
 
         {
-            // TE-lite hardware look: matte dark panel, top bevel, ✦ Lenses, / Tools, ▶ Send.
+            // The pill body (design round 2026-11-19, "the pill joins tonight"): cream paper, a 1 px ink frame, ink text, the
+            // same look as the input field of the Copilot panel. Drawing only: the keys, the focus and the lanes are untouched.
+            // (The ink-mood strip below is dead code, mcpPillSketchMode is never set; it keeps its dark panel.)
             NVGScopedState scopedPanel(nvg);
             nanovg::nvgTranslate(nvg, static_cast<float>(panel.getX()), static_cast<float>(panel.getY()));
-            nanovg::nvgDrawRoundedRect(nvg, 0, 0, w, h, nanovg::nvgRGBA(24, 26, 30, 250), nanovg::nvgRGBA(55, 60, 72, 220), 8.0f);
+            bool const paper = !mcpPillSketchMode;
+            if (paper)
+                nanovg::nvgDrawRoundedRect(nvg, 0, 0, w, h, mcpai::colour(mcp::aiCream), mcpai::colour(mcp::aiInk), mcp::aiRadius);
+            else
+                nanovg::nvgDrawRoundedRect(nvg, 0, 0, w, h, nanovg::nvgRGBA(24, 26, 30, 250), nanovg::nvgRGBA(55, 60, 72, 220), 8.0f);
 
-            // Audio-reactive border glow while recording voice / beatbox
+            // Audio-reactive border glow while recording voice / beatbox (red = recording)
             if (isVoiceRec) {
                 float const lvl = voiceLvl;
                 nanovg::nvgBeginPath(nvg);
@@ -317,13 +323,15 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
                 nanovg::nvgStroke(nvg);
             }
 
-            // Subtle top highlight line
-            nanovg::nvgBeginPath(nvg);
-            nanovg::nvgMoveTo(nvg, 8.0f, 1.0f);
-            nanovg::nvgLineTo(nvg, w - 8.0f, 1.0f);
-            nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(255, 255, 255, 25));
-            nanovg::nvgStrokeWidth(nvg, 1.0f);
-            nanovg::nvgStroke(nvg);
+            // Subtle top highlight line (the dark strip only)
+            if (!paper) {
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgMoveTo(nvg, 8.0f, 1.0f);
+                nanovg::nvgLineTo(nvg, w - 8.0f, 1.0f);
+                nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(255, 255, 255, 25));
+                nanovg::nvgStrokeWidth(nvg, 1.0f);
+                nanovg::nvgStroke(nvg);
+            }
 
             if (mcpPillSketchMode && mcpCompletedStrokes.empty()) {
                 // Mood strip: icons first, surfaces second. [✏] [T] [🖼] [🎙 Melody] [🥁 Beat]
@@ -670,53 +678,36 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
                     nanovg::nvgStroke(nvg);
                 }
             } else {
-            // Left: subtle generative AI sparkle icon ✨
-            {
-                float const cx = 15.0f;
-                float const cy = h * 0.5f;
-                nanovg::nvgBeginPath(nvg);
-                nanovg::nvgCircle(nvg, cx, cy, 6.0f);
-                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(74, 158, 255, 30));
-                nanovg::nvgFill(nvg);
-                // 4-point sparkle star
-                nanovg::nvgBeginPath(nvg);
-                nanovg::nvgMoveTo(nvg, cx, cy - 4.5f);
-                nanovg::nvgQuadTo(nvg, cx, cy, cx + 4.5f, cy);
-                nanovg::nvgQuadTo(nvg, cx, cy, cx, cy + 4.5f);
-                nanovg::nvgQuadTo(nvg, cx, cy, cx - 4.5f, cy);
-                nanovg::nvgQuadTo(nvg, cx, cy, cx, cy - 4.5f);
-                nanovg::nvgClosePath(nvg);
-                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(140, 195, 255, 220));
-                nanovg::nvgFill(nvg);
-            }
+            // Left: the half circle, "asking / your turn" (the same mark as an AI question on the canvas)
+            mcpai::drawGlyph(nvg, mcp::AiTag::Ask, 15.0f, h * 0.5f);
 
-            // Right ~26px: sleek submit button (a return arrow)
+            // Right ~26px: the send arrow (Enter), a 1 px ink outline, no fill
             {
                 float const subW = 20.0f;
                 float const subH = 18.0f;
                 float const subX = w - 25.0f;
                 float const subY = (h - subH) * 0.5f;
-                nanovg::nvgDrawRoundedRect(nvg, subX, subY, subW, subH, nanovg::nvgRGBA(74, 158, 255, 220), nanovg::nvgRGBA(140, 195, 255, 255), 4.0f);
                 // Drawn as a shape, not the glyph: text with a character the UI font lacks is shaped on every
                 // frame, and each shaping clones the Noto Emoji face for the preferred-fallback check (GUI CPU hunt).
                 float const cx = subX + subW * 0.5f;
                 float const cy = subY + subH * 0.5f;
                 nanovg::nvgSave(nvg);
-                nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(255, 255, 255, 255));
-                nanovg::nvgStrokeWidth(nvg, 1.4f);
+                nanovg::nvgStrokeColor(nvg, mcpai::colour(mcp::aiInk));
+                nanovg::nvgStrokeWidth(nvg, mcp::aiLineWidth);
                 nanovg::nvgLineCap(nvg, NVG_ROUND);
                 nanovg::nvgLineJoin(nvg, NVG_ROUND);
                 nanovg::nvgBeginPath(nvg);
-                nanovg::nvgMoveTo(nvg, cx + 4.0f, cy - 4.0f); // down from the top right
-                nanovg::nvgLineTo(nvg, cx + 4.0f, cy + 1.5f);
-                nanovg::nvgLineTo(nvg, cx - 4.0f, cy + 1.5f); // then left
-                nanovg::nvgMoveTo(nvg, cx - 1.5f, cy - 1.0f); // arrow head
-                nanovg::nvgLineTo(nvg, cx - 4.0f, cy + 1.5f);
-                nanovg::nvgLineTo(nvg, cx - 1.5f, cy + 4.0f);
+                nanovg::nvgMoveTo(nvg, cx + 5.0f, cy - 5.0f); // down from the top right
+                nanovg::nvgLineTo(nvg, cx + 5.0f, cy + 1.5f);
+                nanovg::nvgLineTo(nvg, cx - 5.0f, cy + 1.5f); // then left
+                nanovg::nvgMoveTo(nvg, cx - 2.0f, cy - 1.5f); // arrow head
+                nanovg::nvgLineTo(nvg, cx - 5.0f, cy + 1.5f);
+                nanovg::nvgLineTo(nvg, cx - 2.0f, cy + 4.5f);
                 nanovg::nvgStroke(nvg);
                 nanovg::nvgRestore(nvg);
             }
-                // QUICK / DEEP chip, before the send arrow: one click flips the lane the next sends take.
+                // quick / deep chip, before the send arrow: one click flips the lane the next sends take. A 1 px outlined
+                // lower-case button, inverted (ink fill, cream text) while the deep lane is on.
                 {
                     bool deepLane = false;
                     if (canvas.pd) {
@@ -724,19 +715,26 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
                             deepLane = laneBridge->isPillDeepLane();
                     }
                     auto const chip = pillLaneChipRect(panel).translated(-panel.getX(), -panel.getY()).toFloat();
-                    nanovg::nvgDrawRoundedRect(nvg, chip.getX(), chip.getY(), chip.getWidth(), chip.getHeight(),
-                        deepLane ? nanovg::nvgRGBA(110, 60, 200, 240) : nanovg::nvgRGBA(38, 42, 50, 235),
-                        deepLane ? nanovg::nvgRGBA(176, 128, 255, 255) : nanovg::nvgRGBA(160, 175, 200, 110), 4.0f);
+                    nanovg::nvgBeginPath(nvg);
+                    nanovg::nvgRoundedRect(nvg, chip.getX() + 0.5f, chip.getY() + 0.5f, chip.getWidth() - 1.0f, chip.getHeight() - 1.0f, mcp::aiRadius);
+                    if (deepLane) {
+                        nanovg::nvgFillColor(nvg, mcpai::colour(mcp::aiInk));
+                        nanovg::nvgFill(nvg);
+                    } else {
+                        mcpai::strokeOutline(nvg, mcp::aiInk);
+                    }
                     NVGScopedState scopedChip(nvg);
                     mcpnvg::nvgFontFace(nvg, "Inter");
-                    mcpnvg::nvgFontSize(nvg, 9.0f);
+                    mcpnvg::nvgFontSize(nvg, 10.0f);
                     mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-                    nanovg::nvgFillColor(nvg, deepLane ? nanovg::nvgRGBA(255, 255, 255, 255) : nanovg::nvgRGBA(190, 203, 222, 235));
-                    mcpnvg::nvgText(nvg, chip.getCentreX(), chip.getCentreY() + 0.5f, deepLane ? "DEEP" : "QUICK", nullptr);
+                    nanovg::nvgFillColor(nvg, mcpai::colour(deepLane ? mcp::aiCream : mcp::aiInk));
+                    mcpnvg::nvgText(nvg, chip.getCentreX(), chip.getCentreY() + 0.5f, deepLane ? "deep" : "quick", nullptr);
                 }
             } // else: object-pill controls
         }
 
+        // The pill body is cream paper with ink text (the dark strip is dead code), see the panel above.
+        bool const paperOn = !mcpPillSketchMode;
         // Ambient blinking caret when unfocused & empty to clearly signal interactive input affordance
         if (mcpSelectionPill && !mcpSelectionPill->hasKeyboardFocus(true) && mcpSelectionPill->getText().isEmpty()
             && !(mcpPillSketchMode && mcpCompletedStrokes.empty())) {
@@ -748,8 +746,8 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
                 nanovg::nvgBeginPath(nvg);
                 nanovg::nvgMoveTo(nvg, caretX, caretY - 7.0f);
                 nanovg::nvgLineTo(nvg, caretX, caretY + 7.0f);
-                nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(74, 158, 255, 230));
-                nanovg::nvgStrokeWidth(nvg, 1.5f);
+                nanovg::nvgStrokeColor(nvg, paperOn ? mcpai::colour(mcp::aiInk) : nanovg::nvgRGBA(74, 158, 255, 230));
+                nanovg::nvgStrokeWidth(nvg, paperOn ? mcp::aiLineWidth : 1.5f);
                 nanovg::nvgStroke(nvg);
             }
         }
@@ -769,13 +767,13 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
                 nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(140, 155, 175, mcpSelectionPill->hasKeyboardFocus(true) ? 90 : 170));
             } else if (isVoiceRec) {
                 hint = "Listening... (speak prompt or beatbox groove)";
-                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(255, 110, 95, 240));
+                nanovg::nvgFillColor(nvg, mcpai::colour(mcp::aiRed));
             } else if (mcpActiveLens.isNotEmpty()) {
                 hint = "[" + mcpActiveLens.toUpperCase() + "] Ask AI on selection...";
-                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(140, 155, 175, mcpSelectionPill->hasKeyboardFocus(true) ? 90 : 170));
+                nanovg::nvgFillColor(nvg, mcpai::colour(mcp::aiGrey, mcpSelectionPill->hasKeyboardFocus(true) ? 0.6f : 1.0f));
             } else {
                 hint = "Ask AI on selection... (Enter to mutate, Esc to cancel)";
-                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(140, 155, 175, mcpSelectionPill->hasKeyboardFocus(true) ? 90 : 170));
+                nanovg::nvgFillColor(nvg, mcpai::colour(mcp::aiGrey, mcpSelectionPill->hasKeyboardFocus(true) ? 0.6f : 1.0f));
             }
             mcpnvg::nvgText(nvg, panel.getX() + (mcpPillSketchMode ? 96.0f : 38.0f), panel.getY() + panel.getHeight() * 0.5f, hint.toRawUTF8(), nullptr);
         }
