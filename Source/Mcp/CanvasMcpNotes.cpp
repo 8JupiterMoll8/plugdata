@@ -10,6 +10,7 @@
 #include "Utility/NVGTextShim.h"
 
 #include "Mcp/CanvasMcpLayer.h"
+#include "Mcp/McpAiStyle.h"
 #include "Mcp/McpAlphi.h"
 #include "Mcp/McpAlphiStrip.h"
 #include "Sidebar/Sidebar.h"
@@ -176,31 +177,73 @@ bool CanvasMcpLayer::getAnnotationLiveBounds(juce::String const& targetId, float
     return getAnnotationLiveBounds(targetId, juce::StringArray(), fallbackX, fallbackY, fallbackLx, fallbackLy, fallbackHasLeader, outAx, outAy, outLx, outLy, outHasLeader, nullptr);
 }
 
-juce::Rectangle<float> CanvasMcpLayer::getAnnotationScreenBounds(size_t annIndex) const
+CanvasMcpLayer::AnnotationFrame CanvasMcpLayer::getAnnotationFrame(size_t annIndex) const
 {
-    if (!canvas.pd) return {};
+    AnnotationFrame frame;
+    if (!canvas.pd) return frame;
     auto const anns = canvas.pd->getMcp()->session.getMcpAnnotations();
-    if (annIndex >= anns.size()) return {};
+    if (annIndex >= anns.size()) return frame;
     auto const& a = anns[annIndex];
     float rawAx = 0.0f, rawAy = 0.0f, rawLx = 0.0f, rawLy = 0.0f;
     bool hasLead = false;
     juce::Rectangle<int> grpBounds;
     if (!getAnnotationLiveBounds(a.targetId, a.targetIds, a.x, a.y, a.leaderX, a.leaderY, a.hasLeader, rawAx, rawAy, rawLx, rawLy, hasLead, &grpBounds))
-        return {};
+        return frame; // all target boxes deleted -> auto-prune
 
-    float const ax = canvas.canvasOrigin.x + rawAx;
-    float const ay = canvas.canvasOrigin.y + rawAy;
-    constexpr float tapeH = 20.0f;
-    float const textW = a.text.length() * 6.8f + 40.0f;
-    float const groupW = grpBounds.isEmpty() ? 140.0f : static_cast<float>(grpBounds.getWidth());
-    float tapeW = 0.0f;
-    if (!grpBounds.isEmpty() && groupW >= 90.0f) {
-        tapeW = std::min(groupW, std::max(80.0f, textW));
-    } else {
-        // a note beside one object: wide enough for its text (live check 2026-11-08: cut at 160 px, 'gentle (veloc')
-        tapeW = std::max(groupW, std::min(320.0f, textW));
+    auto const origin = juce::Point<float>(static_cast<float>(canvas.canvasOrigin.x), static_cast<float>(canvas.canvasOrigin.y));
+    float const tagW = std::min(annotationMaxWidthPx, mcp::aiTagWidthPx(static_cast<size_t>(a.text.length())) + annotationCloseSlotPx);
+    float const tagH = mcp::aiTagHeightPx;
+
+    if (!grpBounds.isEmpty()) {
+        frame.group = grpBounds.toFloat().translated(origin.x, origin.y);
+        // Several tags on the same boxes stack downwards.
+        auto const idsOf = [](juce::String const& one, juce::StringArray const& many) {
+            return many.size() > 0 ? many : (one.isNotEmpty() ? juce::StringArray(one) : juce::StringArray());
+        };
+        auto const ids = idsOf(a.targetId, a.targetIds);
+        int stack = 0;
+        for (size_t j = 0; j < annIndex; ++j) {
+            auto const prevIds = idsOf(anns[j].targetId, anns[j].targetIds);
+            bool shares = false;
+            for (auto const& p : prevIds)
+                shares = shares || ids.contains(p);
+            if (shares) ++stack;
+        }
+        // 1. Right of the boxes, vertically centred, unless another box lies there.
+        juce::Rectangle<float> const right(frame.group.getRight() + mcp::aiTagLeaderPx, frame.group.getCentreY() - tagH * 0.5f + static_cast<float>(stack) * (tagH + 2.0f), tagW, tagH);
+        auto const rightPatch = right.translated(-origin.x, -origin.y).expanded(2.0f);
+        bool blocked = false;
+        for (auto* obj : canvas.objects) {
+            if (!obj || blocked) continue;
+            bool isTarget = false;
+            for (auto const& tid : ids)
+                isTarget = isTarget || (findObjectByStableId(tid) == obj);
+            if (!isTarget && obj->getObjectBounds().toFloat().intersects(rightPatch))
+                blocked = true;
+        }
+        if (!blocked)
+            frame.tag = right;
     }
-    return juce::Rectangle<float>(ax, ay, tapeW, tapeH);
+    // 2. As before: where the bridge put it (above the target, or on the side it found free; free-floating at its own x, y).
+    if (frame.tag.isEmpty())
+        frame.tag = juce::Rectangle<float>(origin.x + rawAx, origin.y + rawAy, tagW, tagH);
+
+    // The leader: from the nearest point of the boxes to the nearest point of the tag (a straight grey line, none when they touch).
+    if (!frame.group.isEmpty()) {
+        auto const& g = frame.group;
+        auto const& t = frame.tag;
+        juce::Point<float> const from(juce::jlimit(g.getX(), g.getRight(), t.getCentreX()), juce::jlimit(g.getY(), g.getBottom(), t.getCentreY()));
+        juce::Point<float> const to(juce::jlimit(t.getX(), t.getRight(), from.x), juce::jlimit(t.getY(), t.getBottom(), from.y));
+        frame.leaderFrom = from;
+        frame.leaderTo = to;
+        frame.hasLeader = from.getDistanceFrom(to) > 1.0f;
+    }
+    return frame;
+}
+
+juce::Rectangle<float> CanvasMcpLayer::getAnnotationScreenBounds(size_t annIndex) const
+{
+    return getAnnotationFrame(annIndex).tag;
 }
 
 void CanvasMcpLayer::mouseMove(MouseEvent const& e)

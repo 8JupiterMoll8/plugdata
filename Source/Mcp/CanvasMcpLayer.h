@@ -135,6 +135,21 @@ public:
     mutable bool mcpIdCacheValid = false;
     bool getAnnotationLiveBounds(juce::String const& targetId, juce::StringArray const& targetIds, float fallbackX, float fallbackY, float fallbackLx, float fallbackLy, bool fallbackHasLeader, float& outAx, float& outAy, float& outLx, float& outLy, bool& outHasLeader, juce::Rectangle<int>* outGroupBounds = nullptr) const;
     bool getAnnotationLiveBounds(juce::String const& targetId, float fallbackX, float fallbackY, float fallbackLx, float fallbackLy, bool fallbackHasLeader, float& outAx, float& outAy, float& outLx, float& outLy, bool& outHasLeader) const;
+    // The frame of one AI tag (design round B2): the ONE place a tag is drawn AND hit-tested (hover, the close cross, the chips drawer
+    // and the click all read it), so a tag is never drawn where it cannot be clicked. Canvas component coordinates (the canvas origin
+    // is added). `tag` = glyph slot + estimated text + the close slot; empty when the annotation's boxes are gone (auto-prune).
+    // Right of the target boxes, vertically centred, 14 px from their right edge; when another box lies there, where the bridge put
+    // it (above the target, or on the side it found free).
+    struct AnnotationFrame {
+        juce::Rectangle<float> tag;
+        juce::Rectangle<float> group; // the target boxes' union (empty: a tag with no target)
+        juce::Point<float> leaderFrom; // on the boxes
+        juce::Point<float> leaderTo;   // on the tag
+        bool hasLeader = false;
+    };
+    static constexpr float annotationCloseSlotPx = 16.0f; // the close cross sits in the last 16 px of the frame (shown on hover)
+    static constexpr float annotationMaxWidthPx = 380.0f; // a longer text is cut by the frame, never drawn past it
+    AnnotationFrame getAnnotationFrame(size_t annIndex) const;
     juce::Rectangle<float> getAnnotationScreenBounds(size_t annIndex) const;
     void setSketchToolActive(bool active);
     bool isSketchToolActive() const;

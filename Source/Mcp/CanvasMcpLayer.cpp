@@ -159,261 +159,119 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
     // AI overlays belong to the canvas's own view, never to the box drawn inside another one: skip them there.
     if (canvas.isGraph)
         return;
-    // PRD overlay: Console Tape (Eurorack Scribble Strip) annotations.
-    // Pinned directly above the module strip, bounded to column width (0% horizontal spill).
+    // PRD overlay: the AI's tags (design round B2). A tag is a 1 px grey leader from the boxes, a glyph (square = a
+    // measurement, circle = a change, triangle = look here, half circle = a question), and the text in ink with a halo
+    // in the canvas colour. No chassis, no shadow, no bevel, no accent bar, no LED. The frame comes from
+    // getAnnotationFrame, the same function the hover, the close cross and the click use.
     if (canvas.pd && shouldShowAIAnnotations() && !canvas.pd->getMcp()->session.getMcpAnnotations().empty()) {
-        int noteIdx = 0;
-        for (auto const& a : canvas.pd->getMcp()->session.getMcpAnnotations()) {
+        auto const canvasBg = nvgColour(getThemeColours(canvas).canvasBackgroundColour);
+        auto const anns = canvas.pd->getMcp()->session.getMcpAnnotations();
+        for (size_t ai = 0; ai < anns.size(); ++ai) {
+            auto const& a = anns[ai];
             if (a.text.isEmpty()) continue;
-            float rawAx = 0.0f, rawAy = 0.0f, rawLx = 0.0f, rawLy = 0.0f;
-            bool hasLead = false;
-            juce::Rectangle<int> grpBounds;
-            if (!getAnnotationLiveBounds(a.targetId, a.targetIds, a.x, a.y, a.leaderX, a.leaderY, a.hasLeader, rawAx, rawAy, rawLx, rawLy, hasLead, &grpBounds))
-                continue;
+            auto const frame = getAnnotationFrame(ai);
+            auto const& tape = frame.tag;
+            if (tape.isEmpty()) continue; // all target boxes deleted
 
-            auto const tapeBounds = getAnnotationScreenBounds(static_cast<size_t>(noteIdx));
-            if (tapeBounds.isEmpty()) continue;
-
-            // Outside what this render redraws: skip the tape, its chips drawer (below, may be wider), the hover
-            // tint around its group and the anchor tick down to it. The index still advances, as when drawn.
+            // Outside what this render redraws: skip the tag, its chips drawer (below, may be wider), the hover outline
+            // around its boxes and the leader down to them.
             {
-                auto cull = tapeBounds.withSize(tapeBounds.getWidth() + 240.0f, tapeBounds.getHeight() + 30.0f);
-                if (!grpBounds.isEmpty())
-                    cull = cull.getUnion(grpBounds.toFloat().translated(static_cast<float>(canvas.canvasOrigin.x), static_cast<float>(canvas.canvasOrigin.y)));
-                if (!mcpPaintRegion.isEmpty() && !cull.expanded(12.0f).intersects(mcpPaintRegion.toFloat())) {
-                    ++noteIdx;
+                auto cull = tape.withSize(tape.getWidth() + 240.0f, tape.getHeight() + 30.0f);
+                if (!frame.group.isEmpty())
+                    cull = cull.getUnion(frame.group);
+                if (!mcpPaintRegion.isEmpty() && !cull.expanded(12.0f).intersects(mcpPaintRegion.toFloat()))
                     continue;
-                }
             }
 
             NVGScopedState scopedAnn(nvg);
-            float const ax = tapeBounds.getX();
-            float const ay = tapeBounds.getY();
-            float const tapeW = tapeBounds.getWidth();
-            float const tapeH = tapeBounds.getHeight();
-
-            // Colour by kind so the artist can tell notes apart at a glance.
-            juce::String const k = a.kind.isNotEmpty() ? a.kind : juce::String("info");
-            int ar = 0x4a, ag = 0x9e, ab = 0xff; // cyan
-            if (k == "change") { ar = 0x3d; ag = 0xdd; ab = 0x8a; }      // green
-            else if (k == "warn") { ar = 0xff; ag = 0x5a; ab = 0x5a; }   // red
-            else if (k == "artist") { ar = 0xff; ag = 0xbe; ab = 0x50; } // amber
-            NVGcolor const accent = nanovg::nvgRGBA(ar, ag, ab, 255);
-            bool const isHovered = (noteIdx == mcpNoteHover);
+            bool const isHovered = (static_cast<int>(ai) == mcpNoteHover);
             bool const isCloseHover = (isHovered && mcpNoteHoverClose);
 
-            // 1. Tactile Selection Region: illuminate with soft neon tint on hover
-            if (isHovered && !grpBounds.isEmpty()) {
-                constexpr int pad = 6;
-                float const rx = canvas.canvasOrigin.x + static_cast<float>(grpBounds.getX() - pad);
-                float const ry = canvas.canvasOrigin.y + static_cast<float>(grpBounds.getY() - pad);
-                float const rw = static_cast<float>(grpBounds.getWidth() + pad * 2);
-                float const rh = static_cast<float>(grpBounds.getHeight() + pad * 2);
-
+            // 1. On hover only: the linked boxes get a 1 px grey outline (no coloured fill).
+            if (isHovered && !frame.group.isEmpty()) {
+                auto const g = frame.group.expanded(4.0f);
                 nanovg::nvgBeginPath(nvg);
-                nanovg::nvgRoundedRect(nvg, rx, ry, rw, rh, 5.0f);
-                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(ar, ag, ab, 22));
-                nanovg::nvgFill(nvg);
-                nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(ar, ag, ab, 170));
-                nanovg::nvgStrokeWidth(nvg, 1.2f);
-                nanovg::nvgLineStyle(nvg, NVG_LINE_DASHED);
-                nanovg::nvgDashLength(nvg, 5.0f);
-                nanovg::nvgStroke(nvg);
-                nanovg::nvgLineStyle(nvg, NVG_LINE_SOLID);
+                nanovg::nvgRoundedRect(nvg, g.getX(), g.getY(), g.getWidth(), g.getHeight(), mcp::aiRadius);
+                mcpai::strokeOutline(nvg, mcp::aiGrey);
             }
 
-            // 2. Hardware Console Tape Anchor: vertical tick connecting tape to module
-            if (hasLead && !grpBounds.isEmpty()) {
-                float const tickX = ax + 14.0f;
-                float const tickY1 = ay + tapeH;
-                float const tickY2 = canvas.canvasOrigin.y + static_cast<float>(grpBounds.getY());
+            // 2. The leader: a 1 px grey line from the boxes to the tag.
+            if (frame.hasLeader) {
                 nanovg::nvgBeginPath(nvg);
-                nanovg::nvgMoveTo(nvg, tickX, tickY1);
-                nanovg::nvgLineTo(nvg, tickX, tickY2);
-                nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(ar, ag, ab, isHovered ? 200 : 120));
-                nanovg::nvgStrokeWidth(nvg, 1.0f);
-                nanovg::nvgStroke(nvg);
-
-                // Small anchor rivet dot at module top edge
-                nanovg::nvgBeginPath(nvg);
-                nanovg::nvgCircle(nvg, tickX, tickY2, 2.0f);
-                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(ar, ag, ab, isHovered ? 240 : 160));
-                nanovg::nvgFill(nvg);
+                nanovg::nvgMoveTo(nvg, frame.leaderFrom.x, frame.leaderFrom.y);
+                nanovg::nvgLineTo(nvg, frame.leaderTo.x, frame.leaderTo.y);
+                mcpai::strokeOutline(nvg, mcp::aiGrey);
             }
 
-            // 3. Drop Shadow for depth
-            nanovg::nvgBeginPath(nvg);
-            nanovg::nvgRoundedRect(nvg, ax, ay + 1.0f, tapeW, tapeH, 4.0f);
-            nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(10, 10, 14, 180));
-            nanovg::nvgFill(nvg);
+            // 3. The glyph (the artist's own notes have none: plain ink text) and the text with its halo.
+            float const midY = tape.getCentreY();
+            mcpai::drawGlyph(nvg, mcp::aiTagOf(a.kind.toStdString()), tape.getX() + mcp::aiTagGlyphSlotPx * 0.5f - 2.0f, midY);
+            float const textLeft = tape.getX() + mcp::aiTagGlyphSlotPx;
+            {
+                NVGScopedState scopedText(nvg);
+                // The frame cuts a text that is longer than it: never drawn past it, never over the close cross.
+                nanovg::nvgScissor(nvg, textLeft - 1.0f, tape.getY(), std::max(20.0f, tape.getWidth() - mcp::aiTagGlyphSlotPx - annotationCloseSlotPx), tape.getHeight());
+                mcpai::drawHaloText(nvg, textLeft, midY, a.text.toRawUTF8(), canvasBg, mcpai::colour(mcp::aiInk));
+                nanovg::nvgResetScissor(nvg);
+            }
 
-            // 4. Console Tape Chassis (Matte dark Eurorack scribble strip)
-            nanovg::nvgBeginPath(nvg);
-            nanovg::nvgRoundedRect(nvg, ax, ay, tapeW, tapeH, 3.5f);
-            nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(20, 21, 26, isHovered ? 250 : 230));
-            nanovg::nvgFill(nvg);
-            nanovg::nvgStrokeColor(nvg, isHovered ? accent : nanovg::nvgRGBA(ar, ag, ab, 140));
-            nanovg::nvgStrokeWidth(nvg, isHovered ? 1.4f : 1.0f);
-            nanovg::nvgStroke(nvg);
+            // 4. On hover only: a 1 px ink outline around the tag and the close cross in ink (grey until the pointer is on it).
+            if (isHovered) {
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgRoundedRect(nvg, tape.getX() - 0.5f, tape.getY() - 0.5f, tape.getWidth() + 1.0f, tape.getHeight() + 1.0f, mcp::aiRadius);
+                mcpai::strokeOutline(nvg, mcp::aiInk);
+                float const cx = tape.getRight() - annotationCloseSlotPx * 0.5f;
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgMoveTo(nvg, cx - 3.0f, midY - 3.0f);
+                nanovg::nvgLineTo(nvg, cx + 3.0f, midY + 3.0f);
+                nanovg::nvgMoveTo(nvg, cx + 3.0f, midY - 3.0f);
+                nanovg::nvgLineTo(nvg, cx - 3.0f, midY + 3.0f);
+                nanovg::nvgStrokeColor(nvg, mcpai::colour(mcp::aiInk, isCloseHover ? 1.0f : 0.6f));
+                nanovg::nvgStrokeWidth(nvg, isCloseHover ? mcp::aiLineWidthActive : mcp::aiLineWidth);
+                nanovg::nvgStroke(nvg);
+            }
 
-            // 5. Top bevel reflection (milled brushed aluminum edge)
-            nanovg::nvgBeginPath(nvg);
-            nanovg::nvgMoveTo(nvg, ax + 3.0f, ay + 1.0f);
-            nanovg::nvgLineTo(nvg, ax + tapeW - 3.0f, ay + 1.0f);
-            nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(255, 255, 255, isHovered ? 50 : 25));
-            nanovg::nvgStrokeWidth(nvg, 1.0f);
-            nanovg::nvgStroke(nvg);
-
-            // 6. Left accent bar
-            nanovg::nvgBeginPath(nvg);
-            nanovg::nvgRoundedRect(nvg, ax + 2.0f, ay + 2.5f, 2.5f, tapeH - 5.0f, 1.2f);
-            nanovg::nvgFillColor(nvg, accent);
-            nanovg::nvgFill(nvg);
-
-            // 7. Jewel LED Diode on tape
-            float const ledX = ax + 14.0f;
-            float const ledY = ay + tapeH * 0.5f;
-
-            // Soft glow
-            nanovg::nvgBeginPath(nvg);
-            nanovg::nvgCircle(nvg, ledX, ledY, 5.0f);
-            nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(ar, ag, ab, isHovered ? 60 : 30));
-            nanovg::nvgFill(nvg);
-
-            // Diode body
-            nanovg::nvgBeginPath(nvg);
-            nanovg::nvgCircle(nvg, ledX, ledY, 2.8f);
-            nanovg::nvgFillColor(nvg, accent);
-            nanovg::nvgFill(nvg);
-
-            // Specular glint
-            nanovg::nvgBeginPath(nvg);
-            nanovg::nvgCircle(nvg, ledX - 0.8f, ledY - 0.8f, 0.8f);
-            nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(255, 255, 255, 220));
-            nanovg::nvgFill(nvg);
-
-            // 8. Scribble text
-            mcpnvg::nvgFontSize(nvg, 11.5f);
-            mcpnvg::nvgFontFace(nvg, "Inter");
-            mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
-
-            // Scissor so text NEVER overflows past right action buttons
-            float const textLeft = ax + 24.0f;
-            float const rightZoneW = 32.0f; // space for sidebar icon + close x
-            float const maxTextW = std::max(20.0f, tapeW - 24.0f - rightZoneW);
-            nanovg::nvgScissor(nvg, textLeft, ay, maxTextW, tapeH);
-            nanovg::nvgFillColor(nvg, isHovered ? nanovg::nvgRGBA(255, 255, 255, 255) : nanovg::nvgRGBA(225, 228, 238, 230));
-            mcpnvg::nvgText(nvg, textLeft, ay + tapeH * 0.5f, a.text.toRawUTF8(), nullptr);
-            nanovg::nvgResetScissor(nvg);
-
-            // 9. Right Icons: Notebook link ↗ & Dismiss ✕
-            // Sidebar Notebook link icon (subtle ↗ arrow)
-            float const iconX = ax + tapeW - 23.0f;
-            nanovg::nvgBeginPath(nvg);
-            nanovg::nvgMoveTo(nvg, iconX - 2.5f, ay + tapeH * 0.5f + 2.5f);
-            nanovg::nvgLineTo(nvg, iconX + 2.5f, ay + tapeH * 0.5f - 2.5f);
-            nanovg::nvgMoveTo(nvg, iconX - 0.5f, ay + tapeH * 0.5f - 2.5f);
-            nanovg::nvgLineTo(nvg, iconX + 2.5f, ay + tapeH * 0.5f - 2.5f);
-            nanovg::nvgLineTo(nvg, iconX + 2.5f, ay + tapeH * 0.5f + 0.5f);
-            nanovg::nvgStrokeColor(nvg, (!isCloseHover && isHovered) ? accent : nanovg::nvgRGBA(ar, ag, ab, 120));
-            nanovg::nvgStrokeWidth(nvg, 1.1f);
-            nanovg::nvgStroke(nvg);
-
-            // Dismiss 'x'
-            float const closeX = ax + tapeW - 9.0f;
-            mcpnvg::nvgFontSize(nvg, 10.5f);
-            mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-            nanovg::nvgFillColor(nvg, isCloseHover ? nanovg::nvgRGBA(255, 90, 90, 255) : (isHovered ? nanovg::nvgRGBA(255, 140, 140, 200) : nanovg::nvgRGBA(ar, ag, ab, 130)));
-            mcpnvg::nvgText(nvg, closeX, ay + tapeH * 0.5f, "x", nullptr);
-
-            // 10. Pivot Chips Drawer (blooms below hovered tape)
-            if (isHovered && mcpNoteEditIndex != noteIdx) {
+            // 5. Pivot chips drawer (below a hovered tag): cream, 1 px ink outline, ink text, the chosen chip inverted.
+            if (isHovered && mcpNoteEditIndex != static_cast<int>(ai)) {
                 auto const chips = getAnnotationPivotChips(a.text, a.kind);
                 float totalChipsW = 0.0f;
                 for (auto const& c : chips) totalChipsW += getChipWidth(c.label) + 4.0f;
-                float const drawerW = std::max(tapeW, totalChipsW + 4.0f);
-                float const drawerX = ax;
-                float const drawerY = ay + tapeH + 2.0f;
+                float const drawerW = std::max(tape.getWidth(), totalChipsW + 4.0f);
+                float const drawerX = tape.getX();
+                float const drawerY = tape.getY() + tape.getHeight() + 2.0f;
                 float const drawerH = 22.0f;
 
-                // Subtle drop shadow
                 nanovg::nvgBeginPath(nvg);
-                nanovg::nvgRoundedRect(nvg, drawerX, drawerY + 1.0f, drawerW, drawerH, 4.0f);
-                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(8, 9, 12, 160));
+                nanovg::nvgRoundedRect(nvg, drawerX, drawerY, drawerW, drawerH, mcp::aiRadius);
+                nanovg::nvgFillColor(nvg, mcpai::colour(mcp::aiCream));
                 nanovg::nvgFill(nvg);
+                mcpai::strokeOutline(nvg, mcp::aiInk);
 
-                // Smoked glass chassis with subtle accent stroke
-                nanovg::nvgBeginPath(nvg);
-                nanovg::nvgRoundedRect(nvg, drawerX, drawerY, drawerW, drawerH, 3.5f);
-                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(18, 19, 24, 245));
-                nanovg::nvgFill(nvg);
-                nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(ar, ag, ab, 90));
-                nanovg::nvgStrokeWidth(nvg, 1.0f);
-                nanovg::nvgStroke(nvg);
-
-                // Render each chip
                 float curChipX = drawerX + 4.0f;
                 float const chipY = drawerY + 2.5f;
                 float const chipH = drawerH - 5.0f;
-
                 for (size_t ci = 0; ci < chips.size(); ++ci) {
                     auto const& chip = chips[ci];
                     float const cw = getChipWidth(chip.label);
-                    bool const isThisChipHovered = (mcpNoteHoverChip == static_cast<int>(ci));
-
-                    NVGcolor bgCol, strkCol, txtCol;
-                    if (chip.prompt == "__undo__") {
-                        if (isThisChipHovered) {
-                            bgCol = nanovg::nvgRGBA(170, 45, 45, 240);
-                            strkCol = nanovg::nvgRGBA(255, 90, 90, 255);
-                            txtCol = nanovg::nvgRGBA(255, 255, 255, 255);
-                        } else {
-                            bgCol = nanovg::nvgRGBA(34, 22, 24, 210);
-                            strkCol = nanovg::nvgRGBA(110, 40, 40, 160);
-                            txtCol = nanovg::nvgRGBA(230, 140, 140, 220);
-                        }
-                    } else if (chip.prompt == "__reply__") {
-                        if (isThisChipHovered) {
-                            bgCol = nanovg::nvgRGBA(45, 115, 215, 240);
-                            strkCol = nanovg::nvgRGBA(90, 175, 255, 255);
-                            txtCol = nanovg::nvgRGBA(255, 255, 255, 255);
-                        } else {
-                            bgCol = nanovg::nvgRGBA(24, 32, 46, 210);
-                            strkCol = nanovg::nvgRGBA(55, 95, 150, 160);
-                            txtCol = nanovg::nvgRGBA(155, 200, 255, 220);
-                        }
-                    } else {
-                        // Sound pivot chip
-                        if (isThisChipHovered) {
-                            bgCol = nanovg::nvgRGBA(ar, ag, ab, 220);
-                            strkCol = accent;
-                            txtCol = nanovg::nvgRGBA(14, 16, 20, 255);
-                        } else {
-                            bgCol = nanovg::nvgRGBA(28, 30, 38, 220);
-                            strkCol = nanovg::nvgRGBA(65, 75, 95, 160);
-                            txtCol = nanovg::nvgRGBA(215, 222, 235, 230);
-                        }
-                    }
+                    bool const chosen = (mcpNoteHoverChip == static_cast<int>(ci));
 
                     nanovg::nvgBeginPath(nvg);
-                    nanovg::nvgRoundedRect(nvg, curChipX, chipY, cw, chipH, 2.5f);
-                    nanovg::nvgFillColor(nvg, bgCol);
-                    nanovg::nvgFill(nvg);
-                    nanovg::nvgStrokeColor(nvg, strkCol);
-                    nanovg::nvgStrokeWidth(nvg, 1.0f);
-                    nanovg::nvgStroke(nvg);
-
+                    nanovg::nvgRoundedRect(nvg, curChipX, chipY, cw, chipH, mcp::aiRadius);
+                    if (chosen) {
+                        nanovg::nvgFillColor(nvg, mcpai::colour(mcp::aiInk));
+                        nanovg::nvgFill(nvg);
+                    } else {
+                        mcpai::strokeOutline(nvg, mcp::aiInk);
+                    }
                     mcpnvg::nvgFontSize(nvg, 10.0f);
                     mcpnvg::nvgFontFace(nvg, "Inter");
                     mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-                    nanovg::nvgFillColor(nvg, txtCol);
+                    nanovg::nvgFillColor(nvg, mcpai::colour(chosen ? mcp::aiCream : mcp::aiInk));
                     mcpnvg::nvgText(nvg, curChipX + cw * 0.5f, chipY + chipH * 0.5f, chip.label.toRawUTF8(), nullptr);
 
                     curChipX += cw + 4.0f;
                 }
             }
-
-            ++noteIdx;
         }
     }
 
