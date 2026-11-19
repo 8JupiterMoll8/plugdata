@@ -12,6 +12,7 @@
 #include "PluginEditor.h"
 #include "Pd/MCPBridge.h"
 #include "Mcp/McpAiMidiVoice.h"
+#include "Mcp/McpAiMidiTimer.h"
 #include "Utility/NVGTextShim.h"
 #include <vector>
 #include <cmath>
@@ -64,6 +65,11 @@ class AiMidiObject final : public ObjectBase
     int clickBeat = 0;            // beats clicked since the count-in began (accent on each bar's first beat)
     bool recClickOn = false;      // keep clicking while recording
 
+    // The timer has two speeds (Source/Mcp/McpAiMidiTimer.h): 60 Hz only while the widget records, plays, auditions or counts in
+    // (its tick takes the Pd lock); otherwise a 4 Hz idle check that reads the object WITHOUT the lock and wakes the fast timer when
+    // a [play( / [record 1( message from Pd flipped a flag. Live jam 2026-11-19: the old always-on 60 Hz lock made PlugData sluggish.
+    mcp::AiMidiTimerPolicy timerPolicy;
+
     enum Button { recButton = 0, playButton, clearButton, aiButton, soundButton, numButtons };
 
 public:
@@ -73,8 +79,8 @@ public:
         objectParameters.addParamSize(&sizeProperty);
         objectParameters.addParamFloat("BPM", cGeneral, &bpmProperty, 120.0f, true, 40.0f, 260.0f);
 
-        // 60 Hz timer for tape reel rotation and playback sequencing
-        startTimerHz(60);
+        // Idle at first: 4 Hz, no Pd lock. The fast timer starts when a take records, plays or counts in.
+        startTimerHz(mcp::kAiMidiIdleHz);
     }
 
     ~AiMidiObject() override
@@ -264,60 +270,110 @@ public:
             nextBeatMs = now + beatMs(midi);
     }
 
-    void timerCallback() override
+    /** The editor's own state plus the object's flags, for the two-speed timer. Pd lock held (the caller's ptr.get). */
+    mcp::AiMidiActivity activityOf(t_fake_aimidi const* midi) const
     {
-        auto midi = ptr.get<t_fake_aimidi>();
-        if (!midi) return;
+        mcp::AiMidiActivity a;
+        a.recording = midi->x_recording != 0;
+        a.playFlag = midi->x_playing != 0;
+        a.auditioning = isAuditioning;
+        a.countingIn = countInLeft > 0;
+        a.clickOn = recClickOn;
+        return a;
+    }
 
-        tickCountInAndClick(midi.get());
-
-        bool const rec = (midi->x_recording != 0);
-        bool const play = isAuditioning || (midi->x_playing != 0);
-
-        if (rec || play || countInLeft > 0) {
+    /** Do what the timer policy answered: the new speed (restart the timer at the new rate) and the repaint. */
+    void applyTimerStep(mcp::AiMidiTimerStep const& step)
+    {
+        if (step.modeChanged)
+            startTimerHz(step.fast ? mcp::kAiMidiActiveHz : mcp::kAiMidiIdleHz);
+        if (step.repaint)
             repaint();
-        }
+    }
 
-        // Live jam 2026-11-07: a [play( / [stop( message (or Claude Code) drives the same loop as the PLAY button.
+    /** After a button press (Pd lock held): the fast timer starts when the press began something, and ends when it ended everything. */
+    void syncTimer(t_fake_aimidi const* midi)
+    {
+        applyTimerStep(timerPolicy.evaluate(activityOf(midi), mcp::aiMidiSnapshotOf(*midi)));
+    }
+
+    /** The 4 Hz idle check. No Pd lock: ai_midi.c never tells the editor about a [play( / [stop( / [record( message, it only
+        flips an int in the struct, so the editor looks at the struct. Only reads; the aligned ints cannot tear, and a stale
+        read costs one extra repaint or a 250 ms later wake-up. The object can only vanish under the message thread's own
+        remove call (never between this check and the read), and getRaw() already says no once Pd has cleared the reference. */
+    void idleCheck()
+    {
+        auto const* midi = ptr.getRaw<t_fake_aimidi>();
+        if (!midi)
+            return;
+        applyTimerStep(timerPolicy.idleCheck(mcp::aiMidiSnapshotOf(*midi)));
+    }
+
+    /** Live jam 2026-11-07: a [play( / [stop( message (or Claude Code) drives the same loop as the PLAY button. */
+    void followPdPlayFlag(t_fake_aimidi* midi)
+    {
         if (midi->x_playing && !isAuditioning && midi->x_note_count > 0) {
             isAuditioning = true;
             playNoteIndex = 0;
             playStartTime = juce::Time::getMillisecondCounterHiRes();
         } else if (!midi->x_playing && isAuditioning) {
             isAuditioning = false;
-            silenceVoice(midi.get()); // a [stop( message ended it: nothing keeps ringing
+            silenceVoice(midi); // a [stop( message ended it: nothing keeps ringing
+        }
+    }
+
+    /** The audition sequencer: sends the take's notes out of outlet 1 (and to the speaker) in their own time, then loops. */
+    void runAudition(t_fake_aimidi* midi)
+    {
+        if (!isAuditioning || midi->x_note_count <= 0 || !midi->x_notes)
+            return;
+        double const now = juce::Time::getMillisecondCounterHiRes();
+        double const elapsed = now - playStartTime;
+
+        while (playNoteIndex < midi->x_note_count && midi->x_notes[playNoteIndex].time_ms <= elapsed) {
+            auto const& n = midi->x_notes[playNoteIndex];
+
+            // Fire note on outlet 1
+            t_atom at[2];
+            SETFLOAT(&at[0], static_cast<t_float>(n.pitch));
+            SETFLOAT(&at[1], static_cast<t_float>(n.vel));
+            outlet_list(midi->x_out_note, gensym("list"), 2, at);
+            soundEntry(midi, playNoteIndex);
+
+            playNoteIndex++;
         }
 
-        // Audition playback sequencer
-        if (isAuditioning && midi->x_note_count > 0 && midi->x_notes) {
-            double const now = juce::Time::getMillisecondCounterHiRes();
-            double const elapsed = now - playStartTime;
-
-            while (playNoteIndex < midi->x_note_count &&
-                   midi->x_notes[playNoteIndex].time_ms <= elapsed) {
-                auto const& n = midi->x_notes[playNoteIndex];
-                
-                // Fire note on outlet 1
-                t_atom at[2];
-                SETFLOAT(&at[0], static_cast<t_float>(n.pitch));
-                SETFLOAT(&at[1], static_cast<t_float>(n.vel));
-                outlet_list(midi->x_out_note, gensym("list"), 2, at);
-                soundEntry(midi.get(), playNoteIndex);
-
-                playNoteIndex++;
-            }
-
-            // Loop when done
-            if (playNoteIndex >= midi->x_note_count) {
-                double const totalDur = midi->x_notes[midi->x_note_count - 1].time_ms + 500.0;
-                if (elapsed >= totalDur) {
-                    silenceVoice(midi.get()); // the loop starts over: no note carries into the next round
-                    playNoteIndex = 0;
-                    playStartTime = juce::Time::getMillisecondCounterHiRes();
-                    outlet_bang(midi->x_out_bang);
-                }
+        // Loop when done
+        if (playNoteIndex >= midi->x_note_count) {
+            double const totalDur = midi->x_notes[midi->x_note_count - 1].time_ms + 500.0;
+            if (elapsed >= totalDur) {
+                silenceVoice(midi); // the loop starts over: no note carries into the next round
+                playNoteIndex = 0;
+                playStartTime = juce::Time::getMillisecondCounterHiRes();
+                outlet_bang(midi->x_out_bang);
             }
         }
+    }
+
+    /** The 60 Hz tick (Pd lock held): count-in click, the Pd play flag, the audition, then the repaint and the speed. */
+    void activeTick()
+    {
+        auto midi = ptr.get<t_fake_aimidi>();
+        if (!midi)
+            return;
+
+        tickCountInAndClick(midi.get());
+        followPdPlayFlag(midi.get());
+        runAudition(midi.get());
+        syncTimer(midi.get()); // repaints while anything runs; the step it all ended: one last repaint, then idle
+    }
+
+    void timerCallback() override
+    {
+        if (timerPolicy.fast())
+            activeTick();
+        else
+            idleCheck();
     }
 
     void mouseDown(MouseEvent const& e) override
@@ -369,6 +425,7 @@ public:
         default:
             break;
         }
+        syncTimer(midi.get()); // REC / PLAY start the fast timer; CLEAR ends it
         repaint();
     }
 
