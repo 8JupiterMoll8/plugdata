@@ -138,7 +138,8 @@ inline float aiRegionTitleSizeFor(float zoom)
 {
     if (!(zoom > 0.0f) || !std::isfinite(zoom))
         return aiRegionTitleSize;
-    return std::max(aiRegionTitleSize, aiRegionTitleMinScreenPx / zoom);
+    // capped at 24 canvas px so the name always fits the 28 px title band (far out it gets smaller than 11 screen px)
+    return std::min(24.0f, std::max(aiRegionTitleSize, aiRegionTitleMinScreenPx / zoom));
 }
 
 /** The veil's colour (alpha included) for a canvas background: over a light canvas the warm paper white, over a dark one

@@ -91,13 +91,15 @@ void regionTitleSize()
     CHECK(mcp::aiRegionTitleSizeFor(1.0f) == 12.0f);
     CHECK(mcp::aiRegionTitleSizeFor(3.0f) == 12.0f);
     CHECK(mcp::aiRegionTitleSizeFor(11.0f / 12.0f) == 12.0f);
-    for (float zoom : { 0.25f, 0.4f, 0.5f, 0.75f, 0.9f }) {
+    CHECK(mcp::aiRegionTitleSizeFor(0.4f) == 24.0f); // below zoom 0.5 the cap wins over the 11 px floor
+    for (float zoom : { 0.5f, 0.75f, 0.9f }) {
         float const size = mcp::aiRegionTitleSizeFor(zoom);
         CHECK(size >= 12.0f);
         CHECK(size * zoom >= mcp::aiRegionTitleMinScreenPx - 0.001f); // on the screen: 11 px at least
     }
     CHECK(std::fabs(mcp::aiRegionTitleSizeFor(0.5f) - 22.0f) < 0.001f);
     // Nonsense zooms fall back to the plain 12.
+    CHECK(mcp::aiRegionTitleSizeFor(0.25f) == 24.0f); // capped: fits the 28 px title band
     CHECK(mcp::aiRegionTitleSizeFor(0.0f) == 12.0f);
     CHECK(mcp::aiRegionTitleSizeFor(-1.0f) == 12.0f);
     CHECK(mcp::aiRegionTitleSizeFor(std::numeric_limits<float>::quiet_NaN()) == 12.0f);
