@@ -14,8 +14,8 @@ class NoteObject final : public ObjectBase
     , public AsyncUpdater {
     BorderSize<int> border { 1, 7, 1, 0 };
 
-    // MCP-CARRIED(note-padding): a note with a background (the Copilot rack's ai.note sticky) is a card with 12 px of air on
-    // every side; a note without one keeps upstream's border. The width of the text area is the box width minus 2 * padding
+    // MCP-CARRIED(note-padding): the Copilot rack's ai.note sticky (background F6E7A6, see isPadded) is a card with 12 px of
+    // air on every side; every other note keeps upstream's border. The width of the text area is the box width minus 2 * padding
     // minus the editor's 2 px cursor space, so a one-line note needs paddedExtraWidth more than its text.
     static constexpr int padding = 12;
     static constexpr int paddedExtraWidth = 2 * padding + 2;
@@ -122,8 +122,12 @@ public:
         return true;
     }
 
-    // MCP-CARRIED(note-padding)
-    bool isPadded() { return getValue<bool>(fillBackground); }
+    // MCP-CARRIED(note-padding): only the ai.note card (background exactly the family's pale yellow F6E7A6) gets the padding;
+    // the artist's own notes with a background keep upstream's look and height (owner 2026-11-19: old notes stay as they were).
+    bool isPadded()
+    {
+        return getValue<bool>(fillBackground) && getValue<Colour>(secondaryColour).withAlpha(1.0f) == Colour(246, 231, 166);
+    }
 
     // MCP-CARRIED(note-padding)
     void applyPadding()
@@ -385,6 +389,8 @@ public:
         } else if (v.refersToSameSourceAs(secondaryColour)) {
             if (auto note = ptr.get<t_fake_note>())
                 colourToHexArray(getValue<Colour>(secondaryColour), note->x_bg);
+            applyPadding(); // MCP-CARRIED(note-padding): the colour decides whether this is the ai.note card
+            object->updateBounds(); // MCP-CARRIED(note-padding)
             needsRepaint = true;
             repaint();
         } else if (v.refersToSameSourceAs(fontSize)) {
