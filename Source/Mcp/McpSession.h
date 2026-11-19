@@ -320,9 +320,11 @@ struct McpSession {
     std::unordered_set<t_gobj*> mcpOverlayTargets;
     bool mcpOverlayStrictCables = false;
     // The targets in the order the AI gave them (the spotlight numbers its wires by it), and a number that changes whenever
-    // the targets are set or cleared (the canvas repaints its boxes once on a change: their veil is cached).
+    // the targets are set or cleared (the canvas repaints its boxes once on a change: their veil is cached). The number is
+    // atomic: it is bumped under mcpOverlayLock but READ without it (getMcpOverlayTargetsVersion), because the render asks it for
+    // every wire of every frame (CanvasMcpLayer::spotlightHere, from Connection::render) and a lock per wire is a cost for nothing.
     std::vector<t_gobj*> mcpOverlayOrder;
-    std::uint64_t mcpOverlayTargetsVersion = 0;
+    std::atomic<std::uint64_t> mcpOverlayTargetsVersion { 0 };
 
     void setMcpOverlayTargets(std::unordered_set<t_gobj*> targets, bool strictCables = false, std::vector<t_gobj*> order = {})
     {
@@ -330,7 +332,7 @@ struct McpSession {
         mcpOverlayTargets = std::move(targets);
         mcpOverlayStrictCables = strictCables;
         mcpOverlayOrder = std::move(order);
-        ++mcpOverlayTargetsVersion;
+        mcpOverlayTargetsVersion.fetch_add(1, std::memory_order_release);
     }
     void clearMcpOverlayTargets()
     {
@@ -338,7 +340,7 @@ struct McpSession {
         mcpOverlayTargets.clear();
         mcpOverlayStrictCables = false;
         mcpOverlayOrder.clear();
-        ++mcpOverlayTargetsVersion;
+        mcpOverlayTargetsVersion.fetch_add(1, std::memory_order_release);
     }
     std::vector<t_gobj*> getMcpOverlayOrder() const
     {
@@ -347,8 +349,7 @@ struct McpSession {
     }
     std::uint64_t getMcpOverlayTargetsVersion() const
     {
-        juce::ScopedLock sl(mcpOverlayLock);
-        return mcpOverlayTargetsVersion;
+        return mcpOverlayTargetsVersion.load(std::memory_order_acquire); // no lock: see the member
     }
     bool hasMcpOverlayTargets() const
     {
@@ -394,7 +395,7 @@ struct McpSession {
         mcpOverlayTargets.clear();
         mcpOverlayStrictCables = false;
         mcpOverlayOrder.clear();
-        ++mcpOverlayTargetsVersion;
+        mcpOverlayTargetsVersion.fetch_add(1, std::memory_order_release);
         mcpHud = McpHud();
     }
 
