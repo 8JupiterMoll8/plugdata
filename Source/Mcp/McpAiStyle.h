@@ -11,14 +11,16 @@
 // TS test compares with this file. JUCE-free, so Tests/mcp/ai_style_test.cpp compiles it alone; the drawing code turns
 // an AiRgba into its own colour type.
 //
-// The look is the owner's picture "AI overlays, language A" with grey regions: one ink, three shapes for what the AI
-// says (square = a measurement, circle = a change, triangle = look here), pale see-through grey for parts of the patch.
+// The look is the owner's picture "AI overlays, language A": one ink, three shapes for what the AI says (square = a
+// measurement, circle = a change, triangle = look here). A part of the patch is NOT a grey area (owner, 2026-11-19, option
+// A of region-no-grey-options.png): a 3 px ink bar down the left edge of the region plus its name.
 
 #include "McpApprovalState.h" // ApprovalRect, rectsIntersect
 
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -40,8 +42,14 @@ constexpr AiRgba aiRed { 0xDC, 0x29, 0x1F, 255 };    // "I changed this" (a circ
 constexpr AiRgba aiYellow { 0xF7, 0xC2, 0x14, 255 }; // "look here" (a triangle)
 constexpr AiRgba aiBlue { 0x14, 0x3D, 0x9E, 255 };   // "a measurement" (a square), a message on a wire
 constexpr AiRgba aiNoteYellow { 0xF6, 0xE7, 0xA6, 255 }; // the sticky note (ai.note)
-// A part of the patch: the grey at 14 % (36 of 255). The one region tint; the region's kind no longer picks a colour.
+// DEPRECATED, drawn by nothing from the next commit on (regions have no grey fill any more): removed with the region drawing.
 constexpr AiRgba aiRegionTint { 0x8C, 0x85, 0x76, 36 };
+// The spotlight's veil on a box that is not on the lit path, over a LIGHT canvas: a warm paper white at 50 %, so ink text
+// under it reads as a warm grey (about #8C8576) and the box itself stays white-ish ("faded things stay readable grey on
+// white"). Over a DARK canvas the veil is the canvas colour itself (see aiVeilColour).
+constexpr AiRgba aiVeilWarm { 0xFC, 0xF4, 0xE2, 255 };
+constexpr float aiVeilAlpha = 0.5f;         // the veil's strength (was 0.7: the faded parts were unreadable)
+constexpr float aiOffPathCordAlpha = 0.25f; // a cord off the lit path (control or signal) is drawn at 25 %
 
 // -------------------------------------------------------------------------------------------------------- sizes
 
@@ -51,7 +59,7 @@ constexpr float aiRadius = 2.0f;          // every corner
 constexpr int aiHeaderHeight = 24;        // a widget's header row
 constexpr int aiPadding = 12;             // the air around content
 constexpr float aiNameSize = 13.0f;       // a name (widget, card title), Inter-Medium
-constexpr float aiHintSize = 11.0f;       // a hint, a region title, a second line
+constexpr float aiHintSize = 11.0f;       // a hint, a second line
 constexpr float aiTagTextSize = 12.0f;    // the text of a tag on the canvas
 constexpr float aiTagGlyphSize = 9.0f;    // the shape before a tag's text
 constexpr float aiGhostAlpha = 0.6f;      // a ghost is ink at 60 %
@@ -63,7 +71,7 @@ constexpr float aiStepDiscSize = 14.0f;   // the spotlight's order disc: it carr
 constexpr float aiTagGlyphSlotPx = 16.0f;
 constexpr float aiTagCharPx = 6.4f;
 constexpr float aiTagHeightPx = 18.0f;
-constexpr float aiTagLeaderPx = 14.0f; // the grey leader from the object's right edge to the tag
+constexpr float aiTagLeaderPx = 14.0f; // the air between a tag and its boxes, and the longest a grey leader line ever is
 
 constexpr float aiTagWidthPx(std::size_t characters)
 {
@@ -116,15 +124,42 @@ constexpr float aiGlyphSize(AiTag tag)
 
 // ------------------------------------------------------------------------------------------------------- regions
 
-constexpr int aiRegionPadTop = 28; // room for the title above the members
-constexpr int aiRegionGap = 4;     // the least air between two regions' rectangles
+constexpr int aiRegionPadTop = 28;      // room for the title above the members
+constexpr int aiRegionGap = 4;          // the least air between two regions' rectangles
+constexpr int aiRegionMinBelow = 8;     // the least air under any member, where the neighbour's band allows it
+constexpr float aiRegionBarWidth = 3.0f;        // the ink bar down the region's left edge (no grey fill any more)
+constexpr float aiRegionTitleAlpha = 0.75f;     // the name is ink at 75 %
+constexpr float aiRegionTitleSize = 12.0f;      // the name, Inter-Medium, in patch px at zoom 1
+constexpr float aiRegionTitleMinScreenPx = 11.0f; // ... but never smaller than this on the screen when zoomed out
+constexpr float aiRegionTitleInset = 8.0f;      // from the rectangle's left edge (the bar and 5 px of air) to the name
+constexpr float aiRegionTitleTop = 6.0f;        // from the rectangle's top edge to the name
 
-/** One rectangle per region, from the bounding box of the region's member boxes (patch coordinates):
+/** The name's size in patch px for a canvas zoom: 12 px, or more when the zoom would make it smaller than 11 screen px
+ *  (a zoomed-out canvas must still show what a part is called). A zoom that is not a positive number counts as 1. */
+inline float aiRegionTitleSizeFor(float zoom)
+{
+    if (!(zoom > 0.0f) || !std::isfinite(zoom))
+        return aiRegionTitleSize;
+    return std::max(aiRegionTitleSize, aiRegionTitleMinScreenPx / zoom);
+}
+
+/** The veil's colour (alpha included) for a canvas background: over a light canvas the warm paper white, over a dark one
+ *  the canvas colour itself; always aiVeilAlpha. */
+inline AiRgba aiVeilColour(AiRgba canvasBackground)
+{
+    float const luma = 0.2126f * canvasBackground.r + 0.7152f * canvasBackground.g + 0.0722f * canvasBackground.b;
+    AiRgba const base = luma >= 128.0f ? aiVeilWarm : canvasBackground;
+    return { base.r, base.g, base.b, static_cast<std::uint8_t>(aiVeilAlpha * 255.0f + 0.5f) };
+}
+
+/** One rectangle per region, from the bounding box of the region's member boxes (patch coordinates; the caller leaves
+ *  Pd comments out of the bounds):
  *  - padded by aiPadding (12) on three sides and aiRegionPadTop (28, the title) on top;
  *  - where two padded rectangles meet (or come closer than aiRegionGap), both shrink toward their members to a 4 px gap
  *    (to as much as the members allow: a rectangle never cuts a member box, so members closer than 4 px leave less).
- *    Side by side the free band is split in the middle; one above the other the lower region keeps the room for its
- *    title as long as the space between the members allows it;
+ *    Side by side the free band is split in the middle; one above the other the squeeze is shared evenly between the
+ *    upper region's air below and the lower region's title room, and the upper one keeps aiRegionMinBelow (8 px) under
+ *    its members whenever the band holds 8 px plus the gap;
  *  - a region whose members lie on an EARLIER region's members (any earlier one, an emptied one too) gets an empty
  *    rectangle at the place its title goes (x = members.x - padding, y = members.y - 28, w = h = 0): title only;
  *  - a member box without area also gets an empty rectangle.
@@ -172,19 +207,32 @@ inline std::vector<ApprovalRect> aiRegionRects(std::vector<ApprovalRect> const& 
             std::size_t const first = mhi(i, a) <= mlo(j, a) ? i : j;
             std::size_t const second = first == i ? j : i;
             int const g = mlo(second, a) - mhi(first, a); // the free band between the two member sets
-            int newFirstHi = hi[first][a];
             if (a == 0) {
                 // Side by side: the free band is split in the middle, the gap in the middle of it.
-                newFirstHi = g >= aiRegionGap ? std::min(hi[first][a], mhi(first, a) + (g - aiRegionGap) / 2) : mhi(first, a);
+                int newFirstHi = g >= aiRegionGap ? std::min(hi[first][a], mhi(first, a) + (g - aiRegionGap) / 2) : mhi(first, a);
+                newFirstHi = std::max(newFirstHi, mhi(first, a));
+                int newSecondLo = std::max(lo[second][a], newFirstHi + aiRegionGap);
+                newSecondLo = std::min(newSecondLo, mlo(second, a));
+                hi[first][a] = newFirstHi;
+                lo[second][a] = newSecondLo;
             } else {
-                // One above the other: the upper one gives way first, the lower one keeps its title room.
-                newFirstHi = std::min(hi[first][a], std::max(mhi(first, a), lo[second][a] - aiRegionGap));
+                // One above the other: the squeeze is shared evenly (live review 2026-11-19: the lower one used to keep its
+                // whole title room and leave the upper rectangle flush on its last box). `below` is the air under the
+                // upper members as it stands, `above` the title room over the lower ones; together with the gap they need
+                // more than the band g holds by `need`: the upper one gives half, the lower one the rest. The upper one
+                // keeps aiRegionMinBelow (8 px) under its members when the band holds 8 + the gap; the lower one gets
+                // what is left for its title (never a negative room, never a cut member).
+                int const below = hi[first][a] - mhi(first, a);
+                int const above = mlo(second, a) - lo[second][a];
+                int const need = below + above + aiRegionGap - g;
+                if (need > 0) {
+                    int const floorBelow = std::min(below, std::min(aiRegionMinBelow, std::max(0, g - aiRegionGap)));
+                    int const newBelow = std::max(below - need / 2, floorBelow);
+                    int const newAbove = std::max(0, std::min(above, g - aiRegionGap - newBelow));
+                    hi[first][a] = mhi(first, a) + newBelow;
+                    lo[second][a] = mlo(second, a) - newAbove;
+                }
             }
-            newFirstHi = std::max(newFirstHi, mhi(first, a));
-            int newSecondLo = std::max(lo[second][a], newFirstHi + aiRegionGap);
-            newSecondLo = std::min(newSecondLo, mlo(second, a));
-            hi[first][a] = newFirstHi;
-            lo[second][a] = newSecondLo;
         }
     }
 

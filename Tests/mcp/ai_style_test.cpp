@@ -1,18 +1,25 @@
 // Unit tests for the one AI style table (Source/Mcp/McpAiStyle.h), JUCE-free (design round 2026-11-19, step A):
-//  - the palette and the sizes are the owner's numbers (picture "AI overlays, language A", grey regions);
+//  - the palette and the sizes are the owner's numbers (picture "AI overlays, language A"); a region has NO grey fill
+//    (owner 2026-11-19): a 3 px ink bar and a 12 px name at 75 % ink, never below 11 screen px when zoomed out;
+//  - the spotlight's veil is 50 % (was 70 %), warm over a light canvas, the canvas colour over a dark one, and an off-path
+//    cord is drawn at 25 %;
 //  - aiTagOf maps the kind words the server sends: the seven new words, the old ones (info -> guess, change -> changed,
 //    warn -> look, artist -> none) and anything unknown or empty -> guess (an unmarked claim is never shown as measured);
 //  - every tag glyph is 10 px or smaller (the order disc of the spotlight is its own, larger size);
 //  - aiRegionRects: padded rectangles that never intersect, never cut a member box, keep a 4 px gap where the members
-//    allow it, and give a region whose members lie on an earlier region's members an empty rectangle (title only);
+//    allow it, stacked regions share the squeeze evenly and keep 8 px under the upper one's members, and a region whose
+//    members lie on an earlier region's members gets an empty rectangle (title only);
 //  - aiTagWidthPx is the one frame width the tag's paint and its hit test share;
 //  - aiCardMark gives the card's mark for the chapter words the server really sends (SENT, WAITING, THINKING, WORKING,
 //    DONE, ERROR, ...) and for the AI's own titles (built, measured, silent); anything else: no mark.
 // Build + run: scripts/test-bridge-safety.sh
 #include "../../Source/Mcp/McpAiStyle.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -46,11 +53,9 @@ void paletteIsTheOwnersNumbers()
     CHECK(same(mcp::aiYellow, 0xF7, 0xC2, 0x14));
     CHECK(same(mcp::aiBlue, 0x14, 0x3D, 0x9E));
     CHECK(same(mcp::aiNoteYellow, 0xF6, 0xE7, 0xA6));
-    // The region tint is the grey at 14 % (36 of 255).
-    CHECK(mcp::aiRegionTint.r == mcp::aiGrey.r && mcp::aiRegionTint.g == mcp::aiGrey.g && mcp::aiRegionTint.b == mcp::aiGrey.b);
-    CHECK(mcp::aiRegionTint.a == 36);
+    CHECK(same(mcp::aiVeilWarm, 0xFC, 0xF4, 0xE2));
     // Opaque on purpose: the colours never carry their own alpha, a caller scales it.
-    CHECK(mcp::aiCream.a == 255 && mcp::aiInk.a == 255 && mcp::aiGrey.a == 255);
+    CHECK(mcp::aiCream.a == 255 && mcp::aiInk.a == 255 && mcp::aiGrey.a == 255 && mcp::aiVeilWarm.a == 255);
 }
 
 void sizesAreTheOwnersNumbers()
@@ -66,6 +71,66 @@ void sizesAreTheOwnersNumbers()
     CHECK(mcp::aiTagGlyphSize == 9.0f);
     CHECK(mcp::aiGhostAlpha == 0.6f);
     CHECK(mcp::aiRegionGap == 4);
+    // Regions (owner 2026-11-19): no fill, a 3 px ink bar, the name 12 px at 75 % ink, never below 11 screen px.
+    CHECK(mcp::aiRegionBarWidth == 3.0f);
+    CHECK(mcp::aiRegionTitleAlpha == 0.75f);
+    CHECK(mcp::aiRegionTitleSize == 12.0f);
+    CHECK(mcp::aiRegionTitleMinScreenPx == 11.0f);
+    CHECK(mcp::aiRegionMinBelow == 8);
+    CHECK(mcp::aiRegionPadTop == 28); // the title band stays
+    // The spotlight: veil 50 %, off-path cords 25 %.
+    CHECK(mcp::aiVeilAlpha == 0.5f);
+    CHECK(mcp::aiOffPathCordAlpha == 0.25f);
+    // The hint size (11) is untouched: the TS palette test compares it.
+    CHECK(mcp::aiHintSize == 11.0f);
+}
+
+void regionTitleSize()
+{
+    // Zoom 1 and above: 12 px. Below 11/12 of a zoom the screen size would fall under 11 px: the size grows to keep 11.
+    CHECK(mcp::aiRegionTitleSizeFor(1.0f) == 12.0f);
+    CHECK(mcp::aiRegionTitleSizeFor(3.0f) == 12.0f);
+    CHECK(mcp::aiRegionTitleSizeFor(11.0f / 12.0f) == 12.0f);
+    for (float zoom : { 0.25f, 0.4f, 0.5f, 0.75f, 0.9f }) {
+        float const size = mcp::aiRegionTitleSizeFor(zoom);
+        CHECK(size >= 12.0f);
+        CHECK(size * zoom >= mcp::aiRegionTitleMinScreenPx - 0.001f); // on the screen: 11 px at least
+    }
+    CHECK(std::fabs(mcp::aiRegionTitleSizeFor(0.5f) - 22.0f) < 0.001f);
+    // Nonsense zooms fall back to the plain 12.
+    CHECK(mcp::aiRegionTitleSizeFor(0.0f) == 12.0f);
+    CHECK(mcp::aiRegionTitleSizeFor(-1.0f) == 12.0f);
+    CHECK(mcp::aiRegionTitleSizeFor(std::numeric_limits<float>::quiet_NaN()) == 12.0f);
+    CHECK(mcp::aiRegionTitleSizeFor(std::numeric_limits<float>::infinity()) == 12.0f);
+}
+
+// What ink text looks like under a veil over a canvas background (what the eye sees: 50/50 blend).
+AiRgba under(AiRgba veil, AiRgba below)
+{
+    float const a = veil.a / 255.0f;
+    auto const mix = [a](int v, int b) { return static_cast<std::uint8_t>(static_cast<float>(v) * a + static_cast<float>(b) * (1.0f - a) + 0.5f); };
+    return { mix(veil.r, below.r), mix(veil.g, below.g), mix(veil.b, below.b), 255 };
+}
+
+void veilIsWarmOverLightAndPlainOverDark()
+{
+    // Over a light canvas: 50 % warm paper white. Ink text under it is a warm grey near #8C8576 (140, 133, 118).
+    AiRgba const white { 0xFA, 0xFA, 0xFA, 255 };
+    auto const veil = mcp::aiVeilColour(white);
+    CHECK(veil.a == 128); // 50 %
+    CHECK(veil.r == mcp::aiVeilWarm.r && veil.g == mcp::aiVeilWarm.g && veil.b == mcp::aiVeilWarm.b);
+    auto const fadedInk = under(veil, mcp::aiInk);
+    CHECK(std::abs(fadedInk.r - 0x8C) <= 12 && std::abs(fadedInk.g - 0x85) <= 12 && std::abs(fadedInk.b - 0x76) <= 12);
+    CHECK(fadedInk.r > fadedInk.b); // warm: red above blue
+    // The box itself stays white-ish: a plain box background under the veil moves by less than 16 per channel.
+    auto const fadedBox = under(veil, white);
+    CHECK(std::abs(fadedBox.r - white.r) < 16 && std::abs(fadedBox.g - white.g) < 16 && std::abs(fadedBox.b - white.b) < 16);
+    // Over a dark canvas: the canvas colour itself at 50 % (a light veil would light the boxes up).
+    AiRgba const night { 0x1E, 0x20, 0x24, 255 };
+    auto const dark = mcp::aiVeilColour(night);
+    CHECK(dark.a == 128 && dark.r == night.r && dark.g == night.g && dark.b == night.b);
+    // The veil never exceeds 50 %: faded things stay readable (it was 70 %).
+    CHECK(veil.a <= 128 && dark.a <= 128);
 }
 
 void tagKindWords()
@@ -119,6 +184,16 @@ void tagFrameIsOneFunction()
     CHECK(mcp::aiTagWidthPx(11) > mcp::aiTagWidthPx(10));
     CHECK(mcp::aiTagGlyphSlotPx == 16.0f && mcp::aiTagCharPx == 6.4f && mcp::aiTagHeightPx == 18.0f);
 }
+
+// A small deterministic generator: the property test needs no <random> state of the platform.
+struct Lcg {
+    std::uint32_t s;
+    int next(int n)
+    {
+        s = s * 1664525u + 1013904223u;
+        return static_cast<int>((s >> 8) % static_cast<std::uint32_t>(n));
+    }
+};
 
 // What the region rectangles must always be.
 bool inside(ApprovalRect outer, ApprovalRect inner)
@@ -199,21 +274,79 @@ void membersCloserThanTheGap()
     expectSane(touching, t, __LINE__);
 }
 
-void stackedKeepsTheLowerTitle()
+void stackedSharesTheSqueezeEvenly()
 {
-    // A region below another keeps the room for its title as long as the space between the members allows it.
+    // 40 px between the members: the padded rectangles (12 below + 28 title + 4 gap = 44) are 4 px too much, so the upper
+    // one gives 2 and the lower one gives 2: 10 px under the upper members, 26 px of title room over the lower ones.
     std::vector<ApprovalRect> const members { { 0, 100, 100, 50 }, { 0, 190, 100, 50 } };
     auto const r = mcp::aiRegionRects(members);
-    CHECK(r[1].y == 190 - 28); // the lower one's title room is whole
+    CHECK(r[0].y + r[0].h - 150 == 10);
+    CHECK(190 - r[1].y == 26);
     CHECK(r[1].y - (r[0].y + r[0].h) == mcp::aiRegionGap);
-    CHECK(r[0].y + r[0].h >= 150); // the upper one still holds its members
     expectSane(members, r, __LINE__);
-    // Less space: the lower region's title room is cut, never its members, and the rectangles still do not cross.
+    // The upper region is never left flush on its members (the live picture: the rectangle ended 1 px under the last box).
+    CHECK(r[0].y + r[0].h - 150 >= mcp::aiRegionMinBelow);
+    // Plenty of room: nothing is shaved, each keeps its padding (12 under, 28 over).
+    std::vector<ApprovalRect> const roomy { { 0, 100, 100, 50 }, { 0, 300, 100, 50 } };
+    auto const o = mcp::aiRegionRects(roomy);
+    CHECK(o[0].y + o[0].h - 150 == 12 && 300 - o[1].y == 28);
+}
+
+void stackedKeepsEightBelowTheUpperMembers()
+{
+    // Less space (20 px between the members): the upper one keeps 8 px under its members, the lower one gets what is
+    // left of the band for its title; the rectangles still keep their 4 px gap and no member is cut.
     std::vector<ApprovalRect> const tight { { 0, 100, 100, 50 }, { 0, 170, 100, 50 } };
     auto const t = mcp::aiRegionRects(tight);
-    CHECK(t[1].y <= 170 && t[0].y + t[0].h >= 150);
-    CHECK(t[1].y - (t[0].y + t[0].h) >= mcp::aiRegionGap);
+    CHECK(t[0].y + t[0].h - 150 == mcp::aiRegionMinBelow);
+    CHECK(t[1].y - (t[0].y + t[0].h) == mcp::aiRegionGap);
+    CHECK(t[1].y <= 170);
     expectSane(tight, t, __LINE__);
+    // So little room that 8 + 4 do not fit (10 px): the upper one gets what the gap leaves, the members stay whole.
+    std::vector<ApprovalRect> const cramped { { 0, 100, 100, 50 }, { 0, 160, 100, 50 } };
+    auto const c = mcp::aiRegionRects(cramped);
+    CHECK(c[0].y + c[0].h >= 150 && c[1].y <= 160);
+    CHECK(c[1].y - (c[0].y + c[0].h) >= mcp::aiRegionGap);
+    expectSane(cramped, c, __LINE__);
+    // The same in every column offset: stacked regions that only partly share their columns.
+    std::vector<ApprovalRect> const shifted { { 0, 100, 100, 50 }, { 60, 170, 100, 50 } };
+    auto const s2 = mcp::aiRegionRects(shifted);
+    CHECK(s2[0].y + s2[0].h - 150 >= mcp::aiRegionMinBelow);
+    expectSane(shifted, s2, __LINE__);
+}
+
+// Two regions stacked, any column overlap and any distance: the squeeze is shared evenly and the upper one keeps 8 px
+// under its members whenever the band holds 8 + the 4 px gap.
+void stackedPairProperty()
+{
+    Lcg rng { 777u };
+    for (int round = 0; round < 500; ++round) {
+        int const g = rng.next(70); // the band between the member sets
+        ApprovalRect const upper { rng.next(100), 50, 40 + rng.next(120), 20 + rng.next(80) };
+        ApprovalRect const lower { rng.next(100), upper.y + upper.h + g, 40 + rng.next(120), 20 + rng.next(80) };
+        // Only pairs that share columns are stacked (side by side is another rule).
+        if (std::min(upper.x + upper.w, lower.x + lower.w) <= std::max(upper.x, lower.x))
+            continue;
+        std::vector<ApprovalRect> const members { upper, lower };
+        auto const r = mcp::aiRegionRects(members);
+        expectSane(members, r, 2000 + round);
+        int const below = r[0].y + r[0].h - (upper.y + upper.h);
+        int const above = lower.y - r[1].y;
+        if (g >= mcp::aiRegionMinBelow + mcp::aiRegionGap) {
+            CHECK(below >= mcp::aiRegionMinBelow);
+            CHECK(r[1].y - (r[0].y + r[0].h) >= mcp::aiRegionGap);
+        }
+        if (g >= 0) {
+            CHECK(below >= 0 && above >= 0);
+            // The shaving is even while neither side is at its floor: the two shaves differ by at most 1.
+            int const need = 12 + 28 + mcp::aiRegionGap - g;
+            if (need > 0 && 12 - need / 2 >= mcp::aiRegionMinBelow) {
+                int const shaveUpper = 12 - below;
+                int const shaveLower = 28 - above;
+                CHECK(std::abs(shaveUpper - shaveLower) <= 1);
+            }
+        }
+    }
 }
 
 void diagonalNeighbours()
@@ -260,16 +393,6 @@ void oddInput()
     auto const one = mcp::aiRegionRects({ { 5, 5, 20, 20 } });
     CHECK(one.size() == 1 && one[0].x == -7 && one[0].y == -23 && one[0].w == 44 && one[0].h == 60);
 }
-
-// A small deterministic generator: the property test needs no <random> state of the platform.
-struct Lcg {
-    std::uint32_t s;
-    int next(int n)
-    {
-        s = s * 1664525u + 1013904223u;
-        return static_cast<int>((s >> 8) % static_cast<std::uint32_t>(n));
-    }
-};
 
 void anyLayoutIsSane()
 {
@@ -343,6 +466,8 @@ int main()
 {
     paletteIsTheOwnersNumbers();
     sizesAreTheOwnersNumbers();
+    regionTitleSize();
+    veilIsWarmOverLightAndPlainOverDark();
     tagKindWords();
     oldKindWordsMap();
     unknownIsNeverMeasured();
@@ -351,7 +476,9 @@ int main()
     paddedAndApart();
     sideBySideGetsTheGap();
     membersCloserThanTheGap();
-    stackedKeepsTheLowerTitle();
+    stackedSharesTheSqueezeEvenly();
+    stackedKeepsEightBelowTheUpperMembers();
+    stackedPairProperty();
     diagonalNeighbours();
     overlappingMembersGetNoRectangle();
     oddInput();
