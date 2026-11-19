@@ -11,6 +11,7 @@
 #include "Canvas.h"
 #include "PluginEditor.h"
 #include "Pd/MCPBridge.h"
+#include "Mcp/McpAiMidiVoice.h"
 #include "Utility/NVGTextShim.h"
 #include <vector>
 #include <cmath>
@@ -40,6 +41,9 @@ struct t_fake_aimidi {
     t_outlet       *x_out_note;
     t_outlet       *x_out_bang;
     t_outlet       *x_out_id;
+    // The speaker (patches/submodules/pd-else/0005): the C struct goes on after this field with the voice bookkeeping, which only
+    // ai_midi.c touches; the editor reads this one and sends `speaker`, `_voice` and `_voiceoff` messages.
+    int             x_speaker;
 };
 
 class AiMidiObject final : public ObjectBase
@@ -60,7 +64,7 @@ class AiMidiObject final : public ObjectBase
     int clickBeat = 0;            // beats clicked since the count-in began (accent on each bar's first beat)
     bool recClickOn = false;      // keep clicking while recording
 
-    enum Button { recButton = 0, playButton, clearButton, aiButton, numButtons };
+    enum Button { recButton = 0, playButton, clearButton, aiButton, soundButton, numButtons };
 
 public:
     AiMidiObject(pd::WeakReference ptr, Object* object)
@@ -138,7 +142,7 @@ public:
     int rowBHeight() const { return juce::jlimit(13, 20, getHeight() - rowBTop() - pad - (meterFits() ? 12 : 0)); }
     bool meterFits() const { return getHeight() >= 64; }
 
-    /** The four tab buttons across the middle row: REC PLAY CLEAR TO-AI. */
+    /** The five tab buttons across the middle row: REC PLAY CLEAR TO-AI SOUND. */
     Rectangle<int> buttonRect(int const which) const
     {
         int const gap = 3;
@@ -173,6 +177,29 @@ public:
             pd_float(thing, accent ? 1.0f : 0.0f);
     }
 
+    /** The speaker: take entry `index` also goes to the hidden voice engine, through the object's own `_voice <pitch> <vel> <dur ms>`
+        message (ai_midi.c keeps what sounds and ends it: a note-off, the clock for a note the take never ends, every stop). The outlet
+        has just sent the same entry; this changes nothing about it. Pd lock held (the caller's ptr.get). */
+    static void soundEntry(t_fake_aimidi* midi, int const index)
+    {
+        if (!midi->x_speaker)
+            return;
+        auto const call = mcp::aiMidiVoiceCall(midi->x_notes, midi->x_note_count, index);
+        if (call.pitch < 0)
+            return;
+        t_atom at[3];
+        SETFLOAT(&at[0], static_cast<t_float>(call.pitch));
+        SETFLOAT(&at[1], static_cast<t_float>(call.vel));
+        SETFLOAT(&at[2], static_cast<t_float>(call.autoOffMs));
+        pd_typedmess(&midi->x_obj.ob_pd, gensym("_voice"), 3, at);
+    }
+
+    /** Every note the speaker started ends now (the playback stopped, wrapped or started over). Harmless when nothing sounds. */
+    static void silenceVoice(t_fake_aimidi* midi)
+    {
+        pd_typedmess(&midi->x_obj.ob_pd, gensym("_voiceoff"), 0, nullptr);
+    }
+
     double beatMs(t_fake_aimidi const* midi) const
     {
         float const bpm = midi->x_bpm > 20.0f ? midi->x_bpm : 120.0f;
@@ -183,6 +210,7 @@ public:
     {
         isAuditioning = false;
         midi->x_playing = 0;
+        silenceVoice(midi);
         countInLeft = countInBeats;
         clickBeat = 0;
         double const bar = beatMs(midi) * countInBeats;
@@ -257,6 +285,7 @@ public:
             playStartTime = juce::Time::getMillisecondCounterHiRes();
         } else if (!midi->x_playing && isAuditioning) {
             isAuditioning = false;
+            silenceVoice(midi.get()); // a [stop( message ended it: nothing keeps ringing
         }
 
         // Audition playback sequencer
@@ -273,6 +302,7 @@ public:
                 SETFLOAT(&at[0], static_cast<t_float>(n.pitch));
                 SETFLOAT(&at[1], static_cast<t_float>(n.vel));
                 outlet_list(midi->x_out_note, gensym("list"), 2, at);
+                soundEntry(midi.get(), playNoteIndex);
 
                 playNoteIndex++;
             }
@@ -281,6 +311,7 @@ public:
             if (playNoteIndex >= midi->x_note_count) {
                 double const totalDur = midi->x_notes[midi->x_note_count - 1].time_ms + 500.0;
                 if (elapsed >= totalDur) {
+                    silenceVoice(midi.get()); // the loop starts over: no note carries into the next round
                     playNoteIndex = 0;
                     playStartTime = juce::Time::getMillisecondCounterHiRes();
                     outlet_bang(midi->x_out_bang);
@@ -309,6 +340,7 @@ public:
             if (isAuditioning) {
                 isAuditioning = false;
                 midi->x_playing = 0;
+                silenceVoice(midi.get());
             } else if (midi->x_note_count > 0 && !midi->x_recording && countInLeft == 0) {
                 midi->x_playing = 1; // keep the message flag in step with the button
                 isAuditioning = true;
@@ -325,6 +357,15 @@ public:
         case aiButton:
             transmitToAi();
             break;
+        case soundButton: {
+            // The speaker on or off: the box saves differently (`speaker 0` only while off), so the patch is changed.
+            t_atom on;
+            SETFLOAT(&on, midi->x_speaker ? 0.0f : 1.0f);
+            pd_typedmess(&midi->x_obj.ob_pd, gensym("speaker"), 1, &on);
+            if (auto* patch = cnv->patch.getRawPointer())
+                canvas_dirty(patch, 1);
+            break;
+        }
         default:
             break;
         }
@@ -552,6 +593,7 @@ public:
         drawTab(playButton, play ? "STOP" : "PLAY", play, cyan());
         drawTab(clearButton, "CLEAR", false, cyan());
         drawTab(aiButton, "TO AI", false, cyan());
+        drawTab(soundButton, "SOUND", midi && midi->x_speaker != 0, cyan());
 
         // Row C: the 16-cell meter
         if (meterFits()) {

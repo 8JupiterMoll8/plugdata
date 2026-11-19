@@ -1,0 +1,262 @@
+From b68bdfd4cbf6173f204534d7ae2cd5e3bfc068a9 Mon Sep 17 00:00:00 2001
+From: Alphi <alphi@local>
+Date: Thu, 19 Nov 2026 15:52:27 +0100
+Subject: [PATCH] feat(ai.midi): the speaker: notes the object makes audible
+ also go to the hidden voice engine
+
+ai-voice-note gets <midi> <vel> (vel 0 = off) for the player's live notes while recording
+and for the editor's playback of a take (the internal messages _voice <pitch> <vel> [<dur ms>]
+and _voiceoff). One bit per pitch keeps what sounds; a note-on the take never ends (a bare
+float) is released by the object's own clock after its length; stop, clear, record, play,
+speaker 0 and deleting the box release everything. `speaker 0|1` switches it; it is saved
+as ` speaker 0` after the size only while it is off, so a default box saves as before and
+an old box loads with the speaker on.
+---
+ Source/Control/ai_midi.c | 146 +++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 146 insertions(+)
+
+diff --git a/Source/Control/ai_midi.c b/Source/Control/ai_midi.c
+index e5e1afa..9b8be09 100644
+--- a/Source/Control/ai_midi.c
++++ b/Source/Control/ai_midi.c
+@@ -38,8 +38,128 @@ typedef struct _aimidi {
+     t_outlet       *x_out_note;    // Outlet 1: list pitch vel
+     t_outlet       *x_out_bang;    // Outlet 2: bang on loop/end or transmit
+     t_outlet       *x_out_id;      // Outlet 3: symbol take_id
++    /* The speaker: the notes this object makes audible (a take's playback, the player's live notes while recording) also go to
++       the hidden voice engine (receiver "ai-voice-note": a list <midi> <vel>, vel 0 = off). The editor mirrors the layout up to
++       x_speaker (t_fake_aimidi in Source/Objects/AiMidiObject.h): new fields go after it, never before. */
++    int             x_speaker;     // 1 = on (the default; saved only while it is off: `speaker 0` after the size)
++    unsigned char   x_sounding[128]; // 1 = a note-on went to the engine and its note-off has not
++    double          x_off_at[128]; // logical time of the auto-off of a note the take never ends; < 0 = none
++    t_clock        *x_offclock;    // fires the auto-offs
+ } t_aimidi;
+ 
++#define AIMIDI_VOICE "ai-voice-note"
++#define AIMIDI_MAX_NOTE_MS 60000.0
++
++/* ---- the speaker: notes to the hidden voice engine --------------------------------------------------------------------
++   Everything here runs in Pd's own thread (a message, a clock, the editor's timer under the Pd lock), so it needs no lock of
++   its own. x_sounding keeps one bit per pitch: a note-on that reached the engine and has no note-off yet. Every way a note can
++   end (a note-off, the clock, stop, clear, a new take, the speaker going off, the box being deleted) goes through
++   aimidi_voice_off or aimidi_voice_release, so nothing hangs. */
++static int aimidi_clampi(t_float f, int lo, int hi) {
++    if (!(f > (t_float)lo)) return lo;      /* also NaN */
++    if (f > (t_float)hi) return hi;
++    return (int)f;
++}
++
++/* one message to the engine; 0 when no engine is open (nothing is bound to the name) */
++static int aimidi_voice_send(int pitch, int vel) {
++    t_pd *voice = gensym(AIMIDI_VOICE)->s_thing;
++    t_atom at[2];
++    if (!voice) return 0;
++    SETFLOAT(&at[0], (t_float)pitch);
++    SETFLOAT(&at[1], (t_float)vel);
++    pd_list(voice, &s_list, 2, at);
++    return 1;
++}
++
++/* the clock waits for the earliest auto-off still pending */
++static void aimidi_voice_rearm(t_aimidi *x) {
++    double next = -1.0;
++    int p;
++    for (p = 0; p < 128; p++)
++        if (x->x_off_at[p] >= 0.0 && (next < 0.0 || x->x_off_at[p] < next))
++            next = x->x_off_at[p];
++    if (next < 0.0) clock_unset(x->x_offclock);
++    else clock_set(x->x_offclock, next);
++}
++
++static void aimidi_voice_clock(t_aimidi *x);
++
++/* a new object: the speaker is on, nothing sounds, no auto-off is pending */
++static void aimidi_voice_init(t_aimidi *x) {
++    int p;
++    x->x_speaker = 1;
++    memset(x->x_sounding, 0, sizeof(x->x_sounding));
++    for (p = 0; p < 128; p++) x->x_off_at[p] = -1.0;
++    x->x_offclock = clock_new(x, (t_method)aimidi_voice_clock);
++}
++
++/* the note-off of one pitch, only if its note-on went out */
++static void aimidi_voice_off(t_aimidi *x, int pitch) {
++    x->x_off_at[pitch] = -1.0;
++    if (!x->x_sounding[pitch]) return;
++    x->x_sounding[pitch] = 0;
++    aimidi_voice_send(pitch, 0);
++}
++
++/* every sounding note off: stop, clear, a new take, the speaker going off, deleting the box. Does not look at x_speaker. */
++static void aimidi_voice_release(t_aimidi *x) {
++    int p;
++    for (p = 0; p < 128; p++)
++        if (x->x_sounding[p] || x->x_off_at[p] >= 0.0)
++            aimidi_voice_off(x, p);
++    aimidi_voice_rearm(x);
++}
++
++/* the clock: end every note whose time has come */
++static void aimidi_voice_clock(t_aimidi *x) {
++    double now = clock_getlogicaltime();
++    int p;
++    for (p = 0; p < 128; p++)
++        if (x->x_off_at[p] >= 0.0 && x->x_off_at[p] <= now)
++            aimidi_voice_off(x, p);
++    aimidi_voice_rearm(x);
++}
++
++/* A note for the engine. vel 0 = off. A note-on is clipped to 1..127; a pitch already sounding is retriggered (off, then on: one
++   voice per pitch, so one off ends it). dur_ms > 0 = a note nobody will end (a bare float, a take entry with no off of its own):
++   the clock ends it after dur_ms. Not delivered (speaker off, no engine open) = not marked as sounding. */
++static void aimidi_voice_note(t_aimidi *x, int pitch, int vel, double dur_ms) {
++    if (pitch < 0) pitch = 0;
++    if (pitch > 127) pitch = 127;
++    if (vel <= 0) {
++        aimidi_voice_off(x, pitch);
++        aimidi_voice_rearm(x);
++        return;
++    }
++    if (!x->x_speaker) return;
++    if (vel > 127) vel = 127;
++    if (x->x_sounding[pitch]) aimidi_voice_send(pitch, 0);
++    x->x_sounding[pitch] = (unsigned char)aimidi_voice_send(pitch, vel);
++    if (x->x_sounding[pitch] && dur_ms > 0.0)
++        x->x_off_at[pitch] = clock_getsystimeafter(dur_ms > AIMIDI_MAX_NOTE_MS ? AIMIDI_MAX_NOTE_MS : dur_ms);
++    else
++        x->x_off_at[pitch] = -1.0;
++    aimidi_voice_rearm(x);
++}
++
++/* speaker <0|1> */
++static void aimidi_speaker(t_aimidi *x, t_floatarg f) {
++    if (f == 0.0f) aimidi_voice_release(x);
++    x->x_speaker = (f != 0.0f);
++}
++
++/* _voice <pitch> <vel> [<dur ms>]: the editor's playback of a take (its 60 Hz timer calls it with the same note it sends out of
++   outlet 1). Internal: not for patches. */
++static void aimidi_voice_msg(t_aimidi *x, t_floatarg pitch, t_floatarg vel, t_floatarg dur) {
++    aimidi_voice_note(x, aimidi_clampi(pitch, 0, 127), aimidi_clampi(vel, 0, 127), dur > 0.0f ? (double)dur : 0.0);
++}
++
++/* _voiceoff: the editor ended or restarted the playback. Internal. */
++static void aimidi_voiceoff_msg(t_aimidi *x) {
++    aimidi_voice_release(x);
++}
++
+ static void aimidi_erase(t_aimidi *x, t_glist *glist) {
+     sys_vgui(".x%lx.c delete %lxALL\n", glist_getcanvas(glist), x);
+ }
+@@ -110,6 +230,8 @@ static void aimidi_save(t_gobj *z, t_binbuf *b) {
+         (int)x->x_obj.te_xpix, (int)x->x_obj.te_ypix,
+         atom_getsymbol(binbuf_getvec(x->x_obj.te_binbuf)),
+         x->x_w, x->x_h);
++    if (!x->x_speaker)  /* the default (on) is never written: a default box saves as it always did, an old box loads with the speaker on */
++        binbuf_addv(b, "si", gensym("speaker"), 0);
+     binbuf_addv(b, ";");
+ }
+ 
+@@ -150,6 +272,7 @@ static void aimidi_list(t_aimidi *x, t_symbol *s, int argc, t_atom *argv) {
+ 
+         if (x->x_recording) {
+             aimidi_add_note(x, pitch, vel); // note-offs too, so playback releases what it played
++            aimidi_voice_note(x, pitch, vel, 0.0); // the player hears what they play (the note-off comes with their key)
+         }
+ 
+         t_atom out_at[2];
+@@ -164,6 +287,7 @@ static void aimidi_float(t_aimidi *x, t_float f) {
+     int vel = 100;
+     if (x->x_recording) {
+         aimidi_add_note(x, pitch, vel);
++        aimidi_voice_note(x, pitch, vel, 200.0); // a bare float has no note-off: the take stamps it 200 ms, so does the engine
+     }
+     t_atom out_at[2];
+     SETFLOAT(&out_at[0], (t_float)pitch);
+@@ -174,6 +298,7 @@ static void aimidi_float(t_aimidi *x, t_float f) {
+ static void aimidi_record(t_aimidi *x, t_floatarg f) {
+     int rec = (f != 0.0f);
+     if (rec && !x->x_recording) {
++        aimidi_voice_release(x);  /* a note the playback was holding does not ring into the new take */
+         x->x_recording = 1;
+         x->x_playing = 0;
+         x->x_note_count = 0;
+@@ -181,6 +306,7 @@ static void aimidi_record(t_aimidi *x, t_floatarg f) {
+         snprintf(x->x_take_id, sizeof(x->x_take_id), "take_%d", aimidi_global_take_counter++);
+     } else if (!rec && x->x_recording) {
+         x->x_recording = 0;
++        aimidi_voice_release(x);  /* a key still held when the take ends */
+         outlet_symbol(x->x_out_id, gensym(x->x_take_id));
+         outlet_bang(x->x_out_bang);
+     }
+@@ -189,6 +315,7 @@ static void aimidi_record(t_aimidi *x, t_floatarg f) {
+ static void aimidi_play(t_aimidi *x) {
+     if (x->x_note_count <= 0) return;
+     // The widget's timer plays the take while x_playing is set (the same loop as its PLAY button).
++    if (x->x_recording) aimidi_voice_release(x);  /* playing ends the recording: the live notes end with it */
+     x->x_playing = 1;
+     x->x_recording = 0;
+ }
+@@ -196,12 +323,14 @@ static void aimidi_play(t_aimidi *x) {
+ static void aimidi_stop(t_aimidi *x) {
+     x->x_recording = 0;
+     x->x_playing = 0;
++    aimidi_voice_release(x);
+ }
+ 
+ static void aimidi_clear(t_aimidi *x) {
+     x->x_note_count = 0;
+     x->x_recording = 0;
+     x->x_playing = 0;
++    aimidi_voice_release(x);
+ }
+ 
+ static void aimidi_send(t_aimidi *x) {
+@@ -228,6 +357,11 @@ static void aimidi_dim(t_aimidi *x, t_floatarg w, t_floatarg h) {
+ }
+ 
+ static void aimidi_free(t_aimidi *x) {
++    aimidi_voice_release(x);  /* a deleted box (or a closed patch) leaves no note ringing */
++    if (x->x_offclock) {
++        clock_free(x->x_offclock);
++        x->x_offclock = NULL;
++    }
+     if (x->x_notes) {
+         free(x->x_notes);
+         x->x_notes = NULL;
+@@ -254,6 +388,7 @@ static void *aimidi_new(t_symbol *s, int ac, t_atom *av) {
+     x->x_max_notes = 128;
+     x->x_notes = (t_aimidi_note *)malloc(x->x_max_notes * sizeof(t_aimidi_note));
+     x->x_rec_start_time = 0.0;
++    aimidi_voice_init(x);
+     snprintf(x->x_take_id, sizeof(x->x_take_id), "take_%d", aimidi_global_take_counter++);
+ 
+     if (ac > 0 && av->a_type == A_FLOAT) {
+@@ -268,6 +403,14 @@ static void *aimidi_new(t_symbol *s, int ac, t_atom *av) {
+         x->x_bpm = av->a_w.w_float;
+         ac--; av++;
+     }
++    /* what is left of the box text: `speaker <0|1>`, saved only while the speaker is off (see aimidi_save) */
++    while (ac > 0) {
++        if (av->a_type == A_SYMBOL && av->a_w.w_symbol == gensym("speaker") && ac > 1 && av[1].a_type == A_FLOAT) {
++            x->x_speaker = (av[1].a_w.w_float != 0.0f);
++            ac--; av++;
++        }
++        ac--; av++;
++    }
+ 
+     x->x_out_note = outlet_new(&x->x_obj, &s_list);
+     x->x_out_bang = outlet_new(&x->x_obj, &s_bang);
+@@ -297,6 +440,9 @@ void ai_midi_setup(void) {
+     class_addmethod(aimidi_class, (t_method)aimidi_send, gensym("ai"), 0);
+     class_addmethod(aimidi_class, (t_method)aimidi_bpm, gensym("bpm"), A_FLOAT, 0);
+     class_addmethod(aimidi_class, (t_method)aimidi_dim, gensym("dim"), A_FLOAT, A_FLOAT, 0);
++    class_addmethod(aimidi_class, (t_method)aimidi_speaker, gensym("speaker"), A_FLOAT, 0);
++    class_addmethod(aimidi_class, (t_method)aimidi_voice_msg, gensym("_voice"), A_FLOAT, A_FLOAT, A_DEFFLOAT, 0);
++    class_addmethod(aimidi_class, (t_method)aimidi_voiceoff_msg, gensym("_voiceoff"), 0);
+ 
+     aimidi_widgetbehavior.w_getrectfn  = aimidi_getrect;
+     aimidi_widgetbehavior.w_displacefn = aimidi_displace;
+-- 
+2.34.1
+

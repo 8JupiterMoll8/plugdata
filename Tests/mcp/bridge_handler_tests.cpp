@@ -6417,6 +6417,434 @@ void runVoiceEngineCases(Harness& h, PluginProcessor& processor, AudioControl& a
     sleepMs(100);
 }
 
+// [ai.midi] sounds by itself through the hidden voice engine (patches/submodules/pd-else/0005). The engine's receiver is
+// `ai-voice-note` (a list `<midi> <vel>`, vel 0 = off); a probe bound to that name hears exactly what the engine would. The
+// object is made and driven through Pd's own messages on a scratch subpatch, headless (the widget's 60 Hz timer needs an editor:
+// it plays a take with the same two messages `_voice <pitch> <vel> <dur ms>` and `_voiceoff` that these cases send):
+//   1. no engine open (nothing bound to the name): nothing happens, nothing is marked as sounding;
+//   2. saving: a default box saves byte for byte as before; `speaker 0` adds ` speaker 0` and `speaker 1` takes it away again;
+//      a box made from `ai.midi 240 64 speaker 0` / `ai.midi speaker 0` is off, an old box (no marker) is on;
+//   3. the live notes: only while recording (the player's keys), the object's outlet is untouched (speaker on or off);
+//   4. no hanging note: stop, clear, record 0, a new record 1, play, speaker 0, deleting the box release what sounds;
+//   5. `_voice` (the take's playback): velocity clipped to 1..127, one voice per pitch (a retrigger is off + on), an off for a note
+//      that is not sounding is not sent, a note-on the take never ends is released by the object's own clock after its dur ms;
+//   6. a patch file with the three forms loads right.
+namespace aimidivoice {
+std::mutex lock;
+std::vector<std::string> heard;   // "<pitch> <vel>" of every message to `ai-voice-note`
+std::vector<std::string> outlet;  // the same for what the object's outlet 0 sent
+t_class* voiceProbeClass = nullptr;
+t_class* outletProbeClass = nullptr;
+
+std::string lineOf(int argc, t_atom* argv)
+{
+    std::string line;
+    for (int i = 0; i < argc; ++i) {
+        char buf[MAXPDSTRING] = {};
+        atom_string(argv + i, buf, sizeof(buf));
+        line += (i ? " " : "") + std::string(buf);
+    }
+    return line;
+}
+
+void voiceList(t_object*, t_symbol*, int argc, t_atom* argv)
+{
+    std::lock_guard<std::mutex> g(lock);
+    heard.push_back(lineOf(argc, argv));
+}
+
+void outletList(t_object*, t_symbol*, int argc, t_atom* argv)
+{
+    std::lock_guard<std::mutex> g(lock);
+    outlet.push_back(lineOf(argc, argv));
+}
+
+std::vector<std::string> heardNow()
+{
+    std::lock_guard<std::mutex> g(lock);
+    return heard;
+}
+
+std::vector<std::string> outletNow()
+{
+    std::lock_guard<std::mutex> g(lock);
+    return outlet;
+}
+
+void clearAll()
+{
+    std::lock_guard<std::mutex> g(lock);
+    heard.clear();
+    outlet.clear();
+}
+
+using Lines = std::vector<std::string>;
+
+std::string joined(Lines const& lines)
+{
+    std::string out;
+    for (auto const& l : lines) out += (out.empty() ? "" : ", ") + l;
+    return out;
+}
+
+// like CHECK, and says what it got
+#define EXPECT_LINES(got, ...)                                                                                         \
+    do {                                                                                                               \
+        Lines const g_ = (got);                                                                                        \
+        Lines const w_ = __VA_ARGS__;                                                                                  \
+        if (g_ != w_) {                                                                                                \
+            std::printf("  FAIL %s:%d  %s: got [%s] want [%s]\n", __FILE__, __LINE__, #got, joined(g_).c_str(), joined(w_).c_str()); \
+            ++failures;                                                                                                \
+        }                                                                                                              \
+    } while (0)
+
+#define EXPECT_TEXT(got, want)                                                                                         \
+    do {                                                                                                               \
+        std::string const g_ = (got);                                                                                  \
+        std::string const w_ = want;                                                                                   \
+        if (g_ != w_) {                                                                                                \
+            std::printf("  FAIL %s:%d  %s: got [%s] want [%s]\n", __FILE__, __LINE__, #got, g_.c_str(), w_.c_str());   \
+            ++failures;                                                                                                \
+        }                                                                                                              \
+    } while (0)
+
+std::string className(t_gobj* g)
+{
+    return g ? std::string(class_getname(pd_class(&g->g_pd))) : std::string();
+}
+} // namespace aimidivoice
+
+void runAiMidiVoiceCases(Harness& h, PluginProcessor& processor, AudioControl& audio)
+{
+    using namespace aimidivoice;
+    std::printf("ai.midi sounds by itself (speaker, ai-voice-note)\n");
+    auto* host = processor.getMcp();
+    audio.paused = false; // Pd's clocks (the auto-off) run in processBlock
+    sleepMs(50);
+
+    // A scratch subpatch on main for the boxes.
+    t_canvas* mainRoot = nullptr;
+    t_gobj* subObj = nullptr;
+    t_canvas* sub = nullptr;
+    CHECK(host->pdWait([&] {
+        mainRoot = host->getCanvasBySymbol("main");
+        if (!mainRoot) return;
+        t_atom a[4];
+        SETFLOAT(a, 1100);
+        SETFLOAT(a + 1, 700);
+        SETSYMBOL(a + 2, gensym("pd"));
+        SETSYMBOL(a + 3, gensym("p12midi"));
+        pd_typedmess(&mainRoot->gl_pd, gensym("obj"), 4, a);
+        subObj = pd::Interface::getNewest(mainRoot);
+        sub = reinterpret_cast<t_canvas*>(subObj);
+    }, 3000));
+    CHECK(sub != nullptr);
+    if (!sub) return;
+
+    int nextY = 10;
+    auto make = [&](std::initializer_list<char const*> words) {
+        t_gobj* made = nullptr;
+        int const y = nextY;
+        nextY += 60;
+        host->pdWait([&] {
+            std::vector<t_atom> at(3 + words.size());
+            SETFLOAT(&at[0], 10);
+            SETFLOAT(&at[1], static_cast<t_float>(y));
+            SETSYMBOL(&at[2], gensym("ai.midi"));
+            size_t i = 3;
+            for (char const* w : words) {
+                char* end = nullptr;
+                double const v = std::strtod(w, &end);
+                if (end != w && *end == 0) SETFLOAT(&at[i], static_cast<t_float>(v));
+                else SETSYMBOL(&at[i], gensym(w));
+                ++i;
+            }
+            pd_typedmess(&sub->gl_pd, gensym("obj"), static_cast<int>(at.size()), at.data());
+            made = pd::Interface::getNewest(sub);
+        }, 3000);
+        return made;
+    };
+    auto saved = [&](t_gobj* g) {
+        std::string text;
+        host->pdWait([&] {
+            t_binbuf* b = binbuf_new();
+            class_getsavefn(pd_class(&g->g_pd))(g, b);
+            char* buf = nullptr;
+            int len = 0;
+            binbuf_gettext(b, &buf, &len);
+            text.assign(buf ? buf : "", static_cast<size_t>(len));
+            if (buf) freebytes(buf, static_cast<size_t>(len));
+            binbuf_free(b);
+        }, 3000);
+        while (!text.empty() && (text.back() == '\n' || text.back() == ' ')) text.pop_back();
+        return text;
+    };
+    auto tell = [&](t_gobj* g, char const* selector, std::initializer_list<float> numbers) {
+        host->pdWait([&] {
+            t_atom at[4];
+            int n = 0;
+            for (float f : numbers) { // (SETFLOAT evaluates its first argument twice: no n++ inside)
+                SETFLOAT(&at[n], f);
+                ++n;
+            }
+            pd_typedmess(&g->g_pd, gensym(selector), n, at);
+        }, 3000);
+    };
+    auto tellFloat = [&](t_gobj* g, float f) { host->pdWait([&] { pd_float(&g->g_pd, f); }, 3000); };
+    auto bound = [&] {
+        bool b = false;
+        host->pdWait([&] { b = gensym("ai-voice-note")->s_thing != nullptr; }, 2000);
+        return b;
+    };
+
+    // 1. No engine open: nothing is sent and nothing counts as sounding (a note-off later is not invented).
+    t_gobj* a = make({ "240", "64" });
+    CHECK(className(a) == "ai.midi");
+    if (className(a) != "ai.midi") {
+        host->pdWait([&] { glist_delete(mainRoot, subObj); }, 3000);
+        return;
+    }
+    bool const engineWasOpen = bound();
+    if (!engineWasOpen) {
+        tell(a, "record", { 1 });
+        tell(a, "list", { 60, 100 });
+        tell(a, "record", { 0 });
+    }
+
+    // The probes: one on the engine's name, one on the box's outlet 0.
+    t_object* voiceProbe = nullptr;
+    t_object* outletProbe = nullptr;
+    CHECK(host->pdWait([&] {
+        if (!voiceProbeClass) {
+            voiceProbeClass = class_new(gensym("mcp_test_aimidi_voice"), nullptr, nullptr, sizeof(t_object), CLASS_PD, static_cast<t_atomtype>(0));
+            class_addlist(voiceProbeClass, reinterpret_cast<t_method>(voiceList));
+            outletProbeClass = class_new(gensym("mcp_test_aimidi_outlet"), nullptr, nullptr, sizeof(t_object), 0, static_cast<t_atomtype>(0));
+            class_addlist(outletProbeClass, reinterpret_cast<t_method>(outletList));
+        }
+        voiceProbe = reinterpret_cast<t_object*>(pd_new(voiceProbeClass));
+        pd_bind(&voiceProbe->ob_pd, gensym("ai-voice-note"));
+        outletProbe = reinterpret_cast<t_object*>(pd_new(outletProbeClass));
+        obj_connect(reinterpret_cast<t_object*>(a), 0, outletProbe, 0);
+    }, 3000));
+    CHECK(voiceProbe != nullptr && outletProbe != nullptr);
+    if (!voiceProbe || !outletProbe) return;
+    clearAll();
+    tell(a, "_voiceoff", {});
+    EXPECT_LINES(heardNow(), Lines {}); // the note of step 1 never reached an engine: no off for it
+
+    // 2. Saving and loading the setting.
+    EXPECT_TEXT(saved(a), "#X obj 10 10 ai.midi 240 64;"); // a default box: byte for byte what it was
+    tell(a, "speaker", { 0 });
+    EXPECT_TEXT(saved(a), "#X obj 10 10 ai.midi 240 64 speaker 0;");
+    tell(a, "speaker", { 1 });
+    EXPECT_TEXT(saved(a), "#X obj 10 10 ai.midi 240 64;");
+    t_gobj* off1 = make({ "240", "64", "speaker", "0" });
+    EXPECT_TEXT(className(off1) == "ai.midi" ? saved(off1) : std::string("(not ai.midi)"), "#X obj 10 70 ai.midi 240 64 speaker 0;");
+    t_gobj* off2 = make({ "speaker", "0" }); // a box that asks only for the setting keeps the default size
+    EXPECT_TEXT(className(off2) == "ai.midi" ? saved(off2) : std::string("(not ai.midi)"), "#X obj 10 130 ai.midi 240 64 speaker 0;");
+    t_gobj* sized = make({ "300", "80", "speaker", "1" }); // an explicit 1 is the default again
+    EXPECT_TEXT(className(sized) == "ai.midi" ? saved(sized) : std::string("(not ai.midi)"), "#X obj 10 190 ai.midi 300 80;");
+    t_gobj* bad = make({ "240", "64", "speaker" }); // a marker without its number is ignored, not a crash
+    EXPECT_TEXT(className(bad) == "ai.midi" ? saved(bad) : std::string("(not ai.midi)"), "#X obj 10 250 ai.midi 240 64;");
+    host->pdWait([&] { for (t_gobj* g : { off1, off2, sized, bad }) glist_delete(sub, g); }, 3000);
+
+    // 3. Live notes: only while recording; the outlet passes them whatever the speaker says.
+    clearAll();
+    tell(a, "list", { 60, 100 }); // not recording: not heard
+    EXPECT_LINES(heardNow(), Lines {});
+    tell(a, "record", { 1 });
+    tell(a, "list", { 60, 100 });
+    tell(a, "list", { 60, 0 });
+    EXPECT_LINES(heardNow(), Lines { "60 100", "60 0" });
+    clearAll();
+    tell(a, "list", { 64, 300 }); // a velocity above 127 is clipped for the engine (the outlet keeps what came in)
+    EXPECT_LINES(heardNow(), Lines { "64 127" });
+    tell(a, "list", { 64, 0 });
+    clearAll();
+    tell(a, "speaker", { 0 });
+    tell(a, "list", { 62, 90 });
+    tell(a, "list", { 62, 0 });
+    tell(a, "record", { 0 });
+    EXPECT_LINES(heardNow(), Lines {}); // speaker off: the engine hears nothing
+    EXPECT_LINES(outletNow(), Lines { "62 90", "62 0" }); // the outlet is the same with the speaker off
+    tell(a, "speaker", { 1 });
+    clearAll();
+    tell(a, "list", { 61, 100 }); // not recording any more: the outlet passes it, the engine does not hear it
+    EXPECT_LINES(heardNow(), Lines {});
+    EXPECT_LINES(outletNow(), Lines { "61 100" });
+
+    // 4. No hanging note: two notes of the player are still held when the take is stopped, cleared, ended by `record 0`, played,
+    //    when the speaker goes off, or when a new take starts over a note the playback was holding.
+    auto holdTwo = [&] {
+        tell(a, "stop", {});
+        tell(a, "speaker", { 1 });
+        tell(a, "record", { 1 });
+        clearAll();
+        tell(a, "list", { 65, 90 });
+        tell(a, "list", { 69, 90 });
+        EXPECT_LINES(heardNow(), Lines { "65 90", "69 90" });
+        clearAll();
+    };
+    auto expectBothReleased = [&](char const* what) {
+        bool const ok = heardNow() == Lines { "65 0", "69 0" };
+        if (!ok) std::printf("  (after %s)\n", what);
+        CHECK(ok);
+        clearAll();
+        tell(a, "_voiceoff", {});
+        EXPECT_LINES(heardNow(), Lines {}); // and nothing is left sounding
+    };
+    holdTwo();
+    tell(a, "record", { 0 });
+    expectBothReleased("record 0");
+    holdTwo();
+    tell(a, "stop", {});
+    expectBothReleased("stop");
+    holdTwo();
+    tell(a, "clear", {});
+    expectBothReleased("clear");
+    holdTwo();
+    tell(a, "play", {}); // a play message ends the recording; the widget's timer takes over
+    expectBothReleased("play");
+    holdTwo();
+    tell(a, "speaker", { 0 });
+    expectBothReleased("speaker 0");
+    tell(a, "speaker", { 1 });
+    tell(a, "stop", {});
+    clearAll();
+    tell(a, "_voice", { 60, 100, 0 }); // the playback holds a note when a new take starts
+    clearAll();
+    tell(a, "record", { 1 });
+    EXPECT_LINES(heardNow(), Lines { "60 0" });
+    tell(a, "record", { 1 }); // a second `record 1` while recording changes nothing
+    EXPECT_LINES(heardNow(), Lines { "60 0" });
+    tell(a, "stop", {});
+
+    // 5. `_voice`: the take's playback entry point.
+    clearAll();
+    tell(a, "speaker", { 1 });
+    tell(a, "_voice", { 60, 100, 0 });
+    EXPECT_LINES(heardNow(), Lines { "60 100" });
+    clearAll();
+    tell(a, "_voice", { 60, 100, 0 }); // the same pitch again: off, then on (one voice per pitch)
+    EXPECT_LINES(heardNow(), Lines { "60 0", "60 100" });
+    clearAll();
+    tell(a, "_voice", { 60, 0 }); // the take's own off
+    tell(a, "_voice", { 60, 0 }); // a second off for a note that is not sounding: nothing
+    tell(a, "_voice", { 72, 0 });
+    EXPECT_LINES(heardNow(), Lines { "60 0" });
+    clearAll();
+    tell(a, "_voice", { 60, 300, 0 });
+    tell(a, "_voice", { 61, 0.4f, 0 }); // a velocity that rounds to 0 is an off, not a whisper
+    EXPECT_LINES(heardNow(), Lines { "60 127" });
+    tell(a, "_voice", { 200, 90, 0 }); // the pitch is clipped to 0..127
+    tell(a, "_voice", { -4, 90, 0 });
+    EXPECT_LINES(heardNow(), Lines { "60 127", "127 90", "0 90" });
+    clearAll();
+    tell(a, "_voiceoff", {});
+    EXPECT_LINES(heardNow(), (Lines { "0 0", "60 0", "127 0" })); // every sounding pitch, ascending
+    clearAll();
+    tell(a, "speaker", { 0 });
+    tell(a, "_voice", { 60, 100, 0 }); // speaker off: not heard, the take's outlet does not depend on it
+    EXPECT_LINES(heardNow(), Lines {});
+    EXPECT_LINES(outletNow(), Lines {}); // `_voice` itself is a side channel: no outlet output
+    tell(a, "speaker", { 1 });
+
+    // 5b. The note the take never ends: the object's own clock ends it after its dur ms; per pitch, newest wins.
+    clearAll();
+    tell(a, "_voice", { 61, 100, 150 });
+    EXPECT_LINES(heardNow(), Lines { "61 100" }); // not at once
+    CHECK(focuscases::waitFor([&] { return heardNow().size() == 2; }, 3000));
+    EXPECT_LINES(heardNow(), Lines { "61 100", "61 0" });
+    clearAll();
+    tell(a, "_voice", { 60, 100, 500 });
+    tell(a, "_voice", { 64, 100, 100 });
+    CHECK(focuscases::waitFor([&] { return heardNow().size() == 4; }, 3000));
+    EXPECT_LINES(heardNow(), Lines { "60 100", "64 100", "64 0", "60 0" }); // the short one ends first
+    clearAll();
+    tell(a, "_voice", { 61, 100, 300 });
+    tell(a, "_voice", { 61, 0 }); // the take's own off came first: no second off from the clock
+    tell(a, "_voice", { 61, 100, 0 }); // and an on the take ends itself has no pending off either
+    sleepMs(700);
+    EXPECT_LINES(heardNow(), Lines { "61 100", "61 0", "61 100" });
+    tell(a, "_voiceoff", {});
+    clearAll();
+    tell(a, "_voice", { 63, 100, 300 });
+    tell(a, "speaker", { 0 }); // released at once, and the clock has nothing left to do
+    sleepMs(600);
+    EXPECT_LINES(heardNow(), Lines { "63 100", "63 0" });
+    tell(a, "speaker", { 1 });
+
+    // 5c. A bare float while recording (vel 100, no off of its own): heard, then released after 200 ms.
+    clearAll();
+    tell(a, "record", { 1 });
+    clearAll();
+    tellFloat(a, 70);
+    EXPECT_LINES(heardNow(), Lines { "70 100" });
+    EXPECT_LINES(outletNow(), Lines { "70 100" });
+    CHECK(focuscases::waitFor([&] { return heardNow().size() == 2; }, 3000));
+    EXPECT_LINES(heardNow(), Lines { "70 100", "70 0" });
+    clearAll();
+    tellFloat(a, 71); // stopped before the 200 ms are over: released by the stop, and only once
+    tell(a, "stop", {});
+    sleepMs(500);
+    EXPECT_LINES(heardNow(), Lines { "71 100", "71 0" });
+    EXPECT_LINES(outletNow(), Lines { "71 100" });
+
+    // 6. Deleting the box releases what sounds.
+    t_gobj* doomed = make({ "240", "64" });
+    CHECK(className(doomed) == "ai.midi");
+    clearAll();
+    tell(doomed, "record", { 1 });
+    tell(doomed, "list", { 72, 90 });
+    EXPECT_LINES(heardNow(), Lines { "72 90" });
+    host->pdWait([&] { glist_delete(sub, doomed); }, 3000);
+    EXPECT_LINES(heardNow(), Lines { "72 90", "72 0" });
+
+    // 7. A patch file: an old box (no marker), one saved with the speaker off, one that asks only for it.
+    auto dir = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("mcp_aimidi_speaker");
+    dir.deleteRecursively();
+    dir.createDirectory();
+    auto file = dir.getChildFile("speaker.pd");
+    file.replaceWithText("#N canvas 0 50 450 300 12;\n#X obj 10 10 ai.midi 240 64;\n#X obj 10 90 ai.midi 200 50 speaker 0;\n"
+                         "#X obj 10 170 ai.midi speaker 0;\n");
+    host->pdWait([&] { glist_delete(sub, a); }, 3000); // (releases its probe wire too)
+    auto r = h.call("/pd/load_patch", { "pd-p12midi", file.getFullPathName(), "am1" }, "/pd/load_patch/reply/am1", 5000);
+    CHECK(r.has_value() && r->num(0) == 3);
+    std::vector<t_gobj*> loaded;
+    host->pdWait([&] {
+        for (t_gobj* g = sub->gl_list; g; g = g->g_next)
+            if (className(g) == "ai.midi") loaded.push_back(g);
+    }, 3000);
+    CHECK(loaded.size() == 3);
+    if (loaded.size() == 3) {
+        auto const tail = [&](t_gobj* g) {
+            auto const t = saved(g);
+            auto const at = t.find("ai.midi");
+            return at == std::string::npos ? t : t.substr(at);
+        };
+        EXPECT_TEXT(tail(loaded[0]), "ai.midi 240 64;");
+        EXPECT_TEXT(tail(loaded[1]), "ai.midi 200 50 speaker 0;");
+        EXPECT_TEXT(tail(loaded[2]), "ai.midi 240 64 speaker 0;");
+        for (size_t i = 0; i < 3; ++i) { // heard only from the box that has the speaker on
+            clearAll();
+            tell(loaded[i], "record", { 1 });
+            tell(loaded[i], "list", { 66, 100 });
+            tell(loaded[i], "record", { 0 });
+            EXPECT_LINES(heardNow(), (i == 0 ? Lines { "66 100", "66 0" } : Lines {}));
+        }
+    }
+
+    // Clean up: the probes and the scratch subpatch.
+    host->pdWait([&] {
+        pd_unbind(&voiceProbe->ob_pd, gensym("ai-voice-note"));
+        pd_free(&voiceProbe->ob_pd);
+        pd_free(&outletProbe->ob_pd);
+        glist_delete(mainRoot, subObj);
+    }, 3000);
+    dir.deleteRecursively();
+    (void)engineWasOpen;
+}
+
 // MIDI device awareness: /pd/midi_devices <corrId> answers {"inputs":[{name,identifier,enabled}],"outputs":[...]}:
 // every device JUCE lists (as PlugData's MidiDeviceManager holds them) and whether PlugData's MIDI settings have it on
 // (enabled = it sits in a numbered port; null in the plugin build, where the host routes MIDI). Read-only: the port
@@ -7960,6 +8388,7 @@ int main()
             runFactCases(harness, processor);
             runOutputCeilingCases(harness, processor, audioControl);
             runVoiceEngineCases(harness, processor, audioControl);
+            runAiMidiVoiceCases(harness, processor, audioControl);
             runMidiDevicesCases(harness, processor);
             runApprovalCases(harness, processor);
             runAlphiSayCases(harness, processor);
