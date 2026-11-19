@@ -3,6 +3,8 @@
  // Moved verbatim from Source/Canvas.cpp; implicit Canvas members became `canvas.`
  // accesses. See CanvasMcpLayer.h.
  */
+#include <algorithm>
+#include <vector>
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_cryptography/juce_cryptography.h>
 #include "Utility/Config.h"
@@ -212,12 +214,13 @@ CanvasMcpLayer::AnnotationFrame CanvasMcpLayer::getAnnotationFrame(size_t annInd
         // 1. Right of the boxes, vertically centred, unless another box lies there.
         juce::Rectangle<float> const right(frame.group.getRight() + mcp::aiTagLeaderPx, frame.group.getCentreY() - tagH * 0.5f + static_cast<float>(stack) * (tagH + 2.0f), tagW, tagH);
         auto const rightPatch = right.translated(-origin.x, -origin.y).expanded(2.0f);
+        std::vector<Object const*> targets; // looked up once: the scan below visits every box of the canvas
+        for (auto const& tid : ids)
+            targets.push_back(findObjectByStableId(tid));
         bool blocked = false;
         for (auto* obj : canvas.objects) {
             if (!obj || blocked) continue;
-            bool isTarget = false;
-            for (auto const& tid : ids)
-                isTarget = isTarget || (findObjectByStableId(tid) == obj);
+            bool const isTarget = std::find(targets.begin(), targets.end(), obj) != targets.end();
             if (!isTarget && obj->getObjectBounds().toFloat().intersects(rightPatch))
                 blocked = true;
         }
