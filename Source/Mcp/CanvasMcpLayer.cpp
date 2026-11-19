@@ -9,6 +9,7 @@
 #include "Utility/NVGTextShim.h"
 
 #include "Mcp/CanvasMcpLayer.h"
+#include "Mcp/CanvasMcpAiDraw.h"
 #include "Canvas.h"
 #include "Object.h"
 #include "Connection.h"
@@ -85,97 +86,64 @@ void CanvasMcpLayer::paintUnderObjects(NVGcontext* nvg, Rectangle<int> invalidRe
     // Alphi drop 1 D11: with no free spot on the right edge his tab is drawn under the boxes (CanvasMcpAlphiSay.cpp).
     if (mcpAlphiTabUnder && !mcpAlphiTabFrameUnder.isEmpty())
         paintAlphiTab(nvg);
-    // PRD overlay: titled regions drawn BEHIND the objects (structure at a glance).
+    // PRD overlay: titled regions drawn BEHIND the objects (structure at a glance). Design round 2026-11-19 B1: ONE grey
+    // tint with a plain grey title; the rectangles come from mcp::aiRegionRects (padded, never crossing, never cutting a
+    // member box), the region's kind no longer picks a colour.
     if (canvas.pd && shouldShowAIRegions() && !canvas.pd->getMcp()->session.getMcpRegions().empty()) {
-        for (auto const& r : canvas.pd->getMcp()->session.getMcpRegions()) {
-            float rx = 0.0f, ry = 0.0f, rw = 0.0f, rh = 0.0f;
-            if (r.targetIds.size() > 0) {
-                bool first = true;
-                int minX = 0, minY = 0, maxX = 0, maxY = 0;
-                for (auto const& tid : r.targetIds) {
-                    if (auto* obj = findObjectByStableId(tid)) {
-                        auto const b = obj->getObjectBounds();
-                        if (first) {
-                            minX = b.getX();
-                            minY = b.getY();
-                            maxX = b.getRight();
-                            maxY = b.getBottom();
-                            first = false;
-                        } else {
-                            minX = std::min(minX, b.getX());
-                            minY = std::min(minY, b.getY());
-                            maxX = std::max(maxX, b.getRight());
-                            maxY = std::max(maxY, b.getBottom());
-                        }
-                    }
-                }
-                if (first) continue; // All member objects deleted -> auto-prune
-                constexpr int padX = 18;
-                constexpr int padYTop = 48;
-                constexpr int padYBottom = 18;
-                rx = canvas.canvasOrigin.x + static_cast<float>(minX - padX);
-                ry = canvas.canvasOrigin.y + static_cast<float>(minY - padYTop);
-                rw = static_cast<float>(maxX - minX + padX * 2);
-                rh = static_cast<float>(maxY - minY + padYTop + padYBottom);
-            } else {
-                rx = canvas.canvasOrigin.x + r.x;
-                ry = canvas.canvasOrigin.y + r.y;
-                rw = r.w;
-                rh = r.h;
-            }
-
-            // Outside what this render redraws: nothing of it would land (its title badge may run past rw).
-            if (!juce::Rectangle<float>(rx, ry, std::max(rw, 640.0f), rh).expanded(4.0f).intersects(invalidRegion.toFloat()))
+        auto const regions = canvas.pd->getMcp()->session.getMcpRegions();
+        // Every region that holds boxes: the bounding box of its live members (all deleted -> auto-prune); a region with
+        // no targets keeps the rectangle it was given.
+        std::vector<mcp::ApprovalRect> members;
+        std::vector<size_t> memberOf; // members[k] belongs to regions[memberOf[k]]
+        for (size_t ri = 0; ri < regions.size(); ++ri) {
+            auto const& r = regions[ri];
+            if (r.targetIds.size() == 0)
                 continue;
-
-            NVGScopedState scopedRegion(nvg);
-            juce::String const k = r.kind.isNotEmpty() ? r.kind : juce::String("group");
-            int ar = 0x8a, ag = 0x93, ab = 0xa6;
-            if (k == "source") { ar = 0x3d; ag = 0xdd; ab = 0x8a; }      // Emerald Green
-            else if (k == "fx") { ar = 0x4a; ag = 0x9e; ab = 0xff; }     // Electric Cyan
-            else if (k == "loop") { ar = 0xff; ag = 0xbe; ab = 0x50; }   // Warm Amber
-            else if (k == "output") { ar = 0xff; ag = 0x5a; ab = 0x5a; } // Coral Red
-
-            // 1. Module Chassis Backplate
-            nanovg::nvgBeginPath(nvg);
-            nanovg::nvgRoundedRect(nvg, rx, ry, rw, rh, 8.0f);
-            nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(ar, ag, ab, 22));
-            nanovg::nvgFill(nvg);
-            nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(ar, ag, ab, 140));
-            nanovg::nvgStrokeWidth(nvg, 1.2f);
-            nanovg::nvgLineStyle(nvg, NVG_LINE_DASHED);
-            nanovg::nvgDashLength(nvg, 6.0f);
-            nanovg::nvgStroke(nvg);
-            nanovg::nvgLineStyle(nvg, NVG_LINE_SOLID);
-
-            // 2. Hardware Module Faceplate Title Badge
-            if (r.title.isNotEmpty()) {
-                mcpnvg::nvgFontSize(nvg, 11.0f);
-                mcpnvg::nvgFontFace(nvg, "Inter");
-                float bounds[4];
-                mcpnvg::nvgTextBounds(nvg, rx + 10.0f, ry + 6.0f, r.title.toRawUTF8(), nullptr, bounds);
-                float const tw = bounds[2] - bounds[0];
-
-                // Dark chassis badge
-                nanovg::nvgBeginPath(nvg);
-                nanovg::nvgRoundedRect(nvg, rx + 8.0f, ry + 5.0f, tw + 22.0f, 18.0f, 4.0f);
-                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(16, 18, 22, 230));
-                nanovg::nvgFill(nvg);
-                nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(ar, ag, ab, 100));
-                nanovg::nvgStrokeWidth(nvg, 1.0f);
-                nanovg::nvgStroke(nvg);
-
-                // Status Jewel LED
-                nanovg::nvgBeginPath(nvg);
-                nanovg::nvgCircle(nvg, rx + 16.0f, ry + 14.0f, 2.5f);
-                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(ar, ag, ab, 255));
-                nanovg::nvgFill(nvg);
-
-                // Title Text
-                mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
-                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(ar, ag, ab, 245));
-                mcpnvg::nvgText(nvg, rx + 23.0f, ry + 14.0f, r.title.toRawUTF8(), nullptr);
+            bool first = true;
+            int minX = 0, minY = 0, maxX = 0, maxY = 0;
+            for (auto const& tid : r.targetIds) {
+                if (auto* obj = findObjectByStableId(tid)) {
+                    auto const b = obj->getObjectBounds();
+                    minX = first ? b.getX() : std::min(minX, b.getX());
+                    minY = first ? b.getY() : std::min(minY, b.getY());
+                    maxX = first ? b.getRight() : std::max(maxX, b.getRight());
+                    maxY = first ? b.getBottom() : std::max(maxY, b.getBottom());
+                    first = false;
+                }
             }
+            if (first)
+                continue;
+            members.push_back({ minX, minY, maxX - minX, maxY - minY });
+            memberOf.push_back(ri);
+        }
+        auto const rects = mcp::aiRegionRects(members);
+
+        auto const drawRegion = [&](float rx, float ry, float rw, float rh, juce::String const& title) {
+            // Outside what this render redraws: nothing of it would land (its title may run past rw).
+            if (!juce::Rectangle<float>(rx, ry, std::max(rw, 240.0f), std::max(rh, 20.0f)).expanded(4.0f).intersects(invalidRegion.toFloat()))
+                return;
+            NVGScopedState scopedRegion(nvg);
+            if (rw > 0.0f && rh > 0.0f) {
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgRoundedRect(nvg, rx, ry, rw, rh, mcp::aiRadius);
+                nanovg::nvgFillColor(nvg, mcpai::colour(mcp::aiRegionTint));
+                nanovg::nvgFill(nvg);
+            }
+            if (title.isNotEmpty()) {
+                mcpnvg::nvgFontSize(nvg, mcp::aiHintSize);
+                mcpnvg::nvgFontFace(nvg, "Inter");
+                mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
+                nanovg::nvgFillColor(nvg, mcpai::colour(mcp::aiGrey));
+                mcpnvg::nvgText(nvg, rx + 8.0f, ry + 6.0f, title.toRawUTF8(), nullptr);
+            }
+        };
+
+        for (size_t k = 0; k < rects.size(); ++k) // a region lying on an earlier one's boxes has an empty rectangle: its title only
+            drawRegion(canvas.canvasOrigin.x + static_cast<float>(rects[k].x), canvas.canvasOrigin.y + static_cast<float>(rects[k].y),
+                static_cast<float>(rects[k].w), static_cast<float>(rects[k].h), regions[memberOf[k]].title);
+        for (auto const& r : regions) { // no targets: the rectangle as given
+            if (r.targetIds.size() == 0)
+                drawRegion(canvas.canvasOrigin.x + r.x, canvas.canvasOrigin.y + r.y, r.w, r.h, r.title);
         }
     }
 
