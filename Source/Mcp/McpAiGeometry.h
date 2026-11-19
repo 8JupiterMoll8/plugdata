@@ -12,13 +12,19 @@
 //  - aiTagLeader: the grey line from the boxes to their tag, at most aiTagLeaderMaxPx (14) long;
 //  - aiTagPlace: right of the boxes, else above, else below, else left, always aiTagLeaderPx (14) away, never over a
 //    box (the tag AND its leader are clear of every other box);
-//  - aiRegionTitlePlace: the name at the top left of the region's rectangle, at the top right when a wire or a step
-//    disc would cover it on the left.
+//  - aiRegionTitlePlace / aiRegionTitlePlaceBy: the name at the top left of the region's rectangle, at the top right
+//    when a wire or a step disc would cover it on the left; the By form asks lazily (the left spot first, the right
+//    only when the left is covered), so a paint tests wires only when the name could move;
+//  - aiWireSegmentOnTitle: a flattened wire segment lies on a name (the cord is 4 px thick);
+//  - aiHashMix + AiTitleSideCache: the side of a name is remembered from paint to paint and asked again only when the
+//    hash of its inputs changes; the cache says when a remembered side flipped (the caller repaints the name's band).
 
 #include "McpAiStyle.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <vector>
 
 namespace mcp {
@@ -109,8 +115,9 @@ struct AiTagPlace {
  *  centred, the tag's own place for years), else above them, else below them (both left-aligned with the boxes), else
  *  left of them; always aiTagLeaderPx away. `stack` = how many tags already stand on the same boxes: each moves one line
  *  (aiTagStackStepPx) further along its side. A side is taken only when the tag (2 px of air around it) and its leader
- *  line touch no box in `obstacles` (the boxes the tag speaks about are not obstacles). */
-inline AiTagPlace aiTagPlace(AiRectF group, float tagW, float tagH, int stack, std::vector<AiRectF> const& obstacles)
+ *  line touch no box in `obstacles` (the boxes the tag speaks about are not obstacles: pass them in `skip`, as indices into
+ *  `obstacles`, so that one list of every box serves all the tags of a paint; an index past the list is ignored). */
+inline AiTagPlace aiTagPlace(AiRectF group, float tagW, float tagH, int stack, std::vector<AiRectF> const& obstacles, std::vector<std::size_t> const& skip = {})
 {
     float const step = static_cast<float>(stack) * (tagH + 2.0f);
     float const midY = group.centreY() - tagH * 0.5f;
@@ -121,11 +128,15 @@ inline AiTagPlace aiTagPlace(AiRectF group, float tagW, float tagH, int stack, s
         { group.x - aiTagLeaderPx - tagW, midY + step, tagW, tagH },               // left
     };
     AiTagSide const sides[4] = { AiTagSide::Right, AiTagSide::Above, AiTagSide::Below, AiTagSide::Left };
+    auto const skipped = [&skip](std::size_t index) { return std::find(skip.begin(), skip.end(), index) != skip.end(); };
     for (int i = 0; i < 4; ++i) {
         auto const tag = candidates[i];
         auto const leader = aiTagLeader(group, tag);
         bool blocked = false;
-        for (auto const& o : obstacles) {
+        for (std::size_t k = 0; k < obstacles.size(); ++k) {
+            auto const& o = obstacles[k];
+            if (!skip.empty() && skipped(k))
+                continue;
             if (aiIntersects(aiExpanded(tag, 2.0f), o) || (leader.visible && aiSegmentHits(leader.from, leader.to, aiExpanded(o, 1.0f)))) {
                 blocked = true;
                 break;
@@ -144,26 +155,119 @@ struct AiTitlePlace {
     bool right = false;       // moved to the top right of the rectangle
 };
 
-/** Where a region's name of `titleW` x `titleH` px stands: at the top left of `rect` (aiRegionTitleInset from the left
- *  edge, aiRegionTitleTop from the top), or at the top right (the same distance from the right edge) when something in
- *  `covers` (a wire sampled as small rectangles, a step disc) would lie on the name on the left and the right place is
- *  clear. A rectangle that is only a title (no width), one too narrow to hold the name twice, and a right place that
- *  is covered as well all keep the left place. */
+/** The name's top left on one side of `rect`: the left spot (aiRegionTitleInset from the left edge, aiRegionTitleTop from the
+ *  top) or the right spot (the same distance from the right edge). */
+inline AiTitlePlace aiRegionTitleSpot(AiRectF rect, float titleW, bool right)
+{
+    return right ? AiTitlePlace { rect.right() - aiRegionTitleInset - titleW, rect.y + aiRegionTitleTop, true }
+                 : AiTitlePlace { rect.x + aiRegionTitleInset, rect.y + aiRegionTitleTop, false };
+}
+
+/** A name can move to the other side only in a rectangle that is more than a title (some width) and has room for the name
+ *  twice (the right spot must not lie on the left one). Otherwise it stays on the left, whatever is on it. */
+inline bool aiRegionTitleCanMove(AiRectF rect, float titleW)
+{
+    if (rect.w <= 0.0f)
+        return false;
+    return !(aiRegionTitleSpot(rect, titleW, true).x < aiRegionTitleSpot(rect, titleW, false).x + titleW + aiRegionTitleInset);
+}
+
+/** Where a region's name of `titleW` x `titleH` px stands: at the top left of `rect` (aiRegionTitleSpot), or at the top
+ *  right when `covered` (asked with the name's spot: a wire or a step disc lies on it) says so for the left spot and the
+ *  right spot is clear. A rectangle where the name cannot move (aiRegionTitleCanMove), and a right place that is covered
+ *  as well, keep the left place. `covered` is asked LAZILY: never for a name that cannot move, the left spot first, and
+ *  the right spot only when the left is covered (a paint that finds nothing on the left tests no more). */
+template <class Covered>
+inline AiTitlePlace aiRegionTitlePlaceBy(AiRectF rect, float titleW, float titleH, Covered&& covered)
+{
+    auto const left = aiRegionTitleSpot(rect, titleW, false);
+    if (!aiRegionTitleCanMove(rect, titleW))
+        return left;
+    if (!covered(AiRectF { left.x, left.y, titleW, titleH }))
+        return left;
+    auto const right = aiRegionTitleSpot(rect, titleW, true);
+    return covered(AiRectF { right.x, right.y, titleW, titleH }) ? left : right;
+}
+
+/** The same with the covers as a list of rectangles (a wire sampled as small rectangles, a step disc). */
 inline AiTitlePlace aiRegionTitlePlace(AiRectF rect, float titleW, float titleH, std::vector<AiRectF> const& covers)
 {
-    AiTitlePlace const left { rect.x + aiRegionTitleInset, rect.y + aiRegionTitleTop, false };
-    if (rect.w <= 0.0f)
-        return left;
-    AiTitlePlace const right { rect.right() - aiRegionTitleInset - titleW, left.y, true };
-    if (right.x < left.x + titleW + aiRegionTitleInset)
-        return left; // no room for two places: the name stays at the left
-    auto const covered = [&](AiTitlePlace p) {
+    return aiRegionTitlePlaceBy(rect, titleW, titleH, [&covers](AiRectF spot) {
         for (auto const& c : covers)
-            if (aiIntersects({ p.x, p.y, titleW, titleH }, c))
+            if (aiIntersects(spot, c))
                 return true;
         return false;
-    };
-    return covered(left) && !covered(right) ? right : left;
+    });
 }
+
+constexpr float aiRegionWireHalfWidth = 2.0f; // a cord is drawn about 4 px thick
+
+/** A segment of a flattened wire lies on a name's spot: the segment comes within the cord's half width of the spot. */
+inline bool aiWireSegmentOnTitle(AiPointF a, AiPointF b, AiRectF title)
+{
+    return aiSegmentHits(a, b, aiExpanded(title, aiRegionWireHalfWidth));
+}
+
+// ------------------------------------------------------------------------------------- remembering a name's side
+
+constexpr std::uint64_t aiHashSeed = 0xcbf29ce484222325ull;
+
+/** One value mixed into a 64-bit hash (the key of a cached decision). Order matters; a float is mixed by its bits. */
+inline std::uint64_t aiHashMix(std::uint64_t h, std::uint64_t v)
+{
+    h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+    h *= 0xff51afd7ed558ccdull;
+    return h ^ (h >> 32);
+}
+inline std::uint64_t aiHashMix(std::uint64_t h, int v) { return aiHashMix(h, static_cast<std::uint64_t>(static_cast<std::int64_t>(v))); }
+inline std::uint64_t aiHashMix(std::uint64_t h, float v)
+{
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &v, sizeof bits);
+    return aiHashMix(h, static_cast<std::uint64_t>(bits));
+}
+
+/** The side each region's name stands on, remembered from one paint to the next. A slot is asked again (`compute`) only when
+ *  its key (the caller's hash of everything the answer depends on: the rectangle, the name's size, the wires, the discs)
+ *  changed since the slot was last asked. `changed` says that a name which was drawn on one side now belongs on the other:
+ *  the render is scissored to the damaged area, so the caller repaints the name's band (a partial repaint would tear it).
+ *  The first answer of a slot is never a change: nothing of it is on the screen yet. */
+class AiTitleSideCache {
+public:
+    struct Answer {
+        bool right = false;
+        bool recomputed = false;
+        bool changed = false;
+    };
+
+    template <class Compute>
+    Answer get(std::size_t slot, std::uint64_t key, Compute&& compute)
+    {
+        if (slot >= entries_.size())
+            entries_.resize(slot + 1);
+        auto& e = entries_[slot];
+        if (e.valid && e.key == key)
+            return { e.right, false, false };
+        bool const right = compute();
+        bool const changed = e.valid && e.right != right;
+        e = { key, right, true };
+        return { right, true, changed };
+    }
+    /** Forget the slots at `slots` and beyond (the regions of the canvas became fewer). */
+    void trim(std::size_t slots)
+    {
+        if (entries_.size() > slots)
+            entries_.resize(slots);
+    }
+    void clear() { entries_.clear(); }
+
+private:
+    struct Entry {
+        std::uint64_t key = 0;
+        bool right = false;
+        bool valid = false;
+    };
+    std::vector<Entry> entries_;
+};
 
 } // namespace mcp

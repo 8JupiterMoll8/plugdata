@@ -4,6 +4,8 @@
  // mark); implicit Canvas members became `canvas.` accesses. See CanvasMcpLayer.h.
  */
 #include <algorithm>
+#include <cstdint>
+#include <optional>
 #include <tuple>
 #include <vector>
 #include <juce_gui_basics/juce_gui_basics.h>
@@ -126,9 +128,27 @@ void CanvasMcpLayer::paintUnderObjects(NVGcontext* nvg, Rectangle<int> invalidRe
 
         float const zoom = canvas.viewport ? canvas.viewport->getViewScale() : getValue<float>(canvas.zoomScale);
         float const titleSize = mcp::aiRegionTitleSizeFor(zoom);
-        auto const steps = spotlightSteps(); // the order discs a name may have to step aside for (empty without a spotlight)
+        auto const& steps = spotlightSteps(); // the order discs a name may have to step aside for (empty without a spotlight; cached)
 
-        auto const drawRegion = [&](float rx, float ry, float rw, float rh, juce::String const& title) {
+        // What a name's side depends on besides its own rectangle: the wires and the discs. One pass over the wires, made at most
+        // once per render and only when a name that can move is drawn (review 2026-11-19: the side used to be worked out on every
+        // paint by measuring every wire in 4 px steps).
+        std::optional<std::uint64_t> sceneKey;
+        auto const sceneKeyOnce = [&]() {
+            if (!sceneKey) {
+                auto h = wiresKey();
+                for (auto const& step : steps) {
+                    h = mcp::aiHashMix(h, step.centre.x);
+                    h = mcp::aiHashMix(h, step.centre.y);
+                    h = mcp::aiHashMix(h, step.number);
+                }
+                sceneKey = h;
+            }
+            return *sceneKey;
+        };
+        std::vector<juce::Rectangle<int>> flippedBands; // the bands of the names that changed sides in this render
+
+        auto const drawRegion = [&](std::size_t slot, float rx, float ry, float rw, float rh, juce::String const& title) {
             // Outside what this render redraws: nothing of it would land (its title may run past rw, and grows when zoomed out).
             if (!juce::Rectangle<float>(rx, ry, std::max(rw, 240.0f * titleSize / mcp::aiRegionTitleSize), std::max(rh, titleSize * 2.0f)).expanded(4.0f).intersects(invalidRegion.toFloat()))
                 return;
@@ -148,21 +168,38 @@ void CanvasMcpLayer::paintUnderObjects(NVGcontext* nvg, Rectangle<int> invalidRe
                 mcpnvg::nvgTextBounds(nvg, 0.0f, 0.0f, title.toRawUTF8(), nullptr, bounds);
                 float const titleW = bounds[2] - bounds[0];
                 float const titleH = bounds[3] - bounds[1];
-                // Left, unless a wire or a step disc would lie on the name there and the right is clear.
-                auto const place = mcp::aiRegionTitlePlace({ rx, ry, rw, rh }, titleW, titleH,
-                    regionTitleCovers({ rx, ry + mcp::aiRegionTitleTop, std::max(rw, titleW + 2.0f * mcp::aiRegionTitleInset), titleH }, steps));
+                // Left, unless a wire or a step disc would lie on the name there and the right is clear. The answer is remembered
+                // per region and asked again only when its inputs changed (the rectangle, the name's size, the wires, the discs).
+                mcp::AiRectF const rect { rx, ry, rw, rh };
+                bool const movable = mcp::aiRegionTitleCanMove(rect, titleW);
+                auto key = mcp::aiHashSeed;
+                for (float const v : { rx, ry, rw, rh, titleW, titleH })
+                    key = mcp::aiHashMix(key, v);
+                key = mcp::aiHashMix(key, movable ? sceneKeyOnce() : std::uint64_t { 0 }); // a name that cannot move ignores the wires
+                auto const side = mcpTitleSides.get(slot, key, [&] {
+                    return mcp::aiRegionTitlePlaceBy(rect, titleW, titleH, [&](mcp::AiRectF spot) { return regionTitleCovered(spot, steps); }).right;
+                });
+                if (side.changed) // drawn on the other side before: this render is scissored to the damage and would tear it
+                    flippedBands.push_back(juce::Rectangle<float>(rx, ry + mcp::aiRegionTitleTop, std::max(rw, titleW + 2.0f * mcp::aiRegionTitleInset), titleH).expanded(3.0f).getSmallestIntegerContainer());
+                auto const place = mcp::aiRegionTitleSpot(rect, titleW, side.right);
                 nanovg::nvgFillColor(nvg, mcpai::colour(mcp::aiInk, mcp::aiRegionTitleAlpha));
                 mcpnvg::nvgText(nvg, place.x, place.y, title.toRawUTF8(), nullptr);
             }
         };
 
+        std::size_t slot = 0;
         for (size_t k = 0; k < rects.size(); ++k) // a region lying on an earlier one's boxes has an empty rectangle: its title only
-            drawRegion(canvas.canvasOrigin.x + static_cast<float>(rects[k].x), canvas.canvasOrigin.y + static_cast<float>(rects[k].y),
+            drawRegion(slot++, canvas.canvasOrigin.x + static_cast<float>(rects[k].x), canvas.canvasOrigin.y + static_cast<float>(rects[k].y),
                 static_cast<float>(rects[k].w), static_cast<float>(rects[k].h), regions[memberOf[k]].title);
         for (auto const& r : regions) { // no targets: the rectangle as given
             if (r.targetIds.size() == 0)
-                drawRegion(canvas.canvasOrigin.x + r.x, canvas.canvasOrigin.y + r.y, r.w, r.h, r.title);
+                drawRegion(slot++, canvas.canvasOrigin.x + r.x, canvas.canvasOrigin.y + r.y, r.w, r.h, r.title);
         }
+        mcpTitleSides.trim(slot);
+        for (auto const& band : flippedBands)
+            repaintAfterRender(band);
+    } else {
+        mcpTitleSides.clear(); // no regions on show: what was remembered is not on the screen any more
     }
 
     // PRD Phase 2: pasted reference images render as glass backdrops behind cords/objects.
@@ -184,10 +221,11 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
     if (canvas.pd && shouldShowAIAnnotations() && !canvas.pd->getMcp()->session.getMcpAnnotations().empty()) {
         auto const canvasBg = nvgColour(getThemeColours(canvas).canvasBackgroundColour);
         auto const anns = canvas.pd->getMcp()->session.getMcpAnnotations();
+        auto const scene = buildAnnotationScene(); // every box, once for all the tags of this paint
         for (size_t ai = 0; ai < anns.size(); ++ai) {
             auto const& a = anns[ai];
             if (a.text.isEmpty()) continue;
-            auto const frame = getAnnotationFrame(ai);
+            auto const frame = getAnnotationFrame(ai, scene);
             auto const& tape = frame.tag;
             if (tape.isEmpty()) continue; // all target boxes deleted
 
@@ -1818,11 +1856,51 @@ void CanvasMcpLayer::paintSpotlightActivity(NVGcontext* nvg, Connection const& c
     nanovg::nvgFill(nvg);
 }
 
-std::vector<CanvasMcpLayer::SpotlightStep> CanvasMcpLayer::spotlightSteps() const
+std::uint64_t CanvasMcpLayer::wiresKey() const
 {
-    std::vector<SpotlightStep> out;
-    if (canvas.isGraph || !spotlightHere())
-        return out;
+    auto h = mcp::aiHashMix(mcp::aiHashSeed, static_cast<int>(canvas.connections.size()));
+    auto const addr = [](void const* p) { return static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(p)); };
+    for (auto* c : canvas.connections) {
+        if (!c)
+            continue;
+        h = mcp::aiHashMix(h, addr(c));
+        h = mcp::aiHashMix(h, addr(c->outobj.get())); // a retyped box makes new wires: the same path from another box is another wire
+        h = mcp::aiHashMix(h, addr(c->inobj.get()));
+        h = mcp::aiHashMix(h, c->outIdx);
+        h = mcp::aiHashMix(h, c->inIdx);
+        for (juce::Path::Iterator it(c->getPath()); it.next();) { // the path's elements: no flattening, no measuring
+            h = mcp::aiHashMix(h, static_cast<int>(it.elementType));
+            if (it.elementType == juce::Path::Iterator::closePath)
+                continue;
+            h = mcp::aiHashMix(h, it.x1);
+            h = mcp::aiHashMix(h, it.y1);
+            if (it.elementType == juce::Path::Iterator::quadraticTo || it.elementType == juce::Path::Iterator::cubicTo) {
+                h = mcp::aiHashMix(h, it.x2);
+                h = mcp::aiHashMix(h, it.y2);
+            }
+            if (it.elementType == juce::Path::Iterator::cubicTo) {
+                h = mcp::aiHashMix(h, it.x3);
+                h = mcp::aiHashMix(h, it.y3);
+            }
+        }
+    }
+    return h;
+}
+
+std::vector<CanvasMcpLayer::SpotlightStep> const& CanvasMcpLayer::spotlightSteps() const
+{
+    if (canvas.isGraph || !spotlightHere()) {
+        mcpSteps.clear();
+        mcpStepsValid = false;
+        return mcpSteps;
+    }
+    // The discs depend on the targets and their order (the targets version covers both) and on where the wires run. Made again only
+    // when one of them changed: this is asked twice per render (the region names step aside for the discs, then the discs are drawn)
+    // and a wire's middle takes two measurements of its path.
+    auto const key = mcp::aiHashMix(wiresKey(), static_cast<std::uint64_t>(canvas.pd->getMcp()->session.getMcpOverlayTargetsVersion()));
+    if (mcpStepsValid && key == mcpStepsKey)
+        return mcpSteps;
+    mcpSteps.clear();
     auto const order = canvas.pd->getMcp()->session.getMcpOverlayOrder();
     auto const rankOf = [&order](Object const* obj) -> std::size_t {
         if (!obj)
@@ -1857,8 +1935,10 @@ std::vector<CanvasMcpLayer::SpotlightStep> CanvasMcpLayer::spotlightSteps() cons
     });
     int n = 0;
     for (auto const& step : steps)
-        out.push_back({ step.middle, ++n }); // numbered from 1
-    return out;
+        mcpSteps.push_back({ step.middle, ++n }); // numbered from 1
+    mcpStepsKey = key;
+    mcpStepsValid = true;
+    return mcpSteps;
 }
 
 void CanvasMcpLayer::paintSpotlightOrder(NVGcontext* nvg)
@@ -1867,30 +1947,35 @@ void CanvasMcpLayer::paintSpotlightOrder(NVGcontext* nvg)
         mcpai::drawGlyph(nvg, mcp::AiTag::Step, step.centre.x, step.centre.y, step.number);
 }
 
-std::vector<mcp::AiRectF> CanvasMcpLayer::regionTitleCovers(mcp::AiRectF band, std::vector<SpotlightStep> const& steps) const
+bool CanvasMcpLayer::regionTitleCovered(mcp::AiRectF spot, std::vector<SpotlightStep> const& steps) const
 {
-    std::vector<mcp::AiRectF> covers;
-    juce::Rectangle<float> const area(band.x, band.y, band.w, band.h);
     constexpr float disc = mcp::aiStepDiscSize;
-    for (auto const& step : steps) {
-        juce::Rectangle<float> const d(step.centre.x - disc * 0.5f, step.centre.y - disc * 0.5f, disc, disc);
-        if (d.intersects(area))
-            covers.push_back({ d.getX(), d.getY(), d.getWidth(), d.getHeight() });
-    }
-    // A wire is sampled every 4 px along its path; the samples inside the band become 4 px squares.
-    constexpr float sample = 4.0f;
+    for (auto const& step : steps)
+        if (mcp::aiIntersects(spot, { step.centre.x - disc * 0.5f, step.centre.y - disc * 0.5f, disc, disc }))
+            return true;
+    // A wire is its flattened segments (one pass each, no measuring); only a wire whose bounds reach the spot is looked at.
+    juce::Rectangle<float> const reach = juce::Rectangle<float>(spot.x, spot.y, spot.w, spot.h).expanded(mcp::aiRegionWireHalfWidth);
     for (auto* c : canvas.connections) {
-        if (!c || !c->getBounds().toFloat().expanded(sample).intersects(area))
+        if (!c || !c->getBounds().toFloat().intersects(reach))
             continue;
-        auto const& wire = c->getPath();
-        auto const length = wire.getLength();
-        for (float at = 0.0f; at <= length; at += sample) {
-            auto const p = wire.getPointAlongPath(at);
-            if (area.contains(p))
-                covers.push_back({ p.x - sample * 0.5f, p.y - sample * 0.5f, sample, sample });
-        }
+        for (juce::PathFlatteningIterator it(c->getPath()); it.next();)
+            if (mcp::aiWireSegmentOnTitle({ it.x1, it.y1 }, { it.x2, it.y2 }, spot))
+                return true;
     }
-    return covers;
+    return false;
+}
+
+void CanvasMcpLayer::repaintAfterRender(juce::Rectangle<int> area) const
+{
+    // The surface clears its damage when the frame is recorded: a repaint asked from inside the render is lost. Posted, it lands
+    // after the frame and the next one redraws `area`.
+    juce::MessageManager::callAsync([safe = juce::Component::SafePointer<Canvas>(&canvas), area] {
+        if (!safe)
+            return;
+        safe->repaint(area);
+        if (safe->editor)
+            safe->editor->nvgSurface.invalidateArea(safe->editor->nvgSurface.getLocalArea(safe.getComponent(), area));
+    });
 }
 
 void CanvasMcpLayer::updateOverlays(int const overlayState)

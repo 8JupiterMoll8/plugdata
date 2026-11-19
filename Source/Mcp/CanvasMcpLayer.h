@@ -73,16 +73,23 @@ public:
     void paintSpotlightActivity(NVGcontext* nvg, Connection const& c, float progress) const;
     // The order discs: a black disc with a white number in the middle of each wire between two targets, numbered from 1 in the
     // order the AI listed them. spotlightSteps is where they go (canvas component coordinates): paintSpotlightOrder draws them, and
-    // a region's name steps aside for them.
+    // a region's name steps aside for them. CACHED (review 2026-11-19): the discs are made again only when the spotlight's targets
+    // or the canvas's wires changed (one pass over the wires per call, no path is measured); empty without a spotlight.
     struct SpotlightStep {
         juce::Point<float> centre;
         int number = 0;
     };
-    std::vector<SpotlightStep> spotlightSteps() const;
+    std::vector<SpotlightStep> const& spotlightSteps() const;
     void paintSpotlightOrder(NVGcontext* nvg);
-    // What would lie on a region's name inside `band` (canvas component coordinates): the order discs (`steps`) and a sample of every wire
-    // that runs through the band, as small rectangles (mcp::aiRegionTitlePlace decides left or right from them).
-    std::vector<mcp::AiRectF> regionTitleCovers(mcp::AiRectF band, std::vector<SpotlightStep> const& steps) const;
+    // Does a wire (as its flattened segments, 4 px thick) or an order disc (`steps`) lie on a region's name spot (canvas component
+    // coordinates)? Only wires whose bounds reach the spot are flattened (mcp::aiRegionTitlePlaceBy asks this lazily).
+    bool regionTitleCovered(mcp::AiRectF spot, std::vector<SpotlightStep> const& steps) const;
+    // A hash of the canvas's wires (their count and every path's elements): changes when a wire moves, appears or goes. One pass,
+    // no flattening, no lock: the key of the cached region-name sides and of the cached discs.
+    std::uint64_t wiresKey() const;
+    // Repaint `area` (canvas component coordinates) once this render is over: a repaint asked from inside a render is lost (the
+    // surface clears its damage when the frame is recorded).
+    void repaintAfterRender(juce::Rectangle<int> area) const;
 
     // Writes the overlay bit mask into the settings (lock or edit set) and re-reads them.
     void setOverlayMask(int mask);
@@ -165,6 +172,12 @@ public:
     mutable std::size_t mcpSpotObjects = ~std::size_t(0);
     mutable bool mcpSpotHere = false;
     std::uint64_t mcpSeenTargetsVersion = 0;
+    // spotlightSteps' cache: the discs and the key (targets version + the wires) they were made for (render thread).
+    mutable std::vector<SpotlightStep> mcpSteps;
+    mutable std::uint64_t mcpStepsKey = 0;
+    mutable bool mcpStepsValid = false;
+    // Which side each region's name stands on, remembered between renders (render thread); see mcp::AiTitleSideCache.
+    mcp::AiTitleSideCache mcpTitleSides;
     bool getAnnotationLiveBounds(juce::String const& targetId, juce::StringArray const& targetIds, float fallbackX, float fallbackY, float fallbackLx, float fallbackLy, bool fallbackHasLeader, float& outAx, float& outAy, float& outLx, float& outLy, bool& outHasLeader, juce::Rectangle<int>* outGroupBounds = nullptr) const;
     bool getAnnotationLiveBounds(juce::String const& targetId, float fallbackX, float fallbackY, float fallbackLx, float fallbackLy, bool fallbackHasLeader, float& outAx, float& outAy, float& outLx, float& outLy, bool& outHasLeader) const;
     // The frame of one AI tag (design round B2): the ONE place a tag is drawn AND hit-tested (hover, the close cross, the chips drawer
@@ -181,8 +194,16 @@ public:
     };
     static constexpr float annotationCloseSlotPx = 16.0f; // the close cross sits in the last 16 px of the frame (shown on hover)
     static constexpr float annotationMaxWidthPx = 380.0f; // a longer text is cut by the frame, never drawn past it
-    AnnotationFrame getAnnotationFrame(size_t annIndex) const;
-    juce::Rectangle<float> getAnnotationScreenBounds(size_t annIndex) const;
+    // Every box of the canvas as a tag's obstacle (patch coordinates), `owners[k]` being the box of `obstacles[k]`. Built ONCE per
+    // paint (or per pointer event) and shared by all the tags of it: the old code built this list again for each tag, on every
+    // paint and every hover (review 2026-11-19). A tag skips the boxes it speaks about by index (mcp::aiTagPlace).
+    struct AnnotationScene {
+        std::vector<Object const*> owners;
+        std::vector<mcp::AiRectF> obstacles;
+    };
+    AnnotationScene buildAnnotationScene() const;
+    AnnotationFrame getAnnotationFrame(size_t annIndex, AnnotationScene const& scene) const;
+    juce::Rectangle<float> getAnnotationScreenBounds(size_t annIndex, AnnotationScene const& scene) const;
     void setSketchToolActive(bool active);
     bool isSketchToolActive() const;
     bool isSketchingActive() const;

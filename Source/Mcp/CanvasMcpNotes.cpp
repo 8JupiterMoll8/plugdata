@@ -180,7 +180,23 @@ bool CanvasMcpLayer::getAnnotationLiveBounds(juce::String const& targetId, float
     return getAnnotationLiveBounds(targetId, juce::StringArray(), fallbackX, fallbackY, fallbackLx, fallbackLy, fallbackHasLeader, outAx, outAy, outLx, outLy, outHasLeader, nullptr);
 }
 
-CanvasMcpLayer::AnnotationFrame CanvasMcpLayer::getAnnotationFrame(size_t annIndex) const
+CanvasMcpLayer::AnnotationScene CanvasMcpLayer::buildAnnotationScene() const
+{
+    AnnotationScene scene;
+    auto const count = static_cast<size_t>(canvas.objects.size());
+    scene.owners.reserve(count);
+    scene.obstacles.reserve(count);
+    for (auto* obj : canvas.objects) {
+        if (!obj)
+            continue;
+        auto const ob = obj->getObjectBounds().toFloat();
+        scene.owners.push_back(obj);
+        scene.obstacles.push_back({ ob.getX(), ob.getY(), ob.getWidth(), ob.getHeight() });
+    }
+    return scene;
+}
+
+CanvasMcpLayer::AnnotationFrame CanvasMcpLayer::getAnnotationFrame(size_t annIndex, AnnotationScene const& scene) const
 {
     AnnotationFrame frame;
     if (!canvas.pd) return frame;
@@ -219,16 +235,14 @@ CanvasMcpLayer::AnnotationFrame CanvasMcpLayer::getAnnotationFrame(size_t annInd
         std::vector<Object const*> targets; // looked up once: the scan below visits every box of the canvas
         for (auto const& tid : ids)
             targets.push_back(findObjectByStableId(tid));
-        std::vector<mcp::AiRectF> obstacles;
-        obstacles.reserve(static_cast<size_t>(canvas.objects.size()));
-        for (auto* obj : canvas.objects) {
-            if (!obj || std::find(targets.begin(), targets.end(), obj) != targets.end())
-                continue;
-            auto const ob = obj->getObjectBounds().toFloat();
-            obstacles.push_back({ ob.getX(), ob.getY(), ob.getWidth(), ob.getHeight() });
-        }
+        // The boxes of the scene (built once for all the tags of this paint or event) are the obstacles, except the ones this tag
+        // speaks about: those are skipped by index, no list is built here.
+        std::vector<size_t> skip;
+        for (size_t k = 0; k < scene.owners.size(); ++k)
+            if (std::find(targets.begin(), targets.end(), scene.owners[k]) != targets.end())
+                skip.push_back(k);
         auto const placed = mcp::aiTagPlace({ static_cast<float>(grpBounds.getX()), static_cast<float>(grpBounds.getY()), static_cast<float>(grpBounds.getWidth()), static_cast<float>(grpBounds.getHeight()) },
-            tagW, tagH, stack, obstacles);
+            tagW, tagH, stack, scene.obstacles, skip);
         if (placed.side != mcp::AiTagSide::None) {
             frame.tag = juce::Rectangle<float>(placed.tag.x + origin.x, placed.tag.y + origin.y, placed.tag.w, placed.tag.h);
             // A tag stacked on a tag above or below the boxes has no leader of its own (it would run through the tag between).
@@ -252,9 +266,9 @@ CanvasMcpLayer::AnnotationFrame CanvasMcpLayer::getAnnotationFrame(size_t annInd
     return frame;
 }
 
-juce::Rectangle<float> CanvasMcpLayer::getAnnotationScreenBounds(size_t annIndex) const
+juce::Rectangle<float> CanvasMcpLayer::getAnnotationScreenBounds(size_t annIndex, AnnotationScene const& scene) const
 {
-    return getAnnotationFrame(annIndex).tag;
+    return getAnnotationFrame(annIndex, scene).tag;
 }
 
 void CanvasMcpLayer::mouseMove(MouseEvent const& e)
@@ -267,8 +281,9 @@ void CanvasMcpLayer::mouseMove(MouseEvent const& e)
     if (canvas.pd && !canvas.pd->getMcp()->session.getMcpAnnotations().empty()) {
         auto const pt = e.getPosition().toFloat();
         auto const anns = canvas.pd->getMcp()->session.getMcpAnnotations();
+        auto const scene = buildAnnotationScene(); // once for every tag the pointer is tested against
         for (int i = static_cast<int>(anns.size()) - 1; i >= 0; --i) {
-            auto const tb = getAnnotationScreenBounds(static_cast<size_t>(i));
+            auto const tb = getAnnotationScreenBounds(static_cast<size_t>(i), scene);
             if (tb.isEmpty()) continue;
 
             auto const chips = CanvasMcpLayer::getAnnotationPivotChips(anns[static_cast<size_t>(i)].text, anns[static_cast<size_t>(i)].kind);
@@ -343,8 +358,9 @@ bool CanvasMcpLayer::isPointOverNote(Point<int> canvasPt) const
     if (!canvas.pd || canvas.pd->getMcp()->session.getMcpAnnotations().empty()) return false;
     auto const pt = canvasPt.toFloat();
     auto const anns = canvas.pd->getMcp()->session.getMcpAnnotations();
+    auto const scene = buildAnnotationScene();
     for (size_t i = 0; i < anns.size(); ++i) {
-        auto const tb = getAnnotationScreenBounds(i);
+        auto const tb = getAnnotationScreenBounds(i, scene);
         if (tb.isEmpty()) continue;
         if (static_cast<int>(i) == mcpNoteHover) {
             auto const chips = CanvasMcpLayer::getAnnotationPivotChips(anns[i].text, anns[i].kind);
@@ -571,9 +587,10 @@ bool CanvasMcpLayer::handleNoteClick(Point<int> canvasPt)
     if (!canvas.pd || canvas.pd->getMcp()->session.getMcpAnnotations().empty()) return false;
     auto const pt = canvasPt.toFloat();
     auto anns = canvas.pd->getMcp()->session.getMcpAnnotations();
+    auto const scene = buildAnnotationScene();
     for (int i = static_cast<int>(anns.size()) - 1; i >= 0; --i) {
         auto const& a = anns[static_cast<size_t>(i)];
-        auto const tb = getAnnotationScreenBounds(static_cast<size_t>(i));
+        auto const tb = getAnnotationScreenBounds(static_cast<size_t>(i), scene);
         if (tb.isEmpty()) continue;
 
         auto const chips = CanvasMcpLayer::getAnnotationPivotChips(a.text, a.kind);
