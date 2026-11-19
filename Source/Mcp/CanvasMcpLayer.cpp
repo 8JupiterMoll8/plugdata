@@ -988,9 +988,10 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
         mcpnvg::nvgText(nvg, scx, scy + 12.0f, "(Esc cancels)", nullptr);
     }
 
-    // PRD overlay: ghost/preview of PROPOSED (uncommitted) changes. Drawn above
-    // the patch, never part of it — the artist sees the change before it's real.
+    // PRD overlay: ghost/preview of PROPOSED (uncommitted) changes. Drawn above the patch, never part of it: the artist
+    // sees the change before it's real. Design round B3: ink at 60 %, 1 px, dotted (dash 2), no fill; the label is ink at 60 %.
     if (canvas.pd && shouldShowAIGhosts() && !canvas.pd->getMcp()->session.getMcpGhosts().empty()) {
+        constexpr float dotted = 2.0f;
         for (auto const& g : canvas.pd->getMcp()->session.getMcpGhosts()) {
             NVGScopedState scopedGhost(nvg);
             if (g.kind == 0) {
@@ -1000,19 +1001,17 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
                 float const gh = g.h > 0 ? g.h : 22.0f;
                 nanovg::nvgBeginPath(nvg);
                 nanovg::nvgRoundedRect(nvg, gx, gy, gw, gh, getPlugDataLook(canvas).getObjectCornerRadius());
-                nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(74, 158, 255, 55));
-                nanovg::nvgFill(nvg);
-                nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(74, 158, 255, 220));
-                nanovg::nvgStrokeWidth(nvg, 1.5f);
+                nanovg::nvgStrokeColor(nvg, mcpai::colour(mcp::aiInk, mcp::aiGhostAlpha));
+                nanovg::nvgStrokeWidth(nvg, mcp::aiLineWidth);
                 nanovg::nvgLineStyle(nvg, NVG_LINE_DASHED);
-                nanovg::nvgDashLength(nvg, 6.0f);
+                nanovg::nvgDashLength(nvg, dotted);
                 nanovg::nvgStroke(nvg);
                 nanovg::nvgLineStyle(nvg, NVG_LINE_SOLID);
                 if (g.label.isNotEmpty()) {
-                    mcpnvg::nvgFontSize(nvg, 12.0f);
+                    mcpnvg::nvgFontSize(nvg, mcp::aiTagTextSize);
                     mcpnvg::nvgFontFace(nvg, "Inter");
                     mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
-                    nanovg::nvgFillColor(nvg, nanovg::nvgRGBA(74, 158, 255, 255));
+                    nanovg::nvgFillColor(nvg, mcpai::colour(mcp::aiInk, mcp::aiGhostAlpha));
                     mcpnvg::nvgText(nvg, gx + 6.0f, gy + gh * 0.5f, g.label.toRawUTF8(), nullptr);
                 }
             } else {
@@ -1022,10 +1021,10 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
                 nanovg::nvgMoveTo(nvg, x1, y1);
                 float const dx = std::abs(x2 - x1) * 0.5f + 20.0f;
                 nanovg::nvgBezierTo(nvg, x1, y1 + dx, x2, y2 - dx, x2, y2);
-                nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(74, 158, 255, 220));
-                nanovg::nvgStrokeWidth(nvg, 2.0f);
+                nanovg::nvgStrokeColor(nvg, mcpai::colour(mcp::aiInk, mcp::aiGhostAlpha));
+                nanovg::nvgStrokeWidth(nvg, mcp::aiLineWidth);
                 nanovg::nvgLineStyle(nvg, NVG_LINE_DASHED);
-                nanovg::nvgDashLength(nvg, 6.0f);
+                nanovg::nvgDashLength(nvg, dotted);
                 nanovg::nvgStroke(nvg);
                 nanovg::nvgLineStyle(nvg, NVG_LINE_SOLID);
             }
@@ -1279,25 +1278,34 @@ bool CanvasMcpLayer::decorateObject(NVGcontext* nvg, Object& object, juce::Recta
 {
     if (!shouldShowAIState())
         return false;
-    // PRD overlay: AI state marker drawn per-object (1=changed, 2=proposed, 3=error).
+    // PRD overlay: AI state marker drawn per-object (1=changed, 2=proposed, 3=error). Design round B3: the same shapes as
+    // the tags, on the top-right corner, no coloured frame: 1 = a filled red circle (radius 3); 2 = an outline red
+    // circle plus a dotted ink frame; 3 = a yellow triangle.
     int const aiState = canvas.pd->getMcp()->session.getAiOverlayState(object.getPointer());
     if (aiState != 0) {
-        int const st = aiState;
-        NVGcolor col = (st == 1) ? nanovg::nvgRGB(0x3d, 0xdd, 0x8a)
-                    : (st == 2) ? nanovg::nvgRGB(0x4a, 0x9e, 0xff)
-                                : nanovg::nvgRGB(0xff, 0x5a, 0x5a);
+        float const cx = static_cast<float>(b.getRight());
+        float const cy = static_cast<float>(b.getY());
         NVGScopedState scopedAIState(nvg);
-        nanovg::nvgBeginPath(nvg);
-        nanovg::nvgStrokeColor(nvg, col);
-        nanovg::nvgStrokeWidth(nvg, 2.0f);
-        nanovg::nvgRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), getPlugDataLook(object).getObjectCornerRadius());
-        nanovg::nvgStroke(nvg);
-
-        // state dot, top-right
-        nanovg::nvgBeginPath(nvg);
-        nanovg::nvgFillColor(nvg, col);
-        nanovg::nvgCircle(nvg, b.getRight() - 3.0f, b.getY() + 3.0f, 4.0f);
-        nanovg::nvgFill(nvg);
+        if (aiState == 1) {
+            nanovg::nvgBeginPath(nvg);
+            nanovg::nvgCircle(nvg, cx, cy, 3.0f);
+            nanovg::nvgFillColor(nvg, mcpai::colour(mcp::aiRed));
+            nanovg::nvgFill(nvg);
+        } else if (aiState == 2) {
+            nanovg::nvgBeginPath(nvg);
+            nanovg::nvgRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), getPlugDataLook(object).getObjectCornerRadius());
+            nanovg::nvgStrokeColor(nvg, mcpai::colour(mcp::aiInk, mcp::aiGhostAlpha));
+            nanovg::nvgStrokeWidth(nvg, mcp::aiLineWidth);
+            nanovg::nvgLineStyle(nvg, NVG_LINE_DASHED);
+            nanovg::nvgDashLength(nvg, 2.0f);
+            nanovg::nvgStroke(nvg);
+            nanovg::nvgLineStyle(nvg, NVG_LINE_SOLID);
+            nanovg::nvgBeginPath(nvg);
+            nanovg::nvgCircle(nvg, cx, cy, 2.5f);
+            mcpai::strokeOutline(nvg, mcp::aiRed);
+        } else {
+            mcpai::drawGlyph(nvg, mcp::AiTag::Look, cx, cy);
+        }
     }
     return true;
 }
