@@ -416,10 +416,11 @@ void CanvasMcpLayer::submitSelectionPill(bool queueForChat)
             }
         }
 
-        // Park the prompt in the Sidebar Copilot chat log (no clutter on canvas)
+        // Park the prompt in the Sidebar Copilot chat log (no clutter on canvas), with the widget it was about ("ai.tap") when
+        // one ai.* widget is the selection. The /chat/msg echo of this prompt is dropped by the talk list's duplicate rule.
         if (canvas.editor) {
             if (auto* cp = canvas.editor->getCopilotPanel()) {
-                cp->receiveMessage("user", prompt);
+                cp->addArtistLine(prompt, juce::String(selectedWidgetTarget(selected).widget));
             }
         }
 
@@ -716,7 +717,9 @@ void CanvasMcpLayer::onChatLine(juce::String const& role, juce::String const& te
     // A canvas that never laid out a pill (a graph, one that is locked from the start) has no place for the line: no state, no timer.
     if (mcpSelectionPillFrame.isEmpty())
         return;
-    if (!mcpPillAnswer.onChat(role.toStdString(), text.toStdString(), answerNowMs()))
+    // A waiting line ("Claude Code has not answered yet") shows like an ai line; the answer that follows replaces it.
+    auto const shownRole = role == "waiting" ? juce::String("ai") : role;
+    if (!mcpPillAnswer.onChat(shownRole.toStdString(), text.toStdString(), answerNowMs()))
         return;
     repaintPillAnswer(); // the new line, or the erased one
     if (mcpPillAnswer.line().empty()) {
