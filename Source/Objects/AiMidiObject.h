@@ -13,6 +13,7 @@
 #include "Pd/MCPBridge.h"
 #include "Mcp/McpAiMidiVoice.h"
 #include "Mcp/McpAiMidiTimer.h"
+#include "Mcp/McpAiMidiFace.h"
 #include "Utility/NVGTextShim.h"
 #include <vector>
 #include <cmath>
@@ -71,6 +72,10 @@ class AiMidiObject final : public ObjectBase
     mcp::AiMidiTimerPolicy timerPolicy;
 
     enum Button { recButton = 0, playButton, clearButton, aiButton, soundButton, numButtons };
+    static_assert(static_cast<int>(recButton) == static_cast<int>(mcp::kAiMidiRec) && static_cast<int>(playButton) == static_cast<int>(mcp::kAiMidiPlay)
+            && static_cast<int>(clearButton) == static_cast<int>(mcp::kAiMidiClear) && static_cast<int>(aiButton) == static_cast<int>(mcp::kAiMidiAi)
+            && static_cast<int>(soundButton) == static_cast<int>(mcp::kAiMidiSound) && static_cast<int>(numButtons) == static_cast<int>(mcp::kAiMidiNumButtons),
+        "the buttons are numbered like the face layout's (Source/Mcp/McpAiMidiFace.h)");
 
 public:
     AiMidiObject(pd::WeakReference ptr, Object* object)
@@ -140,26 +145,22 @@ public:
         return getValue<bool>(topLevel->locked) || getValue<bool>(topLevel->commandLocked) || topLevel->isGraph;
     }
 
-    // Display geometry (2026-11-08 restyle: a glowing synth screen). Row A: the 7-segment take number + status;
-    // row B: four tab buttons; row C: a 16-cell beat meter when the widget is tall enough.
-    static constexpr int pad = 5;
-    int rowAHeight() const { return juce::jlimit(18, 34, static_cast<int>((getHeight() - 2 * pad) * 0.45f)); }
-    int rowBTop() const { return pad + rowAHeight() + 4; }
-    int rowBHeight() const { return juce::jlimit(13, 20, getHeight() - rowBTop() - pad - (meterFits() ? 12 : 0)); }
-    bool meterFits() const { return getHeight() >= 64; }
+    // Display geometry (2026-11-19, the Bauhaus family look): every rectangle comes from mcp::aiMidiFaceLayout (Source/Mcp/McpAiMidiFace.h),
+    // for the drawing AND for the click frames, so the two cannot drift apart.
+    mcp::AiMidiFace face() const { return mcp::aiMidiFaceLayout(getWidth(), getHeight()); }
 
-    /** The five tab buttons across the middle row: REC PLAY CLEAR TO-AI SOUND. */
+    /** The five buttons: rec play clear sound in a row, and the AI chip (what TO AI did) at the bottom right. */
     Rectangle<int> buttonRect(int const which) const
     {
-        int const gap = 3;
-        int const tabW = (getWidth() - 2 * pad - gap * (numButtons - 1)) / numButtons;
-        return { pad + which * (tabW + gap), rowBTop(), tabW, rowBHeight() };
+        auto const r = face().button[which];
+        return { r.x, r.y, r.w, r.h };
     }
 
     int buttonAt(Point<int> const pos) const
     {
+        auto const f = face();
         for (int i = 0; i < numButtons; ++i)
-            if (buttonRect(i).contains(pos))
+            if (f.button[i].contains(pos.x, pos.y))
                 return i;
         return -1;
     }
@@ -490,180 +491,203 @@ public:
         repaint();
     }
 
-    // ── Display palette ──
-    static NVGcolor glass(unsigned char a = 255) { return nanovg::nvgRGBA(6, 9, 18, a); }
-    static NVGcolor frame(unsigned char a = 255) { return nanovg::nvgRGBA(59, 91, 219, a); }
-    static NVGcolor segOff() { return nanovg::nvgRGBA(20, 32, 70, 255); }
-    static NVGcolor cyan(unsigned char a = 255) { return nanovg::nvgRGBA(68, 242, 232, a); }
-    static NVGcolor ice(unsigned char a = 255) { return nanovg::nvgRGBA(220, 233, 255, a); }
-    static NVGcolor salmon(unsigned char a = 255) { return nanovg::nvgRGBA(255, 107, 94, a); }
+    // ── Drawing: black on cream, 1 px lines, red only for "recording", no glow ──
+    // The colours and sizes are the family's one style table (Source/Mcp/McpAiStyle.h).
+    static NVGcolor rgb(mcp::AiRgba const c, unsigned char const a = 255) { return nanovg::nvgRGBA(c.r, c.g, c.b, a); }
+    static NVGcolor cream() { return rgb(mcp::aiCream); }
+    static NVGcolor ink(unsigned char const a = 255) { return rgb(mcp::aiInk, a); }
+    static NVGcolor grey(unsigned char const a = 255) { return rgb(mcp::aiGrey, a); }
+    static NVGcolor red() { return rgb(mcp::aiRed); }
 
-    /** A glowing outline: a wide faint stroke under a thin bright one. */
-    static void glowStroke(NVGcontext* nvg, NVGcolor c, float width)
+    /** What the face shows, read once under the Pd lock. */
+    struct FaceState {
+        bool rec = false, play = false, counting = false, speaker = false;
+        int noteCount = 0, bpm = 120, takeNumber = 1;
+        double loopMs = 0.0, spanMs = 2000.0, beatMs = 500.0;
+        double headMs = -1.0; // the playhead or the recording head in take time; < 0 = none
+    };
+
+    FaceState faceStateOf(t_fake_aimidi const* midi) const
     {
-        auto halo = c;
-        halo.a *= 0.22f;
-        nanovg::nvgStrokeColor(nvg, halo);
-        nanovg::nvgStrokeWidth(nvg, width * 3.2f);
+        FaceState st;
+        if (!midi)
+            return st;
+        st.rec = midi->x_recording != 0;
+        st.play = isAuditioning || midi->x_playing != 0;
+        st.counting = countInLeft > 0;
+        st.speaker = midi->x_speaker != 0;
+        st.noteCount = midi->x_note_count;
+        st.bpm = static_cast<int>(midi->x_bpm);
+        st.takeNumber = st.counting ? countInLeft : mcp::aiMidiTakeNumber(midi->x_take_id);
+        st.beatMs = beatMs(midi);
+        st.loopMs = mcp::aiMidiLoopMs(midi->x_notes, midi->x_note_count);
+        double recHeadMs = 0.0;
+        if (st.rec && !st.counting) {
+            recHeadMs = std::max(0.0, clock_gettimesince(midi->x_rec_start_time));
+            st.headMs = recHeadMs;
+        } else if (isAuditioning && st.loopMs > 0.0) {
+            st.headMs = std::min(st.loopMs, juce::Time::getMillisecondCounterHiRes() - playStartTime);
+        }
+        st.spanMs = mcp::aiMidiSpanMs(st.loopMs, recHeadMs, st.beatMs);
+        return st;
+    }
+
+    void drawPlate(NVGcontext* nvg) const
+    {
+        auto const b = getLocalBounds().toFloat();
+        nanovg::nvgBeginPath(nvg);
+        nanovg::nvgRoundedRect(nvg, 0.5f, 0.5f, b.getWidth() - 1.0f, b.getHeight() - 1.0f, mcp::kAiMidiRadius);
+        nanovg::nvgFillColor(nvg, cream());
+        nanovg::nvgFill(nvg);
+        nanovg::nvgStrokeColor(nvg, object->isSelected() && !cnv->isGraph ? nvgColour(getThemeColours().objectSelectedOutlineColour) : grey());
+        nanovg::nvgStrokeWidth(nvg, mcp::kAiMidiLine);
         nanovg::nvgStroke(nvg);
+    }
+
+    /** The 24 px header strip: the name, a grey hint (with the red dot while recording), the tempo at the right. */
+    void drawHeader(NVGcontext* nvg, mcp::AiMidiFace const& f, FaceState const& st) const
+    {
+        float const midY = static_cast<float>(f.header.h) * 0.5f;
+        float const left = static_cast<float>(mcp::kAiMidiPad);
+        mcpnvg::nvgFontFace(nvg, "Inter-Medium");
+        mcpnvg::nvgFontSize(nvg, mcp::kAiMidiNameSize);
+        mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+        nanovg::nvgFillColor(nvg, ink());
+        float x = mcpnvg::nvgText(nvg, left, midY, "ai.midi", nullptr) + 8.0f;
+
+        if (st.rec && !st.counting) { // the one red thing in the header: "recording"
+            nanovg::nvgBeginPath(nvg);
+            nanovg::nvgCircle(nvg, x + 3.0f, midY, 3.0f);
+            nanovg::nvgFillColor(nvg, red());
+            nanovg::nvgFill(nvg);
+            x += 12.0f;
+        }
+        auto const hint = mcp::aiMidiHintText(st.counting, st.rec, st.play, st.noteCount);
+        mcpnvg::nvgFontFace(nvg, "Inter");
+        mcpnvg::nvgFontSize(nvg, mcp::kAiMidiHintSize);
+        nanovg::nvgFillColor(nvg, grey());
+        float const hintEnd = mcpnvg::nvgText(nvg, x, midY, hint.c_str(), nullptr);
+
+        auto const tempo = juce::String(st.bpm) + " bpm";
+        float bounds[4] = {};
+        float const right = static_cast<float>(f.header.w - mcp::kAiMidiPad);
+        mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
+        mcpnvg::nvgTextBounds(nvg, right, midY, tempo.toRawUTF8(), nullptr, bounds);
+        if (bounds[0] > hintEnd + 8.0f) // only when it does not touch the hint
+            mcpnvg::nvgText(nvg, right, midY, tempo.toRawUTF8(), nullptr);
+    }
+
+    /** The take number as a large plain numeral (the count-in shows the beats left). Red only while recording. */
+    void drawNumeral(NVGcontext* nvg, mcp::AiMidiFace const& f, FaceState const& st) const
+    {
+        if (f.numeral.empty())
+            return;
+        mcpnvg::nvgFontFace(nvg, "Inter-Medium");
+        mcpnvg::nvgFontSize(nvg, f.numeralSize);
+        mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+        nanovg::nvgFillColor(nvg, st.rec && !st.counting ? red() : ink());
+        auto const text = juce::String(st.takeNumber);
+        mcpnvg::nvgText(nvg, static_cast<float>(f.numeral.x), static_cast<float>(f.numeral.y) + static_cast<float>(f.numeral.h) * 0.5f, text.toRawUTF8(), nullptr);
+    }
+
+    /** One vertical hairline (1 px) or head (2 px) at x from y0 to y1. */
+    static void vLine(NVGcontext* nvg, float x, float y0, float y1, float width, NVGcolor c)
+    {
+        nanovg::nvgBeginPath(nvg);
+        nanovg::nvgMoveTo(nvg, x, y0);
+        nanovg::nvgLineTo(nvg, x, y1);
         nanovg::nvgStrokeColor(nvg, c);
         nanovg::nvgStrokeWidth(nvg, width);
         nanovg::nvgStroke(nvg);
     }
 
-    /** One 7-segment digit (-1 = blank). Unlit segments stay faintly visible, like a real display. */
-    static void drawDigit(NVGcontext* nvg, float x, float y, float dw, float dh, int digit, NVGcolor lit)
+    /** The take as small ink blocks (a tiny piano roll: one bar = one cell of the grid). While playing the part already played is ink
+        and the rest grey, behind a 2 px head; while recording the head is red. */
+    void drawTake(NVGcontext* nvg, mcp::AiMidiFace const& f, FaceState const& st, t_fake_aimidi const* midi) const
     {
-        static constexpr unsigned char segs[10] = { 0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F };
-        unsigned char const on = (digit >= 0 && digit <= 9) ? segs[digit] : 0;
-        float const t = std::max(1.6f, dw * 0.16f); // stroke thickness
-        float const m = dh * 0.5f;
-        // a b c d e f g: top, top-right, bottom-right, bottom, bottom-left, top-left, middle
-        float const lines[7][4] = {
-            { x + t, y, x + dw - t, y }, { x + dw, y + t, x + dw, y + m - t * 0.5f },
-            { x + dw, y + m + t * 0.5f, x + dw, y + dh - t }, { x + t, y + dh, x + dw - t, y + dh },
-            { x, y + m + t * 0.5f, x, y + dh - t }, { x, y + t, x, y + m - t * 0.5f }, { x + t, y + m, x + dw - t, y + m },
-        };
-        for (int i = 0; i < 7; ++i) {
-            nanovg::nvgBeginPath(nvg);
-            nanovg::nvgMoveTo(nvg, lines[i][0], lines[i][1]);
-            nanovg::nvgLineTo(nvg, lines[i][2], lines[i][3]);
-            nanovg::nvgLineCap(nvg, NVG_ROUND);
-            if (on & (1 << i)) {
-                glowStroke(nvg, lit, t);
-            } else {
-                nanovg::nvgStrokeColor(nvg, segOff());
-                nanovg::nvgStrokeWidth(nvg, t);
-                nanovg::nvgStroke(nvg);
+        auto const& r = f.take;
+        if (r.empty())
+            return;
+        float const x0 = static_cast<float>(r.x), y0 = static_cast<float>(r.y);
+        float const y1 = static_cast<float>(r.bottom());
+        // the tape: a grey rule under the blocks and a hairline at every bar
+        nanovg::nvgBeginPath(nvg);
+        nanovg::nvgMoveTo(nvg, x0, y1 - 0.5f);
+        nanovg::nvgLineTo(nvg, x0 + static_cast<float>(r.w), y1 - 0.5f);
+        nanovg::nvgStrokeColor(nvg, grey());
+        nanovg::nvgStrokeWidth(nvg, mcp::kAiMidiLine);
+        nanovg::nvgStroke(nvg);
+        double const barMs = st.beatMs * 4.0;
+        int const bars = static_cast<int>(st.spanMs / std::max(1.0, barMs) + 0.5);
+        if (bars > 1 && bars <= 32)
+            for (int i = 1; i < bars; ++i)
+                vLine(nvg, std::floor(x0 + static_cast<float>(i) * static_cast<float>(r.w) / static_cast<float>(bars)) + 0.5f, y0, y1, mcp::kAiMidiLine, grey(110));
+
+        float const headX = st.headMs >= 0.0 ? mcp::aiMidiHeadX(st.headMs, st.spanMs, r.w) : -1.0f;
+        if (midi && midi->x_notes && st.noteCount > 0) {
+            for (int pass = 0; pass < 2; ++pass) { // pass 0: ink (played, or everything); pass 1: grey (still to come while playing)
+                nanovg::nvgBeginPath(nvg);
+                mcp::aiMidiForEachBlock(midi->x_notes, st.noteCount, st.spanMs, r.w, r.h, [&](mcp::AiMidiBlock const& b) {
+                    bool const ahead = st.play && !st.rec && headX >= 0.0f && b.x > headX;
+                    if (ahead == (pass == 1))
+                        nanovg::nvgRect(nvg, x0 + b.x, y0 + b.y, b.w, b.h);
+                });
+                nanovg::nvgFillColor(nvg, pass == 0 ? ink() : grey());
+                nanovg::nvgFill(nvg);
             }
         }
+        if (headX >= 0.0f) // the one 2 px line: the active thing
+            vLine(nvg, x0 + headX + 0.5f, y0, y1, mcp::kAiMidiActiveLine, st.rec ? red() : ink());
     }
 
-    static int takeNumber(juce::String const& takeId)
+    /** A 1 px outlined lower-case button; "on" is inverted (ink fill, cream text); `dim` = nothing to do yet (grey). */
+    static void drawButton(NVGcontext* nvg, mcp::AiMidiRect const& r, char const* label, bool const on, bool const dim = false)
     {
-        return takeId.fromLastOccurrenceOf("_", false, false).getIntValue() % 100;
-    }
-
-    /** How many of the meter's 16 cells are lit, and in which colour. */
-    std::pair<int, NVGcolor> meterState(t_fake_aimidi const* midi, bool rec, bool play) const
-    {
-        if (countInLeft > 0)
-            return { countInBeats - countInLeft, salmon() };
-        if (rec)
-            return { (std::max(0, clickBeat - countInBeats) % 16) + 1, salmon() };
-        if (midi && midi->x_note_count > 0) {
-            double const lastMs = midi->x_notes[midi->x_note_count - 1].time_ms + 500.0;
-            if (play) {
-                double const elapsed = juce::Time::getMillisecondCounterHiRes() - playStartTime;
-                return { juce::jlimit(1, 16, static_cast<int>(elapsed / lastMs * 16.0) + 1), cyan() };
-            }
-            int const beats = static_cast<int>(lastMs / beatMs(midi) + 0.5);
-            return { juce::jlimit(1, 16, beats), frame() };
+        nanovg::nvgBeginPath(nvg);
+        nanovg::nvgRoundedRect(nvg, static_cast<float>(r.x) + 0.5f, static_cast<float>(r.y) + 0.5f, static_cast<float>(r.w) - 1.0f, static_cast<float>(r.h) - 1.0f, mcp::kAiMidiRadius);
+        if (on) {
+            nanovg::nvgFillColor(nvg, ink());
+            nanovg::nvgFill(nvg);
+        } else {
+            nanovg::nvgStrokeColor(nvg, dim ? grey() : ink());
+            nanovg::nvgStrokeWidth(nvg, mcp::kAiMidiLine);
+            nanovg::nvgStroke(nvg);
         }
-        return { 0, frame() };
+        mcpnvg::nvgFontFace(nvg, "Inter");
+        mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+        float size = mcp::kAiMidiHintSize;
+        mcpnvg::nvgFontSize(nvg, size);
+        float bounds[4] = {};
+        float const room = static_cast<float>(r.w) - 4.0f;
+        float const width = mcpnvg::nvgTextBounds(nvg, 0.0f, 0.0f, label, nullptr, bounds);
+        if (width > room && width > 0.0f) { // a narrow widget: the word shrinks to fit its box
+            size = std::max(8.0f, size * room / width);
+            mcpnvg::nvgFontSize(nvg, size);
+        }
+        nanovg::nvgFillColor(nvg, on ? cream() : (dim ? grey() : ink()));
+        mcpnvg::nvgText(nvg, static_cast<float>(r.x) + static_cast<float>(r.w) * 0.5f, static_cast<float>(r.y) + static_cast<float>(r.h) * 0.5f, label, nullptr);
+    }
+
+    void drawButtons(NVGcontext* nvg, mcp::AiMidiFace const& f, FaceState const& st) const
+    {
+        bool const empty = st.noteCount <= 0;
+        drawButton(nvg, f.button[recButton], "rec", st.rec || st.counting); // inverted while it counts in or records; the header and the number say which
+        drawButton(nvg, f.button[playButton], st.play ? "stop" : "play", st.play, empty && !st.play);
+        drawButton(nvg, f.button[clearButton], "clear", false, empty);
+        drawButton(nvg, f.button[soundButton], "sound", st.speaker);
+        drawButton(nvg, f.button[aiButton], "AI\xE2\x80\xA6", false); // the chip: what TO AI did
     }
 
     void render(NVGcontext* nvg) override
     {
-        auto const b = getLocalBounds().toFloat();
-        float const w = b.getWidth();
-        float const h = b.getHeight();
-
+        auto const f = face();
         auto midi = ptr.get<t_fake_aimidi>();
-        bool const rec = midi && (midi->x_recording != 0);
-        bool const play = isAuditioning || (midi && midi->x_playing != 0);
-        bool const counting = countInLeft > 0;
-        int const noteCount = midi ? midi->x_note_count : 0;
-        int const bpm = midi ? static_cast<int>(midi->x_bpm) : 120;
-        juce::String const takeId = midi ? juce::String::fromUTF8(midi->x_take_id) : "take_1";
+        auto const st = faceStateOf(midi.get());
 
-        // Glass
-        nanovg::nvgBeginPath(nvg);
-        nanovg::nvgRoundedRect(nvg, 0.5f, 0.5f, w - 1.0f, h - 1.0f, 4.0f);
-        nanovg::nvgFillColor(nvg, glass());
-        nanovg::nvgFill(nvg);
-        nanovg::nvgStrokeColor(nvg, object->isSelected() && !cnv->isGraph ? nvgColour(getThemeColours().objectSelectedOutlineColour) : frame(150));
-        nanovg::nvgStrokeWidth(nvg, 1.0f);
-        nanovg::nvgStroke(nvg);
-
-        // Scanlines: the faint texture of a lit display
-        nanovg::nvgBeginPath(nvg);
-        for (float y = 3.0f; y < h - 2.0f; y += 3.0f) {
-            nanovg::nvgMoveTo(nvg, 2.0f, y);
-            nanovg::nvgLineTo(nvg, w - 2.0f, y);
-        }
-        nanovg::nvgStrokeColor(nvg, nanovg::nvgRGBA(120, 160, 255, 10));
-        nanovg::nvgStrokeWidth(nvg, 1.0f);
-        nanovg::nvgStroke(nvg);
-
-        // Row A: the number box (take number, or the count-in in salmon)
-        float const aH = static_cast<float>(rowAHeight());
-        float const digH = aH - 8.0f;
-        float const digW = digH * 0.52f;
-        float const boxW = digW * 2.0f + 14.0f;
-        nanovg::nvgBeginPath(nvg);
-        nanovg::nvgRoundedRect(nvg, pad, pad, boxW, aH, 2.5f);
-        glowStroke(nvg, counting || rec ? salmon(200) : frame(), 1.2f);
-        auto const lit = counting || rec ? salmon() : cyan();
-        int const shown = counting ? countInLeft : takeNumber(takeId);
-        drawDigit(nvg, pad + 5.0f, pad + 4.0f, digW, digH, counting ? -1 : shown / 10, lit);
-        drawDigit(nvg, pad + 9.0f + digW, pad + 4.0f, digW, digH, shown % 10, lit);
-
-        // Row A: status in ice, tempo small in frame blue at the right
-        juce::String const status = counting ? "counting in"
-            : rec        ? juce::String(noteCount) + " notes"
-            : play       ? "playing"
-            : noteCount  ? juce::String(noteCount) + " notes"
-                         : "empty, press REC";
-        mcpnvg::nvgFontFace(nvg, "Inter-Bold");
-        mcpnvg::nvgFontSize(nvg, juce::jlimit(11.0f, 18.0f, aH * 0.62f));
-        mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
-        nanovg::nvgFillColor(nvg, counting || rec ? salmon() : ice());
-        mcpnvg::nvgText(nvg, pad + boxW + 8.0f, pad + aH * 0.5f, status.toRawUTF8(), nullptr);
-
-        mcpnvg::nvgFontSize(nvg, 10.0f);
-        mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_RIGHT | NVG_ALIGN_TOP);
-        nanovg::nvgFillColor(nvg, frame());
-        mcpnvg::nvgText(nvg, w - pad - 2.0f, pad + 1.0f, (juce::String(bpm) + " bpm").toRawUTF8(), nullptr);
-
-        // Row B: tab buttons, filled when active (like a selected page on the hardware)
-        auto drawTab = [&](int which, char const* label, bool active, NVGcolor on) {
-            auto const r = buttonRect(which).toFloat();
-            nanovg::nvgBeginPath(nvg);
-            nanovg::nvgRect(nvg, r.getX() + 0.5f, r.getY() + 0.5f, r.getWidth() - 1.0f, r.getHeight() - 1.0f);
-            if (active) {
-                nanovg::nvgFillColor(nvg, on);
-                nanovg::nvgFill(nvg);
-                glowStroke(nvg, on, 1.0f);
-            } else {
-                nanovg::nvgStrokeColor(nvg, frame(220));
-                nanovg::nvgStrokeWidth(nvg, 1.0f);
-                nanovg::nvgStroke(nvg);
-            }
-            mcpnvg::nvgFontFace(nvg, "Inter-Bold");
-            mcpnvg::nvgFontSize(nvg, juce::jlimit(9.0f, 12.0f, r.getHeight() * 0.62f));
-            mcpnvg::nvgTextAlign(nvg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
-            nanovg::nvgFillColor(nvg, active ? glass() : frame());
-            mcpnvg::nvgText(nvg, r.getCentreX(), r.getCentreY(), label, nullptr);
-        };
-        drawTab(recButton, counting ? "COUNT" : "REC", rec || counting, salmon());
-        drawTab(playButton, play ? "STOP" : "PLAY", play, cyan());
-        drawTab(clearButton, "CLEAR", false, cyan());
-        drawTab(aiButton, "TO AI", false, cyan());
-        drawTab(soundButton, "SOUND", midi && midi->x_speaker != 0, cyan());
-
-        // Row C: the 16-cell meter
-        if (meterFits()) {
-            auto const [cells, colour] = meterState(midi.get(), rec, play);
-            float const top = static_cast<float>(rowBTop() + rowBHeight() + 4);
-            float const cellH = h - top - pad;
-            float const cellW = (w - 2.0f * pad - 15.0f * 2.0f) / 16.0f;
-            for (int i = 0; i < 16; ++i) {
-                nanovg::nvgBeginPath(nvg);
-                nanovg::nvgRect(nvg, pad + i * (cellW + 2.0f), top, cellW, cellH);
-                nanovg::nvgFillColor(nvg, i < cells ? colour : segOff());
-                nanovg::nvgFill(nvg);
-            }
-        }
+        drawPlate(nvg);
+        drawHeader(nvg, f, st);
+        drawNumeral(nvg, f, st);
+        drawTake(nvg, f, st, midi.get());
+        drawButtons(nvg, f, st);
     }
 };
