@@ -1,7 +1,7 @@
 // Unit tests for the one AI style table (Source/Mcp/McpAiStyle.h), JUCE-free (design round 2026-11-19, step A):
-//  - the palette and the sizes are the owner's numbers (picture "AI overlays, language A"); a region has NO grey fill
-//    (owner 2026-11-19): a 3 px ink bar and a 12 px name at 75 % ink, never below 11 screen px when zoomed out;
-//  - the spotlight's veil is 50 % (was 70 %), warm over a light canvas, the canvas colour over a dark one, and an off-path
+//  - the palette and the sizes are the owner's numbers (picture "AI overlays, language A"); a region is a see-through
+//    colour per kind (owner 2026-11-20) under a 3 px ink bar and a 12 px ink name, never below 11 screen px when zoomed out;
+//  - the spotlight draws no veil over the boxes (owner 2026-11-20); an off-path
 //    cord is drawn at 25 %;
 //  - aiTagOf maps the kind words the server sends: the seven new words, the old ones (info -> guess, change -> changed,
 //    warn -> look, artist -> none) and anything unknown or empty -> guess (an unmarked claim is never shown as measured);
@@ -53,9 +53,8 @@ void paletteIsTheOwnersNumbers()
     CHECK(same(mcp::aiYellow, 0xF7, 0xC2, 0x14));
     CHECK(same(mcp::aiBlue, 0x14, 0x3D, 0x9E));
     CHECK(same(mcp::aiNoteYellow, 0xF6, 0xE7, 0xA6));
-    CHECK(same(mcp::aiVeilWarm, 0xFC, 0xF4, 0xE2));
     // Opaque on purpose: the colours never carry their own alpha, a caller scales it.
-    CHECK(mcp::aiCream.a == 255 && mcp::aiInk.a == 255 && mcp::aiGrey.a == 255 && mcp::aiVeilWarm.a == 255);
+    CHECK(mcp::aiCream.a == 255 && mcp::aiInk.a == 255 && mcp::aiGrey.a == 255);
 }
 
 void sizesAreTheOwnersNumbers()
@@ -80,8 +79,7 @@ void sizesAreTheOwnersNumbers()
     CHECK(mcp::aiRegionTitleMinScreenPx == 11.0f);
     CHECK(mcp::aiRegionMinBelow == 8);
     CHECK(mcp::aiRegionPadTop == 28); // the title band stays
-    // The spotlight: veil 50 %, off-path cords 25 %.
-    CHECK(mcp::aiVeilAlpha == 0.5f);
+    // The spotlight: no veil over the boxes (owner 2026-11-20), off-path cords 25 %.
     CHECK(mcp::aiOffPathCordAlpha == 0.25f);
     // The hint size (11) is untouched: the TS palette test compares it.
     CHECK(mcp::aiHintSize == 11.0f);
@@ -133,34 +131,6 @@ void regionTitleSize()
     CHECK(mcp::aiRegionTitleSizeFor(std::numeric_limits<float>::infinity()) == 12.0f);
 }
 
-// What ink text looks like under a veil over a canvas background (what the eye sees: 50/50 blend).
-AiRgba under(AiRgba veil, AiRgba below)
-{
-    float const a = veil.a / 255.0f;
-    auto const mix = [a](int v, int b) { return static_cast<std::uint8_t>(static_cast<float>(v) * a + static_cast<float>(b) * (1.0f - a) + 0.5f); };
-    return { mix(veil.r, below.r), mix(veil.g, below.g), mix(veil.b, below.b), 255 };
-}
-
-void veilIsWarmOverLightAndPlainOverDark()
-{
-    // Over a light canvas: 50 % warm paper white. Ink text under it is a warm grey near #8C8576 (140, 133, 118).
-    AiRgba const white { 0xFA, 0xFA, 0xFA, 255 };
-    auto const veil = mcp::aiVeilColour(white);
-    CHECK(veil.a == 128); // 50 %
-    CHECK(veil.r == mcp::aiVeilWarm.r && veil.g == mcp::aiVeilWarm.g && veil.b == mcp::aiVeilWarm.b);
-    auto const fadedInk = under(veil, mcp::aiInk);
-    CHECK(std::abs(fadedInk.r - 0x8C) <= 12 && std::abs(fadedInk.g - 0x85) <= 12 && std::abs(fadedInk.b - 0x76) <= 12);
-    CHECK(fadedInk.r > fadedInk.b); // warm: red above blue
-    // The box itself stays white-ish: a plain box background under the veil moves by less than 16 per channel.
-    auto const fadedBox = under(veil, white);
-    CHECK(std::abs(fadedBox.r - white.r) < 16 && std::abs(fadedBox.g - white.g) < 16 && std::abs(fadedBox.b - white.b) < 16);
-    // Over a dark canvas: the canvas colour itself at 50 % (a light veil would light the boxes up).
-    AiRgba const night { 0x1E, 0x20, 0x24, 255 };
-    auto const dark = mcp::aiVeilColour(night);
-    CHECK(dark.a == 128 && dark.r == night.r && dark.g == night.g && dark.b == night.b);
-    // The veil never exceeds 50 %: faded things stay readable (it was 70 %).
-    CHECK(veil.a <= 128 && dark.a <= 128);
-}
 
 void tagKindWords()
 {
@@ -497,7 +467,6 @@ int main()
     paletteIsTheOwnersNumbers();
     sizesAreTheOwnersNumbers();
     regionTitleSize();
-    veilIsWarmOverLightAndPlainOverDark();
     tagKindWords();
     oldKindWordsMap();
     unknownIsNeverMeasured();

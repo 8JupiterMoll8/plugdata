@@ -43,11 +43,6 @@ constexpr AiRgba aiRed { 0xDC, 0x29, 0x1F, 255 };    // "I changed this" (a circ
 constexpr AiRgba aiYellow { 0xF7, 0xC2, 0x14, 255 }; // "look here" (a triangle)
 constexpr AiRgba aiBlue { 0x14, 0x3D, 0x9E, 255 };   // "a measurement" (a square), a message on a wire
 constexpr AiRgba aiNoteYellow { 0xF6, 0xE7, 0xA6, 255 }; // the sticky note (ai.note)
-// The spotlight's veil on a box that is not on the lit path, over a LIGHT canvas: a warm paper white at 50 %, so ink text
-// under it reads as a warm grey (about #8C8576) and the box itself stays white-ish ("faded things stay readable grey on
-// white"). Over a DARK canvas the veil is the canvas colour itself (see aiVeilColour).
-constexpr AiRgba aiVeilWarm { 0xFC, 0xF4, 0xE2, 255 };
-constexpr float aiVeilAlpha = 0.5f;         // the veil's strength (was 0.7: the faded parts were unreadable)
 constexpr float aiOffPathCordAlpha = 0.25f; // a cord off the lit path (control or signal) is drawn at 25 %
 
 // -------------------------------------------------------------------------------------------------------- sizes
@@ -172,15 +167,6 @@ inline float aiRegionTitleSizeFor(float zoom)
     if (!(zoom > 0.0f) || !std::isfinite(zoom))
         return aiRegionTitleSize;
     return std::min(aiRegionTitleMaxSize, std::max(aiRegionTitleSize, aiRegionTitleMinScreenPx / zoom));
-}
-
-/** The veil's colour (alpha included) for a canvas background: over a light canvas the warm paper white, over a dark one
- *  the canvas colour itself; always aiVeilAlpha. */
-inline AiRgba aiVeilColour(AiRgba canvasBackground)
-{
-    float const luma = 0.2126f * canvasBackground.r + 0.7152f * canvasBackground.g + 0.0722f * canvasBackground.b;
-    AiRgba const base = luma >= 128.0f ? aiVeilWarm : canvasBackground;
-    return { base.r, base.g, base.b, static_cast<std::uint8_t>(aiVeilAlpha * 255.0f + 0.5f) };
 }
 
 /** One rectangle per region, from the bounding box of the region's member boxes (patch coordinates; the caller leaves

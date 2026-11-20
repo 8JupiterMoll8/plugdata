@@ -1271,20 +1271,8 @@ void CanvasMcpLayer::paintScreenOverlay(NVGcontext* nvg)
 
 bool CanvasMcpLayer::decorateObject(NVGcontext* nvg, Object& object, juce::Rectangle<int> b)
 {
-    // The spotlight (design round B5, live review 2026-11-19): a box that is not on the path gets a veil over its bounds, 50 %
-    // (it was 70 %: the faded parts were unreadable). Over a light canvas the veil is a warm paper white, so ink text under it
-    // reads as a warm grey (about #8C8576) and the box stays white-ish; over a dark canvas it is the canvas colour (mcp::aiVeilColour).
-    // Never a selected (or dragged) box. The object's drawing is cached: updateOverlays repaints the boxes when the targets change.
-    if (spotlightHere() && !isTargeted(&object) && !object.isSelected()) {
-        NVGScopedState scopedVeil(nvg);
-        auto const bg = getThemeColours(canvas).canvasBackgroundColour;
-        auto const rgba = mcp::aiVeilColour({ bg.getRed(), bg.getGreen(), bg.getBlue(), 255 });
-        auto const veil = nanovg::nvgRGBA(rgba.r, rgba.g, rgba.b, rgba.a);
-        nanovg::nvgBeginPath(nvg);
-        nanovg::nvgRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), getPlugDataLook(object).getObjectCornerRadius());
-        nanovg::nvgFillColor(nvg, veil);
-        nanovg::nvgFill(nvg);
-    }
+    // The spotlight leaves every box as it is (owner 2026-11-20: the cream veil over the boxes off the path is gone; the
+    // path reads by its ink wires and step discs, the cords off it at aiOffPathCordAlpha).
     if (!shouldShowAIState())
         return false;
     // PRD overlay: AI state marker drawn per-object (1=changed, 2=proposed, 3=error). Design round B3: the same shapes as
@@ -1984,7 +1972,7 @@ void CanvasMcpLayer::repaintAfterRender(juce::Rectangle<int> area) const
 
 void CanvasMcpLayer::updateOverlays(int const overlayState)
 {
-    // The spotlight's targets changed (set, or cleared by itself): the boxes draw their veil into a cached command buffer, so each
+    // The spotlight's targets changed (set, or cleared by itself): the boxes draw into a cached command buffer, so each
     // repaints once. One shot, no timer. (The caller, Canvas::updateOverlays, repaints the canvas itself.)
     if (canvas.pd) {
         auto const version = canvas.pd->getMcp()->session.getMcpOverlayTargetsVersion();
