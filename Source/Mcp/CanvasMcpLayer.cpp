@@ -91,10 +91,11 @@ void CanvasMcpLayer::paintUnderObjects(NVGcontext* nvg, Rectangle<int> invalidRe
     // Alphi drop 1 D11: with no free spot on the right edge his tab is drawn under the boxes (CanvasMcpAlphiSay.cpp).
     if (mcpAlphiTabUnder && !mcpAlphiTabFrameUnder.isEmpty())
         paintAlphiTab(nvg);
-    // PRD overlay: titled regions drawn BEHIND the objects (structure at a glance). Owner 2026-11-20, "a combination": a
-    // see-through colour per kind (source green, fx blue, loop amber, output red, group violet grey), no outline, with the
-    // 3 px ink bar down the left edge and the name in ink at 85 % (12 px Inter-Medium, never under 11 screen px when zoomed
-    // out; at the top right when a wire or a step disc would cover it on the left). The rectangles come from mcp::aiRegionRects (padded,
+    // PRD overlay: titled regions drawn BEHIND the objects (structure at a glance). Owner 2026-11-20 (decision-bauhaus-bars.png):
+    // an 8 % wash of the kind's Bauhaus colour (source red, fx blue, loop green, output yellow) behind the opaque boxes, no
+    // outline, a 4 px bar of that colour down the left edge under the name band, and the name in ink at 85 % (12 px
+    // Inter-Medium, never under 11 screen px when zoomed out; at the top right when a wire or a step disc would cover it on the
+    // left). A small group (any other kind) is its name only, in grey. The rectangles come from mcp::aiRegionRects (padded,
     // never crossing, never cutting a member box, stacked ones share the squeeze evenly and keep 8 px under the upper one's boxes).
     if (canvas.pd && shouldShowAIRegions() && !canvas.pd->getMcp()->session.getMcpRegions().empty()) {
         auto const regions = canvas.pd->getMcp()->session.getMcpRegions();
@@ -154,16 +155,19 @@ void CanvasMcpLayer::paintUnderObjects(NVGcontext* nvg, Rectangle<int> invalidRe
             if (!juce::Rectangle<float>(rx, ry, std::max(rw, 240.0f * titleSize / mcp::aiRegionTitleSize), std::max(rh, titleSize * 2.0f)).expanded(4.0f).intersects(invalidRegion.toFloat()))
                 return;
             NVGScopedState scopedRegion(nvg);
-            if (rw > 0.0f && rh > 0.0f) {
-                // the see-through colour of its kind (no outline), then the 3 px ink bar down the left edge
+            if (rw > 0.0f && rh > 0.0f && !mcp::aiRegionIsQuiet(kindWord)) {
+                // a faint wash of the kind's colour behind the boxes (no outline), then the bar in that colour under the name band
+                auto const tint = mcp::aiRegionTint(kindWord);
                 nanovg::nvgBeginPath(nvg);
                 nanovg::nvgRect(nvg, rx, ry, rw, rh);
-                nanovg::nvgFillColor(nvg, mcpai::colour(mcp::aiRegionTint(kindWord), mcp::aiRegionFillAlpha));
+                nanovg::nvgFillColor(nvg, mcpai::colour(tint, mcp::aiRegionFillAlpha));
                 nanovg::nvgFill(nvg);
-                nanovg::nvgBeginPath(nvg);
-                nanovg::nvgRect(nvg, rx, ry, mcp::aiRegionBarWidth, rh);
-                nanovg::nvgFillColor(nvg, mcpai::colour(mcp::aiInk));
-                nanovg::nvgFill(nvg);
+                if (rh > mcp::aiRegionBarTop) {
+                    nanovg::nvgBeginPath(nvg);
+                    nanovg::nvgRect(nvg, rx, ry + mcp::aiRegionBarTop, mcp::aiRegionBarWidth, rh - mcp::aiRegionBarTop);
+                    nanovg::nvgFillColor(nvg, mcpai::colour(tint));
+                    nanovg::nvgFill(nvg);
+                }
             }
             if (title.isNotEmpty()) {
                 mcpnvg::nvgFontSize(nvg, titleSize);
@@ -186,7 +190,7 @@ void CanvasMcpLayer::paintUnderObjects(NVGcontext* nvg, Rectangle<int> invalidRe
                 if (side.changed) // drawn on the other side before: this render is scissored to the damage and would tear it
                     flippedBands.push_back(juce::Rectangle<float>(rx, ry + mcp::aiRegionTitleTop, std::max(rw, titleW + 2.0f * mcp::aiRegionTitleInset + mcp::aiRegionTitleNudge), titleH).expanded(3.0f).getSmallestIntegerContainer());
                 auto const place = mcp::aiRegionTitleAt(rect, titleW, side.right);
-                nanovg::nvgFillColor(nvg, mcpai::colour(mcp::aiInk, mcp::aiRegionTitleAlpha));
+                nanovg::nvgFillColor(nvg, mcp::aiRegionIsQuiet(kindWord) ? mcpai::colour(mcp::aiGrey) : mcpai::colour(mcp::aiInk, mcp::aiRegionTitleAlpha));
                 mcpnvg::nvgText(nvg, place.x, place.y, title.toRawUTF8(), nullptr);
             }
         };

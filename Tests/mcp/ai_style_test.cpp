@@ -70,11 +70,12 @@ void sizesAreTheOwnersNumbers()
     CHECK(mcp::aiTagGlyphSize == 9.0f);
     CHECK(mcp::aiGhostAlpha == 0.6f);
     CHECK(mcp::aiRegionGap == 4);
-    // Regions (owner 2026-11-20, the combination): the 3 px ink bar and the ink name of option A, over a see-through
-    // colour per kind, no outline. The name stays 12 px, never below 11 screen px.
-    CHECK(mcp::aiRegionBarWidth == 3.0f);
+    // Regions (owner 2026-11-20, decision-bauhaus-bars.png): a 4 px bar in the kind's colour under the name band, an 8 %
+    // wash of the same colour behind the boxes, the name in ink above the bar. The name stays 12 px, never below 11 screen px.
+    CHECK(mcp::aiRegionBarWidth == 4.0f);
+    CHECK(mcp::aiRegionBarTop == 22.0f);
     CHECK(mcp::aiRegionTitleAlpha == 0.85f);
-    CHECK(mcp::aiRegionFillAlpha == 0.16f);
+    CHECK(mcp::aiRegionFillAlpha == 0.08f);
     CHECK(mcp::aiRegionTitleSize == 12.0f);
     CHECK(mcp::aiRegionTitleMinScreenPx == 11.0f);
     CHECK(mcp::aiRegionMinBelow == 8);
@@ -87,17 +88,18 @@ void sizesAreTheOwnersNumbers()
 
 void regionColours()
 {
-    // Each kind its own hue (the colours the owner remembered from the first weeks: source green, fx blue, loop amber,
-    // output red; group a quiet violet grey). Unknown or empty -> group.
+    // The Bauhaus colours of the ai.* widgets: source red, fx blue, loop green, output yellow. Any other kind (group, empty,
+    // unknown) is quiet: no bar, no wash, the name only.
     auto same = [](mcp::AiRgba a, mcp::AiRgba b) { return a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a; };
-    CHECK(same(mcp::aiRegionTint("source"), mcp::AiRgba { 0x2E, 0x9E, 0x5B, 255 }));
-    CHECK(same(mcp::aiRegionTint("fx"), mcp::AiRgba { 0x3A, 0x78, 0xE0, 255 }));
-    CHECK(same(mcp::aiRegionTint("loop"), mcp::AiRgba { 0xE8, 0xA2, 0x1C, 255 }));
-    CHECK(same(mcp::aiRegionTint("output"), mcp::AiRgba { 0xE0, 0x49, 0x3C, 255 }));
-    CHECK(same(mcp::aiRegionTint("group"), mcp::AiRgba { 0x8A, 0x86, 0xA0, 255 }));
-    CHECK(same(mcp::aiRegionTint(""), mcp::aiRegionTint("group")));
-    CHECK(same(mcp::aiRegionTint("whatever"), mcp::aiRegionTint("group")));
+    CHECK(same(mcp::aiRegionTint("source"), mcp::AiRgba { 0xB8, 0x30, 0x2A, 255 }));
+    CHECK(same(mcp::aiRegionTint("fx"), mcp::AiRgba { 0x2B, 0x3F, 0x9E, 255 }));
+    CHECK(same(mcp::aiRegionTint("loop"), mcp::AiRgba { 0x3A, 0x7D, 0x44, 255 }));
+    CHECK(same(mcp::aiRegionTint("output"), mcp::AiRgba { 0xE3, 0xB2, 0x2B, 255 }));
     CHECK(same(mcp::aiRegionTint("FX"), mcp::aiRegionTint("fx")));
+    for (auto const* k : { "source", "fx", "loop", "output", "Source" })
+        CHECK(!mcp::aiRegionIsQuiet(k));
+    for (auto const* k : { "group", "", "whatever" })
+        CHECK(mcp::aiRegionIsQuiet(k));
 }
 
 void regionTitleSize()

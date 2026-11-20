@@ -12,9 +12,9 @@
 // an AiRgba into its own colour type.
 //
 // The look is the owner's picture "AI overlays, language A": one ink, three shapes for what the AI says (square = a
-// measurement, circle = a change, triangle = look here). A part of the patch (owner, 2026-11-20, "a combination"): the 3 px
-// ink bar and the name of option A over a see-through COLOUR per kind, no outline ("colored, transparent regions ... I could
-// see in one moment what it was"; the grey of 2026-11-19 read as no colour, the bar alone too weak).
+// measurement, circle = a change, triangle = look here). A part of the patch (owner, 2026-11-20, decision-bauhaus-bars.png):
+// a bar in the kind's Bauhaus colour down the left edge, a faint wash of that colour behind the (opaque, white) boxes, the
+// name in ink above the bar; a small group is its name only. Grey fills and the ink bar alone were rejected as too weak.
 
 #include "McpApprovalState.h" // ApprovalRect, rectsIntersect
 
@@ -121,9 +121,10 @@ constexpr float aiGlyphSize(AiTag tag)
 constexpr int aiRegionPadTop = 28;      // room for the title above the members
 constexpr int aiRegionGap = 4;          // the least air between two regions' rectangles
 constexpr int aiRegionMinBelow = 8;     // the least air under any member, where the neighbour's band allows it
-constexpr float aiRegionBarWidth = 3.0f;        // the ink bar down the region's left edge
+constexpr float aiRegionBarWidth = 4.0f;        // the bar in the kind's colour down the region's left edge
+constexpr float aiRegionBarTop = 22.0f;         // the bar starts under the name band (the name stands above it)
 constexpr float aiRegionTitleAlpha = 0.85f;     // the name is ink at 85 %
-constexpr float aiRegionFillAlpha = 0.16f;      // the see-through colour of the region's kind (behind the boxes, no outline)
+constexpr float aiRegionFillAlpha = 0.08f;      // the wash of the kind's colour behind the boxes (no outline)
 constexpr float aiRegionTitleSize = 12.0f;      // the name, Inter-Medium, in patch px at zoom 1
 constexpr float aiRegionTitleMinScreenPx = 11.0f; // ... but never smaller than this on the screen when zoomed out
 constexpr float aiRegionTitleInset = 8.0f;      // from the rectangle's left edge (the bar and 5 px of air) to the name
@@ -143,19 +144,25 @@ inline bool aiKindIs(std::string_view kind, std::string_view word)
 }
 }
 
-/** A region's hue by its kind (source green, fx blue, loop amber, output red; anything else is a group: violet grey).
- *  Drawn at aiRegionFillAlpha behind the boxes, no outline. */
+/** A region's colour by its kind, the Bauhaus colours of the ai.* widgets: source red, fx blue, loop green, output yellow.
+ *  Solid for the bar, at aiRegionFillAlpha for the wash behind the boxes. A quiet kind (aiRegionIsQuiet) draws neither. */
 inline AiRgba aiRegionTint(std::string_view kind)
 {
     if (detail::aiKindIs(kind, "source"))
-        return { 0x2E, 0x9E, 0x5B, 255 };
+        return { 0xB8, 0x30, 0x2A, 255 };
     if (detail::aiKindIs(kind, "fx"))
-        return { 0x3A, 0x78, 0xE0, 255 };
+        return { 0x2B, 0x3F, 0x9E, 255 };
     if (detail::aiKindIs(kind, "loop"))
-        return { 0xE8, 0xA2, 0x1C, 255 };
+        return { 0x3A, 0x7D, 0x44, 255 };
     if (detail::aiKindIs(kind, "output"))
-        return { 0xE0, 0x49, 0x3C, 255 };
-    return { 0x8A, 0x86, 0xA0, 255 };
+        return { 0xE3, 0xB2, 0x2B, 255 };
+    return aiGrey;
+}
+
+/** A small group (any kind but source, fx, loop, output) is quiet: its name only, no bar, no wash. */
+inline bool aiRegionIsQuiet(std::string_view kind)
+{
+    return !(detail::aiKindIs(kind, "source") || detail::aiKindIs(kind, "fx") || detail::aiKindIs(kind, "loop") || detail::aiKindIs(kind, "output"));
 }
 
 /** The name's size in patch px for a canvas zoom: 12 px, or more when the zoom would make it smaller than 11 screen px
