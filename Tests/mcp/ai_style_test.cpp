@@ -71,9 +71,11 @@ void sizesAreTheOwnersNumbers()
     CHECK(mcp::aiTagGlyphSize == 9.0f);
     CHECK(mcp::aiGhostAlpha == 0.6f);
     CHECK(mcp::aiRegionGap == 4);
-    // Regions (owner 2026-11-19): no fill, a 3 px ink bar, the name 12 px at 75 % ink, never below 11 screen px.
+    // Regions (owner 2026-11-20, the combination): the 3 px ink bar and the ink name of option A, over a see-through
+    // colour per kind, no outline. The name stays 12 px, never below 11 screen px.
     CHECK(mcp::aiRegionBarWidth == 3.0f);
-    CHECK(mcp::aiRegionTitleAlpha == 0.75f);
+    CHECK(mcp::aiRegionTitleAlpha == 0.85f);
+    CHECK(mcp::aiRegionFillAlpha == 0.16f);
     CHECK(mcp::aiRegionTitleSize == 12.0f);
     CHECK(mcp::aiRegionTitleMinScreenPx == 11.0f);
     CHECK(mcp::aiRegionMinBelow == 8);
@@ -83,6 +85,21 @@ void sizesAreTheOwnersNumbers()
     CHECK(mcp::aiOffPathCordAlpha == 0.25f);
     // The hint size (11) is untouched: the TS palette test compares it.
     CHECK(mcp::aiHintSize == 11.0f);
+}
+
+void regionColours()
+{
+    // Each kind its own hue (the colours the owner remembered from the first weeks: source green, fx blue, loop amber,
+    // output red; group a quiet violet grey). Unknown or empty -> group.
+    auto same = [](mcp::AiRgba a, mcp::AiRgba b) { return a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a; };
+    CHECK(same(mcp::aiRegionTint("source"), mcp::AiRgba { 0x2E, 0x9E, 0x5B, 255 }));
+    CHECK(same(mcp::aiRegionTint("fx"), mcp::AiRgba { 0x3A, 0x78, 0xE0, 255 }));
+    CHECK(same(mcp::aiRegionTint("loop"), mcp::AiRgba { 0xE8, 0xA2, 0x1C, 255 }));
+    CHECK(same(mcp::aiRegionTint("output"), mcp::AiRgba { 0xE0, 0x49, 0x3C, 255 }));
+    CHECK(same(mcp::aiRegionTint("group"), mcp::AiRgba { 0x8A, 0x86, 0xA0, 255 }));
+    CHECK(same(mcp::aiRegionTint(""), mcp::aiRegionTint("group")));
+    CHECK(same(mcp::aiRegionTint("whatever"), mcp::aiRegionTint("group")));
+    CHECK(same(mcp::aiRegionTint("FX"), mcp::aiRegionTint("fx")));
 }
 
 void regionTitleSize()
@@ -476,6 +493,7 @@ void cardMarks()
 
 int main()
 {
+    regionColours();
     paletteIsTheOwnersNumbers();
     sizesAreTheOwnersNumbers();
     regionTitleSize();

@@ -12,8 +12,9 @@
 // an AiRgba into its own colour type.
 //
 // The look is the owner's picture "AI overlays, language A": one ink, three shapes for what the AI says (square = a
-// measurement, circle = a change, triangle = look here). A part of the patch is NOT a grey area (owner, 2026-11-19, option
-// A of region-no-grey-options.png): a 3 px ink bar down the left edge of the region plus its name.
+// measurement, circle = a change, triangle = look here). A part of the patch (owner, 2026-11-20, "a combination"): the 3 px
+// ink bar and the name of option A over a see-through COLOUR per kind, no outline ("colored, transparent regions ... I could
+// see in one moment what it was"; the grey of 2026-11-19 read as no colour, the bar alone too weak).
 
 #include "McpApprovalState.h" // ApprovalRect, rectsIntersect
 
@@ -125,14 +126,42 @@ constexpr float aiGlyphSize(AiTag tag)
 constexpr int aiRegionPadTop = 28;      // room for the title above the members
 constexpr int aiRegionGap = 4;          // the least air between two regions' rectangles
 constexpr int aiRegionMinBelow = 8;     // the least air under any member, where the neighbour's band allows it
-constexpr float aiRegionBarWidth = 3.0f;        // the ink bar down the region's left edge (no grey fill any more)
-constexpr float aiRegionTitleAlpha = 0.75f;     // the name is ink at 75 %
+constexpr float aiRegionBarWidth = 3.0f;        // the ink bar down the region's left edge
+constexpr float aiRegionTitleAlpha = 0.85f;     // the name is ink at 85 %
+constexpr float aiRegionFillAlpha = 0.16f;      // the see-through colour of the region's kind (behind the boxes, no outline)
 constexpr float aiRegionTitleSize = 12.0f;      // the name, Inter-Medium, in patch px at zoom 1
 constexpr float aiRegionTitleMinScreenPx = 11.0f; // ... but never smaller than this on the screen when zoomed out
 constexpr float aiRegionTitleInset = 8.0f;      // from the rectangle's left edge (the bar and 5 px of air) to the name
 constexpr float aiRegionTitleTop = 6.0f;        // from the rectangle's top edge to the name
 constexpr float aiInterLineHeight = 1.21f;      // Inter's line box as a multiple of its font size (nvgTextBounds' height)
 constexpr float aiRegionTitleMaxSize = 18.0f;   // the name's size cap: 18 x 1.21 = 21.8 px fits what the 28 px band leaves under the 6 px top (22)
+
+namespace detail {
+inline bool aiKindIs(std::string_view kind, std::string_view word)
+{
+    if (kind.size() != word.size())
+        return false;
+    for (std::size_t i = 0; i < kind.size(); ++i)
+        if (std::tolower(static_cast<unsigned char>(kind[i])) != word[i])
+            return false;
+    return true;
+}
+}
+
+/** A region's hue by its kind (source green, fx blue, loop amber, output red; anything else is a group: violet grey).
+ *  Drawn at aiRegionFillAlpha behind the boxes, no outline. */
+inline AiRgba aiRegionTint(std::string_view kind)
+{
+    if (detail::aiKindIs(kind, "source"))
+        return { 0x2E, 0x9E, 0x5B, 255 };
+    if (detail::aiKindIs(kind, "fx"))
+        return { 0x3A, 0x78, 0xE0, 255 };
+    if (detail::aiKindIs(kind, "loop"))
+        return { 0xE8, 0xA2, 0x1C, 255 };
+    if (detail::aiKindIs(kind, "output"))
+        return { 0xE0, 0x49, 0x3C, 255 };
+    return { 0x8A, 0x86, 0xA0, 255 };
+}
 
 /** The name's size in patch px for a canvas zoom: 12 px, or more when the zoom would make it smaller than 11 screen px
  *  (a zoomed-out canvas must still show what a part is called), but never more than aiRegionTitleMaxSize (18): a bigger

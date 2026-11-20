@@ -91,10 +91,10 @@ void CanvasMcpLayer::paintUnderObjects(NVGcontext* nvg, Rectangle<int> invalidRe
     // Alphi drop 1 D11: with no free spot on the right edge his tab is drawn under the boxes (CanvasMcpAlphiSay.cpp).
     if (mcpAlphiTabUnder && !mcpAlphiTabFrameUnder.isEmpty())
         paintAlphiTab(nvg);
-    // PRD overlay: titled regions drawn BEHIND the objects (structure at a glance). Design round 2026-11-19 B1, changed by the
-    // owner the same evening (region-no-grey-options.png, option A): NO grey fill. A region is a 3 px ink bar down the left
-    // edge of its rectangle plus its name (ink at 75 %, 12 px Inter-Medium, never under 11 screen px when zoomed out; at the
-    // top right when a wire or a step disc would cover it on the left). The rectangles come from mcp::aiRegionRects (padded,
+    // PRD overlay: titled regions drawn BEHIND the objects (structure at a glance). Owner 2026-11-20, "a combination": a
+    // see-through colour per kind (source green, fx blue, loop amber, output red, group violet grey), no outline, with the
+    // 3 px ink bar down the left edge and the name in ink at 85 % (12 px Inter-Medium, never under 11 screen px when zoomed
+    // out; at the top right when a wire or a step disc would cover it on the left). The rectangles come from mcp::aiRegionRects (padded,
     // never crossing, never cutting a member box, stacked ones share the squeeze evenly and keep 8 px under the upper one's boxes).
     if (canvas.pd && shouldShowAIRegions() && !canvas.pd->getMcp()->session.getMcpRegions().empty()) {
         auto const regions = canvas.pd->getMcp()->session.getMcpRegions();
@@ -148,13 +148,18 @@ void CanvasMcpLayer::paintUnderObjects(NVGcontext* nvg, Rectangle<int> invalidRe
         };
         std::vector<juce::Rectangle<int>> flippedBands; // the bands of the names that changed sides in this render
 
-        auto const drawRegion = [&](std::size_t slot, float rx, float ry, float rw, float rh, juce::String const& title) {
+        auto const drawRegion = [&](std::size_t slot, float rx, float ry, float rw, float rh, juce::String const& title, juce::String const& kind) {
+            std::string const kindWord = kind.toStdString();
             // Outside what this render redraws: nothing of it would land (its title may run past rw, and grows when zoomed out).
             if (!juce::Rectangle<float>(rx, ry, std::max(rw, 240.0f * titleSize / mcp::aiRegionTitleSize), std::max(rh, titleSize * 2.0f)).expanded(4.0f).intersects(invalidRegion.toFloat()))
                 return;
             NVGScopedState scopedRegion(nvg);
             if (rw > 0.0f && rh > 0.0f) {
-                // the 3 px ink bar down the left edge; no fill, no outline
+                // the see-through colour of its kind (no outline), then the 3 px ink bar down the left edge
+                nanovg::nvgBeginPath(nvg);
+                nanovg::nvgRect(nvg, rx, ry, rw, rh);
+                nanovg::nvgFillColor(nvg, mcpai::colour(mcp::aiRegionTint(kindWord), mcp::aiRegionFillAlpha));
+                nanovg::nvgFill(nvg);
                 nanovg::nvgBeginPath(nvg);
                 nanovg::nvgRect(nvg, rx, ry, mcp::aiRegionBarWidth, rh);
                 nanovg::nvgFillColor(nvg, mcpai::colour(mcp::aiInk));
@@ -189,10 +194,10 @@ void CanvasMcpLayer::paintUnderObjects(NVGcontext* nvg, Rectangle<int> invalidRe
         std::size_t slot = 0;
         for (size_t k = 0; k < rects.size(); ++k) // a region lying on an earlier one's boxes has an empty rectangle: its title only
             drawRegion(slot++, canvas.canvasOrigin.x + static_cast<float>(rects[k].x), canvas.canvasOrigin.y + static_cast<float>(rects[k].y),
-                static_cast<float>(rects[k].w), static_cast<float>(rects[k].h), regions[memberOf[k]].title);
+                static_cast<float>(rects[k].w), static_cast<float>(rects[k].h), regions[memberOf[k]].title, regions[memberOf[k]].kind);
         for (auto const& r : regions) { // no targets: the rectangle as given
             if (r.targetIds.size() == 0)
-                drawRegion(slot++, canvas.canvasOrigin.x + r.x, canvas.canvasOrigin.y + r.y, r.w, r.h, r.title);
+                drawRegion(slot++, canvas.canvasOrigin.x + r.x, canvas.canvasOrigin.y + r.y, r.w, r.h, r.title, r.kind);
         }
         mcpTitleSides.trim(slot);
         for (auto const& band : flippedBands)
