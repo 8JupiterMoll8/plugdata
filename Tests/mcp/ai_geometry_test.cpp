@@ -129,6 +129,25 @@ void tagLeaderNeverCrossesABox()
     CHECK(!segmentTouches(l.from, l.to, gapBox[0]));
 }
 
+void tagAboveStepsRightPastARegionName()
+{
+    // The live showcase (owner 2026-11-20): ai.draw's right is taken by ai.tap, and above its left edge stands the region's
+    // name band. The tag goes above, right-aligned with the boxes, past the name (it used to be flung 480 px away).
+    AiRectF const group { 40, 50, 320, 280 };
+    std::vector<AiRectF> const obstacles { { 460, 50, 360, 220 }, { 28, 22, 110, 22 } };
+    auto const p = mcp::aiTagPlace(group, 170.0f, 18.0f, 0, obstacles);
+    CHECK(p.side == AiTagSide::Above);
+    CHECK(near(p.tag.x + p.tag.w, group.x + group.w));            // right-aligned with the boxes
+    CHECK(near(p.tag.y + p.tag.h + mcp::aiTagLeaderPx, group.y)); // 14 px above them
+    for (auto const& o : obstacles)
+        CHECK(!mcp::aiIntersects(p.tag, o));
+    // Below works the same way: above fully taken, below-left taken -> below, right-aligned.
+    std::vector<AiRectF> const more { { 460, 50, 360, 220 }, { 0, 0, 400, 40 }, { 28, 344, 110, 22 } };
+    auto const q = mcp::aiTagPlace(group, 170.0f, 18.0f, 0, more);
+    CHECK(q.side == AiTagSide::Below);
+    CHECK(near(q.tag.x + q.tag.w, group.x + group.w));
+}
+
 void tagGoesBelowThenLeft()
 {
     AiRectF const group { 200, 200, 100, 30 };
@@ -467,6 +486,7 @@ int main()
     tagStandsRightWhenFree();
     tagGoesAboveWhenTheRightIsTaken();
     tagLeaderNeverCrossesABox();
+    tagAboveStepsRightPastARegionName();
     tagGoesBelowThenLeft();
     tagNeverStandsOverABox();
     titleStandsTopLeft();

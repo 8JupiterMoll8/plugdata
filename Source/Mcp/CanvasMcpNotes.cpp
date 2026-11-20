@@ -198,9 +198,10 @@ CanvasMcpLayer::AnnotationScene CanvasMcpLayer::buildAnnotationScene() const
     if (canvas.pd && shouldShowAIRegions()) {
         auto const regions = canvas.pd->getMcp()->session.getMcpRegions();
         std::vector<mcp::ApprovalRect> members;
+        std::vector<int> titleChars; // per member rectangle, its region's name length
         for (auto const& r : regions) {
             if (r.targetIds.size() == 0) {
-                auto const band = mcp::aiRegionNameBand({ static_cast<int>(r.x), static_cast<int>(r.y), static_cast<int>(r.w), static_cast<int>(r.h) });
+                auto const band = mcp::aiRegionNameBand({ static_cast<int>(r.x), static_cast<int>(r.y), static_cast<int>(r.w), static_cast<int>(r.h) }, r.title.length());
                 scene.owners.push_back(nullptr);
                 scene.obstacles.push_back({ static_cast<float>(band.x), static_cast<float>(band.y), static_cast<float>(band.w), static_cast<float>(band.h) });
                 continue;
@@ -214,11 +215,14 @@ CanvasMcpLayer::AnnotationScene CanvasMcpLayer::buildAnnotationScene() const
                 bounds = any ? bounds.getUnion(obj->getObjectBounds()) : obj->getObjectBounds();
                 any = true;
             }
-            if (any)
+            if (any) {
                 members.push_back({ bounds.getX(), bounds.getY(), bounds.getWidth(), bounds.getHeight() });
+                titleChars.push_back(r.title.length());
+            }
         }
-        for (auto const& rect : mcp::aiRegionRects(members)) {
-            auto const band = mcp::aiRegionNameBand(rect);
+        auto const rects = mcp::aiRegionRects(members);
+        for (std::size_t k = 0; k < rects.size(); ++k) {
+            auto const band = mcp::aiRegionNameBand(rects[k], k < titleChars.size() ? titleChars[k] : 0);
             scene.owners.push_back(nullptr);
             scene.obstacles.push_back({ static_cast<float>(band.x), static_cast<float>(band.y), static_cast<float>(band.w), static_cast<float>(band.h) });
         }

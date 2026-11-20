@@ -104,13 +104,18 @@ void regionColours()
 
 void regionNameBand()
 {
-    // The strip at the top of a region where its name stands: no tag may sit there (owner 2026-11-20: a tag lay on
-    // "drawn voice"). It spans the region's width and runs down to where the bar starts.
-    auto const band = mcp::aiRegionNameBand({ 10, 20, 300, 200 });
-    CHECK(band.x == 10 && band.y == 20 && band.w == 300 && band.h == static_cast<int>(mcp::aiRegionBarTop));
-    // A title-only region (empty rectangle) still keeps a band for its name, 160 px wide.
-    auto const titleOnly = mcp::aiRegionNameBand({ 50, 60, 0, 0 });
-    CHECK(titleOnly.x == 50 && titleOnly.y == 60 && titleOnly.w == 160 && titleOnly.h == static_cast<int>(mcp::aiRegionBarTop));
+    // The strip at the top of a region where its NAME stands: no tag may sit there (owner 2026-11-20: a tag lay on
+    // "drawn voice"). As wide as the name (about 7.5 px a character at 12 px, plus the inset on both sides), never wider
+    // than the region, and down to where the bar starts; the rest of the region's top stays free for tags.
+    auto const band = mcp::aiRegionNameBand({ 10, 20, 300, 200 }, 11); // "drawn voice"
+    CHECK(band.x == 10 && band.y == 20 && band.h == static_cast<int>(mcp::aiRegionBarTop));
+    CHECK(band.w == static_cast<int>(2.0f * mcp::aiRegionTitleInset + 11 * mcp::aiRegionTitleCharPx + 0.5f));
+    CHECK(band.w < 300);
+    // A long name in a narrow region: the region's width.
+    CHECK(mcp::aiRegionNameBand({ 0, 0, 60, 100 }, 40).w == 60);
+    // A title-only region (empty rectangle): the name's width.
+    auto const titleOnly = mcp::aiRegionNameBand({ 50, 60, 0, 0 }, 4);
+    CHECK(titleOnly.x == 50 && titleOnly.y == 60 && titleOnly.w == static_cast<int>(2.0f * mcp::aiRegionTitleInset + 4 * mcp::aiRegionTitleCharPx + 0.5f));
 }
 
 void regionTitleSize()

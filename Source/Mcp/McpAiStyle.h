@@ -176,11 +176,15 @@ inline float aiRegionTitleSizeFor(float zoom)
     return std::min(aiRegionTitleMaxSize, std::max(aiRegionTitleSize, aiRegionTitleMinScreenPx / zoom));
 }
 
-/** The strip at the top of a region (patch coordinates) where its name stands, down to where the bar starts: the tags
- *  keep out of it. A title-only region (an empty rectangle) keeps a 160 px band for its name. */
-inline ApprovalRect aiRegionNameBand(ApprovalRect region)
+constexpr float aiRegionTitleCharPx = 7.5f; // a generous width of one character of the 12 px name (Inter-Medium)
+
+/** The strip at the top of a region (patch coordinates) where its NAME stands, as wide as the name (`titleChars`
+ *  characters, the inset on both sides; never wider than the region) and down to where the bar starts: the tags keep out
+ *  of it, the rest of the region's top stays free for them. A title-only region (an empty rectangle) gets the name's width. */
+inline ApprovalRect aiRegionNameBand(ApprovalRect region, int titleChars)
 {
-    int const w = region.w > 0 ? region.w : 160;
+    int const nameW = static_cast<int>(2.0f * aiRegionTitleInset + static_cast<float>(std::max(0, titleChars)) * aiRegionTitleCharPx + 0.5f);
+    int const w = region.w > 0 ? std::min(region.w, nameW) : nameW;
     return { region.x, region.y, w, static_cast<int>(aiRegionBarTop) };
 }
 

@@ -112,8 +112,8 @@ struct AiTagPlace {
 };
 
 /** Where a tag of `tagW` x `tagH` px stands next to the boxes it speaks about (`group`): right of them (vertically
- *  centred, the tag's own place for years), else above them, else below them (both left-aligned with the boxes), else
- *  left of them; always aiTagLeaderPx away. `stack` = how many tags already stand on the same boxes: each moves one line
+ *  centred, the tag's own place for years), else above them, else below them (each left-aligned with the boxes, then
+ *  right-aligned), else left of them; always aiTagLeaderPx away. `stack` = how many tags already stand on the same boxes: each moves one line
  *  (aiTagStackStepPx) further along its side. A side is taken only when the tag (2 px of air around it) and its leader
  *  line touch no box in `obstacles` (the boxes the tag speaks about are not obstacles: pass them in `skip`, as indices into
  *  `obstacles`, so that one list of every box serves all the tags of a paint; an index past the list is ignored). */
@@ -121,15 +121,20 @@ inline AiTagPlace aiTagPlace(AiRectF group, float tagW, float tagH, int stack, s
 {
     float const step = static_cast<float>(stack) * (tagH + 2.0f);
     float const midY = group.centreY() - tagH * 0.5f;
-    AiRectF const candidates[4] = {
+    // Above and below come twice: left-aligned with the boxes first, then right-aligned (owner 2026-11-20: a region's name
+    // band takes the spot above the left edge, and a tag with no free spot used to be flung far away by the bridge).
+    float const alignRight = group.right() - tagW;
+    AiRectF const candidates[6] = {
         { group.right() + aiTagLeaderPx, midY + step, tagW, tagH },                // right
         { group.x, group.y - aiTagLeaderPx - tagH - step, tagW, tagH },            // above
+        { alignRight, group.y - aiTagLeaderPx - tagH - step, tagW, tagH },         // above, right-aligned
         { group.x, group.bottom() + aiTagLeaderPx + step, tagW, tagH },            // below
+        { alignRight, group.bottom() + aiTagLeaderPx + step, tagW, tagH },         // below, right-aligned
         { group.x - aiTagLeaderPx - tagW, midY + step, tagW, tagH },               // left
     };
-    AiTagSide const sides[4] = { AiTagSide::Right, AiTagSide::Above, AiTagSide::Below, AiTagSide::Left };
+    AiTagSide const sides[6] = { AiTagSide::Right, AiTagSide::Above, AiTagSide::Above, AiTagSide::Below, AiTagSide::Below, AiTagSide::Left };
     auto const skipped = [&skip](std::size_t index) { return std::find(skip.begin(), skip.end(), index) != skip.end(); };
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < 6; ++i) {
         auto const tag = candidates[i];
         auto const leader = aiTagLeader(group, tag);
         bool blocked = false;
