@@ -102,6 +102,17 @@ void regionColours()
         CHECK(mcp::aiRegionIsQuiet(k));
 }
 
+void regionNameBand()
+{
+    // The strip at the top of a region where its name stands: no tag may sit there (owner 2026-11-20: a tag lay on
+    // "drawn voice"). It spans the region's width and runs down to where the bar starts.
+    auto const band = mcp::aiRegionNameBand({ 10, 20, 300, 200 });
+    CHECK(band.x == 10 && band.y == 20 && band.w == 300 && band.h == static_cast<int>(mcp::aiRegionBarTop));
+    // A title-only region (empty rectangle) still keeps a band for its name, 160 px wide.
+    auto const titleOnly = mcp::aiRegionNameBand({ 50, 60, 0, 0 });
+    CHECK(titleOnly.x == 50 && titleOnly.y == 60 && titleOnly.w == 160 && titleOnly.h == static_cast<int>(mcp::aiRegionBarTop));
+}
+
 void regionTitleSize()
 {
     // Zoom 1 and above: 12 px. Below 11/12 of a zoom the screen size would fall under 11 px: the size grows to keep 11.
@@ -466,6 +477,7 @@ void cardMarks()
 int main()
 {
     regionColours();
+    regionNameBand();
     paletteIsTheOwnersNumbers();
     sizesAreTheOwnersNumbers();
     regionTitleSize();

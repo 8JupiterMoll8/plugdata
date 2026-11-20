@@ -193,6 +193,36 @@ CanvasMcpLayer::AnnotationScene CanvasMcpLayer::buildAnnotationScene() const
         scene.owners.push_back(obj);
         scene.obstacles.push_back({ ob.getX(), ob.getY(), ob.getWidth(), ob.getHeight() });
     }
+    // The name band at the top of every region is an obstacle too (owner 2026-11-20: a tag lay on "drawn voice"). The same
+    // rectangles as the paint (mcp::aiRegionRects over the members' bounds, comments left out); no owner, so never skipped.
+    if (canvas.pd && shouldShowAIRegions()) {
+        auto const regions = canvas.pd->getMcp()->session.getMcpRegions();
+        std::vector<mcp::ApprovalRect> members;
+        for (auto const& r : regions) {
+            if (r.targetIds.size() == 0) {
+                auto const band = mcp::aiRegionNameBand({ static_cast<int>(r.x), static_cast<int>(r.y), static_cast<int>(r.w), static_cast<int>(r.h) });
+                scene.owners.push_back(nullptr);
+                scene.obstacles.push_back({ static_cast<float>(band.x), static_cast<float>(band.y), static_cast<float>(band.w), static_cast<float>(band.h) });
+                continue;
+            }
+            juce::Rectangle<int> bounds;
+            bool any = false;
+            for (auto const& tid : r.targetIds) {
+                auto* obj = findObjectByStableId(tid);
+                if (!obj || obj->getType(false) == "comment")
+                    continue;
+                bounds = any ? bounds.getUnion(obj->getObjectBounds()) : obj->getObjectBounds();
+                any = true;
+            }
+            if (any)
+                members.push_back({ bounds.getX(), bounds.getY(), bounds.getWidth(), bounds.getHeight() });
+        }
+        for (auto const& rect : mcp::aiRegionRects(members)) {
+            auto const band = mcp::aiRegionNameBand(rect);
+            scene.owners.push_back(nullptr);
+            scene.obstacles.push_back({ static_cast<float>(band.x), static_cast<float>(band.y), static_cast<float>(band.w), static_cast<float>(band.h) });
+        }
+    }
     return scene;
 }
 
@@ -239,7 +269,7 @@ CanvasMcpLayer::AnnotationFrame CanvasMcpLayer::getAnnotationFrame(size_t annInd
         // speaks about: those are skipped by index, no list is built here.
         std::vector<size_t> skip;
         for (size_t k = 0; k < scene.owners.size(); ++k)
-            if (std::find(targets.begin(), targets.end(), scene.owners[k]) != targets.end())
+            if (scene.owners[k] && std::find(targets.begin(), targets.end(), scene.owners[k]) != targets.end()) // a band (no owner) is never skipped
                 skip.push_back(k);
         auto const placed = mcp::aiTagPlace({ static_cast<float>(grpBounds.getX()), static_cast<float>(grpBounds.getY()), static_cast<float>(grpBounds.getWidth()), static_cast<float>(grpBounds.getHeight()) },
             tagW, tagH, stack, scene.obstacles, skip);

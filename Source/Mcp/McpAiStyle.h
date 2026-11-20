@@ -176,6 +176,14 @@ inline float aiRegionTitleSizeFor(float zoom)
     return std::min(aiRegionTitleMaxSize, std::max(aiRegionTitleSize, aiRegionTitleMinScreenPx / zoom));
 }
 
+/** The strip at the top of a region (patch coordinates) where its name stands, down to where the bar starts: the tags
+ *  keep out of it. A title-only region (an empty rectangle) keeps a 160 px band for its name. */
+inline ApprovalRect aiRegionNameBand(ApprovalRect region)
+{
+    int const w = region.w > 0 ? region.w : 160;
+    return { region.x, region.y, w, static_cast<int>(aiRegionBarTop) };
+}
+
 /** One rectangle per region, from the bounding box of the region's member boxes (patch coordinates; the caller leaves
  *  Pd comments out of the bounds):
  *  - padded by aiPadding (12) on three sides and aiRegionPadTop (28, the title) on top;
