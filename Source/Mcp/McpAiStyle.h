@@ -119,7 +119,7 @@ constexpr float aiGlyphSize(AiTag tag)
 // ------------------------------------------------------------------------------------------------------- regions
 
 constexpr int aiRegionPadTop = 28;      // room for the title above the members
-constexpr int aiRegionGap = 4;          // the least air between two regions' rectangles
+constexpr int aiRegionGap = 10;         // the least air between two regions' rectangles (white, owner 2026-11-20)
 constexpr int aiRegionMinBelow = 8;     // the least air under any member, where the neighbour's band allows it
 constexpr float aiRegionBarWidth = 4.0f;        // the bar in the kind's colour down the region's left edge
 constexpr float aiRegionBarTop = 22.0f;         // the bar starts under the name band (the name stands above it)

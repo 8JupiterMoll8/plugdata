@@ -69,7 +69,7 @@ void sizesAreTheOwnersNumbers()
     CHECK(mcp::aiTagTextSize == 12.0f);
     CHECK(mcp::aiTagGlyphSize == 9.0f);
     CHECK(mcp::aiGhostAlpha == 0.6f);
-    CHECK(mcp::aiRegionGap == 4);
+    CHECK(mcp::aiRegionGap == 10); // white air between regions (owner 2026-11-20, decision-bauhaus-bars.png)
     // Regions (owner 2026-11-20, decision-bauhaus-bars.png): a 4 px bar in the kind's colour under the name band, an 8 %
     // wash of the same colour behind the boxes, the name in ink above the bar. The name stays 12 px, never below 11 screen px.
     CHECK(mcp::aiRegionBarWidth == 4.0f);
@@ -288,12 +288,12 @@ void membersCloserThanTheGap()
 
 void stackedSharesTheSqueezeEvenly()
 {
-    // 40 px between the members: the padded rectangles (12 below + 28 title + 4 gap = 44) are 4 px too much, so the upper
-    // one gives 2 and the lower one gives 2: 10 px under the upper members, 26 px of title room over the lower ones.
-    std::vector<ApprovalRect> const members { { 0, 100, 100, 50 }, { 0, 190, 100, 50 } };
+    // 50 px between the members: the padded rectangles (12 below + 28 title + 10 gap = 50) are 4 px too much at 46, so the
+    // upper one gives 2 and the lower one gives 2: 10 px under the upper members, 26 px of title room over the lower ones.
+    std::vector<ApprovalRect> const members { { 0, 100, 100, 50 }, { 0, 196, 100, 50 } };
     auto const r = mcp::aiRegionRects(members);
     CHECK(r[0].y + r[0].h - 150 == 10);
-    CHECK(190 - r[1].y == 26);
+    CHECK(196 - r[1].y == 26);
     CHECK(r[1].y - (r[0].y + r[0].h) == mcp::aiRegionGap);
     expectSane(members, r, __LINE__);
     // The upper region is never left flush on its members (the live picture: the rectangle ended 1 px under the last box).
