@@ -61,6 +61,41 @@ if [ -n "$stateRt" ]; then
   echo "test-bridge-safety: the widget state receiver and book must not lock, allocate or use JUCE" >&2
   exit 1
 fi
+# ai_widget plan phase 3 (capabilities widget_call and widget_event): the call log records frames while its collector is bound, and the
+# `ai-event` queue and receiver run in Pd's dispatch (the audio thread too): no lock, no allocation, no JUCE, no std container. The reply JSON
+# (McpWidgetCallJson.h) allocates and is built after the collector is unbound: only the verb's handler may include it.
+callRt="$(grep -nE "std::mutex|lock_guard|unique_lock|ScopedLock|new |malloc|std::vector|std::string|juce::|std::function" "$root/Source/Mcp/McpWidgetCall.h" "$root/Source/Mcp/McpWidgetEvent.h" "$root/Source/Pd/MCPBridgeWidgetCall.h" "$root/Source/Pd/MCPBridgeWidgetEvent.h" | grep -v ":\s*//" | grep -v "^[^:]*:[0-9]*: \*\|^[^:]*:[0-9]*://" || true)"
+if [ -n "$callRt" ]; then
+  echo "$callRt" >&2
+  echo "test-bridge-safety: the widget call log, the ai-event queue and both Pd receivers must not lock, allocate or use JUCE" >&2
+  exit 1
+fi
+callCtl="$root/Source/Pd/MCPBridgeCmdControl.cpp"
+callJsonUsers="$(grep -rn "McpWidgetCallJson.h" "$root"/Source --include=*.cpp --include=*.h --include=*.inc | grep -v ":\s*//" | grep -v "Source/Mcp/McpWidgetCallJson.h:" | grep -v "Source/Pd/MCPBridgeCmdControl.cpp:[0-9]*:#include \"Mcp/McpWidgetCallJson.h\"" || true)"
+if [ -n "$callJsonUsers" ]; then
+  echo "$callJsonUsers" >&2
+  echo "test-bridge-safety: McpWidgetCallJson.h (it allocates) is named outside the /pd/widget_call handler" >&2
+  exit 1
+fi
+# The collector is bound by its guard, once, inside the handler; the floor (widgetCallPlan) runs before anything is sent, and the send is
+# inside the guard's scope (after the bind line).
+collectorUsers="$(grep -rnw "McpCallCollectorGuard" "$root"/Source --include=*.cpp --include=*.h --include=*.inc | grep -v ":\s*//" | grep -v "Source/Pd/MCPBridgeWidgetCall.h:" || true)"
+if [ "$(printf '%s\n' "$collectorUsers" | grep -c .)" != "1" ] || ! printf '%s\n' "$collectorUsers" | grep -q "Source/Pd/MCPBridgeCmdControl.cpp:"; then
+  echo "$collectorUsers" >&2
+  echo "test-bridge-safety: the widget_call collector must be bound in exactly one place: the /pd/widget_call handler" >&2
+  exit 1
+fi
+callPlanLine="$(awk '/^void MCPBridge::pdWidgetCall/ { f = 1 } f && /mcp::widgetCallPlan\(/ { print NR; exit } f && /^}/ { exit }' "$callCtl")"
+callBindLine="$(awk '/^void MCPBridge::pdWidgetCall/ { f = 1 } f && /McpCallCollectorGuard const/ { print NR; exit } f && /^}/ { exit }' "$callCtl")"
+callSendLine="$(awk '/^void MCPBridge::pdWidgetCall/ { f = 1 } f && /pd_typedmess\(/ { print NR; exit } f && /^}/ { exit }' "$callCtl")"
+if [ -z "$callPlanLine" ] || [ -z "$callBindLine" ] || [ -z "$callSendLine" ] || [ "$callPlanLine" -ge "$callBindLine" ] || [ "$callBindLine" -ge "$callSendLine" ]; then
+  echo "test-bridge-safety: /pd/widget_call must check the word floor (widgetCallPlan), then bind the collector, then send (lines $callPlanLine, $callBindLine, $callSendLine)" >&2
+  exit 1
+fi
+if [ "$(awk '/^void MCPBridge::pdWidgetCall/ { f = 1 } f && /pd_typedmess\(/ { n++ } f && /^}/ { exit } END { print n + 0 }' "$callCtl")" != "1" ]; then
+  echo "test-bridge-safety: /pd/widget_call must send in exactly one place (after the floor)" >&2
+  exit 1
+fi
 # Review 2026-11-06: Pd's private struct _inlet is read through the fork's class-checked accessors (pure-data/0004),
 # never through a mirrored layout.
 inletMirror="$(grep -rnE "InletMirror|struct _inlet *\{|i_floatslot|i_symslot|iu_floatsignalvalue" "$root"/Source/Pd "$root"/Source/Mcp | grep -v ":\s*//" || true)"

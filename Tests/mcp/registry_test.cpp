@@ -175,6 +175,10 @@ int main()
         CHECK(reported("telemetry", "", "no_such_verb"));
         CHECK(!reported("bridge", "unknown_verb"));
 
+        // ai_widget plan phase 3 (capability widget_call): /pd/widget_call is a row of the pd domain, served by its own handler.
+        CHECK(t.find("pd", "widget_call") != nullptr && *t.find("pd", "widget_call") == "pdWidgetCall");
+        CHECK(!reported("pd", "widget_call"));
+
         // The id-addressed verbs batch_atomic covers are gone (P3.3 S9); the index forms and
         // move_batch_id stay.
         for (char const* gone : { "create_id", "create_batch_id", "connect_id", "connect_batch_id", "disconnect_id",
@@ -265,6 +269,16 @@ int main()
             CHECK(v.mutating == (v.effect != v2::Effect::None));
             CHECK(v.keyRequired == (v.mutating && v.cls != v2::VerbClass::Realtime));
             CHECK(v.needsLease == (v.effect == v2::Effect::Patch || v.effect == v2::Effect::Live || v.effect == v2::Effect::File));
+        }
+        // ai_widget plan phase 3: the schema row of /pd/widget_call (regenerate with scripts/protocol/gen-v2-schema.ts after the verb row
+        // lands): a send into Pd like /pd/send_checked (mutate, live, the edit lease, a key over v2), corrId first, one synchronous reply,
+        // at least corrId, widget, paddr and argc.
+        if (auto const* m = v2::findVerb("pd", "widget_call")) {
+            CHECK(m->cls == v2::VerbClass::Mutate && m->mutating && m->effect == v2::Effect::Live && m->needsLease && m->keyRequired);
+            CHECK(m->replyMode == v2::ReplyMode::Sync && m->corrArg == 0 && m->minArgs == 4 && m->replyCount == 1);
+            CHECK(m->replyCount == 1 && std::string(v2::kReplies[m->firstReply].pattern) == "/pd/widget_call/reply/{id}" && v2::kReplies[m->firstReply].final);
+        } else {
+            CHECK(false && "the v2 schema has no /pd/widget_call row yet (regenerate it)");
         }
         CHECK(v2::findVerb("pd", "batch_atomic")->deadlineMs == 12000);
         CHECK(!v2::findVerb("pd", "select")->needsLease && v2::findVerb("pd", "select")->keyRequired); // ui: no lease, still de-duplicated

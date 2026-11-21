@@ -36,6 +36,8 @@ void MCPBridge::bindWidgetAsk()
         rec->queue = &widgetAsk->queue;
         pd_bind(&rec->obj.ob_pd, rec->sym);
         widgetAsk->receiver = rec;
+        // The artist's answers to a proposal (capability widget_event): `ai-event <widget> <rev> <paddr> use|no|back`.
+        widgetAsk->eventReceiver = mcpBindEventReceiver(widgetAsk->events);
         // Live widget history: a state receiver for each fixed widget (capability widget_state), and again for every named looper held
         // from before a stop (it says hello once, at load: it would not be heard of again). Silent until the server switches the watch on.
         for (char const* widget : mcp::kWidgetStateFixed)
@@ -61,6 +63,10 @@ void MCPBridge::unbindWidgetAsk()
         rec = nullptr;
     }
     widgetAsk->states.rewind(); // the watch is off and what was noted is forgotten (the names stay): serving again starts from the server's next `on`
+    if (widgetAsk->eventReceiver) {
+        pd_free(reinterpret_cast<t_pd*>(widgetAsk->eventReceiver)); // unbinds (mcpEventReceiverFree)
+        widgetAsk->eventReceiver = nullptr;
+    }
     if (widgetAsk->receiver) {
         pd_free(reinterpret_cast<t_pd*>(widgetAsk->receiver)); // unbinds (mcpAskReceiverFree)
         widgetAsk->receiver = nullptr;
@@ -204,6 +210,40 @@ void MCPBridge::pumpWidgetAsks()
             args.add(juce::String::fromUTF8(ev.widget));
             args.add(ev.rev);
             sendReply("/pd/widget_ask", args);
+        }
+    }
+    // The artist's answers to a proposal (capability widget_event): ONE event each on the existing address, `/pd/widget_ask <use|no|back>
+    // <canvas> <widget> <rev>` (the kind word is free there: no new schema event). The canvas is found the way an ask's is.
+    {
+        std::vector<mcp::WidgetEvent> answered;
+        mcp::WidgetEvent answer;
+        while (widgetAsk->events.pop(answer))
+            answered.push_back(answer);
+        if (!answered.empty()) {
+            std::vector<std::string> widgets;
+            for (auto const& ev : answered)
+                if (std::find(widgets.begin(), widgets.end(), ev.widget) == widgets.end()) widgets.emplace_back(ev.widget);
+            auto const canvases = processor ? mcpWidgetAskCanvases(*processor, widgets)
+                                            : std::vector<juce::String>(widgets.size(), juce::String("main"));
+            for (auto const& ev : answered) {
+                auto const at = static_cast<std::size_t>(std::find(widgets.begin(), widgets.end(), ev.widget) - widgets.begin());
+                juce::Array<juce::var> args;
+                args.add(juce::String(mcp::widgetEventKindWord(ev.kind)));
+                args.add(canvases[at]);
+                args.add(juce::String::fromUTF8(ev.widget));
+                args.add(ev.rev);
+                sendReply("/pd/widget_ask", args);
+            }
+        }
+        auto const ec = widgetAsk->events.takeCounts();
+        if (processor && (ec.malformed || ec.rateLimited || ec.full)) {
+            juce::StringArray parts;
+            if (ec.rateLimited) parts.add(juce::String(ec.rateLimited) + " within " + juce::String(static_cast<int>(mcp::kWidgetEventMinGapMs)) + " ms of the same widget's last one");
+            if (ec.malformed) parts.add(juce::String(ec.malformed) + " without a widget name (ai.<word>), a whole-number rev, an address (p<hex>) and use, no or back");
+            if (ec.full) parts.add(juce::String(ec.full) + " while the event queue was full");
+            auto const line = "ai-event: not sent to the AI: " + parts.joinIntoString("; ");
+            McpHost::PdLockScope const lock(*processor);
+            post("%s", line.toRawUTF8());
         }
     }
     // Live widget history: a server that switched the watch on and is gone (no v2 session, nothing for 15 s) is not told: the watch goes

@@ -7663,7 +7663,7 @@ void runZeroArgCases(Harness& h)
         auto const* e = f ? f->find("error") : nullptr;
         refused += (f && field(*f, "outcome") == "rejected" && e && field(*e, "code") == "bad_frame") ? 1 : 0;
     }
-    CHECK(guarded == 28 && refused == guarded); // +1 truth slice 3 send_checked (minArgs 4); 19 since /pd/midi_devices (minArgs 1); +2 P11 /pd/bound, /pd/selection_get; +2 P12c approval_show/clear (minArgs 2); +3 P12a flow_mode_get/off, ownership (P12a.1: the offer verb is gone); +1 Alphi drop 1 alphi_say (minArgs 1)
+    CHECK(guarded == 29 && refused == guarded); // +1 ai_widget phase 3 widget_call (minArgs 4; counts once the v2 schema has its row); +1 truth slice 3 send_checked (minArgs 4); 19 since /pd/midi_devices (minArgs 1); +2 P11 /pd/bound, /pd/selection_get; +2 P12c approval_show/clear (minArgs 2); +3 P12a flow_mode_get/off, ownership (P12a.1: the offer verb is gone); +1 Alphi drop 1 alphi_say (minArgs 1)
 }
 
 // Alphi drop 1, step W: /pd/alphi_say <json {text, kind, state, turn, ttlMs}>. No reply on v1 (nothing at all comes
@@ -8085,6 +8085,385 @@ void runWidgetStateSeamCases(Harness& h, PluginProcessor& processor, MCPBridge& 
     CHECK(!bridge.widgetStateWatching());
 }
 
+// ai_widget plan phase 3 (capability widget_call): /pd/widget_call <corrId> <widget> <paddr|-> <argc> <atoms...> reads and proposes on ONE widget in
+// one synchronous call. A collector is bound to the widget's state name for the length of the call, the atoms are sent to its in-name the way
+// send_checked sends (so a pd-lua widget's own receiver hears them), the frames it answers come back as sets cut at each `end`.
+// The widget here is a stand-in for the pd-lua class: its class is NAMED "pdlua proxy receive" (the bridge tells a pd-lua receiver by that name
+// alone, see isLuaProxyReceive) and it answers inside the call like a widget does: frames on the state name, `end <rev> <paddr>` last. The real
+// Lua route is covered live (the 1c live check against the staged build).
+struct FakeCallWidget {
+    t_pd pd;
+    t_symbol* state;
+    int mode; // 0 answers normally, 1 floods (70 frames then end), 2 sends a frame of 40 atoms, 3 never says end, 4 stays silent
+    char addr[24];
+};
+t_class* fakeCallWidgetClass = nullptr;
+t_class* fakeStrangerClass = nullptr;
+std::vector<std::string> fakeCallHits; // "<address> <words>" for each message an instance acted on; written under the Pd lock
+
+void fakeCallSend(FakeCallWidget* x, char const* selector, std::vector<t_atom> atoms)
+{
+    if (x->state->s_thing)
+        pd_typedmess(x->state->s_thing, gensym(selector), static_cast<int>(atoms.size()), atoms.empty() ? nullptr : atoms.data());
+}
+
+// What a pd-lua widget reads: `symbol dump`, `list to <paddr> dump`, or a message by name. An addressed message is for one instance only.
+void fakeCallWidgetAnything(FakeCallWidget* x, t_symbol* s, int argc, t_atom* argv)
+{
+    std::vector<std::string> words;
+    if (s != &s_list && s != &s_symbol) words.push_back(s->s_name);
+    for (int i = 0; i < argc; ++i)
+        words.push_back(argv[i].a_type == A_SYMBOL ? argv[i].a_w.w_symbol->s_name : std::to_string(static_cast<int>(argv[i].a_w.w_float)));
+    if (words.size() >= 2 && words[0] == "to") {
+        if (words[1] != x->addr) return; // another instance: nothing at all
+        words.erase(words.begin(), words.begin() + 2);
+    }
+    if (words.empty()) return;
+    std::string joined;
+    for (auto const& w : words) joined += (joined.empty() ? "" : " ") + w;
+    fakeCallHits.push_back(std::string(x->addr) + " " + joined);
+    if (x->mode == 4) return;
+    auto const end = [&] { fakeCallSend(x, "end", { numAtom(4), symAtom(x->addr) }); };
+    switch (x->mode) {
+    case 1:
+        for (int i = 0; i < 70; ++i) fakeCallSend(x, "d1", { numAtom(i) });
+        end();
+        break;
+    case 2: {
+        std::vector<t_atom> wide;
+        for (int i = 0; i < 40; ++i) wide.push_back(numAtom(i));
+        fakeCallSend(x, "g1", wide);
+        end();
+        break;
+    }
+    case 3:
+        fakeCallSend(x, "d1", { numAtom(1) });
+        fakeCallSend(x, "d1", { numAtom(2) });
+        break;
+    default:
+        fakeCallSend(x, "d1", { numAtom(4), numAtom(2), numAtom(1) });
+        fakeCallSend(x, "accepts", { symAtom("values"), numAtom(32) });
+        fakeCallSend(x, "label", { symAtom("warm"), symAtom("bass") });
+        end();
+        break;
+    }
+}
+
+void fakeStrangerAnything(t_pd*, t_symbol*, int, t_atom*)
+{
+    fakeCallHits.push_back("stranger heard it");
+}
+
+FakeCallWidget* bindFakeCallWidget(McpHost* host, char const* inName, char const* stateName, char const* addr, int mode = 0)
+{
+    FakeCallWidget* w = nullptr;
+    CHECK(host->pdWait([&] {
+        if (!fakeCallWidgetClass) {
+            fakeCallWidgetClass = class_new(gensym("pdlua proxy receive"), nullptr, nullptr, sizeof(FakeCallWidget), 0, static_cast<t_atomtype>(0));
+            class_addanything(fakeCallWidgetClass, reinterpret_cast<t_method>(fakeCallWidgetAnything));
+            fakeStrangerClass = class_new(gensym("mcp_wcall_stranger"), nullptr, nullptr, sizeof(t_pd), CLASS_PD, static_cast<t_atomtype>(0));
+            class_addanything(fakeStrangerClass, reinterpret_cast<t_method>(fakeStrangerAnything));
+        }
+        w = static_cast<FakeCallWidget*>(getbytes(sizeof(FakeCallWidget)));
+        w->pd = fakeCallWidgetClass; // as pdlua_proxyreceive_new: malloc'd, its class set by hand
+        w->state = gensym(stateName);
+        w->mode = mode;
+        std::snprintf(w->addr, sizeof(w->addr), "%s", addr);
+        pd_bind(&w->pd, gensym(inName));
+    }, 2000));
+    return w;
+}
+
+void freeFakeCallWidget(McpHost* host, FakeCallWidget*& w, char const* inName)
+{
+    CHECK(host->pdWait([&] {
+        pd_unbind(&w->pd, gensym(inName));
+        freebytes(w, sizeof(FakeCallWidget));
+        w = nullptr;
+    }, 2000));
+}
+
+std::vector<std::string> fakeCallHitsNow(McpHost* host)
+{
+    std::vector<std::string> out;
+    host->pdWait([&] { out = fakeCallHits; fakeCallHits.clear(); }, 2000);
+    return out;
+}
+
+// How many things are bound to a name (the bridge's own receivers included).
+int bindersOnName(McpHost* host, char const* name)
+{
+    int n = -1;
+    CHECK(host->pdWait([&] { n = static_cast<int>(mcp::bound::bindersOf(gensym(name)).size()); }, 2000));
+    return n;
+}
+
+juce::Array<juce::var> const* arrayOf(juce::var const& v)
+{
+    return v.getArray();
+}
+
+void runWidgetCallCases(Harness& h, PluginProcessor& processor)
+{
+    std::printf("widget_call (ai_widget plan phase 3): one call, one collector, no control window\n");
+    auto* host = processor.getMcp();
+    CHECK(hasCap(h, "widget_call", "wc0"));
+    CHECK(hasCap(h, "widget_event", "wc1"));
+    int corr = 0;
+    auto call = [&](char const* widget, char const* paddr, std::vector<A> const& atoms) {
+        auto const id = "wcl" + std::to_string(++corr);
+        std::vector<A> args { A(id.c_str()), A(widget), A(paddr), A(static_cast<int>(atoms.size())) };
+        for (auto const& a : atoms) args.push_back(a);
+        auto r = h.callList("/pd/widget_call", args, "/pd/widget_call/reply/" + id);
+        CHECK(r.has_value());
+        return r ? parseJson(*r) : juce::var();
+    };
+    auto const setCount = [](juce::var const& json) { auto const* s = json["sets"].getArray(); return s ? s->size() : -1; };
+    auto const frameSelector = [](juce::var const& set, int frame) {
+        auto const* frames = set["frames"].getArray();
+        return frames && frame < frames->size() ? (*frames)[frame][0].toString() : juce::String("<none>");
+    };
+
+    // 1. Nothing listens on the in-name: nothing is sent, nothing is bound for the call, the answer says so.
+    {
+        auto const json = call("ai.wcall", "-", { A("dump") });
+        CHECK(json["widget"].toString() == "ai.wcall" && static_cast<int>(json["listeners"]) == 0 && setCount(json) == 0);
+        CHECK(!static_cast<bool>(json["truncated"]) && json["refused"].isVoid());
+        CHECK(bindersOnName(host, "ai-wcall-state") == 0);
+    }
+
+    // 2. One widget (a pd-lua stand-in on its in-name) answers `dump`: one set, the end frame last, the address on it.
+    auto* first = bindFakeCallWidget(host, "ai-wcall-in", "ai-wcall-state", "p55d0c8a3b2a0");
+    CHECK(first != nullptr);
+    if (!first) return;
+    fakeCallHitsNow(host);
+    {
+        auto const json = call("ai.wcall", "-", { A("dump") });
+        CHECK(static_cast<int>(json["listeners"]) == 1 && setCount(json) == 1 && !static_cast<bool>(json["truncated"]) && static_cast<int>(json["unended"]) == 0);
+        auto const set = setCount(json) == 1 ? (*arrayOf(json["sets"]))[0] : juce::var();
+        CHECK(static_cast<int>(set["rev"]) == 4 && set["at"].toString() == "p55d0c8a3b2a0");
+        auto const* frames = set["frames"].getArray();
+        CHECK(frames && frames->size() == 4);
+        CHECK(frameSelector(set, 0) == "d1" && frameSelector(set, 3) == "end");
+        if (frames && frames->size() == 4) {
+            auto const* d1 = (*frames)[0].getArray();
+            CHECK(d1 && d1->size() == 4 && static_cast<int>((*d1)[1]) == 4 && static_cast<int>((*d1)[2]) == 2);
+            auto const* label = (*frames)[2].getArray();
+            CHECK(label && label->size() == 3 && (*label)[1].toString() == "warm" && (*label)[2].toString() == "bass");
+            auto const* end = (*frames)[3].getArray();
+            CHECK(end && end->size() == 3 && static_cast<int>((*end)[1]) == 4 && (*end)[2].toString() == "p55d0c8a3b2a0");
+        }
+        auto const hits = fakeCallHitsNow(host);
+        CHECK(hits.size() == 1 && hits[0] == "p55d0c8a3b2a0 dump"); // the widget heard `dump`, once
+        CHECK(bindersOnName(host, "ai-wcall-state") == 0);          // the collector is gone again
+    }
+
+    // 3. Two instances of one widget: unaddressed, both answer (two sets, told apart by `at`); addressed, only that one acts, and it
+    //    heard `to <paddr> ghost ...` (the bridge puts the prefix in front); `to <paddr>` already in the atoms is sent as it is.
+    auto* second = bindFakeCallWidget(host, "ai-wcall-in", "ai-wcall-state", "p77aa");
+    CHECK(second != nullptr);
+    if (!second) {
+        freeFakeCallWidget(host, first, "ai-wcall-in");
+        return;
+    }
+    fakeCallHitsNow(host);
+    {
+        auto const json = call("ai.wcall", "-", { A("dump") });
+        CHECK(static_cast<int>(json["listeners"]) == 2 && setCount(json) == 2);
+        if (setCount(json) == 2) {
+            juce::StringArray at;
+            for (auto const& s : *arrayOf(json["sets"])) at.add(s["at"].toString());
+            CHECK(at.contains("p55d0c8a3b2a0") && at.contains("p77aa"));
+        }
+        fakeCallHitsNow(host);
+        auto const addressed = call("ai.wcall", "p77aa", { A("ghost"), A(4), A(0.5), A(-1) });
+        CHECK(setCount(addressed) == 1 && (*arrayOf(addressed["sets"]))[0]["at"].toString() == "p77aa");
+        auto hits = fakeCallHitsNow(host);
+        CHECK(hits.size() == 1 && hits[0] == "p77aa ghost 4 0 -1"); // the widget read floats; the prefix was put in front by the bridge
+        auto const inAtoms = call("ai.wcall", "-", { A("to"), A("p55d0c8a3b2a0"), A("dump") });
+        CHECK(setCount(inAtoms) == 1 && (*arrayOf(inAtoms["sets"]))[0]["at"].toString() == "p55d0c8a3b2a0");
+        hits = fakeCallHitsNow(host);
+        CHECK(hits.size() == 1 && hits[0] == "p55d0c8a3b2a0 dump");
+    }
+    freeFakeCallWidget(host, second, "ai-wcall-in");
+
+    // 4. The floor, in C++: any word but dump / ghost / ghostname / unghost is refused and NOTHING reaches the widget.
+    for (char const* word : { "do", "clear", "flow", "beat", "drive", "undo", "reload", "tempo" }) {
+        auto const json = call("ai.wcall", "-", { A(word) });
+        CHECK(!json["refused"].toString().isEmpty() && setCount(json) == 0);
+        CHECK(json["refused"].toString().contains("allowed widget word"));
+    }
+    {
+        auto const json = call("ai.wcall", "p55d0c8a3b2a0", { A("do"), A("undo") });
+        CHECK(json["refused"].toString().contains("allowed widget word"));
+        auto const prefixed = call("ai.wcall", "-", { A("to"), A("p55d0c8a3b2a0"), A("clear") });
+        CHECK(prefixed["refused"].toString().contains("allowed widget word"));
+        auto const number = call("ai.wcall", "-", { A(1) });
+        CHECK(!number["refused"].toString().isEmpty());
+        CHECK(fakeCallHitsNow(host).empty()); // none of it got through
+    }
+
+    // 5. Other things that are refused before Pd sees them: a name that is no ai.<word>, a bad address, an empty message, a count the
+    //    message does not carry, an address twice.
+    {
+        CHECK(call("pd", "-", { A("dump") })["refused"].toString().contains("ai widget name"));
+        CHECK(call("ai.wcall", "zz", { A("dump") })["refused"].toString().contains("address"));
+        CHECK(call("ai.wcall", "p1", { A("to"), A("p2"), A("dump") })["refused"].toString().contains("twice"));
+        CHECK(!call("ai.wcall", "-", {})["refused"].toString().isEmpty());
+        auto const id = std::string("wcl-short");
+        auto r = h.call("/pd/widget_call", { id.c_str(), "ai.wcall", "-", 5, "ghost" }, "/pd/widget_call/reply/" + id); // argc 5, one atom
+        CHECK(r.has_value() && parseJson(*r)["refused"].toString().contains("fewer atoms"));
+        CHECK(fakeCallHitsNow(host).empty());
+    }
+
+    // 6. Limits: 70 frames are cut at 64 and flagged (no end inside the cut: no set is served, the frames are only counted); a frame of 40
+    //    atoms is cut at 32 and flagged (its set is served); a dump that never says `end` is served as nothing.
+    first->mode = 1;
+    {
+        auto const json = call("ai.wcall", "-", { A("dump") });
+        CHECK(static_cast<bool>(json["truncated"]) && setCount(json) == 0 && static_cast<int>(json["unended"]) == 64);
+    }
+    first->mode = 2;
+    {
+        auto const json = call("ai.wcall", "-", { A("dump") });
+        CHECK(static_cast<bool>(json["truncated"]) && setCount(json) == 1);
+        if (setCount(json) == 1) {
+            auto const* g1 = (*(*arrayOf(json["sets"]))[0]["frames"].getArray())[0].getArray();
+            CHECK(g1 && g1->size() == 33); // the selector and 32 atoms
+        }
+    }
+    first->mode = 3;
+    {
+        auto const json = call("ai.wcall", "-", { A("dump") });
+        CHECK(setCount(json) == 0 && static_cast<int>(json["unended"]) == 2 && !static_cast<bool>(json["truncated"]));
+    }
+    first->mode = 4; // a widget that says nothing
+    {
+        auto const json = call("ai.wcall", "-", { A("dump") });
+        CHECK(static_cast<int>(json["listeners"]) == 1 && setCount(json) == 0 && static_cast<int>(json["unended"]) == 0);
+    }
+    first->mode = 0;
+    CHECK(bindersOnName(host, "ai-wcall-state") == 0); // no call left its collector bound, whatever the widget did
+
+    // 7. The collector is one more binder of the state name FOR THE CALL ONLY: a widget's own receiver on that name (the way a pd-lua widget
+    //    listens to its state name) is still there before and after, and the bridge's own receiver of a watched name (ai-draw-state)
+    //    coexists with it. ai.draw is a watched widget: its state receiver is bound by the bridge while it serves.
+    {
+        auto* draw = bindFakeCallWidget(host, "ai-draw-in", "ai-draw-state", "p1d");
+        CHECK(draw != nullptr);
+        if (draw) {
+            int const before = bindersOnName(host, "ai-draw-state"); // the bridge's receiver (1)
+            auto const json = call("ai.draw", "-", { A("dump") });
+            CHECK(static_cast<int>(json["listeners"]) == 1 && setCount(json) == 1);   // the bridge's own receivers are no listener
+            CHECK(bindersOnName(host, "ai-draw-state") == before);
+            CHECK(before >= 1);
+            freeFakeCallWidget(host, draw, "ai-draw-in");
+        }
+        fakeCallHitsNow(host);
+    }
+
+    // 8. Fail closed, as send_checked: a binder on the in-name that is neither a box nor a pd-lua receiver refuses the whole call and
+    //    nothing is sent (the widget behind it hears nothing).
+    {
+        t_pd* stranger = nullptr;
+        CHECK(host->pdWait([&] {
+            stranger = static_cast<t_pd*>(getbytes(sizeof(t_pd)));
+            *stranger = fakeStrangerClass;
+            pd_bind(stranger, gensym("ai-wcall-in"));
+        }, 2000));
+        auto const json = call("ai.wcall", "-", { A("dump") });
+        CHECK(json["refused"].toString() == "non-object binder" && setCount(json) == 0);
+        CHECK(fakeCallHitsNow(host).empty());
+        CHECK(host->pdWait([&] {
+            pd_unbind(stranger, gensym("ai-wcall-in"));
+            freebytes(stranger, sizeof(t_pd));
+        }, 2000));
+    }
+
+    // 9. After all of it the widget answers again as before (nothing was left bound or half-sent).
+    {
+        auto const json = call("ai.wcall", "-", { A("dump") });
+        CHECK(static_cast<int>(json["listeners"]) == 1 && setCount(json) == 1);
+    }
+    freeFakeCallWidget(host, first, "ai-wcall-in");
+    {
+        auto const json = call("ai.wcall", "-", { A("dump") });
+        CHECK(static_cast<int>(json["listeners"]) == 0 && setCount(json) == 0);
+    }
+}
+
+// ai_widget plan phase 3 (capability widget_event): a widget's `ai-event <widget> <rev> <paddr> use|no|back` reaches the server as ONE event
+// /pd/widget_ask <use|no|back> <canvas> <widget> <rev> (no address, no free text), sent from the message thread; at most one per widget,
+// instance and word per 500 ms (a refused one is a console line, not an event); a bad word, name, number or address is a console line too.
+// The receiver is bound only while the bridge serves.
+void sendToAiEvent(McpHost* host, t_symbol* selector, std::vector<t_atom> atoms)
+{
+    CHECK(host->pdWait([&] {
+        auto* s = gensym("ai-event");
+        if (s->s_thing) pd_typedmess(s->s_thing, selector, static_cast<int>(atoms.size()), atoms.empty() ? nullptr : atoms.data());
+    }, 2000));
+}
+
+void runWidgetEventCases(Harness& h, PluginProcessor& processor, MCPBridge& bridge)
+{
+    std::printf("widget_event (ai_widget plan phase 3): the artist's answer to a proposal\n");
+    auto* host = processor.getMcp();
+    CHECK(bridge.widgetAskBound());
+    bool bound = false;
+    CHECK(host->pdWait([&] { bound = gensym("ai-event")->s_thing != nullptr; }, 2000));
+    CHECK(bound);
+
+    // 1. The three words, as a Lua widget sends them (a list), one event each.
+    for (char const* word : { "use", "no", "back" }) {
+        h.replies.clear();
+        sendToAiEvent(host, &s_list, { symAtom("ai.draw"), numAtom(7), symAtom("p55d0c8a3b2a0"), symAtom(word) });
+        auto ev = h.replies.waitFor("/pd/widget_ask", 2000);
+        CHECK(ev.has_value());
+        if (ev) {
+            CHECK(ev->args.size() == 4 && ev->str(0) == word && ev->str(1) == "main" && ev->str(2) == "ai.draw" && ev->num(3) == 7);
+        } else {
+            std::printf("  unread replies: %s\n", h.replies.describe().c_str());
+        }
+    }
+
+    // 2. A [s ai-event] message box (the widget name is the selector), another widget; trailing words are dropped.
+    h.replies.clear();
+    sendToAiEvent(host, gensym("ai.tap"), { numAtom(3), symAtom("p1"), symAtom("no"), symAtom("and"), symAtom("more") });
+    auto tap = h.replies.waitFor("/pd/widget_ask", 2000);
+    CHECK(tap && tap->str(0) == "no" && tap->str(2) == "ai.tap" && tap->num(3) == 3 && tap->args.size() == 4);
+
+    // 3. The same word of the same instance again at once: no event, one console line. Another instance has its own budget.
+    uint64_t const before = host->consoleSeqNow();
+    sendToAiEvent(host, &s_list, { symAtom("ai.tap"), numAtom(4), symAtom("p1"), symAtom("no") });
+    CHECK(!h.replies.waitFor("/pd/widget_ask", 400).has_value());
+    CHECK(consoleHas(host, before, "of the same widget's last one", 2000));
+    sendToAiEvent(host, &s_list, { symAtom("ai.tap"), numAtom(4), symAtom("p2"), symAtom("no") });
+    auto other = h.replies.waitFor("/pd/widget_ask", 2000);
+    CHECK(other && other->str(0) == "no" && other->str(2) == "ai.tap" && other->num(3) == 4);
+
+    // 4. Malformed (no ai.<word> name, no whole-number rev, no address text, an unknown word): no event, one console line.
+    uint64_t const beforeBad = host->consoleSeqNow();
+    sendToAiEvent(host, &s_list, { symAtom("pd"), numAtom(1), symAtom("p1"), symAtom("use") });
+    sendToAiEvent(host, &s_list, { symAtom("ai.knob"), numAtom(-2), symAtom("p1"), symAtom("use") });
+    sendToAiEvent(host, &s_list, { symAtom("ai.knob"), numAtom(2), symAtom("0x55d0"), symAtom("use") });
+    sendToAiEvent(host, &s_list, { symAtom("ai.knob"), numAtom(2), symAtom("p1"), symAtom("keep") });
+    sendToAiEvent(host, &s_list, { symAtom("ai.knob"), numAtom(2), numAtom(1), symAtom("use") });
+    sendToAiEvent(host, &s_list, { symAtom("ai.knob"), numAtom(2) });
+    sendToAiEvent(host, &s_float, { numAtom(4) });
+    CHECK(!h.replies.waitFor("/pd/widget_ask", 400).has_value());
+    CHECK(consoleHas(host, beforeBad, "ai-event: not sent to the AI", 2000));
+    CHECK(consoleHas(host, beforeBad, "use, no or back", 2000));
+
+    // 5. The receiver is one of the bridge's own: a checked send to `ai-event` is not refused as a stranger binder, and /pd/bound calls it a probe.
+    {
+        auto r = h.call("/pd/send_checked", { "main", "we1", "ai-event", 1, "dump" }, "/pd/send_checked/reply/we1");
+        CHECK(r.has_value());
+        auto const json = r ? parseJson(*r) : juce::var();
+        // were it a stranger binder it would be refused ("non-object binder"); it is one of the bridge's own, so nothing listens and nothing is refused
+        CHECK(json["refused"].toString().isEmpty() && !static_cast<bool>(json["bound"]) && static_cast<int>(json["proxies"]) == 0);
+    }
+}
+
 // P4.1 S3: the handler cases a second time, through a v2 session of the bridge's own listener, with the same
 // expectations on the decoded replies (the evidence that the handlers did not change), then the v2-only cases.
 void runV2Pass(Harness& v1, MCPBridge& bridge)
@@ -8409,6 +8788,8 @@ int main()
                 bridge->setReplySinkForTests([&replies](juce::OSCMessage const& msg) { replies.push(msg); });
             });
             runWidgetStateSeamCases(harness, processor, *bridge);
+            runWidgetCallCases(harness, processor);
+            runWidgetEventCases(harness, processor, *bridge);
             runWireActivityCases(harness);
             runFactCases(harness, processor);
             runOutputCeilingCases(harness, processor, audioControl);

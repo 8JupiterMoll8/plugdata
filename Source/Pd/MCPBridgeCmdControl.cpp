@@ -10,6 +10,7 @@
 #include "MCPBridgeBound.h"          // truth slice 3: send_checked's receivers
 #include "MCPBridgeOwnReceivers.h"   // mcpIsBridgeOwnReceiverClass: the bridge's own probes (control, ai-ask, widget state) are no receivers
 #include "MCPBridgePdAccessors.h"
+#include "Mcp/McpWidgetCallJson.h"  // phase 3 (widget_call): the reply JSON, built after the collector is unbound
 
 void MCPBridge::handleParamDomain(const juce::String& /*paramName*/, const juce::OSCMessage& msg)
 {
@@ -387,4 +388,196 @@ void MCPBridge::pdSendChecked(const juce::String& action, const juce::OSCMessage
         root->setProperty("error", "the Pd context did not answer in time");
     }
     sendReply(address, juce::JSON::toString(rootVar, true));
+}
+
+// ── Phase 3 of the ai_widget plan (capability widget_call): /pd/widget_call <corrId> <widget> <paddr|-> <argc> <atoms...> ──────────────
+// Reads and proposes on ONE ai.* widget in one call, without the shared control window. Under the Pd lock, on the Pd context (the message
+// thread, like /pd/send_checked): a collector is bound to the widget's STATE name (`ai-draw-state`, a looper's `ai-loop_<name>-state`), the
+// atoms are sent to its IN name (`ai-draw-in`) exactly the way /pd/send_checked sends (the same selector rule, pd_typedmess on the name's
+// bound thing, so a pd-lua widget's own `pd.Receive` proxy hears it as well as a canvas [r]), the collector is unbound again, and the frames
+// it caught, cut into sets at each `end`, are the reply (Source/Mcp/McpWidgetCallJson.h). `paddr` names one instance (`to <paddr>` is put in
+// front of the atoms: only that object acts, the others stay silent); `-` sends the message as it is.
+//
+// The floor (mcp::widgetCallPlan, Source/Mcp/McpWidgetCall.h): the first word of the message is dump, ghost, ghostname or unghost, and nothing
+// else gets through (do, clear, flow, beat, ...): the AI proposes and reads, it never drives. The widget name must be ai.<word>; the in-name
+// has to be listened on by boxes and pd-lua proxies only (the same fail-closed sort as send_checked: an array, a canvas by namecanvas or any
+// other binder that is not a box makes the whole call refused, nothing is sent). The collector is made before and freed after the bind by a
+// guard, never reachable from the audio thread (the Pd lock is held from the bind to the unbind) and it allocates nothing while bound: the log
+// is one fixed object made BEFORE the Pd context is entered.
+//
+// Reply /pd/widget_call/reply/<corrId>: { widget, listeners, sets: [{ rev, at, frames }], truncated, unended[, refused][, error] }. A Pd-context
+// timeout says `listeners: null` and `error`. Nothing listening is `listeners: 0` and no sets.
+namespace {
+
+// What listens on a widget's in-name, sorted like send_checked sorts a name's binders (fail closed): the bridge's own receivers are no
+// listeners; a pd-lua `pd.Receive` proxy is one (counted, never read as a t_object, review H5); a box is one only when it is found placed on a
+// canvas (placedAmong), and is never read here; anything else, or a walk that stopped at its cap before it found a binder, refuses the call.
+struct WidgetCallListeners {
+    int count = 0;
+    std::string refused;
+};
+
+WidgetCallListeners sortWidgetCallBinders(t_symbol* in)
+{
+    WidgetCallListeners out;
+    int proxies = 0;
+    std::vector<t_pd*> candidates;
+    for (auto* b : mcp::bound::bindersOf(in)) {
+        if (mcpIsBridgeOwnReceiverClass(*b)) continue;
+        if (isLuaProxyReceive(b)) ++proxies;
+        else candidates.push_back(b);
+    }
+    auto const placed = mcp::bound::placedAmong(candidates); // review H5: only a placed box is a box
+    int boxes = 0;
+    for (auto* b : candidates) {
+        bool const isBox = *b != canvas_class && placed.found.count(b) != 0 && pd_checkobject(b) != nullptr;
+        if (!isBox) {
+            out.refused = (*b != canvas_class && placed.walkLimit) ? "walk limit" : "non-object binder"; // review M6, fail closed
+            return out;
+        }
+        ++boxes;
+    }
+    out.count = proxies + boxes;
+    return out;
+}
+
+// One atom of the request, kept until the call is done (the floor reads the words in place).
+struct WidgetCallWire {
+    bool isSymbol = false;
+    double num = 0.0;
+    std::string text;
+};
+
+std::string widgetCallText(juce::OSCArgument const& arg)
+{
+    auto s = getArgString(arg);
+    if (s.startsWith("s:")) s = s.substring(2); // as send_checked: an optional marker that a string is a word
+    return s.toStdString();
+}
+
+// The request's atoms (OSC floats and ints are numbers, strings are words), `argc` of them from index 4 on; the caller checked the message holds them.
+std::vector<WidgetCallWire> readWidgetCallWire(juce::OSCMessage const& msg, int argc)
+{
+    std::vector<WidgetCallWire> wire(static_cast<std::size_t>(argc));
+    for (int a = 0; a < argc; ++a) {
+        auto const& arg = msg[4 + a];
+        auto& w = wire[static_cast<std::size_t>(a)];
+        if (arg.isFloat32() || arg.isInt32()) {
+            w.num = static_cast<double>(getArgFloat(arg));
+        } else {
+            w.isSymbol = true;
+            w.text = widgetCallText(arg);
+        }
+    }
+    return wire;
+}
+
+// The Pd atoms of the call: `to <paddr>` first when the address came as an argument, then the request. gensym: the caller holds the Pd lock.
+std::vector<t_atom> widgetCallAtoms(std::vector<WidgetCallWire> const& wire, std::string const& addressPrefix)
+{
+    std::vector<t_atom> atoms;
+    atoms.reserve(wire.size() + 2);
+    if (!addressPrefix.empty()) {
+        t_atom to;
+        SETSYMBOL(&to, gensym("to"));
+        atoms.push_back(to);
+        t_atom who;
+        SETSYMBOL(&who, gensym(addressPrefix.c_str()));
+        atoms.push_back(who);
+    }
+    for (auto const& w : wire) {
+        t_atom at;
+        if (w.isSymbol) SETSYMBOL(&at, gensym(w.text.c_str()));
+        else SETFLOAT(&at, static_cast<t_float>(w.num));
+        atoms.push_back(at);
+    }
+    return atoms;
+}
+
+// The selector /pd/send_checked picks for a list of atoms, so the widget's receivers see the same message either way.
+t_symbol* widgetCallSelector(std::vector<t_atom> const& atoms)
+{
+    return atoms.empty() ? &s_bang
+        : atoms.size() == 1 && atoms[0].a_type == A_FLOAT ? &s_float
+        : atoms.size() == 1 && atoms[0].a_type == A_SYMBOL ? &s_symbol
+        : &s_list;
+}
+
+} // namespace
+
+void MCPBridge::pdWidgetCall(const juce::String& action, const juce::OSCMessage& msg)
+{
+    juce::ignoreUnused(action);
+    if (!processor || msg.size() < 4) return;
+    auto const correlationId = getArgString(msg[0]);
+    auto const address = "/pd/widget_call/reply/" + correlationId;
+    auto const widget = widgetCallText(msg[1]);
+    auto const paddr = widgetCallText(msg[2]);
+    float const rawArgc = getArgFloat(msg[3]);
+    int const argc = rawArgc >= 1.0f ? (rawArgc > 100000.0f ? 100000 : static_cast<int>(rawArgc)) : 0; // a huge or nan count is never cast
+
+    mcp::WidgetCallReplyInfo info;
+    info.widget = widget.c_str();
+    info.listeners = 0;
+    auto const reply = [&](mcp::WidgetCallLog const* log) {
+        sendReply(address, juce::String::fromUTF8(mcp::widgetCallReplyJson(info, log).c_str()));
+    };
+    auto const refuse = [&](char const* why) {
+        info.refused = why;
+        reply(nullptr);
+    };
+    if (!mcp::widgetAskNameOk(widget.c_str())) return refuse(mcp::widgetCallRefusalText(mcp::WidgetCallRefusal::NoWidget));
+    if (argc > mcp::kWidgetCallMaxArgs) return refuse(mcp::widgetCallRefusalText(mcp::WidgetCallRefusal::TooManyAtoms));
+    if (static_cast<int>(msg.size()) < 4 + argc) return refuse("the message carries fewer atoms than its argc says");
+
+    auto const wire = readWidgetCallWire(msg, argc);
+    std::vector<mcp::WidgetCallArg> args(wire.size()); // after `wire` is complete: the words are read in place
+    for (std::size_t i = 0; i < wire.size(); ++i) {
+        args[i].isSymbol = wire[i].isSymbol;
+        args[i].num = wire[i].num;
+        args[i].sym = wire[i].isSymbol ? wire[i].text.c_str() : nullptr;
+    }
+    auto const plan = mcp::widgetCallPlan(args.data(), argc, paddr.c_str()); // the floor: before anything reaches Pd
+    if (plan.refusal != mcp::WidgetCallRefusal::None) return refuse(mcp::widgetCallRefusalText(plan.refusal));
+
+    char inName[mcp::kWidgetAskNameLen + 8] = {};
+    char stateName[mcp::kWidgetAskNameLen + 12] = {};
+    if (!mcp::widgetAskInName(widget.c_str(), inName, sizeof(inName)) || !mcp::widgetStateSymbolName(widget.c_str(), stateName, sizeof(stateName)))
+        return refuse(mcp::widgetCallRefusalText(mcp::WidgetCallRefusal::NoWidget));
+    // The address argument (the atoms did not say it: the floor checked) goes in front as `to <paddr>`; "-" sends the atoms as they are.
+    std::string const addressPrefix = paddr == "-" ? std::string() : paddr;
+
+    auto log = std::make_unique<mcp::WidgetCallLog>(); // the room, reserved before the Pd context is entered
+    std::string refusedHere;
+    auto* host = processor->getMcp();
+    bool const ran = host->pdWait([&] {
+        t_symbol* const in = mcp::bound::findSymbolNoCreate(inName);
+        auto const listeners = sortWidgetCallBinders(in);
+        if (!listeners.refused.empty()) {
+            refusedHere = listeners.refused;
+            return;
+        }
+        info.listeners = listeners.count;
+        if (listeners.count == 0) return; // nothing listens: nothing is sent
+
+        auto atoms = widgetCallAtoms(wire, addressPrefix);
+        t_symbol* const selector = widgetCallSelector(atoms);
+        t_symbol* const state = gensym(stateName); // made before the bind: nothing is made while the collector is bound
+        unsigned int const seqBefore = mcp_last_seq();
+        {
+            McpCallCollectorGuard const collector(*log, state); // bound from here to the closing brace, under the Pd lock
+            pd_typedmess(in->s_thing, selector, static_cast<int>(atoms.size()), atoms.data());
+        }
+        host->noteAiSeqRange(seqBefore, mcp_last_seq()); // what the message made downstream is the AI's, as for send_checked
+    }, 3000);
+
+    if (!refusedHere.empty()) return refuse(refusedHere.c_str());
+    if (!ran) {
+        // The Pd context did not answer (the job never ran and never will: pdWait abandons it): nothing is known.
+        info.listeners = -1;
+        info.error = "the Pd context did not answer in time";
+        reply(nullptr);
+        return;
+    }
+    reply(log.get());
 }

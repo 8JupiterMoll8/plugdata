@@ -23,13 +23,16 @@
 // (1 ask per widget per 2 s): Source/Mcp/McpWidgetAsk.h. Included by MCPBridge.cpp only.
 //
 // The same pump also carries the live widget history (MCPBridgeWidgetState.h): a receiver on each widget's state name, and the
-// `/pd/widget_ask state ...` events it makes after 1 s of quiet (kind `state`: the kind word is free, the event address is the same).
+// `/pd/widget_ask state ...` events it makes after 1 s of quiet (kind `state`: the kind word is free, the event address is the same),
+// and the artist's answers to a proposal (MCPBridgeWidgetEvent.h, capability widget_event): a receiver on `ai-event` and the
+// `/pd/widget_ask <use|no|back> ...` events it makes.
 
 #pragma once
 
 #include "Mcp/McpWidgetAsk.h"
 #include "Mcp/McpWidgetFocus.h"
 #include "MCPBridgeWidgetAskCanvas.h"
+#include "MCPBridgeWidgetEvent.h"
 #include "MCPBridgeWidgetState.h"
 
 #include <chrono>
@@ -140,6 +143,9 @@ struct McpWidgetAskState {
 
     mcp::WidgetAskQueue queue;
     McpAskReceiver* receiver = nullptr; // bound to `ai-ask` while the bridge serves
+    // The artist's answers to a proposal (capability widget_event): `ai-event <widget> <rev> <paddr> use|no|back`, bound while the bridge serves.
+    mcp::WidgetEventQueue events;
+    McpEventReceiver* eventReceiver = nullptr;
     // The chip's focus (`ai-ask focus ...`): the newest one waits here until the mouse button is up (the chip fires on the press; the
     // canvas must not change its mode under a held button), at most kFocusWaitMs; then it is carried out once, answered or not.
     static constexpr std::int64_t kFocusWaitMs = 1200;
