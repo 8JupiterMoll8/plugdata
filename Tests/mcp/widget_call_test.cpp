@@ -158,8 +158,19 @@ void theFloorRefusesBadAtoms()
     CHECK(planOf({ sym("ghostname"), sym("a\nb") }) == WidgetCallRefusal::BadAtom);   // a control character
     CHECK(planOf({ sym("ghostname"), sym("a\x7f") }) == WidgetCallRefusal::BadAtom);
     CHECK(planOf({ sym("ghostname"), sym("") }) == WidgetCallRefusal::BadAtom);       // an empty symbol is no atom
+    // a request word is refused above what a captured frame can carry back (kWidgetCallSymLen - 1 = 47 bytes): a label the widget echoes
+    // is then never read back cut short
+    CHECK(mcp::kWidgetCallMaxArgChars == mcp::kWidgetCallSymLen - 1 && mcp::kWidgetCallMaxArgChars == 47);
     CHECK(planOf({ sym("ghostname"), sym(std::string(65, 'a').c_str()) }) == WidgetCallRefusal::BadAtom);
-    CHECK(planOf({ sym("ghostname"), sym(std::string(64, 'a').c_str()) }) == WidgetCallRefusal::None);
+    CHECK(planOf({ sym("ghostname"), sym(std::string(64, 'a').c_str()) }) == WidgetCallRefusal::BadAtom);
+    CHECK(planOf({ sym("ghostname"), sym(std::string(48, 'a').c_str()) }) == WidgetCallRefusal::BadAtom);
+    CHECK(planOf({ sym("ghostname"), sym(std::string(47, 'a').c_str()) }) == WidgetCallRefusal::None);
+    // the cap counts bytes: 24 umlauts are 48 bytes (refused), 23 umlauts and an 'a' are 47 (taken)
+    std::string umlauts48, umlauts47 = "a";
+    for (int i = 0; i < 24; ++i) umlauts48 += "\xC3\xA4";
+    for (int i = 0; i < 23; ++i) umlauts47 += "\xC3\xA4";
+    CHECK(planOf({ sym("ghostname"), sym(umlauts48.c_str()) }) == WidgetCallRefusal::BadAtom);
+    CHECK(planOf({ sym("ghostname"), sym(umlauts47.c_str()) }) == WidgetCallRefusal::None);
     WidgetCallArg nullSym;
     nullSym.isSymbol = true;
     nullSym.sym = nullptr;
@@ -329,6 +340,86 @@ void aLongSymbolIsCutAndFlagged()
     CHECK(std::strcmp(log3->frame(0).atoms[0].sym, "?") == 0);
 }
 
+// Valid UTF-8 as juce::String::fromUTF8 wants it: every lead byte has exactly its continuation bytes, no stray continuation byte.
+bool validUtf8(char const* s)
+{
+    auto const* p = reinterpret_cast<unsigned char const*>(s);
+    while (*p) {
+        int extra = 0;
+        if (*p < 0x80) extra = 0;
+        else if ((*p & 0xE0) == 0xC0) extra = 1;
+        else if ((*p & 0xF0) == 0xE0) extra = 2;
+        else if ((*p & 0xF8) == 0xF0) extra = 3;
+        else return false; // a stray continuation byte (or an impossible lead)
+        ++p;
+        for (int i = 0; i < extra; ++i, ++p)
+            if ((*p & 0xC0) != 0x80) return false;
+    }
+    return true;
+}
+
+void aCutNeverSplitsAMultibyteCharacter()
+{
+    CHECK(validUtf8("warm \xC3\xA4 \xE2\x82\xAC \xF0\x9F\x8E\x9B") && !validUtf8("a\xA4") && !validUtf8("a\xC3") && !validUtf8("a\xE2\x82"));
+    // the umlaut straddles the cut: 46 bytes, then C3 A4 (bytes 47 and 48); 47 bytes are kept, so the lead byte alone would remain
+    std::string const straddle = std::string(mcp::kWidgetCallSymLen - 2, 'a') + "\xC3\xA4" + "tail";
+    auto log = std::make_unique<WidgetCallLog>();
+    log->beginFrame("label");
+    log->addSymbol(straddle.c_str());
+    CHECK(log->truncated());
+    CHECK(validUtf8(log->frame(0).atoms[0].sym));
+    CHECK(std::strcmp(log->frame(0).atoms[0].sym, std::string(mcp::kWidgetCallSymLen - 2, 'a').c_str()) == 0); // the whole character is dropped, not half
+    // every character width at every cut position: the symbol is always valid, never longer than the room, and loses at most 3 bytes
+    for (char const* ch : { "\xC3\xA4", "\xE2\x82\xAC", "\xF0\x9F\x8E\x9B" }) {
+        std::size_t const width = std::strlen(ch);
+        for (int pad = 0; pad < 8; ++pad) {
+            std::string text(static_cast<std::size_t>(mcp::kWidgetCallSymLen - 1 - 6 + pad), 'a');
+            while (text.size() < 90) text += ch;
+            auto l = std::make_unique<WidgetCallLog>();
+            l->beginFrame(text.c_str()); // the selector is cut the same way
+            l->addSymbol(text.c_str());
+            CHECK(l->truncated());
+            CHECK(validUtf8(l->frame(0).selector) && validUtf8(l->frame(0).atoms[0].sym));
+            std::size_t const kept = std::strlen(l->frame(0).atoms[0].sym);
+            CHECK(kept <= static_cast<std::size_t>(mcp::kWidgetCallSymLen - 1) && kept + width > static_cast<std::size_t>(mcp::kWidgetCallSymLen - 1));
+            CHECK(std::strcmp(l->frame(0).selector, l->frame(0).atoms[0].sym) == 0);
+        }
+    }
+    // a character that ENDS exactly at the cut stays whole and the symbol is not flagged: 45 bytes and an umlaut are 47
+    std::string const fits = std::string(mcp::kWidgetCallSymLen - 3, 'a') + "\xC3\xA4";
+    auto fit = std::make_unique<WidgetCallLog>();
+    fit->beginFrame("label");
+    fit->addSymbol(fits.c_str());
+    CHECK(!fit->truncated() && std::strcmp(fit->frame(0).atoms[0].sym, fits.c_str()) == 0);
+    // text that is cut right after a whole character keeps it: 45 bytes, the umlaut, more text
+    auto after = std::make_unique<WidgetCallLog>();
+    after->beginFrame("label");
+    after->addSymbol((fits + "more").c_str());
+    CHECK(after->truncated() && std::strcmp(after->frame(0).atoms[0].sym, fits.c_str()) == 0);
+    // text that is not UTF-8 at all (a run of continuation bytes) is still cut at the room: the step back is bounded, nothing runs off the buffer
+    auto junk = std::make_unique<WidgetCallLog>();
+    junk->beginFrame("label");
+    junk->addSymbol(std::string(100, '\xA4').c_str());
+    CHECK(junk->truncated() && std::strlen(junk->frame(0).atoms[0].sym) <= static_cast<std::size_t>(mcp::kWidgetCallSymLen - 1));
+}
+
+// A request word the floor takes (47 bytes) comes back whole from a frame, umlauts included.
+void aLabelTheFloorTakesRoundTrips()
+{
+    std::string const word47 = std::string(mcp::kWidgetCallMaxArgChars - 2, 'w') + "\xC3\xA4";
+    CHECK(word47.size() == 47 && planOf({ sym("ghostname"), sym(word47.c_str()) }) == WidgetCallRefusal::None);
+    auto log = std::make_unique<WidgetCallLog>();
+    log->beginFrame("label");
+    log->addSymbol(word47.c_str());
+    CHECK(!log->truncated() && std::strcmp(log->frame(0).atoms[0].sym, word47.c_str()) == 0);
+    std::string const plain47(47, 'x');
+    CHECK(planOf({ sym("ghostname"), sym(plain47.c_str()) }) == WidgetCallRefusal::None);
+    auto log2 = std::make_unique<WidgetCallLog>();
+    log2->beginFrame("label");
+    log2->addSymbol(plain47.c_str());
+    CHECK(!log2->truncated() && std::strcmp(log2->frame(0).atoms[0].sym, plain47.c_str()) == 0);
+}
+
 void theRoomIsFixed()
 {
     // nothing is allocated while the collector is bound: the whole log is one object of fixed size (64 frames of 32 atoms)
@@ -447,6 +538,8 @@ int main()
     theFloorAllowsFourWordsAndNothingElse();
     theAddressIsPrefixedOrGiven();
     theFloorRefusesBadAtoms();
+    aCutNeverSplitsAMultibyteCharacter();
+    aLabelTheFloorTakesRoundTrips();
     twoSetsAreSplitAtEachEnd();
     aSetWithoutEndIsNotServed();
     anEndWithoutRevOrAddressStillCloses();

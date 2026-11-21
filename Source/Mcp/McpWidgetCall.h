@@ -19,7 +19,9 @@
 //     lower-case hex digits, the way a widget writes its object's address;
 //   - the log: fixed storage for at most 64 frames of at most 32 atoms (the control window's numbers). Recording never locks, never
 //     allocates and never calls JUCE (scripts/test-bridge-safety.sh greps this file for it): it runs wherever Pd dispatches. The 65th
-//     frame and the 33rd atom of a frame are dropped and the log says `truncated`; a symbol longer than its room is cut and flagged;
+//     frame and the 33rd atom of a frame are dropped and the log says `truncated`; a symbol longer than its room (47 bytes) is cut, on a
+//     UTF-8 character boundary (never inside a multibyte character: the reply is read as UTF-8), and flagged. A request word is refused
+//     above the same 47 bytes (kWidgetCallMaxArgChars), so a label the widget echoes in a frame never comes back cut short;
 //   - the sets: the frames are cut at each `end` frame (a widget's state is `... end <rev> <paddr>`); the end frame is the last frame of
 //     its set. Frames after the last `end` are no state (a dump that was cut): they are counted, never served.
 
@@ -38,7 +40,7 @@ constexpr int kWidgetCallMaxFrames = 64;     // frames kept per call (the 65th i
 constexpr int kWidgetCallMaxAtoms = 32;      // atoms kept per frame (the 33rd is dropped and flagged)
 constexpr int kWidgetCallSymLen = 48;        // bytes kept of a selector or a symbol atom, the terminating NUL included
 constexpr int kWidgetCallMaxArgs = 256;      // atoms of the request message, before the `to <paddr>` the bridge may put in front
-constexpr int kWidgetCallMaxArgChars = 64;   // characters of one symbol of the request
+constexpr int kWidgetCallMaxArgChars = kWidgetCallSymLen - 1; // bytes of one symbol of the request: what a captured frame carries back whole
 constexpr int kWidgetCallAddrChars = 17;     // `p` and 16 hex digits, the terminating NUL not counted
 
 // The address of a widget object as it writes it: `p` and 1..16 lower-case hex digits ("p55d0c8a3b2a0"). Compared as text, never read as a pointer.
@@ -78,7 +80,7 @@ inline char const* widgetCallRefusalText(WidgetCallRefusal r)
     case WidgetCallRefusal::NoWidget: return "not an ai widget name (ai.<word>)";
     case WidgetCallRefusal::Empty: return "nothing to send (the message is empty)";
     case WidgetCallRefusal::TooManyAtoms: return "too many atoms in the message (at most 256)";
-    case WidgetCallRefusal::BadAtom: return "an atom is not allowed (a number must be finite, a word is 1 to 64 printable characters)";
+    case WidgetCallRefusal::BadAtom: return "an atom is not allowed (a number must be finite, a word is 1 to 47 bytes of printable characters)";
     case WidgetCallRefusal::BadAddress: return "the address is not p and 1 to 16 lower-case hex digits";
     case WidgetCallRefusal::AddressTwice: return "the address is given twice (as the address argument and as `to <paddr>` in the message)";
     case WidgetCallRefusal::Word: return "not an allowed widget word (only dump, ghost, ghostname, unghost)";
@@ -270,14 +272,26 @@ private:
     }
 
     // `src` into a kWidgetCallSymLen buffer; true when it had to be cut. No printf: no locale, no formatting on the dispatch path.
+    // The cut is on a UTF-8 character boundary: when the first byte left out is a continuation byte (0x80..0xBF) the cut lay inside a
+    // multibyte character, so it steps back to that character's lead byte (at most 3 bytes: UTF-8 has no more continuation bytes) and the
+    // whole character is left out. Text that is not UTF-8 (no lead byte within 3) is cut at the room, as it was.
     static bool copyText(char* dst, char const* src)
     {
         std::size_t i = 0;
         for (; src[i] && i < static_cast<std::size_t>(kWidgetCallSymLen - 1); ++i)
             dst[i] = src[i];
+        if (!src[i]) {
+            dst[i] = 0;
+            return false;
+        }
+        std::size_t back = 0; // i is kWidgetCallSymLen - 1 here (> 3): src[i - back] is always inside the text
+        while (back < 3 && isContinuationByte(src[i - back])) ++back;
+        if (back > 0 && !isContinuationByte(src[i - back])) i -= back; // src[i - back] is the lead byte of the split character: cut before it
         dst[i] = 0;
-        return src[i] != 0;
+        return true;
     }
+
+    static bool isContinuationByte(char c) { return (static_cast<unsigned char>(c) & 0xC0) == 0x80; }
 
     WidgetCallFrame frames_[kWidgetCallMaxFrames];
     int count_ = 0;
