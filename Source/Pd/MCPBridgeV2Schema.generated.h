@@ -8,7 +8,7 @@
 
 namespace mcp::v2schema {
 
-inline constexpr char kSchemaHash[] = "ca6fe8f8feff8d8e";
+inline constexpr char kSchemaHash[] = "70c6e71fb92ad40b";
 inline constexpr int kProtocol = 2;
 
 enum class VerbClass : std::uint8_t { Read, Mutate, Heavy, Long, Realtime };
@@ -208,6 +208,7 @@ inline constexpr ReplyPattern kReplies[] = {
     { "/pd/undo_peek/error/{id}", true, false, false },
     { "/pd/undo_peek/reply/{id}", true, false, false },
     { "/pd/viewport/reply/{id}", true, false, false },
+    { "/pd/widget_call/reply/{id}", true, false, false },
     { "/pd/wire_activity/reply/{id}", true, false, false },
     { "/pd/wire_occlusions/reply/{id}", true, false, false },
     { "/pd/zoom_to_fit/reply/{id}", true, false, false },
@@ -348,21 +349,22 @@ inline constexpr VerbMeta kVerbs[] = {
     { "pd", "update_dsp", VerbClass::Mutate, true, Effect::Live, true, true, ReplyMode::None, kCorrNone, 10000, 0, 157, 0 },
     { "pd", "viewport", VerbClass::Read, false, Effect::None, false, false, ReplyMode::Async, 1, 3000, 0, 157, 1 },
     { "pd", "vis", VerbClass::Mutate, true, Effect::Ui, false, true, ReplyMode::None, kCorrNone, 10000, 0, 158, 0 },
-    { "pd", "wire_activity", VerbClass::Read, false, Effect::None, false, false, ReplyMode::Sync, 1, 3000, 0, 158, 1 },
-    { "pd", "wire_occlusions", VerbClass::Read, false, Effect::None, false, false, ReplyMode::Sync, 1, 3000, 1, 159, 1 },
-    { "pd", "zoom_to_fit", VerbClass::Mutate, true, Effect::Ui, false, true, ReplyMode::Async, 1, 10000, 0, 160, 1 },
-    { "seq", "start", VerbClass::Mutate, true, Effect::Live, true, true, ReplyMode::Sync, 1, 10000, 0, 161, 1 },
-    { "seq", "stop", VerbClass::Mutate, true, Effect::Live, true, true, ReplyMode::None, kCorrNone, 10000, 0, 162, 0 },
-    { "telemetry", "delete", VerbClass::Mutate, true, Effect::Patch, true, true, ReplyMode::None, kCorrNone, 10000, 0, 162, 0 },
-    { "telemetry", "delete_on", VerbClass::Mutate, true, Effect::Patch, true, true, ReplyMode::None, kCorrNone, 10000, 0, 162, 0 },
-    { "telemetry", "dsp", VerbClass::Mutate, true, Effect::Live, true, true, ReplyMode::None, kCorrNone, 10000, 0, 162, 0 },
-    { "transport", "pause", VerbClass::Mutate, true, Effect::Live, true, true, ReplyMode::None, kCorrNone, 10000, 0, 162, 0 },
-    { "transport", "set_bpm", VerbClass::Mutate, true, Effect::Live, true, true, ReplyMode::None, kCorrNone, 10000, 0, 162, 0 },
-    { "transport", "set_mode", VerbClass::Mutate, true, Effect::Live, true, true, ReplyMode::None, kCorrNone, 10000, 0, 162, 0 },
-    { "transport", "set_subdivision", VerbClass::Mutate, true, Effect::Live, true, true, ReplyMode::None, kCorrNone, 10000, 0, 162, 0 },
-    { "transport", "start", VerbClass::Mutate, true, Effect::Live, true, true, ReplyMode::None, kCorrNone, 10000, 0, 162, 0 },
-    { "transport", "status", VerbClass::Read, false, Effect::None, false, false, ReplyMode::Sync, 0, 3000, 0, 162, 1 },
-    { "trigger", "", VerbClass::Realtime, true, Effect::Live, true, false, ReplyMode::None, kCorrNone, 0, 0, 163, 0 },
+    { "pd", "widget_call", VerbClass::Mutate, true, Effect::Live, true, true, ReplyMode::Sync, 0, 10000, 4, 158, 1 },
+    { "pd", "wire_activity", VerbClass::Read, false, Effect::None, false, false, ReplyMode::Sync, 1, 3000, 0, 159, 1 },
+    { "pd", "wire_occlusions", VerbClass::Read, false, Effect::None, false, false, ReplyMode::Sync, 1, 3000, 1, 160, 1 },
+    { "pd", "zoom_to_fit", VerbClass::Mutate, true, Effect::Ui, false, true, ReplyMode::Async, 1, 10000, 0, 161, 1 },
+    { "seq", "start", VerbClass::Mutate, true, Effect::Live, true, true, ReplyMode::Sync, 1, 10000, 0, 162, 1 },
+    { "seq", "stop", VerbClass::Mutate, true, Effect::Live, true, true, ReplyMode::None, kCorrNone, 10000, 0, 163, 0 },
+    { "telemetry", "delete", VerbClass::Mutate, true, Effect::Patch, true, true, ReplyMode::None, kCorrNone, 10000, 0, 163, 0 },
+    { "telemetry", "delete_on", VerbClass::Mutate, true, Effect::Patch, true, true, ReplyMode::None, kCorrNone, 10000, 0, 163, 0 },
+    { "telemetry", "dsp", VerbClass::Mutate, true, Effect::Live, true, true, ReplyMode::None, kCorrNone, 10000, 0, 163, 0 },
+    { "transport", "pause", VerbClass::Mutate, true, Effect::Live, true, true, ReplyMode::None, kCorrNone, 10000, 0, 163, 0 },
+    { "transport", "set_bpm", VerbClass::Mutate, true, Effect::Live, true, true, ReplyMode::None, kCorrNone, 10000, 0, 163, 0 },
+    { "transport", "set_mode", VerbClass::Mutate, true, Effect::Live, true, true, ReplyMode::None, kCorrNone, 10000, 0, 163, 0 },
+    { "transport", "set_subdivision", VerbClass::Mutate, true, Effect::Live, true, true, ReplyMode::None, kCorrNone, 10000, 0, 163, 0 },
+    { "transport", "start", VerbClass::Mutate, true, Effect::Live, true, true, ReplyMode::None, kCorrNone, 10000, 0, 163, 0 },
+    { "transport", "status", VerbClass::Read, false, Effect::None, false, false, ReplyMode::Sync, 0, 3000, 0, 163, 1 },
+    { "trigger", "", VerbClass::Realtime, true, Effect::Live, true, false, ReplyMode::None, kCorrNone, 0, 0, 164, 0 },
 };
 inline constexpr std::size_t kVerbCount = sizeof(kVerbs) / sizeof(kVerbs[0]);
 
