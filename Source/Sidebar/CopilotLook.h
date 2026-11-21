@@ -37,6 +37,10 @@ constexpr mcp::AiTag tagOfMark(mcp::TalkMark mark)
     case mcp::TalkMark::Changed: return mcp::AiTag::Changed;
     case mcp::TalkMark::Explained: return mcp::AiTag::Guess;
     case mcp::TalkMark::Measured: return mcp::AiTag::Fact;
+    // ai_widget plan, phase 3: the artist's answer to a widget proposal wears an existing shape until the owner draws its own: used = the
+    // red circle (the idea is in the patch now), refused = the blue outline square (a tag, nothing changed)
+    case mcp::TalkMark::Used: return mcp::AiTag::Changed;
+    case mcp::TalkMark::Refused: return mcp::AiTag::Guess;
     case mcp::TalkMark::None: break;
     }
     return mcp::AiTag::None;
@@ -53,10 +57,12 @@ inline void drawMark(juce::Graphics& g, mcp::TalkMark mark, float cx, float cy)
     float const half = size * 0.5f;
     switch (mark) {
     case mcp::TalkMark::Changed:
+    case mcp::TalkMark::Used:
         g.setColour(colour(mcp::aiRed));
         g.fillEllipse(cx - half, cy - half, size, size);
         break;
     case mcp::TalkMark::Explained:
+    case mcp::TalkMark::Refused:
         g.setColour(colour(mcp::aiBlue));
         g.drawRect(cx - half + 0.5f, cy - half + 0.5f, size - 1.0f, size - 1.0f, mcp::aiLineWidth);
         break;

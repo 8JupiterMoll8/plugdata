@@ -10,6 +10,9 @@
 //  - the server's mark (design round 2026-11-19, "who is who"): the optional third word of /chat/msg on an ai / detail line,
 //    `changed=<n>` / `changed`, `explained`, `measured=<dB>`, parsed by parseTalkWork; it becomes the line's mark (red circle,
 //    blue outline square, blue square) and the grey header "alphi · changed 4 · measured -14 dB"; a malformed word is no mark;
+//  - the widget marks (ai_widget plan, phase 3): `used` (the artist took Alphi's proposal on a widget) and `refused` (the artist turned it
+//    down) are two more words of the same wire word; each becomes a mark of its own (and the header "alphi · used" / "alphi · refused");
+//    a malformed word is no mark, both at once say nothing, a change still leads;
 //  - groups: one artist ask and the answers after it are one group (talkGroups); the grey header of an AI line shows once per
 //    run of the same fact; the context label of an artist line ("random 8", "ai.tap", "hsl +2");
 //  - canvas tags (roles tag / annotation / hud) never become a line; an answer is stored whole (no cut, no "->").
@@ -394,6 +397,108 @@ void theHeaderTextSaysWhatTheTurnProved()
     CHECK(header("", "The bridge is not connected.", "error") == "alphi" + dot + "look here");
 }
 
+// ── the widget marks: used / refused (ai_widget plan, phase 3) ────────────────────────────────────────────────────────
+
+void theUsedAndRefusedWordsAreParsed()
+{
+    auto w = mcp::parseTalkWork("used");
+    CHECK(w.kind == TalkWorkKind::Used && w.changes == 0 && !w.hasDb);
+    w = mcp::parseTalkWork("refused");
+    CHECK(w.kind == TalkWorkKind::Refused && w.changes == 0 && !w.hasDb);
+    w = mcp::parseTalkWork("  refused  "); // any blanks
+    CHECK(w.kind == TalkWorkKind::Refused);
+    w = mcp::parseTalkWork("measured=-9.5 used"); // any order; a reading rides along
+    CHECK(w.kind == TalkWorkKind::Used && w.hasDb && w.db == -9.5);
+    w = mcp::parseTalkWork("used explained"); // the artist's answer leads a guess
+    CHECK(w.kind == TalkWorkKind::Used);
+    w = mcp::parseTalkWork("refused explained");
+    CHECK(w.kind == TalkWorkKind::Refused);
+    w = mcp::parseTalkWork("changed=3 used"); // a change of the turn still leads
+    CHECK(w.kind == TalkWorkKind::Changed && w.changes == 3);
+    w = mcp::parseTalkWork("changed refused");
+    CHECK(w.kind == TalkWorkKind::Changed);
+    // both at once say nothing about the artist (no guess); what else the word says still counts
+    w = mcp::parseTalkWork("used refused");
+    CHECK(w.kind == TalkWorkKind::None);
+    w = mcp::parseTalkWork("refused used explained");
+    CHECK(w.kind == TalkWorkKind::Explained);
+}
+
+void aMalformedUsedOrRefusedWordIsNoMark()
+{
+    for (char const* bad : { "used=1", "used=", "Used", "USED", "refused=now", "Refused", "unused", "reused", "refusedd", "use", "refuse", "used,", "used;", "us ed",
+                             "used:1", "=used" }) {
+        auto const w = mcp::parseTalkWork(bad);
+        CHECK(w.kind == TalkWorkKind::None);
+        CHECK(!w.hasDb);
+    }
+    // one bad token does not spoil a good one next to it, and does not become the other mark
+    auto w = mcp::parseTalkWork("used=1 refused");
+    CHECK(w.kind == TalkWorkKind::Refused);
+    w = mcp::parseTalkWork("Used used");
+    CHECK(w.kind == TalkWorkKind::Used);
+}
+
+void theMarkOfAUsedOrRefusedLine()
+{
+    auto const withWork = [](std::string wire, std::string role = "ai") {
+        TalkLine l = line(std::move(role), "You used Alphi's line on ai.draw.");
+        l.work = mcp::parseTalkWork(wire);
+        return l;
+    };
+    CHECK(talkMark(withWork("used")) == TalkMark::Used);
+    CHECK(talkMark(withWork("refused")) == TalkMark::Refused);
+    CHECK(talkMark(withWork("used measured=-12.0")) == TalkMark::Used);
+    CHECK(talkMark(withWork("changed=2 used")) == TalkMark::Changed);
+    // the words are never read for these marks: a line that merely says "used" has none; an error stays an error; a waiting line wears none
+    auto plain = line("ai", "You used the line.");
+    CHECK(talkMark(plain) == TalkMark::None);
+    CHECK(talkMark(withWork("used", "error")) == TalkMark::Look);
+    auto waiting = withWork("used");
+    waiting.waiting = true;
+    CHECK(talkMark(waiting) == TalkMark::None);
+}
+
+void theHeaderSaysUsedOrRefused()
+{
+    auto const header = [](std::string wire, std::string text = "Done.", std::string role = "ai") {
+        TalkLine l = line(std::move(role), std::move(text));
+        l.work = mcp::parseTalkWork(wire);
+        return mcp::talkHeaderText(l);
+    };
+    std::string const dot = " \xC2\xB7 ";
+    CHECK(header("used") == "alphi" + dot + "used");
+    CHECK(header("refused") == "alphi" + dot + "refused");
+    CHECK(header("used measured=-9.5") == "alphi" + dot + "used" + dot + "measured -9.5 dB");
+    CHECK(header("used", "Louder?") == "alphi" + dot + "used"); // what is known beats the question mark
+    CHECK(header("used", "The bridge is not connected.", "error") == "alphi" + dot + "look here");
+}
+
+void theMarkRidesOnTheTalkLine()
+{
+    TalkList t;
+    CHECK(t.add("ai", "You used Alphi's line on ai.draw.", "", "used") == TalkChange::Appended);
+    CHECK(t.lines()[0].work.kind == TalkWorkKind::Used);
+    CHECK(t.add("detail", "You turned Alphi's line on ai.tap down.", "", "refused") == TalkChange::Appended);
+    CHECK(t.lines()[1].work.kind == TalkWorkKind::Refused);
+    // the artist's own line and a waiting line never wear one, whatever the wire said
+    CHECK(t.add("user", "more", "", "used") == TalkChange::Appended);
+    CHECK(t.lines()[2].work.kind == TalkWorkKind::None);
+    CHECK(t.add("waiting", "has not answered yet", "", "refused") == TalkChange::Appended);
+    CHECK(t.lines()[3].work.kind == TalkWorkKind::None);
+    // a repeated line adopts the mark it lacked
+    TalkList u;
+    u.add("ai", "Same.");
+    CHECK(u.add("ai", "Same.", "", "used") == TalkChange::Replaced);
+    CHECK(u.lines()[0].work.kind == TalkWorkKind::Used);
+    // and an answer that replaces a waiting line brings it
+    TalkList v;
+    v.add("user", "a bassline");
+    v.add("waiting", "Claude Code has not answered yet");
+    CHECK(v.add("ai", "You refused it.", "", "refused") == TalkChange::Replaced);
+    CHECK(v.lines()[1].work.kind == TalkWorkKind::Refused);
+}
+
 // ── groups ────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 void anAskAndItsAnswersAreOneGroup()
@@ -557,6 +662,11 @@ int main()
     aRepeatedLineAdoptsAMarkItLacked();
     theMarkOfALine();
     theHeaderTextSaysWhatTheTurnProved();
+    theUsedAndRefusedWordsAreParsed();
+    aMalformedUsedOrRefusedWordIsNoMark();
+    theMarkOfAUsedOrRefusedLine();
+    theHeaderSaysUsedOrRefused();
+    theMarkRidesOnTheTalkLine();
     anAskAndItsAnswersAreOneGroup();
     answersBeforeAnyAskAreAGroupWithoutAsk();
     twoAsksInARowAreTwoGroups();

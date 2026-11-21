@@ -25,6 +25,10 @@
 //    joined by a space. parseTalkWork reads it (a malformed token is ignored: no guess); the line keeps it as `work`; talkMark
 //    turns it into the mark shape (changed = red circle, explained = blue outline square, measured = blue square) and
 //    talkHeaderText into the grey line above the answer ("alphi · changed 4 · measured -14 dB").
+//  - The widget marks (ai_widget plan, phase 3; the server's talk line per widget event, capability widget_event): `used` (the artist
+//    took Alphi's proposal on a widget) and `refused` (the artist turned it down). Exact words only (`used=2`, `Used`, `unused` are no
+//    mark); both at once say nothing about the artist (no guess); a change of the turn still leads, then the artist's answer, then a
+//    guess, then a reading. The header says "alphi · used" / "alphi · refused".
 //  - Who is who: talkGroups cuts the list into groups, one artist ask and the answers after it; talkHeaderShown says whether an
 //    AI line carries its grey header (the first of a run, or a line that knows something new); talkContextLabel names the box an
 //    artist line was about ("random 8", "ai.tap", "hsl +2").
@@ -50,7 +54,7 @@
 namespace mcp {
 
 /** What a turn proved, as the server says it (the third word of /chat/msg on an AI line); None = nothing is known. */
-enum class TalkWorkKind { None, Changed, Explained, Measured };
+enum class TalkWorkKind { None, Changed, Explained, Measured, Used, Refused };
 
 struct TalkWork {
     TalkWorkKind kind = TalkWorkKind::None;
@@ -122,13 +126,16 @@ inline bool parseDb(std::string_view s, double& out)
 
 } // namespace talkdetail
 
-/** Reads the server's word: space separated tokens `changed=<n>`, `changed`, `explained`, `measured=<dB>`, in any order. A token
- *  that does not parse is ignored (never guessed). A change beats an explanation; with neither, a reading alone is Measured. */
+/** Reads the server's word: space separated tokens `changed=<n>`, `changed`, `explained`, `measured=<dB>`, `used`, `refused`, in any
+ *  order. A token that does not parse is ignored (never guessed). A change beats everything; then the artist's answer (`used` or
+ *  `refused`; both at once are no answer), then an explanation; with none of them, a reading alone is Measured. */
 inline TalkWork parseTalkWork(std::string_view wire)
 {
     TalkWork out;
     bool changed = false;
     bool explained = false;
+    bool used = false;
+    bool refused = false;
     int changes = 0;
     std::size_t i = 0;
     while (i < wire.size()) {
@@ -150,6 +157,10 @@ inline TalkWork parseTalkWork(std::string_view wire)
             }
         } else if (token == "explained") {
             explained = true;
+        } else if (token == "used") {
+            used = true;
+        } else if (token == "refused") {
+            refused = true;
         } else if (token.substr(0, 9) == "measured=") {
             double db = 0.0;
             if (talkdetail::parseDb(token.substr(9), db)) {
@@ -161,6 +172,8 @@ inline TalkWork parseTalkWork(std::string_view wire)
     if (changed) {
         out.kind = TalkWorkKind::Changed;
         out.changes = changes;
+    } else if (used != refused) {
+        out.kind = used ? TalkWorkKind::Used : TalkWorkKind::Refused;
     } else if (explained) {
         out.kind = TalkWorkKind::Explained;
     } else if (out.hasDb) {
@@ -180,7 +193,7 @@ struct TalkLine {
 
 enum class TalkChange { None, Appended, Replaced };
 
-enum class TalkMark { None, Look, Ask, Changed, Explained, Measured };
+enum class TalkMark { None, Look, Ask, Changed, Explained, Measured, Used, Refused };
 
 class TalkList {
 public:
@@ -304,7 +317,7 @@ private:
 };
 
 /** The mark a line wears. What the server proved leads (changed = red circle, explained = blue outline square, measured = blue
- *  square); then: error -> Look, an AI line that ends in `?` -> Ask; a waiting line or anything else -> None. */
+ *  square, used / refused = the artist's answer to a widget proposal); then: error -> Look, an AI line that ends in `?` -> Ask; a waiting line or anything else -> None. */
 inline TalkMark talkMark(TalkLine const& line)
 {
     if (line.role == "ai" && !line.waiting) {
@@ -312,6 +325,8 @@ inline TalkMark talkMark(TalkLine const& line)
         case TalkWorkKind::Changed: return TalkMark::Changed;
         case TalkWorkKind::Explained: return TalkMark::Explained;
         case TalkWorkKind::Measured: return TalkMark::Measured;
+        case TalkWorkKind::Used: return TalkMark::Used;
+        case TalkWorkKind::Refused: return TalkMark::Refused;
         case TalkWorkKind::None: break;
         }
     }
@@ -376,6 +391,8 @@ inline std::string talkHeaderText(TalkLine const& line)
             out += " " + std::to_string(line.work.changes);
         break;
     case TalkWorkKind::Explained: out += dot + "explained"; break;
+    case TalkWorkKind::Used: out += dot + "used"; break;
+    case TalkWorkKind::Refused: out += dot + "refused"; break;
     case TalkWorkKind::Measured: break;
     case TalkWorkKind::None:
         if (talkMark(line) == TalkMark::Ask)
