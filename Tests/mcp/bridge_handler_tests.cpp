@@ -8394,8 +8394,8 @@ void runWidgetCallCases(Harness& h, PluginProcessor& processor)
 
 // ai_widget plan phase 3 (capability widget_event): a widget's `ai-event <widget> <rev> <paddr> use|no|back` reaches the server as ONE event
 // /pd/widget_ask <use|no|back> <canvas> <widget> <rev> (no address, no free text), sent from the message thread; at most one per widget,
-// instance and word per 500 ms (a refused one is a console line, not an event); a bad word, name, number or address is a console line too.
-// The receiver is bound only while the bridge serves.
+// instance and word per 500 ms and at most 8 in any second over all of them (a refused one is neither an event nor a console line: a double
+// click is normal); a bad word, name, number or address is a console line, at most one in 5 s. The receiver is bound only while the bridge serves.
 void sendToAiEvent(McpHost* host, t_symbol* selector, std::vector<t_atom> atoms)
 {
     CHECK(host->pdWait([&] {
@@ -8432,16 +8432,17 @@ void runWidgetEventCases(Harness& h, PluginProcessor& processor, MCPBridge& brid
     auto tap = h.replies.waitFor("/pd/widget_ask", 2000);
     CHECK(tap && tap->str(0) == "no" && tap->str(2) == "ai.tap" && tap->num(3) == 3 && tap->args.size() == 4);
 
-    // 3. The same word of the same instance again at once: no event, one console line. Another instance has its own budget.
+    // 3. The same word of the same instance again at once (a double click): no event and NOTHING in the console. Another instance has its own budget.
     uint64_t const before = host->consoleSeqNow();
     sendToAiEvent(host, &s_list, { symAtom("ai.tap"), numAtom(4), symAtom("p1"), symAtom("no") });
-    CHECK(!h.replies.waitFor("/pd/widget_ask", 400).has_value());
-    CHECK(consoleHas(host, before, "of the same widget's last one", 2000));
+    CHECK(!h.replies.waitFor("/pd/widget_ask", 400).has_value()); // 400 ms: eight pump ticks have passed
+    CHECK(!consoleHas(host, before, "ai-event", 0));
     sendToAiEvent(host, &s_list, { symAtom("ai.tap"), numAtom(4), symAtom("p2"), symAtom("no") });
     auto other = h.replies.waitFor("/pd/widget_ask", 2000);
     CHECK(other && other->str(0) == "no" && other->str(2) == "ai.tap" && other->num(3) == 4);
 
-    // 4. Malformed (no ai.<word> name, no whole-number rev, no address text, an unknown word): no event, one console line.
+    // 4. Malformed (no ai.<word> name, no whole-number rev, no address text, an unknown word): no event, one console line (the first one is said
+    //    at once; the pump's gate then holds the next ones back for 5 s and sums them).
     uint64_t const beforeBad = host->consoleSeqNow();
     sendToAiEvent(host, &s_list, { symAtom("pd"), numAtom(1), symAtom("p1"), symAtom("use") });
     sendToAiEvent(host, &s_list, { symAtom("ai.knob"), numAtom(-2), symAtom("p1"), symAtom("use") });

@@ -146,6 +146,7 @@ struct McpWidgetAskState {
     // The artist's answers to a proposal (capability widget_event): `ai-event <widget> <rev> <paddr> use|no|back`, bound while the bridge serves.
     mcp::WidgetEventQueue events;
     McpEventReceiver* eventReceiver = nullptr;
+    mcp::WidgetEventLogGate eventLog; // the pump's console line for refused events: what is wrong only, at most one in 5 s
     // The chip's focus (`ai-ask focus ...`): the newest one waits here until the mouse button is up (the chip fires on the press; the
     // canvas must not change its mode under a held button), at most kFocusWaitMs; then it is carried out once, answered or not.
     static constexpr std::int64_t kFocusWaitMs = 1200;

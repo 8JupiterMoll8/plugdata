@@ -235,13 +235,16 @@ void MCPBridge::pumpWidgetAsks()
                 sendReply("/pd/widget_ask", args);
             }
         }
-        auto const ec = widgetAsk->events.takeCounts();
-        if (processor && (ec.malformed || ec.rateLimited || ec.full)) {
+        // The console says only what is wrong, and not often: a malformed event or a full queue, at most once per kWidgetEventLogGapMs with
+        // the count since the last line. An event dropped by a rate limit (a double click's second one, a flood the global budget sheds)
+        // prints nothing. takeCounts runs every tick (it resets the counters); the gate sums what waits.
+        mcp::WidgetEventLogCounts said;
+        if (widgetAsk->eventLog.take(widgetAsk->events.takeCounts(), mcpAskNowMs(), said) && processor) {
             juce::StringArray parts;
-            if (ec.rateLimited) parts.add(juce::String(ec.rateLimited) + " within " + juce::String(static_cast<int>(mcp::kWidgetEventMinGapMs)) + " ms of the same widget's last one");
-            if (ec.malformed) parts.add(juce::String(ec.malformed) + " without a widget name (ai.<word>), a whole-number rev, an address (p<hex>) and use, no or back");
-            if (ec.full) parts.add(juce::String(ec.full) + " while the event queue was full");
-            auto const line = "ai-event: not sent to the AI: " + parts.joinIntoString("; ");
+            if (said.malformed) parts.add(juce::String(said.malformed) + " without a widget name (ai.<word>), a whole-number rev, an address (p<hex>) and use, no or back");
+            if (said.full) parts.add(juce::String(said.full) + " while the event queue was full");
+            auto const line = "ai-event: not sent to the AI (counted since the last such line, one line per "
+                + juce::String(static_cast<int>(mcp::kWidgetEventLogGapMs / 1000)) + " s at most): " + parts.joinIntoString("; ");
             McpHost::PdLockScope const lock(*processor);
             post("%s", line.toRawUTF8());
         }

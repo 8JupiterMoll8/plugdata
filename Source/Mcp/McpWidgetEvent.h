@@ -20,8 +20,12 @@
 // events and sends them on the existing event address: /pd/widget_ask <use|no|back> <canvas> <widget> <rev> (the kind word is free there).
 //
 // Bounds: no free text travels. Widget names ai.<lowercase word> (kWidgetAskNameLen), rev a whole number 0..9999999, the address
-// `p[0-9a-f]{1,16}`, the word one of three. At most one event per widget, instance and word per kWidgetEventMinGapMs; a fixed queue of
-// kWidgetEventQueueSlots (full = dropped and counted, the rate clock untouched).
+// `p[0-9a-f]{1,16}`, the word one of three. At most one event per widget, instance and word per kWidgetEventMinGapMs (a table of
+// kWidgetEventRateSlots keys, the one used longest ago is reused), and over ALL keys at most kWidgetEventGlobalPerWindow events in any
+// kWidgetEventGlobalWindowMs (a patch that rotates through more addresses than the table holds would otherwise pass every event: each key is
+// evicted before it is asked again); a fixed queue of kWidgetEventQueueSlots (full = dropped and counted, the rate clock and the budget
+// untouched). The console: an event dropped by a rate limit (the per-key gap, the global budget) prints nothing, a double click is normal;
+// malformed events and a full queue are logged at most once per kWidgetEventLogGapMs with the count (WidgetEventLogGate, the pump's).
 
 #pragma once
 
@@ -31,15 +35,19 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 
 namespace mcp {
 
 constexpr int kWidgetEventQueueSlots = 32;
 constexpr int kWidgetEventRateSlots = 16;
 constexpr std::int64_t kWidgetEventMinGapMs = 500; // a double click is one event; a flood of them is not forwarded
+constexpr int kWidgetEventGlobalPerWindow = 8;           // events forwarded over all widgets and instances ...
+constexpr std::int64_t kWidgetEventGlobalWindowMs = 1000; // ... in any window of this length
+constexpr std::int64_t kWidgetEventLogGapMs = 5000;      // a console line for refused events at most this often
 
 enum class WidgetEventKind : int { Use = 0, No = 1, Back = 2 };
-enum class WidgetEventOutcome : int { Queued, Malformed, UnknownWord, BadAddress, RateLimited, Full };
+enum class WidgetEventOutcome : int { Queued, Malformed, UnknownWord, BadAddress, RateLimited, BudgetLimited, Full };
 
 inline char const* widgetEventKindWord(WidgetEventKind kind)
 {
@@ -71,7 +79,8 @@ struct WidgetEvent {
 
 struct WidgetEventCounts {
     int malformed = 0; // a bad name, rev, word or address text
-    int rateLimited = 0;
+    int rateLimited = 0;   // the per-key gap: silent in the console
+    int budgetLimited = 0; // the global budget: silent in the console
     int full = 0;
 };
 
@@ -89,6 +98,13 @@ public:
         if (slot && slot->used && nowMs >= slot->lastMs && nowMs - slot->lastMs < kWidgetEventMinGapMs) {
             rateLimited.fetch_add(1, std::memory_order_relaxed);
             return WidgetEventOutcome::RateLimited;
+        }
+        // The global budget: a free entry of the window, else the window is spent. Only looked at here; an event that is dropped later (a full
+        // queue) leaves it alone.
+        BudgetEntry* const budgetEntry = freeBudgetEntry(nowMs);
+        if (!budgetEntry) {
+            budgetLimited.fetch_add(1, std::memory_order_relaxed);
+            return WidgetEventOutcome::BudgetLimited;
         }
         unsigned const head = writeIndex.load(std::memory_order_relaxed);
         unsigned const tail = readIndex.load(std::memory_order_acquire);
@@ -109,6 +125,8 @@ public:
         copyText(slot->widget, kWidgetAskNameLen, widget);
         copyText(slot->addr, kWidgetCallAddrChars, addr);
         slot->lastMs = nowMs;
+        budgetEntry->used = true;
+        budgetEntry->ms = nowMs;
         return WidgetEventOutcome::Queued;
     }
 
@@ -128,6 +146,7 @@ public:
         WidgetEventCounts c;
         c.malformed = malformed.exchange(0, std::memory_order_relaxed);
         c.rateLimited = rateLimited.exchange(0, std::memory_order_relaxed);
+        c.budgetLimited = budgetLimited.exchange(0, std::memory_order_relaxed);
         c.full = full.exchange(0, std::memory_order_relaxed);
         return c;
     }
@@ -141,6 +160,12 @@ private:
         std::int64_t lastMs = 0;
     };
 
+    // One forwarded event of the global window (its time).
+    struct BudgetEntry {
+        bool used = false;
+        std::int64_t ms = 0;
+    };
+
     WidgetEventOutcome refuse(WidgetEventOutcome why)
     {
         malformed.fetch_add(1, std::memory_order_relaxed);
@@ -152,6 +177,15 @@ private:
     {
         for (auto& s : rate)
             if (s.used && s.kind == kind && std::strcmp(s.widget, widget) == 0 && std::strcmp(s.addr, addr) == 0) return &s;
+        return nullptr;
+    }
+
+    // Producer only. An entry that is unused or older than the window (or from a clock that has gone backwards) is free; null = all of the
+    // kWidgetEventGlobalPerWindow are inside the window, which is a sliding one: the first of them frees its entry a window after it was sent.
+    BudgetEntry* freeBudgetEntry(std::int64_t nowMs)
+    {
+        for (auto& b : budget)
+            if (!b.used || nowMs < b.ms || nowMs - b.ms >= kWidgetEventGlobalWindowMs) return &b;
         return nullptr;
     }
 
@@ -179,9 +213,44 @@ private:
     std::atomic<unsigned> writeIndex { 0 };
     std::atomic<unsigned> readIndex { 0 };
     RateSlot rate[kWidgetEventRateSlots];
+    BudgetEntry budget[kWidgetEventGlobalPerWindow];
     std::atomic<int> malformed { 0 };
     std::atomic<int> rateLimited { 0 };
+    std::atomic<int> budgetLimited { 0 };
     std::atomic<int> full { 0 };
+};
+
+// What the pump says in the console about refused events: only what is wrong (a malformed event, a full queue), never a rate-limited one
+// (a double click is normal, a flood is shed by the budget). At most one line per kWidgetEventLogGapMs; what came meanwhile is summed into
+// it, nothing is lost. Message-thread pump only (no atomics, not thread safe).
+struct WidgetEventLogCounts {
+    int malformed = 0;
+    int full = 0;
+};
+
+class WidgetEventLogGate {
+public:
+    // Adds `fresh` (the counts since the last tick) to what waits. True, with `out` = everything that waited (then reset), when something
+    // printable waits and the gap since the last line is over (or there was no line yet, or the clock went backwards).
+    bool take(WidgetEventCounts const& fresh, std::int64_t nowMs, WidgetEventLogCounts& out)
+    {
+        waiting.malformed = sum(waiting.malformed, fresh.malformed);
+        waiting.full = sum(waiting.full, fresh.full);
+        if (waiting.malformed == 0 && waiting.full == 0) return false;
+        if (said && nowMs >= lastMs && nowMs - lastMs < kWidgetEventLogGapMs) return false;
+        out = waiting;
+        waiting = WidgetEventLogCounts {};
+        said = true;
+        lastMs = nowMs;
+        return true;
+    }
+
+private:
+    static int sum(int a, int b) { return a > std::numeric_limits<int>::max() - b ? std::numeric_limits<int>::max() : a + b; }
+
+    WidgetEventLogCounts waiting;
+    bool said = false;
+    std::int64_t lastMs = 0;
 };
 
 } // namespace mcp
