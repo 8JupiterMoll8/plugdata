@@ -521,10 +521,10 @@ void NVGSurface::invalidateArea(Rectangle<int> const area)
 
 // MCP-CARRIED(repaint-scope): split the frame's damage into clusters that are painted as separate clipped passes, so
 // widgets far apart (and the toolbar meter) no longer redraw the whole bounding box between them. The planning is a pure
-// function (Mcp/McpRenderPasses.h, Tests/mcp/render_passes_test.cpp). Canvas damage is no longer forced into one pass:
-// every per-paint field of the MCP layer is either rebuilt whole in each pass or recorded only by a pass that covers
-// what it records (CanvasMcpLayer audit, 2026-11-22). Presentation mode keeps one region for the canvas (it fills
-// whole-canvas quads in every pass); plugin mode and a full repaint are one pass.
+// function (Mcp/McpRenderPasses.h, Tests/mcp/render_passes_test.cpp). On GL canvas damage is no longer forced into one
+// pass: every per-paint field of the MCP layer is either rebuilt whole in each pass or recorded only by a pass that
+// covers what it records (CanvasMcpLayer audit, 2026-11-22), and every pass has its own flush (recordFrame). Metal has one
+// flush per frame and keeps canvas damage in one region. Plugin mode and a full repaint are one pass.
 std::vector<Rectangle<int>> NVGSurface::renderPasses(Rectangle<int> const bounds) const
 {
     mcp::RenderPassInput<Rectangle<int>> in;
@@ -532,12 +532,13 @@ std::vector<Rectangle<int>> NVGSurface::renderPasses(Rectangle<int> const bounds
     in.damage = invalidArea;
     in.bounds = bounds;
     in.pluginMode = editor->isInPluginMode();
+#if !NANOVG_GL_IMPLEMENTATION
     if (!in.pluginMode && invalidRects.size() > 1) {
         auto& tabs = editor->getTabComponent();
         in.canvasArea = getLocalArea(&tabs, tabs.getLocalBounds());
-        for (auto* cnv : tabs.getVisibleCanvases())
-            in.mergeCanvasDamage = in.mergeCanvasDamage || getValue<bool>(cnv->presentationMode);
+        in.mergeCanvasDamage = true;
     }
+#endif
     return mcp::planRenderPasses(in);
 }
 
@@ -722,6 +723,7 @@ void NVGSurface::recordFrame()
         if (damage.isEmpty())
             return;
         auto const isFullRepaint = damage.contains(bounds);
+        ++recordedFrameId; // MCP-CARRIED(repaint-scope): the passes below are one frame (see getRecordedFrameId)
 
         nanovg::setCurrentPixelScale(asyncNvg, devicePixelScale);
 
@@ -733,9 +735,6 @@ void NVGSurface::recordFrame()
         if (isFullRepaint)
             nanovg::clear(asyncNvg);
 
-        nanovg::nvgBeginFrame(asyncNvg, bounds.getWidth() * desktopScale, bounds.getHeight() * desktopScale, devicePixelScale);
-        nanovg::nvgScale(asyncNvg, desktopScale, desktopScale);
-
         auto& llgc = editor->getOrCreateNanoLLGC(asyncNvg, lastRenderScale);
 
         // MCP-CARRIED(repaint-scope): one clipped pass per damage cluster (renderPasses); a full repaint or
@@ -743,10 +742,37 @@ void NVGSurface::recordFrame()
         // invalid area (the canvas render reads it). The clip is reset ONCE per frame (resetClipRegion bumps the
         // image cache's frame id; per pass it could drop an image an earlier pass drew); each pass runs inside
         // saveState/restoreState, which brings back the clip and the nvg scissor.
+        // On GL every pass is its own nanovg frame with its own backend scissor: nvgBeginFrame, the pass,
+        // nvgGlobalScissor(the pass in device px), nvgEndFrameWithoutPublishing (the last one publishes). The fragment
+        // shader's scissor mask lets the first device pixel outside a pass edge through at a few percent alpha, and only
+        // the hardware scissor stops it: with one scissor over the union of the passes it would land on the frame
+        // between them and add up every frame (a lighter notch around a moving widget); a primitive that spans k passes
+        // would also be shaded k times over the union. Metal keeps ONE frame (its flush acquires the drawable and the
+        // buffer ring, one per frame) and keeps canvas damage in one pass (renderPasses).
         llgc.resetClipRegion(AffineTransform::scale(desktopScale, desktopScale)); // MCP-CARRIED(repaint-scope)
         auto const frameDamage = invalidArea;
         auto const passes = isFullRepaint ? std::vector<Rectangle<int>> { damage } : renderPasses(bounds);
-        for (auto const& pass : passes) {
+        auto const beginPassFrame = [&] { // MCP-CARRIED(repaint-scope)
+            nanovg::nvgBeginFrame(asyncNvg, bounds.getWidth() * desktopScale, bounds.getHeight() * desktopScale, devicePixelScale);
+            nanovg::nvgScale(asyncNvg, desktopScale, desktopScale);
+        };
+        // The backend flush is restricted to this region so the rest of the framebuffer keeps its previous contents
+        // (persistence). Device pixels; each edge rounded on its own, so neighbouring passes never overlap.
+        auto const scissorTo = [&](Rectangle<int> const& area) { // MCP-CARRIED(repaint-scope)
+            auto const left = roundToInt(area.getX() * lastRenderScale);
+            auto const top = roundToInt(area.getY() * lastRenderScale);
+            nanovg::nvgGlobalScissor(asyncNvg, left, top, roundToInt(area.getRight() * lastRenderScale) - left, roundToInt(area.getBottom() * lastRenderScale) - top);
+        };
+#if NANOVG_GL_IMPLEMENTATION
+        constexpr bool flushPerPass = true; // MCP-CARRIED(repaint-scope)
+#else
+        constexpr bool flushPerPass = false; // MCP-CARRIED(repaint-scope)
+#endif
+        beginPassFrame();
+        for (size_t passIndex = 0; passIndex < passes.size(); ++passIndex) {
+            auto const& pass = passes[passIndex];
+            if (flushPerPass && passIndex > 0) // MCP-CARRIED(repaint-scope)
+                beginPassFrame();
             invalidArea = pass;
             llgc.saveState(); // MCP-CARRIED(repaint-scope)
             { // MCP-CARRIED(repaint-scope)
@@ -764,17 +790,16 @@ void NVGSurface::recordFrame()
 #endif
             }
             llgc.restoreState(); // MCP-CARRIED(repaint-scope)
+            if (flushPerPass) { // MCP-CARRIED(repaint-scope)
+                scissorTo(pass);
+                if (passIndex + 1 < passes.size())
+                    nanovg::nvgEndFrameWithoutPublishing(asyncNvg);
+            }
         }
         invalidArea = frameDamage; // MCP-CARRIED(repaint-scope)
 
-        // Restrict the backend flush to the damaged region so the rest of the
-        // framebuffer keeps its previous contents (persistence). Coordinates are
-        // in device pixels.
-        nanovg::nvgGlobalScissor(asyncNvg,
-            roundToInt(damage.getX() * lastRenderScale),
-            roundToInt(damage.getY() * lastRenderScale),
-            roundToInt(damage.getWidth() * lastRenderScale),
-            roundToInt(damage.getHeight() * lastRenderScale));
+        if (!flushPerPass) // MCP-CARRIED(repaint-scope)
+            scissorTo(damage);
 
         nanovg::nvgEndFrame(asyncNvg);
 

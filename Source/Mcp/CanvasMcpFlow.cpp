@@ -225,8 +225,9 @@ bool CanvasMcpLayer::alphiDockPassNeeded()
     // (updateAlphiDock walks every box); mcpAlphiPaintBoxes from the last full pass stay. Any other paint runs it.
     // Review HIGH: only inside his face and his strip AS DRAWN, and only while the layout key near him (box count,
     // the boxes in his zone, a held button) is the one of the last paint.
-    bool const asked = mcpAlphiMotionAsked;
-    mcpAlphiMotionAsked = false;
+    // Repaint scope: a frame can hold several canvas passes; the request is seen by every pass of the frame that first
+    // looks (McpAlphiMotion.h AlphiMotionAsk), so a pass elsewhere in front of Alphi's own does not use it up.
+    bool const asked = mcpAlphiMotionAsk.seenBy(canvas.editor ? canvas.editor->nvgSurface.getRecordedFrameId() : 0);
     if (!asked || mcpAlphiFrame.isEmpty() || !alphiShown() || !mcpAlphiZoneKnown)
         return true;
     auto const zoom = alphiView().second;

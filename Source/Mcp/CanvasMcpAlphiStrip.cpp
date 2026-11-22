@@ -300,7 +300,7 @@ void CanvasMcpLayer::alphiMotionRepaint(bool sayChanged)
     auto const spot = mcp::alphiStripRect(face, mcpAlphiFaceCorner, view, zoom);
     auto const area = mcp::alphiMotionRepaintArea(face, spot, !mcpAlphiStripFrame.isEmpty(), sayChanged, zoom);
     juce::Rectangle<int> const r(area.x, area.y, area.w, area.h);
-    mcpAlphiMotionAsked = true; // N3: this paint is Alphi's own (CanvasMcpLayer::alphiDockPassNeeded)
+    mcpAlphiMotionAsk.ask(); // N3: this paint is Alphi's own (CanvasMcpLayer::alphiDockPassNeeded)
     canvas.repaint(r);
     if (canvas.editor)
         canvas.editor->nvgSurface.invalidateArea(canvas.editor->nvgSurface.getLocalArea(&canvas, r));

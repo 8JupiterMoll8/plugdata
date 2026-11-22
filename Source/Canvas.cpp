@@ -583,11 +583,7 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
 
                 nanovg::nvgFillPaint(nvg, nanovg::nvgImagePattern(nvg, 0, 0, gridSizeCommon, gridSizeCommon, 0, dotsLargeImage.getImage(), 1));
                 auto startPos = infiniteCanvasSize / 2;
-                // MCP-CARRIED(repaint-scope): only the rendered region (in this translated space, 4 px of margin), not the whole
-                // infinite canvas: the quad is shaded over the frame's whole scissor, once for every pass of the frame.
-                auto const dotsOrigin = canvasOrigin.x - 2.5f;
-                auto const dotsArea = invalidRegion.toFloat().expanded(4.0f).translated(-dotsOrigin, -dotsOrigin).getIntersection(Rectangle<float>(-startPos, -startPos, infiniteCanvasSize, infiniteCanvasSize)); // MCP-CARRIED(repaint-scope)
-                nanovg::nvgFillRect(nvg, dotsArea.getX(), dotsArea.getY(), dotsArea.getWidth(), dotsArea.getHeight()); // MCP-CARRIED(repaint-scope)
+                nanovg::nvgFillRect(nvg, -startPos, -startPos, infiniteCanvasSize, infiniteCanvasSize);
             }
         }
     }
@@ -782,6 +778,15 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
 
 void Canvas::renderAllObjects(NVGcontext* nvg, Rectangle<int> const area)
 {
+    // MCP-CARRIED(repaint-scope): a pass draws only the labels it can show (labels lie in canvas coordinates; 16 px of margin)
+    auto const labelInArea = [&area](Object const* obj) {
+        if (!obj->gui)
+            return false;
+        for (auto const* label : obj->gui->labels)
+            if (label && label->getBounds().expanded(16).intersects(area))
+                return true;
+        return false;
+    };
     for (auto* obj : objects) {
         {
             auto b = obj->getBounds();
@@ -793,7 +798,8 @@ void Canvas::renderAllObjects(NVGcontext* nvg, Rectangle<int> const area)
         }
 
         // Draw label in canvas coordinates
-        obj->renderLabel(nvg);
+        if (labelInArea(obj)) // MCP-CARRIED(repaint-scope)
+            obj->renderLabel(nvg);
     }
 }
 void Canvas::renderAllConnections(NVGcontext* nvg, Rectangle<int> const area)

@@ -77,7 +77,7 @@ static void farApartCanvasRects()
 
 static void eightWidgetsOwnerScenario()
 {
-    std::printf("planner: eight widgets spread over x 40..2300 stay eight small passes\n");
+    std::printf("planner: eight widgets spread over x 40..2300 are at most four passes, far below the bounding box\n");
     std::vector<PassRect> rects;
     for (int i = 0; i < 8; ++i)
         rects.push_back({ 40 + i * 230, 120 + (i % 3) * 260, 110, 80 });
@@ -85,10 +85,48 @@ static void eightWidgetsOwnerScenario()
     in.bounds = { 0, 0, 3000, 1080 };
     in.canvasArea = { 0, 40, 3000, 1000 };
     auto const passes = mcp::planRenderPasses(in);
-    CHECK(passes.size() == 8);
+    CHECK(mcp::maxRenderPasses == 4); // each pass is one flush on the GL thread (own scissor, own stencil clear)
+    CHECK(passes.size() >= 2 && passes.size() <= 4);
     for (auto const& r : rects)
         CHECK(covers(passes, r));
-    CHECK(totalArea(passes) < 8 * 110 * 80 * 2);
+    auto const box = boundingBox(rects);
+    CHECK(totalArea(passes) * 2 < static_cast<std::int64_t>(box.w) * box.h);
+}
+
+static void spreadFrameBoundingBoxRule()
+{
+    std::printf("planner: a frame whose bounding box is at most 2.5x the passes' area is one pass\n");
+    {
+        // Two big rects on a diagonal: not cheap as a pair, but their bounding box is only 2.4x their area.
+        auto const a = PassRect { 0, 0, 300, 300 };
+        auto const b = PassRect { 350, 350, 300, 300 };
+        auto const passes = mcp::planRenderPasses(frame({ a, b }));
+        CHECK(passes.size() == 1);
+        CHECK(passes[0] == a.getUnion(b));
+    }
+    {
+        // Pushed apart the box is 2.7x the sum: two passes again.
+        auto const a = PassRect { 0, 0, 300, 300 };
+        auto const b = PassRect { 420, 420, 300, 300 };
+        CHECK(mcp::planRenderPasses(frame({ a, b })).size() == 2);
+    }
+}
+
+static void defaultCapIsFour()
+{
+    std::printf("planner: nine far-apart widgets merge cheapest pair first down to four passes\n");
+    std::vector<PassRect> rects;
+    for (int i = 0; i < 9; ++i)
+        rects.push_back({ 40 + (i % 3) * 800, 120 + (i / 3) * 330, 90, 70 });
+    auto in = frame(rects);
+    in.bounds = { 0, 0, 3000, 1400 };
+    in.canvasArea = { 0, 40, 3000, 1360 };
+    auto const passes = mcp::planRenderPasses(in);
+    CHECK(passes.size() >= 2 && passes.size() <= 4);
+    for (auto const& r : rects)
+        CHECK(covers(passes, r));
+    auto const box = boundingBox(rects);
+    CHECK(totalArea(passes) * 2 < static_cast<std::int64_t>(box.w) * box.h);
 }
 
 static void toolbarAndCanvasStaySeparate()
@@ -294,6 +332,8 @@ int main()
 {
     farApartCanvasRects();
     eightWidgetsOwnerScenario();
+    defaultCapIsFour();
+    spreadFrameBoundingBoxRule();
     toolbarAndCanvasStaySeparate();
     overlappingAndNearRectsMerge();
     tooManyClustersMergeCheapestFirst();
