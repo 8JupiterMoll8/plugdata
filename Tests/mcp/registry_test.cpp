@@ -179,6 +179,10 @@ int main()
         CHECK(t.find("pd", "widget_call") != nullptr && *t.find("pd", "widget_call") == "pdWidgetCall");
         CHECK(!reported("pd", "widget_call"));
 
+        // PARKED 2026-11-22 (capability tab_split): /pd/tab_split is a row of the pd domain, served by its own handler.
+        CHECK(t.find("pd", "tab_split") != nullptr && *t.find("pd", "tab_split") == "pdTabSplit");
+        CHECK(!reported("pd", "tab_split"));
+
         // The id-addressed verbs batch_atomic covers are gone (P3.3 S9); the index forms and
         // move_batch_id stay.
         for (char const* gone : { "create_id", "create_batch_id", "connect_id", "connect_batch_id", "disconnect_id",
@@ -279,6 +283,13 @@ int main()
             CHECK(m->replyCount == 1 && std::string(v2::kReplies[m->firstReply].pattern) == "/pd/widget_call/reply/{id}" && v2::kReplies[m->firstReply].final);
         } else {
             CHECK(false && "the v2 schema has no /pd/widget_call row yet (regenerate it)");
+        }
+        // PARKED 2026-11-22 (capability tab_split): the schema row of /pd/tab_split once it is regenerated (corrId first, one synchronous
+        // reply on /pd/tab_split/reply/{id}). Like the widget_call row this is checked only when the row exists: the generic loop in
+        // this section already fails a verb-table row without a schema row.
+        if (auto const* m = v2::findVerb("pd", "tab_split")) {
+            CHECK(m->corrArg == 0 && m->replyCount == 1);
+            CHECK(m->replyCount == 1 && std::string(v2::kReplies[m->firstReply].pattern) == "/pd/tab_split/reply/{id}" && v2::kReplies[m->firstReply].final);
         }
         CHECK(v2::findVerb("pd", "batch_atomic")->deadlineMs == 12000);
         CHECK(!v2::findVerb("pd", "select")->needsLease && v2::findVerb("pd", "select")->keyRequired); // ui: no lease, still de-duplicated
