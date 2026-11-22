@@ -403,7 +403,7 @@ public:
                 }
             } else if (result == 2) {
                 if (pd && pd->getMcp()->getMCPBridge()) {
-                    pd->getMcp()->getMCPBridge()->startVoiceCapture(1);
+                    pd->getMcp()->getMCPBridge()->startVoiceCapture(60, 1); // 60 s, melody mode: (1) alone was read as maxSeconds = 1, so the take stopped after one second
                 }
             } else if (result == 3) {
                 if (editor) {
