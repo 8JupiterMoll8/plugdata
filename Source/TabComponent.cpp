@@ -1279,7 +1279,7 @@ void TabComponent::closeTab(Canvas* cnv, bool const sendVisMessage)
 
     // PRD overlay lifecycle: patch closed — clear overlay so stale gobj* marks and
     // floating tags can't survive onto whatever patch is shown next.
-    pd->getMcp()->session.clearAiOverlays(); for (auto* c : getCanvases()) c->updateOverlays(); // MCP-HOOK(canvasLifecycle): the cleared spotlight veil leaves every open view's boxes
+    pd->getMcp()->session.clearAiOverlays(patch->getUncheckedPointer()); for (auto* c : getCanvases()) c->updateOverlays(); // MCP-HOOK(canvasLifecycle): the cleared spotlight veil leaves every open view's boxes; the closed canvas drops its own regions, tags and ghosts (the other tabs keep theirs)
 
     triggerAsyncUpdate();
 }

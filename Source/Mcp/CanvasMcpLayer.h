@@ -96,6 +96,10 @@ public:
     // Canvas::updateOverlays: takes the AI bits of the overlay state.
     void updateOverlays(int overlayState);
 
+    // The key of this canvas's ghosts, tags and regions in the session (McpSession::OverlayKey): the canvas's patch pointer, the
+    // same one the bridge resolves a canvas name to. Never dereferenced; safe on the render thread.
+    void const* overlayKey() const;
+
     bool shouldShowAIState() const;
     bool shouldShowAIRegions() const;
     bool shouldShowAIAnnotations() const;

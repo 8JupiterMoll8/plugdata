@@ -5,6 +5,7 @@
  */
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <deque>
 #include <mutex>
@@ -24,6 +25,7 @@
 #include "Mcp/McpOutputCeiling.h"
 #include "Mcp/McpApprovalState.h"
 #include "Mcp/McpFlowMode.h"
+#include "Mcp/McpOverlayStore.h" // regions, tags and ghosts: one list per canvas
 #include "Mcp/McpAlphi.h"
 #include "Mcp/McpAlphiSay.h"
 #include "Pd/MCPBridgeAcLevel.h" // V1 AC taps (JUCE-free)
@@ -82,8 +84,13 @@ struct McpSession {
         float x1 = 0, y1 = 0, x2 = 0, y2 = 0;      // wire
         juce::String label;
     };
-    std::vector<McpGhost> mcpGhosts;
-    std::vector<McpGhost> getMcpGhosts() const { juce::ScopedLock sl(mcpOverlayLock); return mcpGhosts; }
+    // PARKED 2026-11-22 (overlay regions leaked across tabs): ghosts, tags and regions belong to ONE canvas each, keyed by the canvas
+    // pointer (a t_canvas* from the bridge; a Canvas's patch pointer in the paint; never dereferenced). A tab that is a copy of
+    // another (the same tempIds) used to show, and replace, the other's lists. All access is under mcpOverlayLock.
+    using OverlayKey = void const*;
+    mcp::CanvasOverlayLists<McpGhost> mcpGhostLists;
+    std::vector<McpGhost> getMcpGhosts(OverlayKey canvas) const { juce::ScopedLock sl(mcpOverlayLock); return mcpGhostLists.get(canvas); }
+    void setMcpGhosts(OverlayKey canvas, std::vector<McpGhost> ghosts) { juce::ScopedLock sl(mcpOverlayLock); mcpGhostLists.set(canvas, std::move(ghosts)); }
 
     // PRD overlay: short in-place AI annotations ("why"/"what"), drawn as a
     // translucent tag near an object (patch coords). Explanation lives where it
@@ -98,8 +105,14 @@ struct McpSession {
         bool hasLeader = false;      // draw a thin line from the note to the object
         float leaderX = 0, leaderY = 0; // point on the object the line points to
     };
-    std::vector<McpAnnotation> mcpAnnotations;
-    std::vector<McpAnnotation> getMcpAnnotations() const { juce::ScopedLock sl(mcpOverlayLock); return mcpAnnotations; }
+    mcp::CanvasOverlayLists<McpAnnotation> mcpAnnotationLists;
+    std::vector<McpAnnotation> getMcpAnnotations(OverlayKey canvas) const { juce::ScopedLock sl(mcpOverlayLock); return mcpAnnotationLists.get(canvas); }
+    size_t getMcpAnnotationCount(OverlayKey canvas) const { juce::ScopedLock sl(mcpOverlayLock); return mcpAnnotationLists.size(canvas); }
+    std::vector<McpAnnotation> getMcpAnnotationsOfAllCanvases() const { juce::ScopedLock sl(mcpOverlayLock); return mcpAnnotationLists.flatten(); } // the moodboard rail
+    void setMcpAnnotations(OverlayKey canvas, std::vector<McpAnnotation> notes) { juce::ScopedLock sl(mcpOverlayLock); mcpAnnotationLists.set(canvas, std::move(notes)); }
+    // fn works on ONE canvas's tags in place under the overlay lock (push, erase by index, change a text); keep it to plain vector work.
+    template <typename F>
+    auto editMcpAnnotations(OverlayKey canvas, F&& fn) { juce::ScopedLock sl(mcpOverlayLock); return mcpAnnotationLists.edit(canvas, std::forward<F>(fn)); }
 
     // PRD overlay: titled REGIONS — translucent boxes grouping objects (e.g. "FX",
     // "Loops", "Drums"), drawn BEHIND the objects so the patch's structure is
@@ -110,8 +123,36 @@ struct McpSession {
         juce::String kind; // e.g. source | fx | loop | output | group
         juce::StringArray targetIds;
     };
-    std::vector<McpRegion> mcpRegions;
-    std::vector<McpRegion> getMcpRegions() const { juce::ScopedLock sl(mcpOverlayLock); return mcpRegions; }
+    mcp::CanvasOverlayLists<McpRegion> mcpRegionLists;
+    std::vector<McpRegion> getMcpRegions(OverlayKey canvas) const { juce::ScopedLock sl(mcpOverlayLock); return mcpRegionLists.get(canvas); }
+    void setMcpRegions(OverlayKey canvas, std::vector<McpRegion> regions) { juce::ScopedLock sl(mcpOverlayLock); mcpRegionLists.set(canvas, std::move(regions)); }
+
+    // A canvas closed: its ghosts, tags and regions go with it (a freed canvas's address can be handed to a new one). Any thread.
+    void dropCanvasOverlays(OverlayKey canvas)
+    {
+        juce::ScopedLock sl(mcpOverlayLock);
+        mcpGhostLists.erase(canvas);
+        mcpAnnotationLists.erase(canvas);
+        mcpRegionLists.erase(canvas);
+    }
+    // Every canvas that holds a list (the verbs check these against the open canvases, under the Pd lock, and drop the gone ones).
+    std::vector<OverlayKey> canvasesWithOverlays() const
+    {
+        juce::ScopedLock sl(mcpOverlayLock);
+        auto keys = mcpGhostLists.keys();
+        for (auto const* k : mcpAnnotationLists.keys()) keys.push_back(k);
+        for (auto const* k : mcpRegionLists.keys()) keys.push_back(k);
+        std::sort(keys.begin(), keys.end());
+        keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+        return keys;
+    }
+    void dropCanvasesOverlays(std::vector<OverlayKey> const& gone)
+    {
+        juce::ScopedLock sl(mcpOverlayLock);
+        mcpGhostLists.prune(gone);
+        mcpAnnotationLists.prune(gone);
+        mcpRegionLists.prune(gone);
+    }
 
     // PRD Phase 2: pasted reference images (hardware photos, schematics) living on
     // the canvas glass behind the DSP layer. x/y/w/h are PD patch coords so they map
@@ -378,17 +419,21 @@ struct McpSession {
         return outTargeted || inTargeted;
     }
 
-    // PRD overlay lifecycle: wipe ALL AI overlay state (annotations, regions, ghosts,
-    // and per-object marks). Called when the active patch changes (new patch, open,
-    // close) so overlay never leaks onto the next patch — and so the gobj*-keyed marks
-    // can never dangle onto deleted objects after a canvas is rebuilt. Message thread;
-    // the render thread reads all of these under mcpOverlayLock.
-    void clearAiOverlays()
+    // PRD overlay lifecycle: wipe the session's AI overlay state (reference images, voice takes, per-object
+    // marks, the spotlight, the HUD). Called when the active patch changes (new patch, open, close) so overlay never
+    // leaks onto the next patch — and so the gobj*-keyed marks can never dangle onto deleted objects after a canvas
+    // is rebuilt. The ghosts, tags and regions are NOT in this wipe (they belong to their own canvas since the
+    // 2026-11-22 per-canvas store, so a new tab cannot receive them and must not take them from the other tabs); a
+    // canvas that closes passes itself and loses only its own. Message thread; the render thread reads all of
+    // these under mcpOverlayLock.
+    void clearAiOverlays(OverlayKey closedCanvas = nullptr)
     {
         juce::ScopedLock sl(mcpOverlayLock);
-        mcpGhosts.clear();
-        mcpAnnotations.clear();
-        mcpRegions.clear();
+        if (closedCanvas) {
+            mcpGhostLists.erase(closedCanvas);
+            mcpAnnotationLists.erase(closedCanvas);
+            mcpRegionLists.erase(closedCanvas);
+        }
         mcpReferenceImages.clear();
         mcpVoiceTakes.clear();
         mcpAiOverlay.clear();
@@ -399,7 +444,7 @@ struct McpSession {
         mcpHud = McpHud();
     }
 
-    // Guards mcpAiOverlay / mcpGhosts / mcpAnnotations / mcpOverlayTargets: written on the message
+    // Guards mcpAiOverlay / the per-canvas ghost, tag and region lists / mcpOverlayTargets: written on the message
     // thread, read on the VBlank render thread.
     mutable juce::CriticalSection mcpOverlayLock;
 

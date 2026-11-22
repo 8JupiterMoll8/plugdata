@@ -350,8 +350,7 @@ void CanvasMcpLayer::parkSelectionPill()
             }
         }
 
-        juce::ScopedLock sl(canvas.pd->getMcp()->session.mcpOverlayLock);
-        canvas.pd->getMcp()->session.mcpAnnotations.push_back(ann);
+        canvas.pd->getMcp()->session.editMcpAnnotations(overlayKey(), [&ann](std::vector<McpSession::McpAnnotation>& notes) { notes.push_back(ann); });
     }
 
     if (mcpSelectionPill) mcpSelectionPill->setText(juce::String(), false);

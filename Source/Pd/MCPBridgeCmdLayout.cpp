@@ -187,7 +187,7 @@ void MCPBridge::pdDeoverlap(const juce::String& action, const juce::OSCMessage& 
                     }
                 }
             }
-            for (auto const& rg : processor->getMcp()->session.mcpRegions) {
+            for (auto const& rg : processor->getMcp()->session.getMcpRegions(cnv)) {
                 if (rg.title.isEmpty()) continue;
                 int rx = static_cast<int>(rg.x), ry = static_cast<int>(rg.y);
                 int rw = static_cast<int>(rg.w), rh = 26;

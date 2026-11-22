@@ -143,9 +143,9 @@ void MCPBridge::pdAiGhost(const juce::String& action, const juce::OSCMessage& ms
     postMessage([proc = processor, cnv, canvasName, correlationId, bridge = this, parsed]() {
         if (mcpCanvasGone(cnv)) { bridge->sendReply("/pd/ai_ghost/reply/" + correlationId, 0.0f); return; } // P3.4 S4: closed since the handler ran
         // P3.4 S11 (TSan): the Pd lock before the overlay lock, the order the GUI's sync and paint use.
+        // 2026-11-22: ghosts belong to THIS canvas (keyed by `cnv`); built locally, then swapped in under the overlay lock.
+        std::vector<McpSession::McpGhost> built;
         sys_lock();
-        juce::ScopedLock overlaySl(proc->getMcp()->session.mcpOverlayLock);
-        proc->getMcp()->session.mcpGhosts.clear();
         if (auto* arr = parsed.getArray()) {
             for (auto const& v : *arr) {
                 auto* o = v.getDynamicObject();
@@ -169,12 +169,15 @@ void MCPBridge::pdAiGhost(const juce::String& action, const juce::OSCMessage& ms
                     g.h = static_cast<float>(o->getProperty("h"));
                     g.label = o->getProperty("label").toString();
                 }
-                proc->getMcp()->session.mcpGhosts.push_back(g);
+                built.push_back(g);
             }
         }
         sys_unlock();
+        auto const ghostCount = built.size();
+        proc->getMcp()->session.setMcpGhosts(cnv, std::move(built));
+        mcpPruneGoneOverlayCanvases(proc);
         proc->getMcp()->gui().repaintView(cnv);
-        bridge->sendReply("/pd/ai_ghost/reply/" + correlationId, static_cast<float>(proc->getMcp()->session.mcpGhosts.size()));
+        bridge->sendReply("/pd/ai_ghost/reply/" + correlationId, static_cast<float>(ghostCount));
     });
     return;
 }
@@ -199,9 +202,11 @@ void MCPBridge::pdAiAnnotate(const juce::String& action, const juce::OSCMessage&
     postMessage([proc = processor, cnv, canvasName, correlationId, bridge = this, parsed]() {
         if (mcpCanvasGone(cnv)) { bridge->sendReply("/pd/ai_annotate/reply/" + correlationId, 0.0f); return; } // P3.4 S4: closed since the handler ran
         // P3.4 S11 (TSan): the Pd lock before the overlay lock, the order the GUI's sync and paint use.
+        // 2026-11-22: tags belong to THIS canvas (keyed by `cnv`); built locally (the placement below avoids the earlier tags of
+        // this call and the canvas's regions), then swapped in under the overlay lock.
+        std::vector<McpSession::McpAnnotation> built;
+        auto const canvasRegions = proc->getMcp()->session.getMcpRegions(cnv);
         sys_lock();
-        juce::ScopedLock overlaySl(proc->getMcp()->session.mcpOverlayLock);
-        proc->getMcp()->session.mcpAnnotations.clear();
         if (auto* arr = parsed.getArray()) {
             for (auto const& v : *arr) {
                 auto* o = v.getDynamicObject();
@@ -229,9 +234,9 @@ void MCPBridge::pdAiAnnotate(const juce::String& action, const juce::OSCMessage&
                         avoid.emplace_back(static_cast<float>(bx), static_cast<float>(by),
                                            static_cast<float>(bw), static_cast<float>(bh));
                     }
-                    for (auto const& an : proc->getMcp()->session.mcpAnnotations)
+                    for (auto const& an : built)
                         avoid.emplace_back(an.x - 6.0f, an.y - 9.0f, an.text.length() * 7.0f + 28.0f, 18.0f);
-                    for (auto const& rg : proc->getMcp()->session.mcpRegions) {
+                    for (auto const& rg : canvasRegions) {
                         if (rg.title.isNotEmpty())
                             avoid.emplace_back(rg.x, rg.y, rg.w, 24.0f);
                     }
@@ -269,13 +274,15 @@ void MCPBridge::pdAiAnnotate(const juce::String& action, const juce::OSCMessage&
                     a.x = static_cast<float>(o->getProperty("x"));
                     a.y = static_cast<float>(o->getProperty("y"));
                 }
-                proc->getMcp()->session.mcpAnnotations.push_back(a);
+                built.push_back(a);
             }
         }
         sys_unlock();
+        proc->getMcp()->session.setMcpAnnotations(cnv, built);
+        mcpPruneGoneOverlayCanvases(proc);
         proc->getMcp()->gui().repaintView(cnv);
         juce::var details = juce::Array<juce::var>();
-        for (auto const& an : proc->getMcp()->session.mcpAnnotations) {
+        for (auto const& an : built) {
             auto* d = new juce::DynamicObject();
             d->setProperty("targetId", an.targetId);
             d->setProperty("text", an.text);
@@ -288,7 +295,7 @@ void MCPBridge::pdAiAnnotate(const juce::String& action, const juce::OSCMessage&
             details.append(d);
         }
         juce::Array<juce::var> replyArgs;
-        replyArgs.add(static_cast<float>(proc->getMcp()->session.mcpAnnotations.size()));
+        replyArgs.add(static_cast<float>(built.size()));
         replyArgs.add(juce::JSON::toString(details, true));
         bridge->sendReply("/pd/ai_annotate/reply/" + correlationId, replyArgs);
     });
@@ -360,12 +367,13 @@ void MCPBridge::pdAiRegion(const juce::String& action, const juce::OSCMessage& m
             }
             sys_unlock();
         }
-        {
-            juce::ScopedLock overlaySl(proc->getMcp()->session.mcpOverlayLock);
-            proc->getMcp()->session.mcpRegions = std::move(built);
-        }
+        // 2026-11-22: regions belong to THIS canvas (keyed by `cnv`): drawing them on tab B (a copy of tab A, the same tempIds) no
+        // longer replaces the ones tab A shows.
+        auto const regionCount = built.size();
+        proc->getMcp()->session.setMcpRegions(cnv, std::move(built));
+        mcpPruneGoneOverlayCanvases(proc);
         proc->getMcp()->gui().repaintView(cnv);
-        bridge->sendReply("/pd/ai_region/reply/" + correlationId, static_cast<float>(proc->getMcp()->session.mcpRegions.size()));
+        bridge->sendReply("/pd/ai_region/reply/" + correlationId, static_cast<float>(regionCount));
     });
     return;
 }
@@ -564,7 +572,7 @@ void MCPBridge::pdMoodboard(const juce::String& action, const juce::OSCMessage& 
                 o->setProperty("visible", img.visible);
                 imagesArr.add(juce::var(o));
             }
-            for (auto const& a : proc->getMcp()->session.getMcpAnnotations()) {
+            for (auto const& a : proc->getMcp()->session.getMcpAnnotationsOfAllCanvases()) {
                 if (a.text.isEmpty()) continue;
                 auto* o = new juce::DynamicObject();
                 o->setProperty("text", a.text);

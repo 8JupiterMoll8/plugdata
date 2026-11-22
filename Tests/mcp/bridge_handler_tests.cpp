@@ -7901,6 +7901,132 @@ void runAlphiSayCases(Harness& h, PluginProcessor& processor)
     CHECK(!link->take([](auto const& v) { return field(v, "t") == "rep" && field(v, "id") == "AS1"; }, 300).has_value());
 }
 
+// PARKED 2026-11-22 (overlay regions leaked across tabs): the AI's regions, tags and ghosts belong to ONE canvas each. Two canvases (two
+// subpatches of main, standing in for two tabs) written one after the other keep their own lists; clearing one leaves the other; a
+// canvas that is gone drops its lists at the next write. And the census row of an abstraction box carries the box's own args after its
+// file (live check 2026-11-21: `ai.loop~ a` arrived as args ["ai.loop~.pd"]).
+// WRITTEN AND SYNTAX-CHECKED, NOT RUN here (it needs the mcp_bridge_tests build).
+void runOverlayCanvasCases(Harness& h, PluginProcessor& processor)
+{
+    std::printf("overlays per canvas, census abstraction args (2026-11-22)\n");
+    auto* host = processor.getMcp();
+    auto& session = host->session;
+    t_canvas* tabA = nullptr;
+    t_canvas* tabB = nullptr;
+    CHECK(host->pdWait([&] {
+        t_canvas* cnv = host->getCanvasBySymbol("main");
+        if (!cnv) return;
+        auto const make = [&](char const* name, float x) -> t_canvas* {
+            t_atom a[4];
+            SETFLOAT(a, x);
+            SETFLOAT(a + 1, 300);
+            SETSYMBOL(a + 2, gensym("pd"));
+            SETSYMBOL(a + 3, gensym(name));
+            pd_typedmess(&cnv->gl_pd, gensym("obj"), 4, a);
+            return reinterpret_cast<t_canvas*>(pd::Interface::getNewest(cnv));
+        };
+        tabA = make("ovtabA", 900);
+        tabB = make("ovtabB", 1100);
+    }, 3000));
+    CHECK(tabA != nullptr && tabB != nullptr);
+    if (!tabA || !tabB) return;
+
+    auto const region = [&](char const* canvas, char const* title, char const* corr) {
+        auto const json = juce::String("[{\"title\":\"") + title + "\",\"kind\":\"fx\",\"x\":10,\"y\":10,\"w\":100,\"h\":60}]";
+        return h.call("/pd/ai_region", { canvas, corr, json }, std::string("/pd/ai_region/reply/") + corr, 5000);
+    };
+    auto const tag = [&](char const* canvas, char const* text, char const* corr) {
+        auto const json = juce::String("[{\"x\":5,\"y\":5,\"text\":\"") + text + "\",\"kind\":\"info\"}]";
+        return h.call("/pd/ai_annotate", { canvas, corr, json }, std::string("/pd/ai_annotate/reply/") + corr, 5000);
+    };
+    auto const ghost = [&](char const* canvas, char const* label, char const* corr) {
+        auto const json = juce::String("[{\"kind\":\"box\",\"x\":20,\"y\":20,\"w\":60,\"h\":20,\"label\":\"") + label + "\"}]";
+        return h.call("/pd/ai_ghost", { canvas, corr, json }, std::string("/pd/ai_ghost/reply/") + corr, 5000);
+    };
+
+    // Tab A first, then tab B: B's write must not replace what A shows.
+    CHECK(region("pd-ovtabA", "tab a", "ov1").has_value());
+    CHECK(tag("pd-ovtabA", "note a", "ov2").has_value());
+    CHECK(ghost("pd-ovtabA", "ghost a", "ov3").has_value());
+    CHECK(region("pd-ovtabB", "tab b", "ov4").has_value());
+    CHECK(tag("pd-ovtabB", "note b", "ov5").has_value());
+    CHECK(ghost("pd-ovtabB", "ghost b", "ov6").has_value());
+    {
+        auto const ra = session.getMcpRegions(tabA), rb = session.getMcpRegions(tabB);
+        CHECK(ra.size() == 1 && ra[0].title == "tab a");
+        CHECK(rb.size() == 1 && rb[0].title == "tab b");
+        auto const ta = session.getMcpAnnotations(tabA), tb = session.getMcpAnnotations(tabB);
+        CHECK(ta.size() == 1 && ta[0].text == "note a");
+        CHECK(tb.size() == 1 && tb[0].text == "note b");
+        auto const ga = session.getMcpGhosts(tabA), gb = session.getMcpGhosts(tabB);
+        CHECK(ga.size() == 1 && ga[0].label == "ghost a");
+        CHECK(gb.size() == 1 && gb[0].label == "ghost b");
+        auto const* mainCnv = static_cast<void const*>(host->getCanvasBySymbol("main"));
+        CHECK(session.getMcpRegions(mainCnv).empty() && session.getMcpAnnotations(mainCnv).empty()); // a third canvas sees neither
+    }
+    // Clearing A (an empty array) leaves B's lists.
+    CHECK(h.call("/pd/ai_region", { "pd-ovtabA", "ov7", "[]" }, "/pd/ai_region/reply/ov7", 5000).has_value());
+    CHECK(session.getMcpRegions(tabA).empty());
+    CHECK(session.getMcpRegions(tabB).size() == 1 && session.getMcpAnnotations(tabA).size() == 1);
+
+    // A canvas that is gone drops its lists at the next write (a freed address can be handed to a new canvas).
+    CHECK(host->pdWait([&] {
+        if (auto* cnv = host->getCanvasBySymbol("main")) glist_delete(cnv, &tabA->gl_gobj);
+    }, 3000));
+    CHECK(region("pd-ovtabB", "tab b again", "ov8").has_value());
+    CHECK(session.getMcpAnnotations(tabA).empty() && session.getMcpGhosts(tabA).empty());
+    CHECK(session.getMcpRegions(tabB).size() == 1 && session.getMcpRegions(tabB)[0].title == "tab b again");
+
+    // The census: an abstraction's args are its file, then the box's own args; a box with none keeps the file alone.
+    juce::File dir;
+    host->pdWait([&] {
+        if (auto* cnv = host->getCanvasBySymbol("main")) dir = juce::File(juce::String::fromUTF8(canvas_getdir(cnv)->s_name));
+    }, 3000);
+    auto const absFile = dir.getChildFile("ovabsargs.pd");
+    CHECK(absFile.replaceWithText("#N canvas 0 50 450 300 12;\n#X obj 10 10 inlet;\n"));
+    t_gobj* withArgs = nullptr;
+    t_gobj* noArgs = nullptr;
+    CHECK(host->pdWait([&] {
+        t_canvas* cnv = host->getCanvasBySymbol("main");
+        if (!cnv) return;
+        t_atom a[5];
+        SETFLOAT(a, 1300);
+        SETFLOAT(a + 1, 400);
+        SETSYMBOL(a + 2, gensym("ovabsargs"));
+        SETSYMBOL(a + 3, gensym("voice"));
+        SETFLOAT(a + 4, 3);
+        pd_typedmess(&cnv->gl_pd, gensym("obj"), 5, a);
+        withArgs = pd::Interface::getNewest(cnv);
+        pd_typedmess(&cnv->gl_pd, gensym("obj"), 3, a);
+        noArgs = pd::Interface::getNewest(cnv);
+    }, 3000));
+    auto const census = h.call("/pd/census", { "main", "ov9" }, "/pd/census/reply/ov9");
+    CHECK(census.has_value());
+    bool sawWith = false, sawNone = false;
+    if (census) {
+        auto const json = parseJson(*census);
+        for (auto const& o : *json["objects"].getArray()) {
+            if (o["node_class"].toString() != "ovabsargs.pd") continue;
+            auto const* args = o["args"].getArray();
+            if (!args || args->isEmpty()) continue;
+            if ((*args)[0].toString() == "ovabsargs.pd" && args->size() == 3)
+                sawWith = (*args)[1].toString() == "voice" && (*args)[2].toString() == "3";
+            else if (args->size() == 1)
+                sawNone = (*args)[0].toString() == "ovabsargs.pd";
+        }
+    }
+    CHECK(sawWith);
+    CHECK(sawNone);
+    host->pdWait([&] {
+        if (auto* cnv = host->getCanvasBySymbol("main")) {
+            if (withArgs) glist_delete(cnv, withArgs);
+            if (noArgs) glist_delete(cnv, noArgs);
+            if (tabB) glist_delete(cnv, &tabB->gl_gobj);
+        }
+    }, 3000);
+    absFile.deleteFile();
+}
+
 // S6.6 (audit A20): the live props of an IEM GUI carry its label, so a control the builder named (`hsl ... morph_s
 // morph_r morph`) can be read back as named. The label slot is iemgui_new_getnames' index + 2 in each constructor:
 // hsl/vsl/nbx 8, tgl 4, bng 6, hradio/vradio 6. An `empty` label is no label: the property is absent.
@@ -8799,6 +8925,7 @@ int main()
             runMidiDevicesCases(harness, processor);
             runApprovalCases(harness, processor);
             runAlphiSayCases(harness, processor);
+            runOverlayCanvasCases(harness, processor);
             runChatListenerCases(harness, *bridge);
             runPillLaneCases(harness, *bridge);
             runLimiterPatchCases(processor);

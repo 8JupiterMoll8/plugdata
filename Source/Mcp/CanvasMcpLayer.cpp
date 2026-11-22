@@ -97,8 +97,8 @@ void CanvasMcpLayer::paintUnderObjects(NVGcontext* nvg, Rectangle<int> invalidRe
     // Inter-Medium, never under 11 screen px when zoomed out; at the top right when a wire or a step disc would cover it on the
     // left). A small group (any other kind) is its name only, in grey. The rectangles come from mcp::aiRegionRects (padded,
     // never crossing, never cutting a member box, stacked ones share the squeeze evenly and keep 8 px under the upper one's boxes).
-    if (canvas.pd && shouldShowAIRegions() && !canvas.pd->getMcp()->session.getMcpRegions().empty()) {
-        auto const regions = canvas.pd->getMcp()->session.getMcpRegions();
+    if (canvas.pd && shouldShowAIRegions() && !canvas.pd->getMcp()->session.getMcpRegions(overlayKey()).empty()) {
+        auto const regions = canvas.pd->getMcp()->session.getMcpRegions(overlayKey());
         // Every region that holds boxes: the bounding box of its live members (all deleted -> auto-prune); a region with
         // no targets keeps the rectangle it was given. Pd comments are left out of the bounds (a note lies beside the boxes it
         // describes and stretched the rectangle to itself); a region of nothing but comments keeps them.
@@ -226,9 +226,9 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
     // measurement, circle = a change, triangle = look here, half circle = a question), and the text in ink with a halo
     // in the canvas colour. No chassis, no shadow, no bevel, no accent bar, no LED. The frame comes from
     // getAnnotationFrame, the same function the hover, the close cross and the click use.
-    if (canvas.pd && shouldShowAIAnnotations() && !canvas.pd->getMcp()->session.getMcpAnnotations().empty()) {
+    if (canvas.pd && shouldShowAIAnnotations() && !canvas.pd->getMcp()->session.getMcpAnnotations(overlayKey()).empty()) {
         auto const canvasBg = nvgColour(getThemeColours(canvas).canvasBackgroundColour);
-        auto const anns = canvas.pd->getMcp()->session.getMcpAnnotations();
+        auto const anns = canvas.pd->getMcp()->session.getMcpAnnotations(overlayKey());
         auto const scene = buildAnnotationScene(); // every box, once for all the tags of this paint
         for (size_t ai = 0; ai < anns.size(); ++ai) {
             auto const& a = anns[ai];
@@ -1055,9 +1055,9 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
 
     // PRD overlay: ghost/preview of PROPOSED (uncommitted) changes. Drawn above the patch, never part of it: the artist
     // sees the change before it's real. Design round B3, widened with the widgets' family decision (owner 2026-11-22): ink at 85 %, 2 px, dotted (dash 2), no fill; the label is ink at 85 %.
-    if (canvas.pd && shouldShowAIGhosts() && !canvas.pd->getMcp()->session.getMcpGhosts().empty()) {
+    if (canvas.pd && shouldShowAIGhosts() && !canvas.pd->getMcp()->session.getMcpGhosts(overlayKey()).empty()) {
         constexpr float dotted = 2.0f;
-        for (auto const& g : canvas.pd->getMcp()->session.getMcpGhosts()) {
+        for (auto const& g : canvas.pd->getMcp()->session.getMcpGhosts(overlayKey())) {
             NVGScopedState scopedGhost(nvg);
             if (g.kind == 0) {
                 float const gx = canvas.canvasOrigin.x + g.x;
@@ -1319,14 +1319,14 @@ bool CanvasMcpLayer::shouldShowAIState() const
 bool CanvasMcpLayer::shouldShowAIRegions() const
 {
     if (canvas.presentationMode.getValue()) return false;
-    if (canvas.pd && !canvas.pd->getMcp()->session.getMcpRegions().empty()) return true;
+    if (canvas.pd && !canvas.pd->getMcp()->session.getMcpRegions(overlayKey()).empty()) return true;
     return showAiRegions;
 }
 
 bool CanvasMcpLayer::shouldShowAIAnnotations() const
 {
     if (canvas.presentationMode.getValue()) return false;
-    if (canvas.pd && !canvas.pd->getMcp()->session.getMcpAnnotations().empty()) return true;
+    if (canvas.pd && !canvas.pd->getMcp()->session.getMcpAnnotations(overlayKey()).empty()) return true;
     return showAiAnnotations;
 }
 

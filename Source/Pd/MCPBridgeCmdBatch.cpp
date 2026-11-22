@@ -45,7 +45,7 @@ static bool mcpHasCollisions(PluginProcessor* processor, t_canvas* cnv, int pad)
             if (a.x < b.x + b.w + pad && a.x + a.w + pad > b.x
              && a.y < b.y + b.h + pad && a.y + a.h + pad > b.y) return true;
         }
-    for (auto const& rg : processor->getMcp()->session.mcpRegions) {
+    for (auto const& rg : processor->getMcp()->session.getMcpRegions(cnv)) {
         if (rg.title.isEmpty()) continue;
         int rx = static_cast<int>(rg.x), ry = static_cast<int>(rg.y);
         int rw = static_cast<int>(rg.w), rh = 26;

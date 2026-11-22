@@ -29,6 +29,12 @@
 #include "Pd/MCPBridge.h"
 #include "Mcp/McpHost.h"
 
+void const* CanvasMcpLayer::overlayKey() const
+{
+    // The patch pointer as it stands, no weak-reference check and no dereference: the paint (render thread) asks it for every list.
+    return canvas.patch.getUncheckedPointer();
+}
+
 std::uint64_t CanvasMcpLayer::stableIdObjectsKey() const
 {
     // Which objects this canvas shows (the GUI objects and their Pd objects), read on the message thread, no lock.
@@ -137,7 +143,7 @@ bool CanvasMcpLayer::getAnnotationLiveBounds(juce::String const& targetId, juce:
 
             // Stack multiple notes on the same group vertically upwards
             if (canvas.pd) {
-                auto const allAnns = canvas.pd->getMcp()->session.getMcpAnnotations();
+                auto const allAnns = canvas.pd->getMcp()->session.getMcpAnnotations(overlayKey());
                 int noteOrder = 0;
                 for (auto const& prevA : allAnns) {
                     bool isSelf = false;
@@ -196,7 +202,7 @@ CanvasMcpLayer::AnnotationScene CanvasMcpLayer::buildAnnotationScene() const
     // The name band at the top of every region is an obstacle too (owner 2026-11-20: a tag lay on "drawn voice"). The same
     // rectangles as the paint (mcp::aiRegionRects over the members' bounds, comments left out); no owner, so never skipped.
     if (canvas.pd && shouldShowAIRegions()) {
-        auto const regions = canvas.pd->getMcp()->session.getMcpRegions();
+        auto const regions = canvas.pd->getMcp()->session.getMcpRegions(overlayKey());
         std::vector<mcp::ApprovalRect> members;
         std::vector<int> titleChars; // per member rectangle, its region's name length
         for (auto const& r : regions) {
@@ -234,7 +240,7 @@ CanvasMcpLayer::AnnotationFrame CanvasMcpLayer::getAnnotationFrame(size_t annInd
 {
     AnnotationFrame frame;
     if (!canvas.pd) return frame;
-    auto const anns = canvas.pd->getMcp()->session.getMcpAnnotations();
+    auto const anns = canvas.pd->getMcp()->session.getMcpAnnotations(overlayKey());
     if (annIndex >= anns.size()) return frame;
     auto const& a = anns[annIndex];
     float rawAx = 0.0f, rawAy = 0.0f, rawLx = 0.0f, rawLy = 0.0f;
@@ -312,9 +318,9 @@ void CanvasMcpLayer::mouseMove(MouseEvent const& e)
     bool hoverClose = false;
     int hoverChip = -1;
 
-    if (canvas.pd && !canvas.pd->getMcp()->session.getMcpAnnotations().empty()) {
+    if (canvas.pd && !canvas.pd->getMcp()->session.getMcpAnnotations(overlayKey()).empty()) {
         auto const pt = e.getPosition().toFloat();
-        auto const anns = canvas.pd->getMcp()->session.getMcpAnnotations();
+        auto const anns = canvas.pd->getMcp()->session.getMcpAnnotations(overlayKey());
         auto const scene = buildAnnotationScene(); // once for every tag the pointer is tested against
         for (int i = static_cast<int>(anns.size()) - 1; i >= 0; --i) {
             auto const tb = getAnnotationScreenBounds(static_cast<size_t>(i), scene);
@@ -389,9 +395,9 @@ bool CanvasMcpLayer::isPointOverNote(Point<int> canvasPt) const
         if (mcpPillDrawerMode != 0 && mcpPillDrawerFrame.contains(canvasPt)) return true;
         if (mcpPillDrawerMode == 3 && mcpPaletteFrame.contains(canvasPt)) return true;
     }
-    if (!canvas.pd || canvas.pd->getMcp()->session.getMcpAnnotations().empty()) return false;
+    if (!canvas.pd || canvas.pd->getMcp()->session.getMcpAnnotations(overlayKey()).empty()) return false;
     auto const pt = canvasPt.toFloat();
-    auto const anns = canvas.pd->getMcp()->session.getMcpAnnotations();
+    auto const anns = canvas.pd->getMcp()->session.getMcpAnnotations(overlayKey());
     auto const scene = buildAnnotationScene();
     for (size_t i = 0; i < anns.size(); ++i) {
         auto const tb = getAnnotationScreenBounds(i, scene);
@@ -618,9 +624,9 @@ bool CanvasMcpLayer::handleNoteClick(Point<int> canvasPt)
         }
     }
 
-    if (!canvas.pd || canvas.pd->getMcp()->session.getMcpAnnotations().empty()) return false;
+    if (!canvas.pd || canvas.pd->getMcp()->session.getMcpAnnotations(overlayKey()).empty()) return false;
     auto const pt = canvasPt.toFloat();
-    auto anns = canvas.pd->getMcp()->session.getMcpAnnotations();
+    auto anns = canvas.pd->getMcp()->session.getMcpAnnotations(overlayKey());
     auto const scene = buildAnnotationScene();
     for (int i = static_cast<int>(anns.size()) - 1; i >= 0; --i) {
         auto const& a = anns[static_cast<size_t>(i)];
@@ -641,9 +647,10 @@ bool CanvasMcpLayer::handleNoteClick(Point<int> canvasPt)
         if (closeZone.contains(pt)) {
             if (mcpNoteEditor) mcpNoteEditor->setVisible(false);
             mcpNoteEditIndex = -1;
-            juce::ScopedLock sl(canvas.pd->getMcp()->session.mcpOverlayLock);
-            if (i < static_cast<int>(canvas.pd->getMcp()->session.mcpAnnotations.size()))
-                canvas.pd->getMcp()->session.mcpAnnotations.erase(canvas.pd->getMcp()->session.mcpAnnotations.begin() + i);
+            canvas.pd->getMcp()->session.editMcpAnnotations(overlayKey(), [i](std::vector<McpSession::McpAnnotation>& notes) {
+                if (i < static_cast<int>(notes.size()))
+                    notes.erase(notes.begin() + i);
+            });
             canvas.repaint();
             if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
             return true;

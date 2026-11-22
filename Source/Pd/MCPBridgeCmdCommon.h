@@ -195,6 +195,24 @@ inline bool mcpCanvasIsLive(t_canvas* target)
     return false;
 }
 
+// 2026-11-22: ghosts, tags and regions are kept per canvas (McpSession::OverlayKey = the canvas pointer). A canvas that is gone
+// without passing the tab-close hook must not keep its lists: its address can be handed to a new canvas, which would then show
+// them. Called by the verbs that write a list (message thread): the Pd lock briefly to ask which canvases are open, then the
+// overlay lock to drop the gone ones (the order the paint uses). Compares pointers only, never dereferences a key.
+inline void mcpPruneGoneOverlayCanvases(PluginProcessor* proc)
+{
+    if (!proc) return;
+    auto& session = proc->getMcp()->session;
+    auto const keys = session.canvasesWithOverlays();
+    if (keys.empty()) return;
+    std::vector<McpSession::OverlayKey> gone;
+    sys_lock();
+    for (auto const* key : keys)
+        if (!mcpCanvasIsLive(const_cast<t_canvas*>(static_cast<t_canvas const*>(key)))) gone.push_back(key);
+    sys_unlock();
+    if (!gone.empty()) session.dropCanvasesOverlays(gone);
+}
+
 // P3.4 S4: for work posted to another thread that kept a t_canvas*: true when
 // that canvas has been closed (freed) since, so the pointer must not be used.
 // Takes the Pd lock briefly; never call it while holding the lock is fine too

@@ -103,9 +103,9 @@ bool CanvasMcpLayer::mouseDownOnGlass(MouseEvent const& e)
             hideSelectionPill();
 
             // Pill / note clicks were already handled above (before the pen branch).
-            if (false && canvas.pd && !canvas.pd->getMcp()->session.getMcpAnnotations().empty()) {
+            if (false && canvas.pd && !canvas.pd->getMcp()->session.getMcpAnnotations(overlayKey()).empty()) {
                 auto const pt = e.getPosition().toFloat();
-                auto anns = canvas.pd->getMcp()->session.getMcpAnnotations();
+                auto anns = canvas.pd->getMcp()->session.getMcpAnnotations(overlayKey());
                 for (int i = static_cast<int>(anns.size()) - 1; i >= 0; --i) {
                     auto const& a = anns[static_cast<size_t>(i)];
                     float const tx = canvas.canvasOrigin.x + a.x - 6.0f;
@@ -127,13 +127,15 @@ bool CanvasMcpLayer::mouseDownOnGlass(MouseEvent const& e)
                                     juce::String txt = mcpNoteEditor ? mcpNoteEditor->getText().trim() : juce::String();
                                     juce::String targetId;
                                     if (canvas.pd) {
-                                        juce::ScopedLock sl(canvas.pd->getMcp()->session.mcpOverlayLock);
-                                        if (mcpNoteEditIndex < static_cast<int>(canvas.pd->getMcp()->session.mcpAnnotations.size())) {
-                                            auto& ann = canvas.pd->getMcp()->session.mcpAnnotations[static_cast<size_t>(mcpNoteEditIndex)];
-                                            ann.text = txt;
-                                            ann.kind = "artist"; // it's the artist's note now
-                                            targetId = ann.targetId;
-                                        }
+                                        int const editIndex = mcpNoteEditIndex;
+                                        canvas.pd->getMcp()->session.editMcpAnnotations(overlayKey(), [editIndex, &txt, &targetId](std::vector<McpSession::McpAnnotation>& notes) {
+                                            if (editIndex < static_cast<int>(notes.size())) {
+                                                auto& ann = notes[static_cast<size_t>(editIndex)];
+                                                ann.text = txt;
+                                                ann.kind = "artist"; // it's the artist's note now
+                                                targetId = ann.targetId;
+                                            }
+                                        });
                                     }
                                     mcpNoteEditIndex = -1;
                                     if (mcpNoteEditor) mcpNoteEditor->setVisible(false);
@@ -154,9 +156,12 @@ bool CanvasMcpLayer::mouseDownOnGlass(MouseEvent const& e)
                                 // (the note is GPU-drawn, so it updates reliably every keystroke).
                                 mcpNoteEditor->onTextChange = [this] {
                                     if (mcpNoteEditor && canvas.pd && mcpNoteEditIndex >= 0) {
-                                        juce::ScopedLock sl(canvas.pd->getMcp()->session.mcpOverlayLock);
-                                        if (mcpNoteEditIndex < static_cast<int>(canvas.pd->getMcp()->session.mcpAnnotations.size()))
-                                            canvas.pd->getMcp()->session.mcpAnnotations[static_cast<size_t>(mcpNoteEditIndex)].text = mcpNoteEditor->getText();
+                                        int const editIndex = mcpNoteEditIndex;
+                                        auto const typed = mcpNoteEditor->getText();
+                                        canvas.pd->getMcp()->session.editMcpAnnotations(overlayKey(), [editIndex, &typed](std::vector<McpSession::McpAnnotation>& notes) {
+                                            if (editIndex < static_cast<int>(notes.size()))
+                                                notes[static_cast<size_t>(editIndex)].text = typed;
+                                        });
                                     }
                                     canvas.repaint();
                                     if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();

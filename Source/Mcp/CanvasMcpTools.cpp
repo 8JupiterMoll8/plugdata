@@ -132,33 +132,32 @@ void CanvasMcpLayer::createTextNoteAt(Point<int> canvasPos)
     auto const selIds = getSelectionStableIds();
 
     // Drop any abandoned empty artist note first so note indices never drift.
-    {
-        juce::ScopedLock sl(canvas.pd->getMcp()->session.mcpOverlayLock);
-        std::erase_if(canvas.pd->getMcp()->session.mcpAnnotations, [](McpSession::McpAnnotation const& a) {
+    McpSession::McpAnnotation ann;
+    ann.x = static_cast<float>(canvasPos.x - canvas.canvasOrigin.x);
+    ann.y = static_cast<float>(canvasPos.y - canvas.canvasOrigin.y);
+    ann.kind = "artist";
+    ann.t = juce::Time::getMillisecondCounterHiRes() / 1000.0;
+    // Surgical lane: a selection turns the note into an attachment bound to it
+    // (renders anchored beside the object with a leader tick).
+    if (selIds.size() > 0) {
+        ann.targetId = selIds[0];
+        ann.targetIds = selIds;
+    }
+    // The note goes on THIS canvas's list (2026-11-22: one list per canvas).
+    canvas.pd->getMcp()->session.editMcpAnnotations(overlayKey(), [&ann](std::vector<McpSession::McpAnnotation>& notes) {
+        std::erase_if(notes, [](McpSession::McpAnnotation const& a) {
             return a.text.isEmpty() && a.kind == "artist";
         });
+        notes.push_back(ann);
+    });
 
-        McpSession::McpAnnotation ann;
-        ann.x = static_cast<float>(canvasPos.x - canvas.canvasOrigin.x);
-        ann.y = static_cast<float>(canvasPos.y - canvas.canvasOrigin.y);
-        ann.kind = "artist";
-        ann.t = juce::Time::getMillisecondCounterHiRes() / 1000.0;
-        // Surgical lane: a selection turns the note into an attachment bound to it
-        // (renders anchored beside the object with a leader tick).
-        if (selIds.size() > 0) {
-            ann.targetId = selIds[0];
-            ann.targetIds = selIds;
-        }
-        canvas.pd->getMcp()->session.mcpAnnotations.push_back(ann);
-    }
-
-    openNoteEditorForIndex(static_cast<int>(canvas.pd->getMcp()->session.getMcpAnnotations().size()) - 1);
+    openNoteEditorForIndex(static_cast<int>(canvas.pd->getMcp()->session.getMcpAnnotationCount(overlayKey())) - 1);
 }
 
 void CanvasMcpLayer::openNoteEditorForIndex(int index)
 {
     if (!canvas.pd) return;
-    auto const anns = canvas.pd->getMcp()->session.getMcpAnnotations();
+    auto const anns = canvas.pd->getMcp()->session.getMcpAnnotations(overlayKey());
     if (index < 0 || index >= static_cast<int>(anns.size())) return;
     auto const ann = anns[static_cast<size_t>(index)];
 
@@ -173,16 +172,18 @@ void CanvasMcpLayer::openNoteEditorForIndex(int index)
             if (mcpNoteEditIndex < 0) return;
             auto const txt = mcpNoteEditor ? mcpNoteEditor->getText().trim() : juce::String();
             if (canvas.pd) {
-                juce::ScopedLock sl(canvas.pd->getMcp()->session.mcpOverlayLock);
-                if (mcpNoteEditIndex < static_cast<int>(canvas.pd->getMcp()->session.mcpAnnotations.size())) {
-                    if (txt.isEmpty()) {
-                        canvas.pd->getMcp()->session.mcpAnnotations.erase(canvas.pd->getMcp()->session.mcpAnnotations.begin() + mcpNoteEditIndex);
-                    } else {
-                        auto& a = canvas.pd->getMcp()->session.mcpAnnotations[static_cast<size_t>(mcpNoteEditIndex)];
-                        a.text = txt;
-                        a.kind = "artist";
+                int const editIndex = mcpNoteEditIndex;
+                canvas.pd->getMcp()->session.editMcpAnnotations(overlayKey(), [editIndex, &txt](std::vector<McpSession::McpAnnotation>& notes) {
+                    if (editIndex < static_cast<int>(notes.size())) {
+                        if (txt.isEmpty()) {
+                            notes.erase(notes.begin() + editIndex);
+                        } else {
+                            auto& a = notes[static_cast<size_t>(editIndex)];
+                            a.text = txt;
+                            a.kind = "artist";
+                        }
                     }
-                }
+                });
             }
             mcpNoteEditIndex = -1;
             if (mcpNoteEditor) mcpNoteEditor->setVisible(false);
@@ -198,9 +199,12 @@ void CanvasMcpLayer::openNoteEditorForIndex(int index)
         // Live feedback: write the field's text onto the note as you type.
         mcpNoteEditor->onTextChange = [this] {
             if (mcpNoteEditor && canvas.pd && mcpNoteEditIndex >= 0) {
-                juce::ScopedLock sl(canvas.pd->getMcp()->session.mcpOverlayLock);
-                if (mcpNoteEditIndex < static_cast<int>(canvas.pd->getMcp()->session.mcpAnnotations.size()))
-                    canvas.pd->getMcp()->session.mcpAnnotations[static_cast<size_t>(mcpNoteEditIndex)].text = mcpNoteEditor->getText();
+                int const editIndex = mcpNoteEditIndex;
+                auto const typed = mcpNoteEditor->getText();
+                canvas.pd->getMcp()->session.editMcpAnnotations(overlayKey(), [editIndex, &typed](std::vector<McpSession::McpAnnotation>& notes) {
+                    if (editIndex < static_cast<int>(notes.size()))
+                        notes[static_cast<size_t>(editIndex)].text = typed;
+                });
             }
             canvas.repaint();
             if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
