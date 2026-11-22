@@ -583,7 +583,11 @@ void Canvas::performRender(NVGcontext* nvg, Rectangle<int> invalidRegion)
 
                 nanovg::nvgFillPaint(nvg, nanovg::nvgImagePattern(nvg, 0, 0, gridSizeCommon, gridSizeCommon, 0, dotsLargeImage.getImage(), 1));
                 auto startPos = infiniteCanvasSize / 2;
-                nanovg::nvgFillRect(nvg, -startPos, -startPos, infiniteCanvasSize, infiniteCanvasSize);
+                // MCP-CARRIED(repaint-scope): only the rendered region (in this translated space, 4 px of margin), not the whole
+                // infinite canvas: the quad is shaded over the frame's whole scissor, once for every pass of the frame.
+                auto const dotsOrigin = canvasOrigin.x - 2.5f;
+                auto const dotsArea = invalidRegion.toFloat().expanded(4.0f).translated(-dotsOrigin, -dotsOrigin).getIntersection(Rectangle<float>(-startPos, -startPos, infiniteCanvasSize, infiniteCanvasSize)); // MCP-CARRIED(repaint-scope)
+                nanovg::nvgFillRect(nvg, dotsArea.getX(), dotsArea.getY(), dotsArea.getWidth(), dotsArea.getHeight()); // MCP-CARRIED(repaint-scope)
             }
         }
     }
