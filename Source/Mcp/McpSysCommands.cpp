@@ -9,6 +9,7 @@
  */
 #include "Mcp/McpSysCommon.h"
 #include "Mcp/McpNativeUndo.h"
+#include "Mcp/McpCensusArgs.h" // live check 2026-11-21: an abstraction box's own args follow its file in the census
 #include "Pd/MCPBridgeBroken.h" // V1: red boxes on census rows
 #include "Pd/MCPBridgePdAccessors.h" // V1: the switch~ chain, the canvas block size and rate
 
@@ -551,6 +552,22 @@ void McpHost::sysCensus(SmallString const& selector, mcp::SysList const& list)
                     // `node_class` carries the human-facing identity.
                     // Inline [pd foo] gets none.
                     pd::getAbstractionFileName(y_obj, abstractName);
+                    // Live check 2026-11-21: an abstraction's args are the file, then the box's own args (`ai.loop~ a` -> ["ai.loop~.pd", "a"]);
+                    // they were lost, so `list` could not read a looper's name from the box. A box with no args keeps ["file"].
+                    if (abstractName.isNotEmpty() && sub->gl_name) {
+                        std::string boxText;
+                        char* argBuf = nullptr;
+                        int argSize = 0;
+                        auto* boxObj = reinterpret_cast<t_text*>(y_obj);
+                        if (boxObj->te_binbuf) {
+                            binbuf_gettext(boxObj->te_binbuf, &argBuf, &argSize);
+                            if (argBuf && argSize > 0) boxText.assign(argBuf, static_cast<std::size_t>(argSize));
+                            if (argBuf) freebytes(argBuf, argSize);
+                        }
+                        argsList.clear();
+                        for (auto const& a : mcp::abstractionCensusArgs(sub->gl_name->s_name, boxText))
+                            argsList.add(String::fromUTF8(a.c_str()));
+                    }
                 } else if (cl == garray_class) {
                     kind = "table";
                     type = "table";
