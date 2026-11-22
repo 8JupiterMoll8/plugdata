@@ -26,6 +26,7 @@ void nvgSetCornerRadius(float radius, bool left, bool right);
 #include "Utility/OSUtils.h"
 #include "PluginEditor.h"
 #include "PluginProcessor.h"
+#include "Mcp/McpRenderPasses.h" // MCP-CARRIED(repaint-scope): the pass planner (pure, tested)
 
 NVGSurface::NVGSurface(PluginEditor* e)
     :
@@ -513,64 +514,31 @@ void NVGSurface::invalidateAll()
 void NVGSurface::invalidateArea(Rectangle<int> const area)
 {
     invalidArea = invalidArea.getUnion(area);
-    // MCP-CARRIED(repaint-scope): keep the separate rects too (see renderPasses).
-    if (!area.isEmpty()) {
-        if (invalidRects.size() < maxInvalidRects)
-            invalidRects.push_back(area);
-        else
-            invalidRects.assign(1, invalidArea);
-    }
+    // MCP-CARRIED(repaint-scope): keep the separate rects too (see renderPasses); a rect already covered adds nothing.
+    mcp::accumulateDamage(invalidRects, area, invalidArea, maxInvalidRects);
     scheduleRender();
 }
 
-// MCP-CARRIED(repaint-scope): split the frame's damage into a few clusters that are painted as separate clipped
-// passes, so two small repaints far apart no longer redraw the whole bounding box between them. Everything that
-// touches the canvas area (the tab component) stays ONE pass: the canvas render reads getInvalidArea() and the MCP
-// layer keeps per-paint state, so it must see a single region per frame, exactly as before. Overlapping or nearby
-// rects merge; more than maxRenderPasses clusters, plugin mode or a full repaint: one pass (the old behaviour).
+// MCP-CARRIED(repaint-scope): split the frame's damage into clusters that are painted as separate clipped passes, so
+// widgets far apart (and the toolbar meter) no longer redraw the whole bounding box between them. The planning is a pure
+// function (Mcp/McpRenderPasses.h, Tests/mcp/render_passes_test.cpp). Canvas damage is no longer forced into one pass:
+// every per-paint field of the MCP layer is either rebuilt whole in each pass or recorded only by a pass that covers
+// what it records (CanvasMcpLayer audit, 2026-11-22). Presentation mode keeps one region for the canvas (it fills
+// whole-canvas quads in every pass); plugin mode and a full repaint are one pass.
 std::vector<Rectangle<int>> NVGSurface::renderPasses(Rectangle<int> const bounds) const
 {
-    auto const single = std::vector<Rectangle<int>> { invalidArea.getIntersection(bounds) };
-    if (invalidRects.size() < 2 || editor->isInPluginMode())
-        return single;
-
-    auto& tabs = editor->getTabComponent();
-    auto const canvasArea = getLocalArea(&tabs, tabs.getLocalBounds());
-
-    std::vector<Rectangle<int>> passes;
-    passes.reserve(invalidRects.size());
-    for (auto const& r : invalidRects) {
-        auto const clipped = r.getIntersection(bounds);
-        if (!clipped.isEmpty())
-            passes.push_back(clipped);
+    mcp::RenderPassInput<Rectangle<int>> in;
+    in.rects = invalidRects;
+    in.damage = invalidArea;
+    in.bounds = bounds;
+    in.pluginMode = editor->isInPluginMode();
+    if (!in.pluginMode && invalidRects.size() > 1) {
+        auto& tabs = editor->getTabComponent();
+        in.canvasArea = getLocalArea(&tabs, tabs.getLocalBounds());
+        for (auto* cnv : tabs.getVisibleCanvases())
+            in.mergeCanvasDamage = in.mergeCanvasDamage || getValue<bool>(cnv->presentationMode);
     }
-
-    auto const area = [](Rectangle<int> const& r) { return static_cast<int64>(r.getWidth()) * r.getHeight(); };
-    constexpr int64 nearSlack = 64 * 64; // tiny rects close together are cheaper as one pass
-
-    bool merged = true;
-    while (merged) {
-        merged = false;
-        for (size_t i = 0; i < passes.size() && !merged; ++i) {
-            for (size_t j = i + 1; j < passes.size(); ++j) {
-                auto const& a = passes[i];
-                auto const& b = passes[j];
-                auto const u = a.getUnion(b);
-                bool const bothOnCanvas = a.intersects(canvasArea) && b.intersects(canvasArea);
-                bool const cheap = area(u) * 2 <= (area(a) + area(b)) * 3 + nearSlack;
-                if (bothOnCanvas || a.intersects(b) || cheap) {
-                    passes[i] = u;
-                    passes.erase(passes.begin() + static_cast<std::ptrdiff_t>(j));
-                    merged = true;
-                    break;
-                }
-            }
-        }
-    }
-
-    if (passes.empty() || passes.size() > maxRenderPasses)
-        return single;
-    return passes;
+    return mcp::planRenderPasses(in);
 }
 
 void NVGSurface::handleAsyncUpdate()
@@ -746,12 +714,8 @@ void NVGSurface::recordFrame()
         if (nanovg::hasPendingFrame(asyncNvg)) { // MCP-CARRIED(repaint-scope)
             invalidArea = invalidArea.getUnion(inFlightDamage);
             // MCP-CARRIED(repaint-scope): the coalesced frame's separate rects come back too.
-            for (auto const& r : inFlightRects) {
-                if (invalidRects.size() < maxInvalidRects)
-                    invalidRects.push_back(r);
-                else
-                    invalidRects.assign(1, invalidArea);
-            }
+            for (auto const& r : inFlightRects)
+                mcp::accumulateDamage(invalidRects, r, invalidArea, maxInvalidRects);
         }
 
         auto const damage = invalidArea.getIntersection(bounds);
