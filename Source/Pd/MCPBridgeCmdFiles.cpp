@@ -11,7 +11,6 @@
 #include "MCPBridgeSaveTarget.h" // P11.8: what a save would overwrite
 #include "MCPBridgeBroken.h" // red boxes (V1: shared with /pd/broken)
 
-#include <algorithm>
 #include <cstring>
 
 namespace {
@@ -795,7 +794,6 @@ void MCPBridge::pdListTabs(const juce::String& action, const juce::OSCMessage& m
             o->setProperty("title", tab.title);
             o->setProperty("file", tab.file.getFullPathName());
             o->setProperty("focused", tab.focused);
-            o->setProperty("side", mcp::tabsplit::sideWord(tab.side)); // capability tab_split: the bar the tab sits in (everything is left with no split)
             int count = 0;
             sys_lock();
             if (auto* cnv = tab.patch) {
@@ -831,7 +829,6 @@ void MCPBridge::pdListTabs(const juce::String& action, const juce::OSCMessage& m
         }
         auto* root = new juce::DynamicObject();
         root->setProperty("tabs", list);
-        root->setProperty("split", std::any_of(tabs.begin(), tabs.end(), [](auto const& t) { return t.split; })); // capability tab_split
         bridge->sendReply(replyAddr, juce::JSON::toString(juce::var(root)));
     });
     return;
@@ -884,74 +881,6 @@ void MCPBridge::pdCloseTab(const juce::String& action, const juce::OSCMessage& m
             return;
         }
         bridge->sendReply(replyAddr, juce::String("error: tab not found: " + target));
-    });
-    return;
-}
-
-    // ── PARKED 2026-11-22: SPLIT VIEW FOR THE AI (capability tab_split) ──
-    // /pd/tab_split <corrId> <left|right|none> [tab]
-    // left / right: puts the named tab (a file name, a full path or its title, matched as focus_tab does) on that side of PlugData's
-    // split view; none (also unsplit, off): one view again, no tab needed. The moves are the tab menu's own ("Split left / Split
-    // right"); the menu's limit holds (a split needs two tabs) and is answered in words. Message thread (postMessage); the GUI work is
-    // McpGuiHost::setTabSplit. The layout is read back AFTER the move, never assumed.
-    // Reply: /pd/tab_split/reply/<corrId> <json> { ok, outcome: moved | unsplit | unchanged | refused | not_found | bad_request,
-    //   note?, title?, split, tabs: [{ title, file, side: left | right, focused }] }
-namespace {
-juce::String mcpTabSplitReply(std::vector<McpGuiHost::TabInfo> const& tabs, bool ok, char const* outcome, juce::String const& note, juce::String const& title)
-{
-    auto* root = new juce::DynamicObject();
-    root->setProperty("ok", ok);
-    root->setProperty("outcome", outcome);
-    if (note.isNotEmpty()) root->setProperty("note", note);
-    if (title.isNotEmpty()) root->setProperty("title", title);
-    juce::Array<juce::var> list;
-    bool split = false;
-    for (auto const& tab : tabs) {
-        split = split || tab.split;
-        auto* o = new juce::DynamicObject();
-        o->setProperty("title", tab.title);
-        o->setProperty("file", tab.file.getFullPathName());
-        o->setProperty("side", mcp::tabsplit::sideWord(tab.side));
-        o->setProperty("focused", tab.focused);
-        list.add(juce::var(o));
-    }
-    root->setProperty("split", split);
-    root->setProperty("tabs", list);
-    return juce::JSON::toString(juce::var(root));
-}
-} // namespace
-
-void MCPBridge::pdTabSplit(const juce::String& action, const juce::OSCMessage& msg)
-{
-    auto correlationId = msg.size() > 0 ? getArgString(msg[0]) : juce::String("0");
-    auto sideWord      = msg.size() > 1 ? getArgString(msg[1]) : juce::String();
-    auto target        = msg.size() > 2 ? getArgString(msg[2]) : juce::String();
-    juce::String replyAddr = "/pd/tab_split/reply/" + correlationId;
-
-    auto const request = mcp::tabsplit::parseRequest(sideWord.toStdString());
-    if (!request) {
-        sendReply(replyAddr, mcpTabSplitReply({}, false, "bad_request", "the side is left, right or none", {}));
-        return;
-    }
-    if (*request != mcp::tabsplit::Request::Unsplit && target.isEmpty()) {
-        sendReply(replyAddr, mcpTabSplitReply({}, false, "bad_request", "name the tab to move (its file name, path or title)", {}));
-        return;
-    }
-
-    postMessage([p = processor, bridge = this, request = *request, target, replyAddr]() {
-        using mcp::tabsplit::Plan;
-        auto const result = p->getMcp()->gui().setTabSplit(target, request);
-        auto const tabs = p->getMcp()->gui().listTabs(); // the layout as it stands now
-        if (result.outcome == McpGuiHost::SplitOutcome::NotFound) {
-            bridge->sendReply(replyAddr, mcpTabSplitReply(tabs, false, "not_found", "tab not found: " + target, {}));
-        } else if (result.outcome == McpGuiHost::SplitOutcome::Done) {
-            bool const unsplit = request == mcp::tabsplit::Request::Unsplit;
-            bridge->sendReply(replyAddr, mcpTabSplitReply(tabs, true, unsplit ? "unsplit" : "moved", {}, result.title));
-        } else if (result.plan == Plan::AlreadyThere || result.plan == Plan::NothingToUnsplit) { // what was asked is already so
-            bridge->sendReply(replyAddr, mcpTabSplitReply(tabs, true, "unchanged", mcp::tabsplit::planWords(result.plan), result.title));
-        } else {
-            bridge->sendReply(replyAddr, mcpTabSplitReply(tabs, false, "refused", mcp::tabsplit::planWords(result.plan), result.title));
-        }
     });
     return;
 }

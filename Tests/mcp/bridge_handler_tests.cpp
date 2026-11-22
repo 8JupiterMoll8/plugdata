@@ -7663,7 +7663,7 @@ void runZeroArgCases(Harness& h)
         auto const* e = f ? f->find("error") : nullptr;
         refused += (f && field(*f, "outcome") == "rejected" && e && field(*e, "code") == "bad_frame") ? 1 : 0;
     }
-    CHECK(guarded == 30 && refused == guarded); // +1 PARKED 2026-11-22 tab_split (minArgs 2: corrId and the side; counts once the v2 schema has its row); +1 ai_widget phase 3 widget_call (minArgs 4; counts once the v2 schema has its row); +1 truth slice 3 send_checked (minArgs 4); 19 since /pd/midi_devices (minArgs 1); +2 P11 /pd/bound, /pd/selection_get; +2 P12c approval_show/clear (minArgs 2); +3 P12a flow_mode_get/off, ownership (P12a.1: the offer verb is gone); +1 Alphi drop 1 alphi_say (minArgs 1)
+    CHECK(guarded == 29 && refused == guarded); // +1 ai_widget phase 3 widget_call (minArgs 4; counts once the v2 schema has its row); +1 truth slice 3 send_checked (minArgs 4); 19 since /pd/midi_devices (minArgs 1); +2 P11 /pd/bound, /pd/selection_get; +2 P12c approval_show/clear (minArgs 2); +3 P12a flow_mode_get/off, ownership (P12a.1: the offer verb is gone); +1 Alphi drop 1 alphi_say (minArgs 1)
 }
 
 // Alphi drop 1, step W: /pd/alphi_say <json {text, kind, state, turn, ttlMs}>. No reply on v1 (nothing at all comes
@@ -8025,44 +8025,6 @@ void runOverlayCanvasCases(Harness& h, PluginProcessor& processor)
         }
     }, 3000);
     absFile.deleteFile();
-}
-
-// PARKED 2026-11-22 (capability tab_split): the AI's split view. The processor here is headless (no editor, so no tab component): what
-// can be proven is the capability, the request words, the answers with no tab to move, and that list_tabs carries `split`. The moves are
-// the tab menu's own (McpTabSplitAccess, checked in the app); the plan behind them is Tests/mcp/tab_split_test.cpp.
-// WRITTEN AND SYNTAX-CHECKED, NOT RUN here (it needs the mcp_bridge_tests build).
-void runTabSplitCases(Harness& h)
-{
-    std::printf("tab_split (PARKED 2026-11-22): the AI's split view\n");
-    CHECK(hasCap(h, "tab_split", "ts0"));
-    auto const call = [&](std::initializer_list<A> args, char const* corr) {
-        auto r = h.call("/pd/tab_split", args, std::string("/pd/tab_split/reply/") + corr, 5000);
-        return r ? juce::JSON::parse(juce::String(r->str(0))) : juce::var();
-    };
-    // Not a side, or a side without a tab: bad_request, in words, and nothing happens.
-    auto bad = call({ "ts1", "up", "a.pd" }, "ts1");
-    CHECK(bad.isObject() && !static_cast<bool>(bad["ok"]) && bad["outcome"].toString() == "bad_request");
-    auto noTab = call({ "ts2", "left" }, "ts2");
-    CHECK(noTab.isObject() && !static_cast<bool>(noTab["ok"]) && noTab["outcome"].toString() == "bad_request");
-    // A tab that is not open (no editor at all here): not_found, with the layout read back (empty, no split).
-    auto lost = call({ "ts3", "right", "no_such_tab.pd" }, "ts3");
-    CHECK(lost.isObject() && !static_cast<bool>(lost["ok"]) && lost["outcome"].toString() == "not_found");
-    CHECK(lost["tabs"].isArray() && !static_cast<bool>(lost["split"]));
-    // One view again with no split to close: nothing to do, and that is what was asked ("unchanged", ok).
-    for (auto const* word : { "none", "unsplit", "off" }) {
-        auto const corr = std::string("tsu") + word;
-        auto none = call({ corr.c_str(), word }, corr.c_str());
-        CHECK(none.isObject() && static_cast<bool>(none["ok"]) && none["outcome"].toString() == "unchanged");
-        CHECK(none["note"].toString().contains("no split"));
-    }
-    // list_tabs says whether a split shows (additive: the tabs it listed before are unchanged).
-    auto tabs = h.call("/pd/list_tabs", { "ts4" }, "/pd/list_tabs/reply/ts4", 5000);
-    CHECK(tabs.has_value());
-    if (tabs) {
-        auto const json = juce::JSON::parse(juce::String(tabs->str(0)));
-        CHECK(json.hasProperty("split") && !static_cast<bool>(json["split"]));
-        CHECK(json["tabs"].isArray());
-    }
 }
 
 // S6.6 (audit A20): the live props of an IEM GUI carry its label, so a control the builder named (`hsl ... morph_s
@@ -8964,7 +8926,6 @@ int main()
             runApprovalCases(harness, processor);
             runAlphiSayCases(harness, processor);
             runOverlayCanvasCases(harness, processor);
-            runTabSplitCases(harness);
             runChatListenerCases(harness, *bridge);
             runPillLaneCases(harness, *bridge);
             runLimiterPatchCases(processor);

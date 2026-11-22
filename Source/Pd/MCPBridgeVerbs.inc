@@ -106,7 +106,6 @@ MCP_VERB(pd, "open_patch", pdOpenPatch)
 MCP_VERB(pd, "list_tabs", pdListTabs)
 MCP_VERB(pd, "focus_tab", pdFocusTab)
 MCP_VERB(pd, "close_tab", pdCloseTab)
-MCP_VERB(pd, "tab_split", pdTabSplit)
 
 // ── pd: record and render ──
 MCP_VERB(pd, "record_start", pdRecordStart)

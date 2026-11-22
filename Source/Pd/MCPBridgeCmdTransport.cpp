@@ -445,12 +445,6 @@ std::vector<std::string> MCPBridge::capabilityList() const
         // ai_widget plan phase 3: a widget's `ai-event <widget> <rev> <paddr> use|no|back` (what the artist did with a proposal) arrives as the event
         // /pd/widget_ask <use|no|back> <canvas> <widget> <rev> (MCPBridgeWidgetEvent.h; at most one per widget, instance and word per 500 ms).
         "widget_event",
-        // PARKED 2026-11-22: the AI's split view. /pd/tab_split <corrId> <left|right|none> [tab] puts a tab (file name, path or title, as
-        // focus_tab) on the left or right side of PlugData's split view, or goes back to one view (none / unsplit / off). The moves are
-        // the tab menu's own; a split needs two tabs. Reply /pd/tab_split/reply/<corrId> { ok, outcome (moved | unsplit | unchanged |
-        // refused | not_found | bad_request), note?, title?, split, tabs:[{title, file, side (left | right), focused}] }, the layout read back
-        // after the move. /pd/list_tabs carries the same `side` per tab and `split` at the top. Message thread only (Source/Mcp/McpTabSplit.h).
-        "tab_split",
     };
     // P4.1 S2: the v2 listener is up (TCP 127.0.0.1, port and token in the discovery file).
     if (v2Server.running())
