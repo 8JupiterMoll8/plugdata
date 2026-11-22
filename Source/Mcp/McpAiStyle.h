@@ -56,7 +56,8 @@ constexpr float aiNameSize = 13.0f;       // a name (widget, card title), Inter-
 constexpr float aiHintSize = 11.0f;       // a hint, a second line
 constexpr float aiTagTextSize = 12.0f;    // the text of a tag on the canvas
 constexpr float aiTagGlyphSize = 9.0f;    // the shape before a tag's text
-constexpr float aiGhostAlpha = 0.6f;      // a ghost is ink at 60 %
+constexpr float aiGhostAlpha = 0.85f;     // a ghost is ink at 85 % (the family decision, owner 2026-11-22; the widgets' GHOST_ALPHA)
+constexpr float aiGhostWidth = 2.0f;      // a ghost line is 2 px wide, dotted with 2 px dots (the widgets' GHOST_W)
 constexpr float aiStepDiscSize = 14.0f;   // the spotlight's order disc: it carries a number, so it is bigger than a tag glyph
 
 // A tag is one frame: a leader, a glyph slot of 16 px, then the text. The width is an estimate by character count (an

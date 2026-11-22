@@ -1054,7 +1054,7 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
     }
 
     // PRD overlay: ghost/preview of PROPOSED (uncommitted) changes. Drawn above the patch, never part of it: the artist
-    // sees the change before it's real. Design round B3: ink at 60 %, 1 px, dotted (dash 2), no fill; the label is ink at 60 %.
+    // sees the change before it's real. Design round B3, widened with the widgets' family decision (owner 2026-11-22): ink at 85 %, 2 px, dotted (dash 2), no fill; the label is ink at 85 %.
     if (canvas.pd && shouldShowAIGhosts() && !canvas.pd->getMcp()->session.getMcpGhosts().empty()) {
         constexpr float dotted = 2.0f;
         for (auto const& g : canvas.pd->getMcp()->session.getMcpGhosts()) {
@@ -1067,7 +1067,7 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
                 nanovg::nvgBeginPath(nvg);
                 nanovg::nvgRoundedRect(nvg, gx, gy, gw, gh, getPlugDataLook(canvas).getObjectCornerRadius());
                 nanovg::nvgStrokeColor(nvg, mcpai::colour(mcp::aiInk, mcp::aiGhostAlpha));
-                nanovg::nvgStrokeWidth(nvg, mcp::aiLineWidth);
+                nanovg::nvgStrokeWidth(nvg, mcp::aiGhostWidth);
                 nanovg::nvgLineStyle(nvg, NVG_LINE_DASHED);
                 nanovg::nvgDashLength(nvg, dotted);
                 nanovg::nvgStroke(nvg);
@@ -1087,7 +1087,7 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
                 float const dx = std::abs(x2 - x1) * 0.5f + 20.0f;
                 nanovg::nvgBezierTo(nvg, x1, y1 + dx, x2, y2 - dx, x2, y2);
                 nanovg::nvgStrokeColor(nvg, mcpai::colour(mcp::aiInk, mcp::aiGhostAlpha));
-                nanovg::nvgStrokeWidth(nvg, mcp::aiLineWidth);
+                nanovg::nvgStrokeWidth(nvg, mcp::aiGhostWidth);
                 nanovg::nvgLineStyle(nvg, NVG_LINE_DASHED);
                 nanovg::nvgDashLength(nvg, dotted);
                 nanovg::nvgStroke(nvg);
@@ -1296,7 +1296,7 @@ bool CanvasMcpLayer::decorateObject(NVGcontext* nvg, Object& object, juce::Recta
             nanovg::nvgBeginPath(nvg);
             nanovg::nvgRoundedRect(nvg, b.getX(), b.getY(), b.getWidth(), b.getHeight(), getPlugDataLook(object).getObjectCornerRadius());
             nanovg::nvgStrokeColor(nvg, mcpai::colour(mcp::aiInk, mcp::aiGhostAlpha));
-            nanovg::nvgStrokeWidth(nvg, mcp::aiLineWidth);
+            nanovg::nvgStrokeWidth(nvg, mcp::aiGhostWidth);
             nanovg::nvgLineStyle(nvg, NVG_LINE_DASHED);
             nanovg::nvgDashLength(nvg, 2.0f);
             nanovg::nvgStroke(nvg);

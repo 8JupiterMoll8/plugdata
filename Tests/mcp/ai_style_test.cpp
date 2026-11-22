@@ -68,7 +68,9 @@ void sizesAreTheOwnersNumbers()
     CHECK(mcp::aiHintSize == 11.0f);
     CHECK(mcp::aiTagTextSize == 12.0f);
     CHECK(mcp::aiTagGlyphSize == 9.0f);
-    CHECK(mcp::aiGhostAlpha == 0.6f);
+    // The family decision (owner 2026-11-22, ai.* widgets' GHOST_ALPHA / GHOST_W): the AI's dotted line is ink at 85 %, drawn 2 px wide (2 px dots).
+    CHECK(mcp::aiGhostAlpha == 0.85f);
+    CHECK(mcp::aiGhostWidth == 2.0f);
     CHECK(mcp::aiRegionGap == 10); // white air between regions (owner 2026-11-20, decision-bauhaus-bars.png)
     // Regions (owner 2026-11-20, decision-bauhaus-bars.png): a 4 px bar in the kind's colour under the name band, an 8 %
     // wash of the same colour behind the boxes, the name in ink above the bar. The name stays 12 px, never below 11 screen px.
