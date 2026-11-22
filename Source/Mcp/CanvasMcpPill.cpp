@@ -23,6 +23,7 @@
 #include "Objects/ObjectBase.h"
 #include "Pd/MCPBridge.h"
 #include "Mcp/McpHost.h"
+#include "Mcp/McpPillMotion.h"
 
 void CanvasMcpLayer::updateSelectionPill()
 {
@@ -214,7 +215,7 @@ void CanvasMcpLayer::updateSelectionPill()
     if (!mcpPillAnimator) {
         mcpPillAnimator = std::make_unique<SelectionPillAnimator>(this);
     }
-    mcpPillAnimator->startTimerHz(6);
+    mcpPillAnimator->startTimerHz(mcp::PillAnimTiming::animateHz); // the first tick decides (McpPillMotion.h)
     canvas.repaint();
     if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
 }
@@ -523,27 +524,50 @@ bool CanvasMcpLayer::SelectionPillKeyListener::keyPressed(const juce::KeyPress& 
 
 void CanvasMcpLayer::SelectionPillAnimator::timerCallback()
 {
-    if (canvas && canvas->mcpSelectionPill && canvas->mcpSelectionPill->isVisible()) {
-        // Only the pill animates here (the caret blink, the record pulse, the hint's expiry): repaint the pill, its
-        // record box above, its hint below, its drawer and palette, not the whole editor (that redrew the sidebars,
-        // toolbar and statusbar 6 times a second while anything was selected).
-        auto& layer = *canvas;
-        auto area = layer.mcpSelectionPillFrame.isEmpty() ? layer.mcpSelectionPill->getBounds() : layer.mcpSelectionPillFrame;
+    if (!(canvas && canvas->mcpSelectionPill && canvas->mcpSelectionPill->isVisible())) {
+        stopTimer();
+        return;
+    }
+    // Only the pill animates here (the caret blink, the record pulse, the hint's expiry): repaint the pill, its
+    // record box above, its hint below, not the whole editor (that redrew the sidebars, toolbar and statusbar 6 times a
+    // second while anything was selected). Alphi calm (McpPillMotion.h): and only while one of those moves, on a canvas
+    // that is on screen; otherwise the timer drops to a slow look-in (a state check, no repaint).
+    auto& layer = *canvas;
+    mcp::PillAnimInput in;
+    in.showing = layer.canvas.isShowing();
+    in.moodStrip = layer.mcpPillSketchMode && layer.mcpCompletedStrokes.empty();
+    in.focused = layer.mcpSelectionPill->hasKeyboardFocus(true);
+    in.textEmpty = layer.mcpSelectionPill->getText().isEmpty();
+    if (layer.canvas.pd) {
+        if (auto* bridge = layer.canvas.pd->getMcp()->getMCPBridge()) {
+            in.voiceCapturing = bridge->isVoiceCapturing();
+            in.midiCapturing = bridge->isMidiCapturing();
+        }
+    }
+    in.nowMs = static_cast<std::int64_t>(juce::Time::getMillisecondCounter());
+    in.hintUntilMs = layer.mcpMoodHint.isNotEmpty() ? static_cast<std::int64_t>(layer.mcpMoodHintUntil) : 0;
+    auto const plan = mcp::pillAnimPlan(in);
+    int const wantMs = 1000 / (plan.run ? mcp::PillAnimTiming::animateHz : mcp::PillAnimTiming::watchHz);
+    if (getTimerInterval() != wantMs)
+        startTimer(wantMs);
+    if (!plan.run)
+        return;
+    auto area = layer.mcpSelectionPillFrame.isEmpty() ? layer.mcpSelectionPill->getBounds() : layer.mcpSelectionPillFrame;
+    if (plan.growX > mcp::PillAnimTiming::caretGrow) {
+        // The record box and the hint chip lie outside the pill; the drawer and palette stay in the repaint as before.
         for (auto const& f : { layer.mcpPillDrawerFrame, layer.mcpPaletteFrame })
             if (!f.isEmpty())
                 area = area.getUnion(f);
-        area = area.expanded(200, 56);
-        layer.canvas.repaint(area);
-        if (auto* ed = layer.canvas.editor) {
-            auto& surface = ed->nvgSurface;
-            auto dirty = surface.getLocalArea(&layer.canvas, area);
-            if (layer.canvas.viewport)
-                dirty = dirty.getIntersection(surface.getLocalArea(layer.canvas.viewport.get(), layer.canvas.viewport->getLocalBounds()));
-            if (!dirty.isEmpty())
-                surface.invalidateArea(dirty);
-        }
-    } else {
-        stopTimer();
+    }
+    area = area.expanded(plan.growX, plan.growY);
+    layer.canvas.repaint(area);
+    if (auto* ed = layer.canvas.editor) {
+        auto& surface = ed->nvgSurface;
+        auto dirty = surface.getLocalArea(&layer.canvas, area);
+        if (layer.canvas.viewport)
+            dirty = dirty.getIntersection(surface.getLocalArea(layer.canvas.viewport.get(), layer.canvas.viewport->getLocalBounds()));
+        if (!dirty.isEmpty())
+            surface.invalidateArea(dirty);
     }
 }
 
