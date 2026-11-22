@@ -938,6 +938,11 @@ void TabComponent::handleAsyncUpdate()
     repaint();
 }
 
+Canvas* TabComponent::mcpCanvasOfTab(int const bar, int const index) const // MCP-HOOK(tabSplit): see the header; out of range gives nullptr
+{
+    return (bar == 0 || bar == 1) && index >= 0 && index < tabbars[bar].size() ? tabbars[bar][index]->cnv.getComponent() : nullptr;
+}
+
 void TabComponent::closeEmptySplits()
 {
     if (!tabbars[0].size() && tabbars[1].size()) // Check if split can be closed

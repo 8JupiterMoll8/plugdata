@@ -18,6 +18,7 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
+#include "Mcp/McpTabSplit.h"
 #include "Mcp/McpVisibleTab.h"
 #include "Mcp/McpWidgetFocus.h"
 
@@ -140,6 +141,10 @@ public:
         juce::String title;
         juce::File file;
         bool focused = false;
+        // Split view (capability tab_split): the bar the tab sits in (0 left, 1 right; a view with no split has everything left)
+        // and whether its editor shows a split. Additive: a reader that ignores them sees what it saw before.
+        int side = 0;
+        bool split = false;
     };
     virtual std::vector<TabInfo> listTabs() = 0;
     virtual bool openPatch(juce::File const& file) = 0;
@@ -163,6 +168,19 @@ public:
     };
     virtual CloseResult closeTab(juce::String const& target, bool force) = 0;
     virtual void setPatchFile(t_canvas* cnv, juce::File const& file) = 0;
+
+    // ── Split view (capability tab_split, PARKED 2026-11-22) ─────────────
+    // Puts the named tab (matched as focusTab does) on the left or right split, or goes back to one view (Request::Unsplit takes no
+    // tab). The moves are the tab menu's own; what is allowed is mcp::tabsplit::planMove. The caller reads the layout back through
+    // listTabs() afterwards. NotFound: no tab matched; Refused: `plan` says why (TooFewTabs, or AlreadyThere / NothingToUnsplit, which
+    // the bridge reports as "unchanged", what was asked being already so); Done: the layout changed as asked.
+    enum class SplitOutcome { NotFound, Refused, Done };
+    struct SplitResult {
+        SplitOutcome outcome = SplitOutcome::NotFound;
+        mcp::tabsplit::Plan plan = mcp::tabsplit::Plan::TooFewTabs;
+        juce::String title;
+    };
+    virtual SplitResult setTabSplit(juce::String const& target, mcp::tabsplit::Request request) = 0;
 
     // ── Misc ────────────────────────────────────────────────────────────
     virtual bool showObjectReference(juce::String const& objectName) = 0;

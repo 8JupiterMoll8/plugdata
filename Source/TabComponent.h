@@ -10,6 +10,7 @@ class TabComponent final : public Component
     , public AsyncUpdater {
     class TabBarButtonComponent;
     class NewTabButton;
+    friend struct McpTabSplitAccess; // MCP-HOOK(tabSplit): the AI's split view (Source/Mcp/McpTabSplitAccess.cpp) makes the tab menu's own moves
 
 public:
     explicit TabComponent(PluginEditor* editor);
@@ -53,6 +54,8 @@ public:
 
     using VisibleCanvasArray = SmallArray<Canvas*, 2>;
     VisibleCanvasArray getVisibleCanvases();
+
+    Canvas* mcpCanvasOfTab(int bar, int index) const; // MCP-HOOK(tabSplit): the canvas of one tab button, for Source/Mcp/McpTabSplitAccess.cpp (it cannot see the button class)
 
 private:
     void clearCanvases();

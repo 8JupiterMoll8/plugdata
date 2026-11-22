@@ -8,6 +8,7 @@
 #include "Mcp/McpGuiHost.h"
 #include "PluginProcessor.h"
 #include "Mcp/McpHost.h"
+#include "Mcp/McpTabSplitAccess.h"
 #include "PluginEditor.h"
 #include "Toolbar.h"
 #include "Sidebar/Sidebar.h"
@@ -449,10 +450,12 @@ public:
         for (auto* editor : proc->getEditors()) {
             if (!editor) continue;
             auto* focused = editor->getCurrentCanvas();
+            auto const hasSplit = McpTabSplitAccess::layoutOf(editor->getTabComponent()).split;
             for (auto* canvas : editor->getCanvases()) {
                 if (!canvas) continue;
                 tabs.push_back({ canvas->patch.getPointer().get(), canvas->patch.getTitle(),
-                    canvas->patch.getCurrentFile(), canvas == focused });
+                    canvas->patch.getCurrentFile(), canvas == focused,
+                    hasSplit ? std::max(0, McpTabSplitAccess::barOf(editor->getTabComponent(), canvas)) : 0, hasSplit });
             }
         }
         return tabs;
@@ -552,6 +555,42 @@ public:
                     proc->getMcp()->refreshFocusedRoot(); // P3.4 S3
                     return { CloseResult::Closed, title };
                 }
+            }
+        }
+        return {};
+    }
+
+    // PARKED 2026-11-22 (capability tab_split): the AI's split view. The decision is mcp::tabsplit::planMove; the moves are the tab
+    // menu's own (McpTabSplitAccess). Message thread.
+    SplitResult setTabSplit(juce::String const& target, mcp::tabsplit::Request request) override
+    {
+        if (request == mcp::tabsplit::Request::Unsplit) {
+            for (auto* editor : proc->getEditors()) {
+                if (!editor) continue;
+                auto& tabs = editor->getTabComponent();
+                auto const plan = mcp::tabsplit::planMove(request, McpTabSplitAccess::layoutOf(tabs), 0);
+                if (plan != mcp::tabsplit::Plan::Unsplit) continue; // this editor has no split: ask the next
+                McpTabSplitAccess::unsplit(tabs);
+                proc->getMcp()->refreshFocusedRoot();
+                return { SplitOutcome::Done, plan, {} };
+            }
+            return { SplitOutcome::Refused, mcp::tabsplit::Plan::NothingToUnsplit, {} };
+        }
+        juce::File const f = juce::File::isAbsolutePath(target) ? juce::File(target) : juce::File(); // a tab name is no path
+        for (auto* editor : proc->getEditors()) {
+            if (!editor) continue;
+            auto& tabs = editor->getTabComponent();
+            for (auto* canvas : editor->getCanvases()) {
+                if (!canvas || !tabMatches(canvas, f, target)) continue;
+                int const bar = McpTabSplitAccess::barOf(tabs, canvas);
+                if (bar < 0) continue;
+                auto const plan = mcp::tabsplit::planMove(request, McpTabSplitAccess::layoutOf(tabs), bar);
+                auto const title = canvas->patch.getTitle();
+                if (plan != mcp::tabsplit::Plan::MoveLeft && plan != mcp::tabsplit::Plan::MoveRight)
+                    return { SplitOutcome::Refused, plan, title };
+                McpTabSplitAccess::moveToBar(tabs, canvas, plan == mcp::tabsplit::Plan::MoveRight ? 1 : 0);
+                proc->getMcp()->refreshFocusedRoot();
+                return { SplitOutcome::Done, plan, title };
             }
         }
         return {};
