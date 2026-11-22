@@ -191,13 +191,12 @@ mcp::ApprovalRect CanvasMcpLayer::paintAlphiStripNow(NVGcontext* nvg)
     // What this paint shows, for the motion timer (a change, an expiry: one more repaint). Alphi calm: recorded only
     // when the paint redrew the strip it drew (alphiStripRecordsDrawn); a paint elsewhere leaves the screen as it was,
     // and alphiStripAfterPaint no longer repaints a strip that did not move, so the timer must still see the change.
+    // (The dizzy spiral is drawn on the face, not the strip: paintAlphi records mcpAlphiDizzyDrawn with his rect.)
     auto const sayKey = mcp::alphiSayKey(board, now);
-    bool const dizzyNow = mcpAlphiLineClock.dizzy(now);
     auto const recordDrawn = [&](mcp::ApprovalRect drawnStrip) {
         if (!mcp::alphiStripRecordsDrawn(asRect(mcpAlphiStripRegion), drawnStrip))
             return;
         mcpAlphiSayKeyDrawn = sayKey;
-        mcpAlphiDizzyDrawn = dizzyNow;
         mcpAlphiLineAlphaDrawn = lineAlpha;
     };
 

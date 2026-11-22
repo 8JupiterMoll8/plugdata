@@ -17,11 +17,13 @@
 //  - the record pulse: the voice border glow and level (voice / beatbox capture, any layout) and the MIDI box and pulse
 //    (only in the strip);
 //  - the strip's hint chip: drawn until its time runs out, then one more repaint to erase it.
-// Everything else on the pill is still (typed text, an unfocused field), so the animator repaints nothing then. The
+// Everything else on the pill is still (typed text, an unfocused field), so the animator repaints nothing then, apart
+// from one last repaint of the room the animation had (pillAnimStep). The
 // timer itself drops to a slow look-in (watchHz: one state check, no repaint), not to a stop: voice capture can be
 // started from the bridge and the field's focus and text change from anywhere, none of which tells this layer.
 
 #include <cstdint>
+#include <initializer_list>
 
 namespace mcp {
 
@@ -61,6 +63,29 @@ inline PillAnimPlan pillAnimPlan(PillAnimInput const& in)
     if (record || hint) return { true, T::bigGrowX, T::bigGrowY };
     if (caret) return { true, T::caretGrow, T::caretGrow };
     return {};
+}
+
+// What one animator tick repaints, given the plan of the tick before (`last`, remembered by the animator) and this
+// tick's (`now`). While a plan runs it repaints its room; the tick on which the animation stops (a recording ended from
+// elsewhere, the field lost focus with its text kept) or shrinks (a recording ended under a caret) repaints once more
+// with the room the LAST plan drew in, since whatever it left on screen (the red rim, a visible caret) is erased only
+// by a repaint of that room, and nothing else asks for one. The room is the larger of the two, side by side.
+struct PillAnimStep {
+    bool repaint = false;
+    int growX = 0;
+    int growY = 0;
+};
+
+inline PillAnimStep pillAnimStep(PillAnimPlan const& last, PillAnimPlan const& now)
+{
+    if (!last.run && !now.run) return {};
+    PillAnimStep st { true, 0, 0 };
+    for (auto const* p : { &last, &now }) {
+        if (!p->run) continue;
+        if (p->growX > st.growX) st.growX = p->growX;
+        if (p->growY > st.growY) st.growY = p->growY;
+    }
+    return st;
 }
 
 } // namespace mcp

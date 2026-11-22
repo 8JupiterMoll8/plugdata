@@ -529,6 +529,15 @@ static void pulseCalmRecordsOnlyWhenCovered()
     CHECK(mcp::alphiDrawnAfterPaint(0.2f, 0.8f, false) == 0.2f);
     auto const g = mcp::alphiDrawnAfterPaint(mcp::AlphiGaze { 1.0f, 2.0f }, mcp::AlphiGaze { 3.0f, -3.0f }, false);
     CHECK(g.dx == 1.0f && g.dy == 2.0f);
+    // The dizzy spiral is drawn on the face: it is recorded with his rect (not with the strip), so a paint elsewhere
+    // while it starts or ends never marks it as drawn, and the motion timer still repaints his face.
+    bool dizzyDrawn = false;
+    dizzyDrawn = mcp::alphiDrawnAfterPaint(dizzyDrawn, true, false); // a failed final arrives, a paint elsewhere
+    CHECK(!dizzyDrawn);                                              // still "not dizzy" on screen: the wake sees it
+    dizzyDrawn = mcp::alphiDrawnAfterPaint(dizzyDrawn, true, true);  // his own repaint
+    CHECK(dizzyDrawn);
+    dizzyDrawn = mcp::alphiDrawnAfterPaint(dizzyDrawn, false, false); // it ends, a paint elsewhere
+    CHECK(dizzyDrawn);                                                // the spiral is still on screen: still woken
     // The stale-eyes sequence: the level rose to 0.8 while 0.2 was drawn. A canvas paint far away (a box dragged) calls
     // paintAlphi too: it must not mark 0.8 as drawn, so the 10 Hz wake still asks for his rect.
     auto const look = mcp::alphiLook(true);

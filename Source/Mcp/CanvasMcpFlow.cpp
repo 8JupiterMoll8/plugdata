@@ -400,6 +400,7 @@ void CanvasMcpLayer::paintAlphi(NVGcontext* nvg)
     auto const gaze = alphiGazeNow(r);
     mcpAlphiGazeDrawn = mcp::alphiDrawnAfterPaint(mcpAlphiGazeDrawn, gaze, gate.frameInRegion);
     bool const dizzy = mcpAlphiLineClock.dizzy(sayNow);
+    mcpAlphiDizzyDrawn = mcp::alphiDrawnAfterPaint(mcpAlphiDizzyDrawn, dizzy, gate.frameInRegion); // the spiral is on his face
     float const eyeY = 27.5f;
     for (float ex0 : { cx - 7.0f, cx + 7.0f }) {
         if (dizzy) {

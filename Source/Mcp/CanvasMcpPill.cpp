@@ -225,6 +225,7 @@ void CanvasMcpLayer::hideSelectionPill()
     mcpWidgetFocus = {}; // the pill is gone by another way than the chip's own (restoreRunMode ran first where it applies): the artist took over
     if (mcpPillAnimator) {
         mcpPillAnimator->stopTimer();
+        mcpPillAnimator->last = {}; // the hide below repaints the whole pill spot itself
     }
     mcpPillDrawerMode = 0;
     mcpPillDrawerFrame = {};
@@ -526,6 +527,7 @@ void CanvasMcpLayer::SelectionPillAnimator::timerCallback()
 {
     if (!(canvas && canvas->mcpSelectionPill && canvas->mcpSelectionPill->isVisible())) {
         stopTimer();
+        last = {};
         return;
     }
     // Only the pill animates here (the caret blink, the record pulse, the hint's expiry): repaint the pill, its
@@ -550,16 +552,21 @@ void CanvasMcpLayer::SelectionPillAnimator::timerCallback()
     int const wantMs = 1000 / (plan.run ? mcp::PillAnimTiming::animateHz : mcp::PillAnimTiming::watchHz);
     if (getTimerInterval() != wantMs)
         startTimer(wantMs);
-    if (!plan.run)
+    // The tick on which the animation stops or shrinks repaints once more with the room the last plan drew in: nothing
+    // else asks for it (a capture can end from the bridge, the field's focus can leave with its text kept), and until it
+    // runs the red record rim or a visible caret would stay on screen.
+    auto const step = mcp::pillAnimStep(last, plan);
+    last = plan;
+    if (!step.repaint)
         return;
     auto area = layer.mcpSelectionPillFrame.isEmpty() ? layer.mcpSelectionPill->getBounds() : layer.mcpSelectionPillFrame;
-    if (plan.growX > mcp::PillAnimTiming::caretGrow) {
+    if (step.growX > mcp::PillAnimTiming::caretGrow) {
         // The record box and the hint chip lie outside the pill; the drawer and palette stay in the repaint as before.
         for (auto const& f : { layer.mcpPillDrawerFrame, layer.mcpPaletteFrame })
             if (!f.isEmpty())
                 area = area.getUnion(f);
     }
-    area = area.expanded(plan.growX, plan.growY);
+    area = area.expanded(step.growX, step.growY);
     layer.canvas.repaint(area);
     if (auto* ed = layer.canvas.editor) {
         auto& surface = ed->nvgSurface;

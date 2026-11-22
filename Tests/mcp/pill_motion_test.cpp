@@ -126,6 +126,100 @@ static void hint()
     CHECK(!mcp::pillAnimPlan(in).run);
 }
 
+// The animator as CanvasMcpPill.cpp runs it: it remembers the last plan, asks pillAnimStep what to repaint, and keeps this
+// tick's plan for the next one.
+namespace {
+struct Animator {
+    mcp::PillAnimPlan last;
+    mcp::PillAnimStep tick(PillAnimInput const& in)
+    {
+        auto const now = mcp::pillAnimPlan(in);
+        auto const st = mcp::pillAnimStep(last, now);
+        last = now;
+        return st;
+    }
+};
+constexpr int glowReach = 4; // the voice border glow reaches 1 + (1.5 + 3.5 * level) / 2 = up to 3.5 px beyond the pill
+} // namespace
+
+static void transitions()
+{
+    std::printf("pill animator: the last repaint when it stops or shrinks (review: a frozen caret, a stuck record rim)\n");
+    using mcp::PillAnimPlan;
+    PillAnimPlan const idle {}, caret { true, PillAnimTiming::caretGrow, PillAnimTiming::caretGrow },
+        big { true, PillAnimTiming::bigGrowX, PillAnimTiming::bigGrowY };
+    auto const same = [](mcp::PillAnimStep const& s, PillAnimPlan const& p) { return s.repaint && s.growX == p.growX && s.growY == p.growY; };
+    // The table: (last, now) -> what is repainted.
+    CHECK(!mcp::pillAnimStep(idle, idle).repaint);               // idle stays idle: nothing
+    CHECK(same(mcp::pillAnimStep(idle, caret), caret));           // a caret starts
+    CHECK(same(mcp::pillAnimStep(caret, caret), caret));          // blinking
+    CHECK(same(mcp::pillAnimStep(caret, big), big));              // a recording starts: the larger room at once
+    CHECK(same(mcp::pillAnimStep(big, big), big));
+    CHECK(same(mcp::pillAnimStep(big, caret), big));              // a recording ends under a caret: one more repaint of its room
+    CHECK(same(mcp::pillAnimStep(big, idle), big));               // ... or under nothing at all
+    CHECK(same(mcp::pillAnimStep(caret, idle), caret));           // the caret was visible: erase it once
+    // Mixed rooms: the repaint covers both.
+    auto const mixed = mcp::pillAnimStep(PillAnimPlan { true, 200, 3 }, PillAnimPlan { true, 3, 56 });
+    CHECK(mixed.repaint && mixed.growX == 200 && mixed.growY == 56);
+
+    // (a) Voice capture ends from elsewhere (watchdog, buffer full, the AI) with the field unfocused and holding text:
+    // the red recording border must be erased by one more repaint of the whole recording room.
+    {
+        Animator a;
+        auto in = shown();
+        in.textEmpty = false;
+        in.voiceCapturing = true;
+        CHECK(a.tick(in).repaint);
+        CHECK(a.tick(in).growX == PillAnimTiming::bigGrowX);
+        in.voiceCapturing = false; // ended elsewhere: no repaint request came with it
+        auto const last = a.tick(in);
+        CHECK(!mcp::pillAnimPlan(in).run); // nothing animates any more ...
+        CHECK(last.repaint && last.growX >= glowReach && last.growY >= glowReach); // ... but the rim is erased first
+        CHECK(!a.tick(in).repaint);        // then it is quiet
+        CHECK(!a.tick(in).repaint);
+    }
+    // (b) Focus leaves the field with its text kept: the caret frozen visible is erased by one more repaint.
+    {
+        Animator a;
+        auto in = shown();
+        in.textEmpty = false;
+        in.focused = true;
+        CHECK(a.tick(in).repaint);
+        in.focused = false; // onFocusLost repaints nothing
+        auto const last = a.tick(in);
+        CHECK(!mcp::pillAnimPlan(in).run);
+        CHECK(last.repaint && last.growX >= PillAnimTiming::caretGrow);
+        CHECK(!a.tick(in).repaint);
+    }
+    // (c) Capture ends while a caret still blinks (empty field): the repaint is the recording's room, not the caret's
+    // 3 px, so the glow (up to ~3.5 px beyond the pill) goes; the next ticks are caret-sized again.
+    {
+        Animator a;
+        auto in = shown();
+        in.textEmpty = true;
+        in.voiceCapturing = true;
+        CHECK(a.tick(in).growX == PillAnimTiming::bigGrowX);
+        in.voiceCapturing = false;
+        auto const last = a.tick(in);
+        CHECK(mcp::pillAnimPlan(in).run && last.growX >= glowReach && last.growY >= glowReach);
+        auto const next = a.tick(in);
+        CHECK(next.repaint && next.growX == PillAnimTiming::caretGrow);
+    }
+    // The hint chip's last repaint (its grace) and a hidden tab: nothing repaints before or after.
+    {
+        Animator a;
+        auto in = shown();
+        in.moodStrip = true;
+        in.hintUntilMs = in.nowMs + 1000;
+        CHECK(a.tick(in).repaint);
+        in.nowMs += 5000; // the hint is long gone
+        CHECK(a.tick(in).repaint); // the one more repaint that erases it
+        CHECK(!a.tick(in).repaint);
+        in.showing = false;
+        CHECK(!a.tick(in).repaint);
+    }
+}
+
 static void rates()
 {
     std::printf("pill animator: rates\n");
@@ -141,6 +235,7 @@ int main()
     moodStrip();
     recording();
     hint();
+    transitions();
     rates();
     if (failures == 0)
         std::printf("pill_motion_test: all passed\n");

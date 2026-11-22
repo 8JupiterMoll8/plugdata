@@ -26,6 +26,7 @@
 #include "Mcp/McpAlphiDock.h"     // big Alphi 1a0: where Alphi docks
 #include "Mcp/McpAlphiMotion.h"   // Alphi drop 1: motion repaints, the line clock
 #include "Mcp/McpPillAnswer.h"     // the newest AI chat line, shown briefly under the pill
+#include "Mcp/McpPillMotion.h"     // when the pill animator repaints, and the last repaint of its room
 #include "Mcp/McpWidgetFocus.h"    // the widget chip -> selection pill shortcut, and what Enter means on it
 struct NVGcontext;
 
@@ -292,6 +293,7 @@ public:
         explicit SelectionPillAnimator(CanvasMcpLayer* c) : canvas(c) {}
         void timerCallback() override;
         CanvasMcpLayer* canvas;
+        mcp::PillAnimPlan last; // the plan of the tick before: its room gets one last repaint when it ends (McpPillMotion.h)
     };
     std::unique_ptr<SelectionPillAnimator> mcpPillAnimator;
 
