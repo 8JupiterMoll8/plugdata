@@ -106,13 +106,16 @@ private:
 
 // Review M: the strip's hit frame after a paint. It changes only when the render redrew the old and the new strip
 // (`region` holds both); otherwise the drawn one stays (no click falls through a visible strip, no invisible click
-// sink appears) and one more repaint is asked.
+// sink appears) and one more repaint is asked (unless old == new: nothing changed).
 struct AlphiStripUpdate {
     ApprovalRect frame;
     bool repaint = false;
 };
 inline AlphiStripUpdate alphiStripAfterPaint(ApprovalRect prev, ApprovalRect next, ApprovalRect region)
 {
+    // Alphi calm, item 2: the same strip in the same place needs nothing, whatever this render covered (its content is
+    // the say key's business: alphiStripRecordsDrawn). Before, every paint that missed a visible strip asked for another.
+    if (prev.x == next.x && prev.y == next.y && prev.w == next.w && prev.h == next.h) return { next, false };
     bool const nextOk = next.w <= 0 || next.h <= 0 || alphiRectContains(region, next);
     bool const prevOk = prev.w <= 0 || prev.h <= 0 || alphiRectContains(region, prev);
     if (nextOk && prevOk) return { next, false };
@@ -130,12 +133,13 @@ inline ApprovalRect alphiMotionRepaintArea(ApprovalRect face, ApprovalRect strip
 }
 
 // D4: the light ~30 Hz motion timer runs only while Alphi is drawn (shown, uncovered) and something on him moves:
-// the pulse level differs from the drawn one by minStep or more (or the last step to calm), sparks / dots (busy), or
-// the line's spiral or fade. It repaints his own rect (alphiMotionArea) and never touches the gate or the dock.
+// what the next paint would draw of the pulse differs from what was drawn (Alphi calm: alphiPulseHeld, the eye size
+// on its 0.25 px grid, not the raw level), sparks / dots (busy), or the line's spiral or fade. It repaints his own rect
+// (alphiMotionArea) and never touches the gate or the dock.
 struct AlphiMotionInput {
     bool shown = false;      // drawn this paint (alphiShown, placed, not the edge tab)
     bool covered = false;    // a chip stack / the pill covers him
-    float target = 0.0f;     // the pulse level the ceiling asks for (alphiPulse)
+    float target = 0.0f;     // the pulse level the next paint would draw (alphiPulseHeld of the followed level)
     float drawn = 0.0f;      // the level last drawn
     bool busy = false;       // sparks (building) or dots (measuring)
     bool lineMoving = false; // the dizzy spiral or the line's fade (AlphiLineClock::moving)
@@ -143,22 +147,31 @@ struct AlphiMotionInput {
 
 struct AlphiMotionTiming {
     static constexpr int intervalMs = 33;   // ~30 Hz
-    static constexpr float minStep = 0.02f; // smaller level changes are not repainted
+    static constexpr float minStep = 0.02f; // the followed level this close to its target is "arrived" (the follow stops)
+    static constexpr float sameLevel = 1e-4f; // two held levels closer than this are the same drawn size
 };
 
 inline bool alphiMotionRun(AlphiMotionInput const& in)
 {
     if (!in.shown || in.covered) return false;
     if (in.busy || in.lineMoving) return true;
-    float const d = std::fabs(in.target - in.drawn);
-    return d >= AlphiMotionTiming::minStep || (in.target <= 0.0f && in.drawn > 0.0f);
+    return std::fabs(in.target - in.drawn) > AlphiMotionTiming::sameLevel;
 }
 
-// The 10 Hz tick wakes the motion timer when the level moved by minStep or more from what was drawn, or crossed
-// -60 dBFS (level 0 <-> above 0). Review L7: not on every new block.
-inline bool alphiPulseWake(float drawnLevel, float level)
+// The 10 Hz tick wakes the motion timer when what the next paint would draw of the pulse differs from what was drawn
+// (Alphi calm: a new eye size on the 0.25 px grid, or the last step to calm), not on every block or level wiggle
+// (review L7: not on every new block).
+inline bool alphiPulseWake(float drawnLevel, float level, AlphiLook const& look)
 {
-    return std::fabs(level - drawnLevel) >= AlphiMotionTiming::minStep || ((drawnLevel > 0.0f) != (level > 0.0f));
+    return std::fabs(alphiPulseHeld(drawnLevel, level, look) - drawnLevel) > AlphiMotionTiming::sameLevel;
+}
+
+// Alphi calm, item 2: a paint records what the strip showed (the say key, the line's alpha, the spiral) only when it
+// redrew the strip it drew (`drawnStrip`, empty when none): one that missed it left the screen as it was, so the motion
+// timer must still ask for the change (alphiStripAfterPaint no longer repaints a strip that did not move).
+inline bool alphiStripRecordsDrawn(ApprovalRect region, ApprovalRect drawnStrip)
+{
+    return drawnStrip.w <= 0 || drawnStrip.h <= 0 || alphiRectContains(region, drawnStrip);
 }
 
 // What the say board shows right now, as one key: a change (a new say, or a slot's ttl ran out; step W repaints only

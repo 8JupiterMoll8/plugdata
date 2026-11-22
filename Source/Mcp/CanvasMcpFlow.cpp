@@ -394,9 +394,11 @@ void CanvasMcpLayer::paintAlphi(NVGcontext* nvg)
     // look toward the selection (D5) and spin dizzy for 2 s after a failed turn (D8); CanvasMcpAlphiStrip.cpp.
     auto const sayNow = mcp::alphiSayNowMs();
     alphiMotionSample(sayNow);
-    auto const eyes = alphiEyesNow(look);
+    // Alphi calm: a paint that did not cover his rect (a box dragged far away runs paintAlphi too) leaves the screen at
+    // his rect as it was, so it must not record the pulse or the gaze as drawn (the eyes would stay stale).
+    auto const eyes = alphiEyesNow(look, gate.frameInRegion);
     auto const gaze = alphiGazeNow(r);
-    mcpAlphiGazeDrawn = gaze;
+    mcpAlphiGazeDrawn = mcp::alphiDrawnAfterPaint(mcpAlphiGazeDrawn, gaze, gate.frameInRegion);
     bool const dizzy = mcpAlphiLineClock.dizzy(sayNow);
     float const eyeY = 27.5f;
     for (float ex0 : { cx - 7.0f, cx + 7.0f }) {

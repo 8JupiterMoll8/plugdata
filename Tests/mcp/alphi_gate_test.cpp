@@ -191,6 +191,35 @@ static void stripFrameAfterPaint()
     CHECK(u.frame.w == 0 && !u.repaint);
     u = mcp::alphiStripAfterPaint({}, {}, ApprovalRect { 0, 0, 10, 10 });
     CHECK(u.frame.w == 0 && !u.repaint);
+    // Alphi calm, item 2: the same strip in the same place needs no repaint, whichever part of the canvas this paint
+    // redrew (before: any paint that missed a visible strip asked for another one, so a canvas that kept repainting
+    // elsewhere kept repainting his strip).
+    u = mcp::alphiStripAfterPaint(st, st, ApprovalRect { 0, 0, 100, 100 });
+    CHECK(u.frame.x == st.x && u.frame.y == st.y && u.frame.w == st.w && u.frame.h == st.h && !u.repaint);
+    u = mcp::alphiStripAfterPaint(st, st, ApprovalRect {});
+    CHECK(u.frame.w == st.w && !u.repaint);
+    u = mcp::alphiStripAfterPaint(st, st, view);
+    CHECK(u.frame.w == st.w && !u.repaint);
+    // A strip that moved or resized, or came or went, is not "the same": still repainted when this render missed it.
+    ApprovalRect const moved { st.x + 1, st.y, st.w, st.h };
+    u = mcp::alphiStripAfterPaint(st, moved, ApprovalRect { 0, 0, 100, 100 });
+    CHECK(u.frame.x == st.x && u.repaint);
+    u = mcp::alphiStripAfterPaint(st, moved, view);
+    CHECK(u.frame.x == moved.x && !u.repaint);
+}
+
+// Alphi calm, item 2 (the other half): a paint records what the strip showed (say key, line alpha, spiral) only when it
+// redrew the strip it drew; one that missed it left the screen as it was, so the motion timer still asks for it.
+static void stripRecordsDrawn()
+{
+    std::printf("alphi calm: a paint records the strip's content only when it redrew the strip\n");
+    ApprovalRect const st { 900, 700, 250, 36 };
+    CHECK(mcp::alphiStripRecordsDrawn(ApprovalRect { 0, 0, 1200, 800 }, st));
+    CHECK(!mcp::alphiStripRecordsDrawn(ApprovalRect { 0, 0, 100, 100 }, st));  // a paint elsewhere
+    CHECK(!mcp::alphiStripRecordsDrawn(ApprovalRect { 950, 700, 100, 36 }, st)); // part of it
+    CHECK(!mcp::alphiStripRecordsDrawn(ApprovalRect {}, st));
+    CHECK(mcp::alphiStripRecordsDrawn(ApprovalRect { 0, 0, 100, 100 }, ApprovalRect {})); // no strip drawn: nothing to miss
+    CHECK(mcp::alphiStripRecordsDrawn(ApprovalRect {}, ApprovalRect {}));
 }
 
 // Review L6: the motion repaint takes the strip's spot only while a strip is drawn or the say changed.
@@ -278,14 +307,17 @@ static void lineClock()
 static void motionTimer()
 {
     std::printf("D4: the motion timer and its wake\n");
+    // Alphi calm (2026-11-22): `target` is what the next paint would draw (alphiPulseHeld: the eye size on its 0.25 px
+    // grid, with a one-step hold), `drawn` what the last one drew; the timer runs while they differ, never for a
+    // level wiggle the eyes would not show.
     mcp::AlphiMotionInput in;
     in.shown = true;
     in.target = 0.5f;
     in.drawn = 0.5f;
     CHECK(!mcp::alphiMotionRun(in)); // steady: no timer
     in.drawn = 0.49f;
-    CHECK(!mcp::alphiMotionRun(in)); // under 0.02: skipped
-    in.drawn = 0.47f;
+    CHECK(mcp::alphiMotionRun(in)); // what would be drawn differs from what is drawn: one repaint
+    in.drawn = 0.4f;
     CHECK(mcp::alphiMotionRun(in));
     in.covered = true;
     CHECK(!mcp::alphiMotionRun(in)); // covered: not drawn, nothing to move
@@ -303,14 +335,22 @@ static void motionTimer()
     in.target = 0.0f;
     in.drawn = 0.01f;
     CHECK(mcp::alphiMotionRun(in)); // the last step to calm is always drawn
-    // The 10 Hz tick wakes it when the ceiling's block counter moved or the level crossed -60 dBFS.
-    // Review L7: not on every block; on a level change of minStep or more, or a -60 dBFS crossing.
-    CHECK(!mcp::alphiPulseWake(0.0f, 0.0f));
-    CHECK(!mcp::alphiPulseWake(0.40f, 0.41f));
-    CHECK(mcp::alphiPulseWake(0.40f, 0.43f));
-    CHECK(mcp::alphiPulseWake(0.3f, 0.0f));
-    CHECK(mcp::alphiPulseWake(0.0f, 0.01f)); // crossing, however small
-    CHECK(mcp::alphiPulseWake(0.01f, 0.0f));
+    // The 10 Hz tick wakes it when what would be drawn differs from what is drawn (Review L7: not on every block,
+    // not on a level wiggle under one 0.25 px step of the eye).
+    for (bool flow : { false, true }) {
+        auto const look = mcp::alphiLook(flow);
+        float const range = mcp::alphiEyeGrowthPx(look);
+        float const step = mcp::AlphiPulseMetrics::drawStepPx / range; // one grid step as a level
+        CHECK(!mcp::alphiPulseWake(0.0f, 0.0f, look));
+        CHECK(!mcp::alphiPulseWake(0.40f, 0.41f, look));
+        CHECK(!mcp::alphiPulseWake(0.40f, 0.43f, look)); // the old 0.02 step woke here: nothing visible changes
+        CHECK(!mcp::alphiPulseWake(0.0f, 0.01f, look));  // a -60 dBFS crossing alone changes nothing the eye shows
+        CHECK(!mcp::alphiPulseWake(0.0f, 0.8f * step, look));
+        CHECK(mcp::alphiPulseWake(0.0f, 1.3f * step, look)); // a whole step: draw it
+        CHECK(mcp::alphiPulseWake(0.40f, 0.40f + 1.5f * step, look));
+        CHECK(mcp::alphiPulseWake(0.3f, 0.0f, look)); // calm is always reached
+        CHECK(mcp::alphiPulseWake(0.01f, 0.0f, look));
+    }
 }
 
 static void sayExpiryRepaint()
@@ -408,6 +448,7 @@ int main()
     alphiOnlyPaintRule();
     skipNeverHidesALayoutChange();
     stripFrameAfterPaint();
+    stripRecordsDrawn();
     motionRepaintArea();
     whatRestartsTheGate();
     brakeFloorAndOnGap();

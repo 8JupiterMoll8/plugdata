@@ -84,10 +84,14 @@ void CanvasMcpLayer::alphiMotionSample(std::int64_t nowMs)
     mcpAlphiLineClock.observe(host->session.alphiSay.line(nowMs), nowMs);
 }
 
-mcp::AlphiEyes CanvasMcpLayer::alphiEyesNow(mcp::AlphiLook const& look)
+mcp::AlphiEyes CanvasMcpLayer::alphiEyesNow(mcp::AlphiLook const& look, bool coveredHisRect)
 {
-    mcpAlphiPulseDrawn = mcpAlphiPulseLevel;
-    return mcp::alphiEyesAt(mcpAlphiPulseLevel, look);
+    // Alphi calm: the eyes draw the held level (the eye size on its 0.25 px grid, calm exactly the resting look), and
+    // that is what counts as drawn, so the motion timer repaints only when the drawn size would change. A paint that
+    // did not cover his rect draws it (clipped away) but records nothing.
+    float const held = mcp::alphiPulseHeld(mcpAlphiPulseDrawn, mcpAlphiPulseLevel, look);
+    mcpAlphiPulseDrawn = mcp::alphiDrawnAfterPaint(mcpAlphiPulseDrawn, held, coveredHisRect);
+    return mcp::alphiEyesAt(held, look);
 }
 
 mcp::AlphiGaze CanvasMcpLayer::alphiGazeNow(mcp::ApprovalRect face) const
@@ -184,10 +188,18 @@ mcp::ApprovalRect CanvasMcpLayer::paintAlphiStripNow(NVGcontext* nvg)
     auto const line = board.line(now);
     auto const act = board.activity(now);
     float const lineAlpha = line ? mcpAlphiLineClock.lineAlpha(now) : 0.0f;
-    // What this paint shows, for the motion timer (a change, an expiry: one more repaint).
-    mcpAlphiSayKeyDrawn = mcp::alphiSayKey(board, now);
-    mcpAlphiDizzyDrawn = mcpAlphiLineClock.dizzy(now);
-    mcpAlphiLineAlphaDrawn = lineAlpha;
+    // What this paint shows, for the motion timer (a change, an expiry: one more repaint). Alphi calm: recorded only
+    // when the paint redrew the strip it drew (alphiStripRecordsDrawn); a paint elsewhere leaves the screen as it was,
+    // and alphiStripAfterPaint no longer repaints a strip that did not move, so the timer must still see the change.
+    auto const sayKey = mcp::alphiSayKey(board, now);
+    bool const dizzyNow = mcpAlphiLineClock.dizzy(now);
+    auto const recordDrawn = [&](mcp::ApprovalRect drawnStrip) {
+        if (!mcp::alphiStripRecordsDrawn(asRect(mcpAlphiStripRegion), drawnStrip))
+            return;
+        mcpAlphiSayKeyDrawn = sayKey;
+        mcpAlphiDizzyDrawn = dizzyNow;
+        mcpAlphiLineAlphaDrawn = lineAlpha;
+    };
 
     std::string text;
     mcp::AlphiRgba colour {};
@@ -200,8 +212,10 @@ mcp::ApprovalRect CanvasMcpLayer::paintAlphiStripNow(NVGcontext* nvg)
         text = act->text;
         colour = stripColour(mcp::AlphiSayKind::Busy);
     }
-    if (text.empty())
+    if (text.empty()) {
+        recordDrawn({});
         return {};
+    }
 
     auto const [view, zoom] = alphiView();
     auto const face = asRect(mcpAlphiFrame);
@@ -212,14 +226,18 @@ mcp::ApprovalRect CanvasMcpLayer::paintAlphiStripNow(NVGcontext* nvg)
     in.mouse = alphiMouse();
     in.faceShown = true;
     // Never a dock input, never a cover, never in the chips' keep-out: it only reads them (N1).
-    if (!mcp::alphiStripShown(in, mcpAlphiPaintBoxes, alphiDockCovers()))
+    if (!mcp::alphiStripShown(in, mcpAlphiPaintBoxes, alphiDockCovers())) {
+        recordDrawn({});
         return {};
+    }
     auto const& s = in.strip;
 
     using S = mcp::AlphiStripMetrics;
     auto const lines = mcp::alphiStripLines(text);
-    if (lines.empty())
+    if (lines.empty()) {
+        recordDrawn({});
         return {};
+    }
     float const k = static_cast<float>(s.w) / static_cast<float>(S::w); // canvas units per design px
     NVGScopedState scoped(nvg);
     nanovg::nvgTranslate(nvg, static_cast<float>(s.x), static_cast<float>(s.y));
@@ -245,6 +263,7 @@ mcp::ApprovalRect CanvasMcpLayer::paintAlphiStripNow(NVGcontext* nvg)
     float const y0 = static_cast<float>(S::h) * 0.5f - (static_cast<float>(lines.size()) - 1.0f) * lineH * 0.5f;
     for (std::size_t i = 0; i < lines.size(); ++i)
         mcpnvg::nvgText(nvg, bgX + 10.0f, y0 + static_cast<float>(i) * lineH, lines[i].c_str(), nullptr);
+    recordDrawn(s);
     return s;
 }
 
@@ -307,7 +326,8 @@ void CanvasMcpLayer::alphiMotionWake()
     auto const& board = canvas.pd->getMcp()->session.alphiSay;
     auto const gaze = alphiGazeNow(asRect(mcpAlphiFrame));
     bool const gazeMoved = std::fabs(gaze.dx - mcpAlphiGazeDrawn.dx) > 0.25f || std::fabs(gaze.dy - mcpAlphiGazeDrawn.dy) > 0.25f;
-    bool const wake = mcp::alphiPulseWake(mcpAlphiPulseDrawn, mcpAlphiPulseLevel)
+    auto const look = mcp::alphiLook(canvas.pd->getMcp()->session.flowMode.isOn());
+    bool const wake = mcp::alphiPulseWake(mcpAlphiPulseDrawn, mcpAlphiPulseLevel, look)
         || mcp::alphiSayKey(board, now) != mcpAlphiSayKeyDrawn || mcpAlphiLineClock.moving(now)
         || mcpAlphiLineClock.dizzy(now) != mcpAlphiDizzyDrawn || mcpAlphiLineClock.lineAlpha(now) != mcpAlphiLineAlphaDrawn
         || board.activity(now).has_value() || gazeMoved;
@@ -331,7 +351,9 @@ void CanvasMcpLayer::alphiMotionTick()
     mcp::AlphiMotionInput in;
     in.shown = true;
     in.covered = alphiCoveredNow(mcpAlphiFrame);
-    in.target = mcpAlphiPulseLevel;
+    // Alphi calm: the pulse repaints only when what the next paint would draw (the held level: the eye size on its
+    // 0.25 px grid) differs from what was drawn, not on every wiggle of the level.
+    in.target = mcp::alphiPulseHeld(mcpAlphiPulseDrawn, mcpAlphiPulseLevel, mcp::alphiLook(canvas.pd->getMcp()->session.flowMode.isOn()));
     in.drawn = mcpAlphiPulseDrawn;
     in.busy = board.activity(now).has_value();
     in.lineMoving = mcpAlphiLineClock.moving(now);
@@ -343,7 +365,7 @@ void CanvasMcpLayer::alphiMotionTick()
         // While busy only the sparks / dots move: at most busyRepaintMs apart (~12 Hz), and the measuring dots only
         // when the lit dot changes. The pulse, the line, the say and the gaze still repaint at the full rate.
         bool const onlyBusy = in.busy && !sayChanged && !gazeMoved && !in.lineMoving
-            && std::fabs(in.target - in.drawn) < mcp::AlphiMotionTiming::minStep && !(in.target <= 0.0f && in.drawn > 0.0f);
+            && std::fabs(in.target - in.drawn) <= mcp::AlphiMotionTiming::sameLevel;
         if (onlyBusy) {
             auto const act = board.activity(now);
             int const key = act && act->phase == mcp::AlphiSayPhase::Measuring

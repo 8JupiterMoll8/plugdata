@@ -7,9 +7,11 @@
 #include "../../Source/Mcp/McpApprovalState.h"
 #include "../../Source/Mcp/McpAlphi.h"
 #include "../../Source/Mcp/McpAlphiDock.h"
+#include "../../Source/Mcp/McpAlphiMotion.h"
 #include "../../Source/Mcp/McpFlowMode.h"
 
 #include <cmath>
+#include <cstdint>
 #include <optional>
 #include <cstdio>
 #include <string>
@@ -298,6 +300,247 @@ static void pulseFollow()
     CHECK(l == 0.0f);
 }
 
+// ---- Alphi calm (2026-11-22): the eyes repaint on what is DRAWN, not on the level -------------------------------------
+// The idle cost found by reading: the ceiling publishes the raw per-block mean square, so a steady hiss / drone / music
+// bed at -55 dBFS +-1.5 dB moved the followed level by more than the old 0.02 step on most 33 ms ticks, and the motion
+// timer (30 Hz) never settled. Now the eye's drawn size (the on look's radius, the off look's dash height) snaps to a
+// 0.25 design px grid anchored at the resting look, with a one-step hold (hysteresis), and a repaint is asked only
+// when that drawn size changes. The tests drive the same chain the canvas runs per tick: block mean square ->
+// alphiPulse -> alphiPulseFollow -> alphiPulseWake -> (repaint) alphiPulseHeld.
+namespace calm {
+
+struct Lcg {
+    std::uint32_t s = 12345u;
+    float next() // 0..1
+    {
+        s = s * 1664525u + 1013904223u;
+        return static_cast<float>(s >> 8) / 16777216.0f;
+    }
+};
+
+constexpr float tickMs = 33.0f;
+float msOf(double db) { return static_cast<float>(std::pow(10.0, db / 10.0)); }
+
+// The new chain, one 33 ms tick at a time.
+struct Sim {
+    mcp::AlphiLook look;
+    float level = 0.0f, drawn = 0.0f;
+    int repaints = 0, lastRepaint = -1, tick = 0;
+    void step(float meanSquare)
+    {
+        float const target = mcp::alphiPulse(meanSquare, 0, look).level; // a fresh block
+        level = mcp::alphiPulseFollow(level, target, tickMs);
+        if (mcp::alphiPulseWake(drawn, level, look)) {
+            drawn = mcp::alphiPulseHeld(drawn, level, look); // the repaint draws, and records, this
+            ++repaints;
+            lastRepaint = tick;
+        }
+        ++tick;
+    }
+};
+
+// Today's rule (before this change), kept here to show what it cost: repaint whenever the followed level is 0.02 or
+// more from the drawn one, or crossed -60 dBFS; the drawn level is the followed one.
+struct Legacy {
+    float level = 0.0f, drawn = 0.0f;
+    int repaints = 0;
+    void step(float meanSquare)
+    {
+        float const target = mcp::alphiPulseLevel(meanSquare);
+        level = mcp::alphiPulseFollow(level, target, tickMs);
+        if (std::fabs(level - drawn) >= 0.02f || ((drawn > 0.0f) != (level > 0.0f))) {
+            drawn = level;
+            ++repaints;
+        }
+    }
+};
+
+float growthPx(float level, mcp::AlphiLook const& look) { return level * mcp::alphiEyeGrowthPx(look); }
+
+} // namespace calm
+
+static void pulseCalmJitter()
+{
+    std::printf("Alphi calm: a steady -55 dBFS +-1.5 dB for 10 s settles\n");
+    int const ticks = 10000 / 33; // one sample per 33 ms over 10 s
+    for (bool flow : { false, true }) {
+        auto const look = mcp::alphiLook(flow);
+        calm::Sim sim;
+        sim.look = look;
+        calm::Legacy old;
+        calm::Lcg rng;
+        for (int i = 0; i < ticks; ++i) {
+            float const ms = calm::msOf(-55.0 + (rng.next() * 2.0 - 1.0) * 1.5);
+            sim.step(ms);
+            old.step(ms);
+        }
+        std::printf("  %s look: old rule %d repaints in %d ticks, new rule %d (limit 10, last at tick %d)\n",
+            flow ? "on " : "off", old.repaints, ticks, sim.repaints, sim.lastRepaint);
+        CHECK(old.repaints >= ticks / 3); // the cost this removes: a repaint on a large share of the ticks
+        CHECK(sim.repaints <= 10);
+        CHECK(sim.lastRepaint < 30); // settled within the first second
+    }
+    // Every steady level (+-1.5 dB of jitter, the whole range): settled within a second, nothing after.
+    for (bool flow : { false, true }) {
+        auto const look = mcp::alphiLook(flow);
+        for (int centre = -59; centre <= -7; ++centre) {
+            calm::Sim sim;
+            sim.look = look;
+            calm::Lcg rng;
+            rng.s = 777u + static_cast<std::uint32_t>(centre + 100);
+            for (int i = 0; i < ticks; ++i)
+                sim.step(calm::msOf(centre + (rng.next() * 2.0 - 1.0) * 1.5));
+            CHECK(sim.repaints <= 10);
+            CHECK(sim.lastRepaint < 30);
+        }
+    }
+}
+
+static void pulseCalmSteadyAndZero()
+{
+    std::printf("Alphi calm: steady level, digital zero, real changes\n");
+    for (bool flow : { false, true }) {
+        auto const look = mcp::alphiLook(flow);
+        // A perfectly steady level: at most the climb, then no repaint at all.
+        calm::Sim steady;
+        steady.look = look;
+        for (int i = 0; i < 303; ++i)
+            steady.step(calm::msOf(-30.0));
+        CHECK(steady.repaints <= 2);
+        CHECK(steady.lastRepaint < 5);
+        // Digital zero (a stopped transport): calm, exactly, within the 150 ms release (+ the tick), then silence.
+        calm::Sim s;
+        s.look = look;
+        for (int i = 0; i < 60; ++i)
+            s.step(calm::msOf(-20.0));
+        CHECK(s.drawn > 0.0f);
+        int calmAt = -1;
+        for (int i = 0; i < 150; ++i) {
+            s.step(0.0f);
+            if (calmAt < 0 && s.drawn == 0.0f)
+                calmAt = i;
+        }
+        CHECK(calmAt >= 0 && calmAt <= 150 / 33 + 1); // within ~5 ticks = the release time
+        CHECK(s.level == 0.0f && s.drawn == 0.0f);
+        int const repaintsAtCalm = s.repaints;
+        for (int i = 0; i < 150; ++i)
+            s.step(0.0f);
+        CHECK(s.repaints == repaintsAtCalm); // 5 more seconds of zeros: no repaint
+        mcp::AlphiMotionInput in;
+        in.shown = true;
+        in.drawn = s.drawn;
+        in.target = mcp::alphiPulseHeld(s.drawn, s.level, look);
+        CHECK(!mcp::alphiMotionRun(in)); // the motion timer has nothing left to run for
+        // The eyes are exactly the resting look when calm.
+        auto const e = mcp::alphiEyesAt(s.drawn, look);
+        CHECK(e.calm && e.eyeRadius == look.eyeRadius && e.dashHeight == mcp::AlphiPulseMetrics::dashRest);
+    }
+}
+
+static void pulseCalmMusicStillMoves()
+{
+    std::printf("Alphi calm: a real level change, or music, still repaints the eyes\n");
+    for (bool flow : { false, true }) {
+        auto const look = mcp::alphiLook(flow);
+        calm::Sim s;
+        s.look = look;
+        for (int i = 0; i < 40; ++i)
+            s.step(calm::msOf(-50.0));
+        float const quiet = calm::growthPx(s.drawn, look);
+        int const before = s.repaints;
+        for (int i = 0; i < 6; ++i)
+            s.step(calm::msOf(-20.0)); // a hit
+        CHECK(s.repaints > before);
+        float const loud = calm::growthPx(s.drawn, look);
+        CHECK(loud >= quiet + 0.75f); // visibly bigger (the full range is 1.6 px on, 2.8 px off)
+        int const mid = s.repaints;
+        for (int i = 0; i < 12; ++i)
+            s.step(calm::msOf(-50.0)); // and back
+        CHECK(s.repaints > mid);
+        CHECK(std::fabs(calm::growthPx(s.drawn, look) - quiet) <= mcp::AlphiPulseMetrics::drawStepPx + 1e-3f);
+        // Music: a level that wanders 18 dB, a new value every 100 ms, for 10 s: the eyes pulse with it.
+        calm::Sim m;
+        m.look = look;
+        calm::Lcg rng;
+        rng.s = 4242u;
+        double db = -24.0;
+        for (int i = 0; i < 303; ++i) {
+            if (i % 3 == 0)
+                db = -34.0 + rng.next() * 24.0;
+            m.step(calm::msOf(db));
+        }
+        CHECK(m.repaints >= 30);
+        CHECK(m.repaints <= 303);
+    }
+}
+
+static void pulseCalmQuantize()
+{
+    std::printf("Alphi calm: the drawn size is on the 0.25 px grid, anchored at the resting look\n");
+    using P = mcp::AlphiPulseMetrics;
+    CHECK(P::drawStepPx == 0.25f);
+    for (bool flow : { false, true }) {
+        auto const look = mcp::alphiLook(flow);
+        float const step = P::drawStepPx;
+        CHECK(mcp::alphiEyeGrowthPx(look) > step * 4.0f); // the grid has room (1.6 px on, 2.8 px off)
+        // Calm is exact, whatever was drawn before.
+        for (float d : { 0.0f, 0.09f, 0.5f, 0.93f, 1.0f })
+            CHECK(mcp::alphiPulseHeld(d, 0.0f, look) == 0.0f);
+        // Up and down sweeps: always on the grid, never more than one step off the raw level, ends exactly calm.
+        for (int dir = 0; dir < 2; ++dir) {
+            float drawn = dir == 0 ? 0.0f : mcp::alphiPulseHeld(0.0f, 1.0f, look); // the top grid point
+            float maxErr = 0.0f;
+            for (int i = 0; i <= 1000; ++i) {
+                float const level = dir == 0 ? static_cast<float>(i) / 1000.0f : static_cast<float>(1000 - i) / 1000.0f;
+                drawn = mcp::alphiPulseHeld(drawn, level, look);
+                float const g = calm::growthPx(drawn, look) / step;
+                CHECK(std::fabs(g - std::round(g)) < 1e-3f);
+                CHECK(drawn >= 0.0f && drawn <= 1.0f);
+                if (level > 0.0f)
+                    maxErr = std::fmax(maxErr, std::fabs(calm::growthPx(drawn, look) - calm::growthPx(level, look)));
+            }
+            CHECK(maxErr < step + 1e-3f);
+            CHECK(mcp::alphiPulseHeld(drawn, 0.0f, look) == 0.0f); // and the way back to calm is exact
+        }
+        // Hold: anything within one step of the drawn size stays drawn; one full step away moves it.
+        float const g3 = 3.0f * step / mcp::alphiEyeGrowthPx(look); // the grid point #3 as a level
+        CHECK(mcp::alphiPulseHeld(g3, g3 + 0.99f * step / mcp::alphiEyeGrowthPx(look), look) == g3);
+        CHECK(mcp::alphiPulseHeld(g3, g3 - 0.99f * step / mcp::alphiEyeGrowthPx(look), look) == g3);
+        CHECK(mcp::alphiPulseHeld(g3, g3 + 1.2f * step / mcp::alphiEyeGrowthPx(look), look) != g3);
+        // The resting look is unchanged: calm eyes draw the look's own radius / dash.
+        auto const rest = mcp::alphiEyesAt(mcp::alphiPulseHeld(0.4f, 0.0f, look), look);
+        CHECK(rest.eyeRadius == look.eyeRadius && rest.dashHeight == P::dashRest);
+        // Bad input: never NaN, never out of 0..1.
+        for (float bad : { std::nanf(""), INFINITY, -INFINITY, -3.0f, 7.0f }) {
+            float const h = mcp::alphiPulseHeld(0.3f, bad, look);
+            CHECK(std::isfinite(h) && h >= 0.0f && h <= 1.0f);
+            float const h2 = mcp::alphiPulseHeld(bad, 0.6f, look);
+            CHECK(std::isfinite(h2) && h2 >= 0.0f && h2 <= 1.0f);
+        }
+    }
+}
+
+// Alphi calm, item 4: a paint that did not cover his rect leaves the pulse / gaze "drawn" as it was; the next one that
+// does records it (before: every canvas paint recorded, so eyes could stay stale until the level moved again).
+static void pulseCalmRecordsOnlyWhenCovered()
+{
+    std::printf("Alphi calm: only a paint that covered his rect records the eyes as drawn\n");
+    CHECK(mcp::alphiDrawnAfterPaint(0.2f, 0.8f, true) == 0.8f);
+    CHECK(mcp::alphiDrawnAfterPaint(0.2f, 0.8f, false) == 0.2f);
+    auto const g = mcp::alphiDrawnAfterPaint(mcp::AlphiGaze { 1.0f, 2.0f }, mcp::AlphiGaze { 3.0f, -3.0f }, false);
+    CHECK(g.dx == 1.0f && g.dy == 2.0f);
+    // The stale-eyes sequence: the level rose to 0.8 while 0.2 was drawn. A canvas paint far away (a box dragged) calls
+    // paintAlphi too: it must not mark 0.8 as drawn, so the 10 Hz wake still asks for his rect.
+    auto const look = mcp::alphiLook(true);
+    float drawn = 0.2f;
+    float const level = 0.8f;
+    CHECK(mcp::alphiPulseWake(drawn, level, look));
+    drawn = mcp::alphiDrawnAfterPaint(drawn, mcp::alphiPulseHeld(drawn, level, look), false); // paint elsewhere
+    CHECK(mcp::alphiPulseWake(drawn, level, look));                                       // still stale: still woken
+    drawn = mcp::alphiDrawnAfterPaint(drawn, mcp::alphiPulseHeld(drawn, level, look), true); // his own repaint
+    CHECK(!mcp::alphiPulseWake(drawn, level, look));
+}
+
 // Alphi drop 1 F2 (D5): his eyes look toward the selection's centre, clamped to +-3 design px per axis (direction
 // kept); no selection: straight ahead. Screen-constant: the same screen distance gives the same look at any zoom.
 static void gaze()
@@ -354,6 +597,11 @@ int main()
     gaze();
     pulse();
     pulseFollow();
+    pulseCalmQuantize();
+    pulseCalmJitter();
+    pulseCalmSteadyAndZero();
+    pulseCalmMusicStillMoves();
+    pulseCalmRecordsOnlyWhenCovered();
     placement();
     chipsKeepClear();
     docked();

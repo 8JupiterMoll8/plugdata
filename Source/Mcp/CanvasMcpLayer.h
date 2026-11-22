@@ -511,7 +511,7 @@ public:
     // CanvasMcpAlphiSay.cpp: the pulse (D2/D3), the gaze (D5), sparks / dots / spiral, the strip (D6) and the D4
     // motion timer. It repaints only Alphi's rect and strip, and never touches the gate or the dock.
     void alphiMotionSample(std::int64_t nowMs); // the ceiling's pulse and the say board's line clock, now
-    mcp::AlphiEyes alphiEyesNow(mcp::AlphiLook const& look);
+    mcp::AlphiEyes alphiEyesNow(mcp::AlphiLook const& look, bool coveredHisRect); // draws the held level; records it only when covered
     mcp::AlphiGaze alphiGazeNow(mcp::ApprovalRect face) const;
     void paintAlphiFx(NVGcontext* nvg, std::int64_t nowMs);
     void paintAlphiDizzyEye(NVGcontext* nvg, float x, float y, mcp::AlphiRgba colour, std::int64_t nowMs);
@@ -527,7 +527,7 @@ public:
     mcp::AlphiLineClock mcpAlphiLineClock;
     float mcpAlphiPulseLevel = 0.0f;  // the followed level (alphiPulseFollow)
     float mcpAlphiPulseTarget = 0.0f; // what the ceiling asks for now (alphiPulse)
-    float mcpAlphiPulseDrawn = 0.0f;  // the level last drawn
+    float mcpAlphiPulseDrawn = 0.0f;  // the level last drawn: the held one (alphiPulseHeld, the eye size on a 0.25 px grid)
     std::uint64_t mcpAlphiPulseBlocks = 0;
     std::int64_t mcpAlphiPulseFreshMs = 0;  // when the ceiling's block counter last moved (GUI clock)
     std::int64_t mcpAlphiPulseSampleMs = 0; // the last follow step

@@ -159,6 +159,7 @@ struct AlphiPulseMetrics {
     static constexpr float dashRest = 2.2f;     // off look: the flat dash's height (design px) at rest ...
     static constexpr float dashFull = 5.0f;     // ... and at the full pulse
     static constexpr float radiusGrow = 1.45f;  // on look: the eye radius at the full pulse, times the resting one
+    static constexpr float drawStepPx = 0.25f;  // the drawn eye size snaps to this grid (design px), see alphiPulseHeld
 };
 
 struct AlphiEyes {
@@ -211,6 +212,46 @@ inline float alphiPulseFollow(float level, float target, float dtMs)
     if (!(dtMs > 0.0f) || !std::isfinite(dtMs)) return level;
     if (target > level) return std::fmin(target, level + dtMs / P::attackMs);
     return std::fmax(target, level - dtMs / P::releaseMs);
+}
+
+// Alphi calm (2026-11-22): what the eyes DRAW, and so what decides a repaint. The ceiling publishes the raw per-block
+// mean square, so a steady hiss, drone or music bed wiggles the followed level by a dB or two on every tick: repainting
+// on the level restarted the 30 Hz motion timer for as long as anything was above -60 dBFS. The eye's drawn size (the
+// on look's radius, the off look's dash height) is what the screen shows, so the repaint follows that instead: it
+// snaps to a drawStepPx grid anchored at the resting look (calm is exactly the resting look), and holds while the level
+// stays within one step of what was drawn (hysteresis: a level sitting on a grid line cannot flip-flop). The grid is
+// the only change to the look: at most one step (0.25 design px, half a device pixel at render scale 2) off the level.
+inline float alphiEyeGrowthPx(AlphiLook const& look)
+{
+    using P = AlphiPulseMetrics;
+    return look.sleepy ? P::dashFull - P::dashRest : look.eyeRadius * (P::radiusGrow - 1.0f);
+}
+
+// The level (0..1) the next paint draws for the followed `level`, given the level the last paint drew (`drawn`, itself
+// the result of an earlier call). Equal to `drawn` while nothing the eye shows would change; calm (level 0) is always
+// exactly 0. Never NaN, always within 0..1.
+inline float alphiPulseHeld(float drawn, float level, AlphiLook const& look)
+{
+    using P = AlphiPulseMetrics;
+    if (!(level > 0.0f)) return 0.0f; // calm, NaN and below 0
+    if (level > 1.0f) level = 1.0f;
+    if (!(drawn >= 0.0f)) drawn = 0.0f;
+    if (drawn > 1.0f) drawn = 1.0f;
+    float const range = alphiEyeGrowthPx(look);
+    if (!(range > 0.0f)) return level;
+    float const step = P::drawStepPx / range; // one grid step, as a level
+    if (std::fabs(level - drawn) < step) return drawn;
+    float const snapped = std::round(level / step) * step;
+    return snapped > 1.0f ? 1.0f : snapped;
+}
+
+// What a paint records as drawn (Alphi calm, item 4): `now` only when the paint's region covered his rect. A canvas
+// paint elsewhere (a box dragged, a scope redrawn) also runs paintAlphi, but it leaves the screen at his rect as it
+// was, so recording it as drawn left stale eyes until the level moved again.
+template <class T>
+inline T alphiDrawnAfterPaint(T prev, T now, bool coveredHisRect)
+{
+    return coveredHisRect ? now : prev;
 }
 
 // Alphi drop 1, F2 (D5): his eyes look toward the selection. The offset (design px) points from his frame's centre to
