@@ -32,6 +32,9 @@ using namespace juce::gl;
 #include <atomic>
 #include <nanovg_async.h>
 
+#include "Mcp/McpFrameLog.h" // MCP-CARRIED(frame-pacing)
+#include "Mcp/McpFramePacer.h"
+
 #if !NANOVG_METAL_IMPLEMENTATION
 #define NANOVG_GL_IMPLEMENTATION 1
 #endif
@@ -185,6 +188,10 @@ public:
 
     void invalidateArea(Rectangle<int> area);
     void invalidateAll();
+    // MCP-CARRIED(frame-pacing): a frame at once, not at the next pacing tick (the render thread needs a full frame).
+    void invalidateAllNow();
+    // MCP-CARRIED(frame-pacing): record the damage collected so far now, skipping the 16 ms pacing (screenshot, readback).
+    void flushPacedFrame();
 
     static NVGSurface* getSurfaceForContext(NVGcontext*);
 
@@ -205,6 +212,15 @@ private:
     void snapshotEditorSize();
     void scheduleRender();
     void recordFrame();
+#if NANOVG_GL_IMPLEMENTATION
+    // MCP-CARRIED(frame-pacing): GL records at most one frame per 16 ms and never over a frame the render thread still
+    // holds (Source/Mcp/McpFramePacer.h). Message thread only, except the two render-thread counters.
+    void pacerTick();
+    void armFramePacer(double delayMs);
+    void applyPacerDecision(mcp::FramePacer::Decision const& decision);
+    void recordPacedFrame();
+    void emitFrameLog();
+#endif
     void createRenderContext();
     void destroyRenderContext();
     void renderBackendFrame();
@@ -305,6 +321,28 @@ private:
 
 #if NANOVG_GL_IMPLEMENTATION
     std::unique_ptr<OpenGLContext> glContext;
+
+    // MCP-CARRIED(frame-pacing): the pacer, its one-shot wake-up timer, and the env-gated frame log.
+    class CallbackTimer final : public Timer {
+    public:
+        explicit CallbackTimer(std::function<void()> fn)
+            : callback(std::move(fn))
+        {
+        }
+        void timerCallback() override { callback(); }
+
+    private:
+        std::function<void()> callback;
+    };
+
+    mcp::FramePacer framePacer;
+    CallbackTimer pacerTimer { [this] { pacerTick(); } };
+    bool urgentFrameRequested = false;
+    bool const frameLogEnabled = SystemStats::getEnvironmentVariable("PLUGDATA_NVG_FRAME_LOG", {}) == "1";
+    mcp::FrameLogWindow frameLogWindow;
+    CallbackTimer frameLogTimer { [this] { emitFrameLog(); } };
+    std::atomic<std::uint64_t> renderedFrames { 0 };  // render thread: frames replayed (frame log only)
+    std::atomic<std::uint64_t> presentedFrames { 0 }; // render thread: presents / swaps (frame log only)
 #endif
 
 #if NANOVG_METAL_IMPLEMENTATION

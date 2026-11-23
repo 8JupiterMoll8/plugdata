@@ -694,6 +694,10 @@ juce::String GuiHost::screenshot(t_canvas* cnv, float scale, LabelSource const* 
         return juce::String("error:no_editor");
     }
 
+    // The GL surface paces its frames (at most one per 16 ms): record what is still waiting for its tick now, so the
+    // capture shows the state the bridge call just produced (lag fix 2026-11-23).
+    editor->nvgSurface.flushPacedFrame();
+
     // ── Native window capture (createSnapshotOfNativeWindow) ──
     // PlugData's Canvas is NVGComponent: JUCE paint() is empty, GPU-side
     // rendering. createSnapshotOfNativeWindow uses XGetImage on the X11

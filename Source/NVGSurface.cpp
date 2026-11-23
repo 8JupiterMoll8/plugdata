@@ -14,6 +14,10 @@ using namespace juce::gl;
 #include <BinaryData.h>
 
 #include <nanovg_async.h>
+#include <algorithm> // MCP-CARRIED(frame-pacing)
+#include <cmath>
+#include <cstdio>
+#include <utility>
 #ifndef NANOVG_METAL_IMPLEMENTATION
 #    include <nanovg_gl.h>
 #    if JUCE_LINUX || JUCE_BSD
@@ -46,6 +50,11 @@ NVGSurface::NVGSurface(PluginEditor* e)
 #    endif
     glContext->setSwapInterval(0);
     glContext->setContinuousRepainting(false);
+#endif
+
+#if NANOVG_GL_IMPLEMENTATION
+    if (frameLogEnabled) // MCP-CARRIED(frame-pacing): PLUGDATA_NVG_FRAME_LOG=1, one line per second on stderr
+        frameLogTimer.startTimer(1000);
 #endif
 
 #if PLUGDATA_NVG_FRAME_TIME_OVERLAY
@@ -265,6 +274,10 @@ void NVGSurface::run()
 
 void NVGSurface::presentFramebuffer(int viewWidth, int viewHeight)
 {
+#if NANOVG_GL_IMPLEMENTATION
+    if (frameLogEnabled) // MCP-CARRIED(frame-pacing)
+        presentedFrames.fetch_add(1, std::memory_order_relaxed);
+#endif
     nvgBindFramebuffer(nullptr);
 
 #if NANOVG_METAL_IMPLEMENTATION
@@ -309,9 +322,11 @@ void NVGSurface::renderBackendFrame()
             && recordedFramebufferHeight.load() == viewHeight;
 
         if (!hasMatchingFullFrame) {
+            // MCP-CARRIED(frame-pacing): the render thread cannot show what is pending (wrong size or none): ask for a
+            // full frame at once, over the pending one (the pacer would wait for a frame that is never taken).
             MessageManager::callAsync([_this = SafePointer(this)] {
                 if (_this)
-                    _this->invalidateAll();
+                    _this->invalidateAllNow(); // MCP-CARRIED(frame-pacing)
             });
 
             presentFramebuffer(viewWidth, viewHeight);
@@ -359,6 +374,10 @@ void NVGSurface::renderBackendFrame()
 
     if (didRender) {
         frameReadyForReplay.store(false);
+#if NANOVG_GL_IMPLEMENTATION
+        if (frameLogEnabled) // MCP-CARRIED(frame-pacing)
+            renderedFrames.fetch_add(1, std::memory_order_relaxed);
+#endif
 #if PLUGDATA_NVG_FRAME_TIME_OVERLAY
         // The render-thread cost of actually replaying the frame -- a real estimate
         // of frame performance, unlike the (throttled) interval between repaints.
@@ -510,15 +529,33 @@ void NVGSurface::invalidateAll()
     invalidateArea(getLocalBounds());
 }
 
+// MCP-CARRIED(frame-pacing): the same damage, but the frame is recorded at once, over a pending one (see FramePacer).
+void NVGSurface::invalidateAllNow()
+{
+#if NANOVG_GL_IMPLEMENTATION
+    urgentFrameRequested = true;
+#endif
+    invalidateAll();
+}
+
 void NVGSurface::invalidateArea(Rectangle<int> const area)
 {
     invalidArea = invalidArea.getUnion(area);
     // MCP-CARRIED(repaint-scope): keep the separate rects too (see renderPasses).
     if (!area.isEmpty()) {
-        if (invalidRects.size() < maxInvalidRects)
-            invalidRects.push_back(area);
-        else
-            invalidRects.assign(1, invalidArea);
+        // MCP-CARRIED(frame-pacing): damage now collects for up to one pacing interval before a frame takes it, so a
+        // rect inside one we already have adds nothing, and one that swallows others replaces them (the cap below
+        // would otherwise collapse a busy interval into its bounding box).
+        bool covered = false;
+        for (auto const& r : invalidRects)
+            covered = covered || r.contains(area);
+        if (!covered) {
+            invalidRects.erase(std::remove_if(invalidRects.begin(), invalidRects.end(), [&area](auto const& r) { return area.contains(r); }), invalidRects.end());
+            if (invalidRects.size() < maxInvalidRects)
+                invalidRects.push_back(area);
+            else
+                invalidRects.assign(1, invalidArea);
+        }
     }
     scheduleRender();
 }
@@ -575,12 +612,112 @@ std::vector<Rectangle<int>> NVGSurface::renderPasses(Rectangle<int> const bounds
 
 void NVGSurface::handleAsyncUpdate()
 {
+#if NANOVG_GL_IMPLEMENTATION
+    pacerTick(); // MCP-CARRIED(frame-pacing): the frame is recorded when the pacer says so
+#else // MCP-CARRIED(frame-pacing)
     recordFrame();
+#endif // MCP-CARRIED(frame-pacing)
 }
 
 void NVGSurface::scheduleRender()
 {
+#if NANOVG_GL_IMPLEMENTATION
+    // MCP-CARRIED(frame-pacing): an invalidation only marks the surface dirty; the pacer decides when a frame is
+    // recorded (at most one per 16 ms, never over a frame the render thread still holds).
+    auto const nowMs = Time::getMillisecondCounterHiRes();
+    armFramePacer(std::exchange(urgentFrameRequested, false) ? framePacer.invalidateNow(nowMs) : framePacer.invalidate(nowMs));
+#else
     triggerAsyncUpdate();
+#endif
+}
+
+#if NANOVG_GL_IMPLEMENTATION
+// MCP-CARRIED(frame-pacing): everything below is the GL pacing glue around mcp::FramePacer (message thread only).
+void NVGSurface::armFramePacer(double const delayMs)
+{
+    if (delayMs < 0.0)
+        return; // a wake is already armed
+
+    if (delayMs <= 0.0) {
+        // due now: the end of this message-loop turn, as every invalidation was before the pacer
+        pacerTimer.stopTimer();
+        triggerAsyncUpdate();
+    } else {
+        pacerTimer.startTimer(jmax(1, static_cast<int>(std::ceil(delayMs))));
+    }
+}
+
+void NVGSurface::pacerTick()
+{
+    JUCE_ASSERT_MESSAGE_THREAD;
+    pacerTimer.stopTimer(); // one-shot: applyPacerDecision arms the next look if there is one
+
+    auto* asyncNvg = nvg.load();
+    auto const pending = asyncNvg != nullptr && nanovg::hasPendingFrame(asyncNvg);
+    applyPacerDecision(framePacer.tick(Time::getMillisecondCounterHiRes(), pending));
+}
+
+void NVGSurface::applyPacerDecision(mcp::FramePacer::Decision const& decision)
+{
+    using Action = mcp::FramePacer::Action;
+    switch (decision.action) {
+    case Action::Record:
+        // overwritePending (urgent frame, or one the render thread never took): recordFrame still folds the replaced
+        // frame's damage back in, exactly once. A normal paced record never finds a pending frame, so it folds nothing.
+        recordPacedFrame();
+        break;
+    case Action::Wait:
+        if (decision.nudgeRender)
+            requestBackendRender();
+        armFramePacer(decision.nextWakeMs);
+        break;
+    case Action::Idle:
+        break;
+    }
+}
+
+void NVGSurface::recordPacedFrame()
+{
+    if (!frameLogEnabled) {
+        recordFrame();
+        return;
+    }
+
+    auto const bounds = editor->getLocalBounds();
+    auto const hadDamage = !invalidArea.getIntersection(bounds).isEmpty();
+    auto const startMs = Time::getMillisecondCounterHiRes();
+    recordFrame();
+    // recordFrame clears the damage when it recorded a frame; it keeps it when there is no context yet
+    if (!hadDamage || !invalidArea.isEmpty())
+        return;
+
+    double damagePixels = 0.0;
+    for (auto const& r : inFlightRects)
+        damagePixels += static_cast<double>(r.getWidth()) * r.getHeight();
+    frameLogWindow.addRecord(damagePixels, static_cast<double>(bounds.getWidth()) * bounds.getHeight(), Time::getMillisecondCounterHiRes() - startMs);
+}
+
+void NVGSurface::emitFrameLog()
+{
+    auto const line = frameLogWindow.takeLine(framePacer.stats(), renderedFrames.load(std::memory_order_relaxed), presentedFrames.load(std::memory_order_relaxed));
+    std::fprintf(stderr, "%s win=%p\n", line.c_str(), static_cast<void*>(this));
+}
+#endif
+
+void NVGSurface::flushPacedFrame()
+{
+#if NANOVG_GL_IMPLEMENTATION
+    // MCP-CARRIED(frame-pacing): the synchronous path (screenshot, readback): whatever is dirty is recorded now.
+    JUCE_ASSERT_MESSAGE_THREAD;
+    if (!framePacer.isDirty())
+        return;
+
+    cancelPendingUpdate();
+    pacerTimer.stopTimer();
+    auto* asyncNvg = nvg.load();
+    auto const pending = asyncNvg != nullptr && nanovg::hasPendingFrame(asyncNvg);
+    applyPacerDecision(framePacer.flushNow(Time::getMillisecondCounterHiRes(), pending));
+#endif
 }
 
 void NVGSurface::requestBackendRender()
@@ -896,6 +1033,8 @@ Image NVGSurface::renderToImage(Rectangle<int> logicalArea)
 
     if (deviceArea.isEmpty())
         return {};
+
+    flushPacedFrame(); // MCP-CARRIED(frame-pacing): damage still waiting for its pacing tick goes out now
 
     // One readback at a time; the eyedropper is the only caller.
     ScopedLock const sl(readbackLock);
