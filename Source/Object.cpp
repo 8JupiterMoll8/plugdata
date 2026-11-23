@@ -1284,33 +1284,27 @@ void Object::renderIolets(NVGcontext* nvg)
     if (cnv->isGraph)
         return;
 
-    // MCP-CARRIED(repaint-scope): the box clip is intersected per iolet instead of once, so a targeted iolet can draw outside
-    // the box without nvgResetScissor, which also dropped the clip of the render pass (it drew outside its pass).
-    Rectangle<int> ioletClip; // MCP-CARRIED(repaint-scope)
-    bool clipIolets = false; // MCP-CARRIED(repaint-scope)
     if (getValue<bool>(locked) || !drawIoletExpanded) {
-        ioletClip = getLocalBounds().reduced(Object::margin); // MCP-CARRIED(repaint-scope)
-        clipIolets = true; // MCP-CARRIED(repaint-scope)
+        auto const clipBounds = getLocalBounds().reduced(Object::margin);
+        nanovg::nvgIntersectScissor(nvg, clipBounds.getX(), clipBounds.getY(), clipBounds.getWidth(), clipBounds.getHeight());
     } else if (getValue<bool>(patchDownwardsOnly)) {
-        ioletClip = getLocalBounds().reduced(Object::margin); // MCP-CARRIED(repaint-scope)
-        ioletClip.setHeight(ioletClip.getHeight() + Object::doubleMargin); // MCP-CARRIED(repaint-scope)
-        clipIolets = true; // MCP-CARRIED(repaint-scope)
+        auto const clipBounds = getLocalBounds().reduced(Object::margin);
+        nanovg::nvgIntersectScissor(nvg, clipBounds.getX(), clipBounds.getY(), clipBounds.getWidth(), clipBounds.getHeight() + Object::doubleMargin);
     }
 
     auto lastPosition = Point<int>();
     for (auto* iolet : iolets) {
         nanovg::nvgTranslate(nvg, iolet->getX() - lastPosition.x, iolet->getY() - lastPosition.y);
 
-        bool const clipThis = clipIolets && !iolet->isTargeted(); // MCP-CARRIED(repaint-scope)
-        if (clipThis) { // MCP-CARRIED(repaint-scope)
+        if (iolet->isTargeted()) {
             nanovg::nvgSave(nvg);
-            nanovg::nvgIntersectScissor(nvg, ioletClip.getX() - iolet->getX(), ioletClip.getY() - iolet->getY(), ioletClip.getWidth(), ioletClip.getHeight()); // MCP-CARRIED(repaint-scope)
+            nanovg::nvgResetScissor(nvg);
         }
 
         iolet->render(nvg);
         lastPosition = iolet->getPosition();
 
-        if (clipThis) { // MCP-CARRIED(repaint-scope)
+        if (iolet->isTargeted()) {
             nanovg::nvgRestore(nvg);
         }
     }

@@ -16,10 +16,9 @@
 // canvas) still forced every damage rect that touched the canvas into one pass (`bothOnCanvas`), because the canvas
 // render reads the invalid area and the MCP layer keeps per-paint state. That audit is done (CanvasMcpLayer: every
 // per-paint field is either recomputed whole in each pass, or recorded only by a pass that covers what it records), so
-// canvas damage may now be several passes, each flushed on its own (NVGSurface::recordFrame, GL). What stays: the
-// passes are pairwise disjoint, never paint more than the bounding box of the damage, at most maxRenderPasses (a flush
-// each), and one pass when the bounding box is hardly bigger than the passes. A backend that flushes once per frame
-// (Metal) sets mergeCanvasDamage and keeps the old rule: all canvas damage in one region.
+// canvas damage may now be several passes. What stays: the passes are pairwise disjoint, never paint more than the
+// bounding box of the damage, and a canvas that cannot take two passes (mergeCanvasDamage: presentation mode draws
+// whole-canvas quads, one per pass) keeps the old rule.
 
 #include <algorithm>
 #include <cstddef>
@@ -70,12 +69,8 @@ struct PassRect {
     }
 };
 
-/** More damage clusters than this are merged, cheapest pair first (never into one bounding box: that was the bug). Each
- *  pass is one flush on the GL thread (its own scissor, vertex and uniform upload and stencil clear), so few. */
-constexpr std::size_t maxRenderPasses = 4;
-/** A frame whose passes' bounding box is at most this many times (numerator / 2) their summed area is one pass: the
- *  passes would save little and cost a flush each. */
-constexpr std::int64_t renderPassBoxRatioTimes2 = 5; // 2.5x
+/** More damage clusters than this are merged, cheapest pair first (never into one bounding box: that was the bug). */
+constexpr std::size_t maxRenderPasses = 8;
 /** Separately painted rects are merged when their union is hardly bigger than the two (area in px^2 of slack). */
 constexpr std::int64_t renderPassNearSlack = 64 * 64;
 
@@ -86,8 +81,8 @@ struct RenderPassInput {
     Rect bounds;             // the editor's bounds
     Rect canvasArea;         // the tab component's area; read only with mergeCanvasDamage
     bool pluginMode = false; // plugin mode renders its one canvas as a whole: one pass
-    // A backend with one flush per frame (Metal) cannot scissor each pass: every rect that touches canvasArea is merged
-    // with the others that do, as before the split.
+    // A canvas that must see ONE region per frame (presentation mode fills whole-canvas quads in every pass): every
+    // rect that touches canvasArea is merged with the others that do, as before the split.
     bool mergeCanvasDamage = false;
     std::size_t maxPasses = maxRenderPasses;
 };
@@ -174,16 +169,6 @@ std::vector<Rect> planRenderPasses(RenderPassInput<Rect> const& in)
 
     if (passes.empty())
         return single;
-    if (passes.size() > 1 && !in.mergeCanvasDamage) {
-        Rect box = passes.front();
-        std::int64_t sum = 0;
-        for (auto const& p : passes) {
-            box = box.getUnion(p);
-            sum += detail::passArea(p);
-        }
-        if (detail::passArea(box) * 2 <= sum * renderPassBoxRatioTimes2)
-            return { box };
-    }
     return passes;
 }
 

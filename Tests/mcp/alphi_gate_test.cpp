@@ -439,40 +439,8 @@ static void brakeFloorAndOnGap()
     }
 }
 
-static void motionAskIsPerFrame()
-{
-    std::printf("motion ask: every pass of the frame that paints the repaint sees it, the next frame does not\n");
-    mcp::AlphiMotionAsk ask;
-    CHECK(!ask.seenBy(7)); // nothing asked
-    ask.ask();
-    // Several passes in one frame (repaint scope): the pass order must not decide who skips the dock pass.
-    CHECK(ask.seenBy(7));
-    CHECK(ask.seenBy(7));
-    CHECK(ask.seenBy(7));
-    CHECK(!ask.seenBy(8)); // the next frame: consumed
-    CHECK(!ask.seenBy(8));
-    ask.ask();
-    CHECK(ask.seenBy(9));
-    CHECK(ask.seenBy(9));
-    CHECK(!ask.seenBy(10));
-    // A request nobody painted yet (a frame that skipped this canvas) waits for the first paint that looks.
-    ask.ask();
-    CHECK(ask.seenBy(20));
-    // Frame 0 = the frame is unknown: consumed by the first look, as before the passes.
-    ask.ask();
-    CHECK(ask.seenBy(0));
-    CHECK(!ask.seenBy(0));
-    // A new request after a frame saw the old one is a new request.
-    ask.ask();
-    CHECK(ask.seenBy(30));
-    ask.ask();
-    CHECK(ask.seenBy(31));
-    CHECK(ask.seenBy(31));
-}
-
 int main()
 {
-    motionAskIsPerFrame();
     lineClock();
     motionTimer();
     sayExpiryRepaint();

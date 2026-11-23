@@ -538,7 +538,7 @@ public:
     bool mcpAlphiDizzyDrawn = false;
     float mcpAlphiLineAlphaDrawn = 0.0f;
     juce::Rectangle<int> mcpAlphiStripFrame; // the strip as drawn in the last paint (empty: not shown); swallows its click
-    mcp::AlphiMotionAsk mcpAlphiMotionAsk;   // the motion timer asked for the next paint (N3); seen by every pass of that frame
+    bool mcpAlphiMotionAsked = false;        // the motion timer asked for the next paint (N3)
     juce::Rectangle<int> mcpAlphiStripRegion; // review M: this paint's render region, for the strip's frame
     mcp::ApprovalRect mcpAlphiZoneRect;       // review HIGH: the zone and layout key of the last paint
     std::uint64_t mcpAlphiZoneKey = 0;

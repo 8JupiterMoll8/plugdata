@@ -64,8 +64,6 @@ public:
     void handleAsyncUpdate() override;
 
     Rectangle<int> getInvalidArea() const { return invalidArea; }
-    // MCP-CARRIED(repaint-scope): counts the frames recorded (1, 2, ...), constant over the passes of one frame; 0 before the first.
-    uint64 getRecordedFrameId() const { return recordedFrameId; }
 
     float getRenderScale() const;
 
@@ -241,7 +239,6 @@ private:
 
     Rectangle<int> invalidArea;          // damage accumulated since the last recorded frame (message thread)
     Rectangle<int> inFlightDamage;       // damage of the last recorded frame, re-folded if it gets coalesced
-    uint64 recordedFrameId = 0;          // MCP-CARRIED(repaint-scope): see getRecordedFrameId
     // MCP-CARRIED(repaint-scope): the separate damaged rects behind invalidArea (its bounding box). Two small
     // repaints far apart (the toolbar level meter at the top, an animation low on the canvas) used to redraw the
     // whole bounding box, i.e. most of the window, every frame; recordFrame now paints distant clusters as

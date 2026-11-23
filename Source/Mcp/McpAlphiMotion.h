@@ -263,40 +263,4 @@ private:
     std::string lastKey;
 };
 
-// Alphi calm / repaint scope: the motion timer asked for the next paint (review N3: that paint skips the dock pass when it
-// stays near Alphi). One frame can hold several canvas passes (NVGSurface paints far-apart damage as separate clipped
-// passes): the request is seen by EVERY pass of the frame that first looks, whatever their order, and gone from the next
-// frame on. The first pass used to consume it, so a pass elsewhere in front of Alphi's own made both walk every box.
-// frameId is NVGSurface's recorded-frame counter; 0 = unknown frame: consumed by the first look.
-class AlphiMotionAsk {
-public:
-    void ask()
-    {
-        asked_ = true;
-        frame_ = 0;
-    }
-
-    bool seenBy(std::uint64_t frameId)
-    {
-        if (!asked_)
-            return false;
-        if (frameId == 0) {
-            asked_ = false;
-            return true;
-        }
-        if (frame_ == 0)
-            frame_ = frameId;
-        if (frame_ != frameId) {
-            asked_ = false;
-            frame_ = 0;
-            return false;
-        }
-        return true;
-    }
-
-private:
-    bool asked_ = false;
-    std::uint64_t frame_ = 0;
-};
-
 } // namespace mcp
