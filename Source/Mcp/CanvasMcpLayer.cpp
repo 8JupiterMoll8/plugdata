@@ -273,11 +273,10 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
             float const textLeft = tape.getX() + mcp::aiTagGlyphSlotPx;
             {
                 NVGScopedState scopedText(nvg);
-                // The frame cuts a text that is longer than it: never drawn past it, never over the close cross. Intersected with
-                // the clip this render already has (a replacing scissor let the text land outside its pass, over what the pass did
-                // not redraw: repaint scope, several passes in one frame); the scoped state above brings the clip back.
-                nanovg::nvgIntersectScissor(nvg, textLeft - 1.0f, tape.getY(), std::max(20.0f, tape.getWidth() - mcp::aiTagGlyphSlotPx - annotationCloseSlotPx), tape.getHeight());
+                // The frame cuts a text that is longer than it: never drawn past it, never over the close cross.
+                nanovg::nvgScissor(nvg, textLeft - 1.0f, tape.getY(), std::max(20.0f, tape.getWidth() - mcp::aiTagGlyphSlotPx - annotationCloseSlotPx), tape.getHeight());
                 mcpai::drawHaloText(nvg, textLeft, midY, a.text.toRawUTF8(), canvasBg, mcpai::colour(mcp::aiInk));
+                nanovg::nvgResetScissor(nvg);
             }
 
             // 4. On hover only: a 1 px ink outline around the tag and the close cross in ink (grey until the pointer is on it).

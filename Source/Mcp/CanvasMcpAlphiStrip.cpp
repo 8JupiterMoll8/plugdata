@@ -278,7 +278,7 @@ void CanvasMcpLayer::paintAlphiTab(NVGcontext* nvg)
     NVGScopedState scoped(nvg);
     nanovg::nvgTranslate(nvg, static_cast<float>(frame.getX()), static_cast<float>(frame.getY()));
     nanovg::nvgScale(nvg, k, k);
-    nanovg::nvgIntersectScissor(nvg, 0.0f, 0.0f, static_cast<float>(T::w), static_cast<float>(T::h)); // intersect: a replacing scissor paints outside the pass
+    nanovg::nvgScissor(nvg, 0.0f, 0.0f, static_cast<float>(T::w), static_cast<float>(T::h));
     nanovg::nvgDrawRoundedRect(nvg, 2.0f, 10.0f, 44.0f, 44.0f, nanovg::nvgRGBA(242, 241, 236, 255), nanovg::nvgRGBA(196, 196, 190, 255), 12.0f);
     nanovg::nvgDrawRoundedRect(nvg, 8.0f, 17.0f, 32.0f, 21.0f, nanovg::nvgRGBA(24, 26, 31, 255), nanovg::nvgRGBA(10, 11, 14, 255), 6.0f);
     nanovg::nvgBeginPath(nvg);
