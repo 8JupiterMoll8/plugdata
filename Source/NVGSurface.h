@@ -342,6 +342,7 @@ private:
     mcp::FramePacer framePacer;
     CallbackTimer pacerTimer { [this] { pacerTick(); } };
     bool urgentFrameRequested = false;
+    bool recordingForLog = false; // inside recordFrame, frame log on: an invalidation now is counted (damage dropped)
     bool const frameLogEnabled = SystemStats::getEnvironmentVariable("PLUGDATA_NVG_FRAME_LOG", {}) == "1";
     mcp::FrameLogWindow frameLogWindow;
     CallbackTimer frameLogTimer { [this] { emitFrameLog(); } };

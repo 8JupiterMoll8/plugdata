@@ -632,6 +632,8 @@ void NVGSurface::scheduleRender()
 #if NANOVG_GL_IMPLEMENTATION
     // MCP-CARRIED(frame-pacing): an invalidation only marks the surface dirty; the pacer decides when a frame is
     // recorded (at most one per 16 ms, never over a frame the render thread still holds).
+    if (recordingForLog) // PLUGDATA_NVG_FRAME_LOG: asked from inside the render, so recordFrame drops this damage
+        frameLogWindow.addInvalidateDuringRecord();
     auto const nowMs = Time::getMillisecondCounterHiRes();
     armFramePacer(std::exchange(urgentFrameRequested, false) ? framePacer.invalidateNow(nowMs) : framePacer.invalidate(nowMs));
 #else
@@ -694,7 +696,9 @@ void NVGSurface::recordPacedFrame()
     auto const bounds = editor->getLocalBounds();
     auto const hadDamage = !invalidArea.getIntersection(bounds).isEmpty();
     auto const startMs = Time::getMillisecondCounterHiRes();
+    recordingForLog = true;
     recordFrame();
+    recordingForLog = false;
     // recordFrame clears the damage when it recorded a frame; it keeps it when there is no context yet
     if (!hadDamage || !invalidArea.isEmpty())
         return;

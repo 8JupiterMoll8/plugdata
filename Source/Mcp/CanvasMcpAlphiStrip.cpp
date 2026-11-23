@@ -174,9 +174,9 @@ void CanvasMcpLayer::paintAlphiStrip(NVGcontext* nvg)
     if (area.w <= 0 || area.h <= 0)
         return;
     juce::Rectangle<int> const r = juce::Rectangle<int>(area.x, area.y, area.w, area.h).expanded(2);
-    canvas.repaint(r);
-    if (canvas.editor)
-        canvas.editor->nvgSurface.invalidateArea(canvas.editor->nvgSurface.getLocalArea(&canvas, r));
+    // Asked from inside the render: the surface clears its damage when the frame is recorded, so a direct repaint would
+    // be lost and asked again by the next paint. Posted, it lands after the frame (lag fix 2026-11-23).
+    repaintAfterRender(r);
 }
 
 mcp::ApprovalRect CanvasMcpLayer::paintAlphiStripNow(NVGcontext* nvg)

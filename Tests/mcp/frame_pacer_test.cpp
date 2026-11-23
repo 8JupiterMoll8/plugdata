@@ -287,6 +287,9 @@ static void frameLog()
     st.invalidates = 500;
     st.records = 40;
     st.skippedPending = 12;
+    w.addInvalidateDuringRecord(); // an invalidation asked from inside the render (its damage is lost: fix #3)
+    w.addInvalidateDuringRecord();
+    w.addInvalidateDuringRecord();
     w.addRecord(/*damagePixels*/ 600 * 400, /*boundsPixels*/ 1000 * 800, /*recordMs*/ 2.0);
     w.addRecord(/*damagePixels*/ 1000 * 800, /*boundsPixels*/ 1000 * 800, /*recordMs*/ 4.0);
     auto const line = w.takeLine(st, /*renderFrames*/ 38, /*swaps*/ 61);
@@ -297,6 +300,7 @@ static void frameLog()
     CHECK(line.find("recMs=3.00") != std::string::npos); // (2 + 4) / 2
     CHECK(line.find("renderFrames=38") != std::string::npos);
     CHECK(line.find("swaps=61") != std::string::npos);
+    CHECK(line.find("inRender=3") != std::string::npos);
     CHECK(line.rfind("[nvg-frame]", 0) == 0);
     CHECK(line.find('\n') == std::string::npos);
 
@@ -311,6 +315,7 @@ static void frameLog()
     CHECK(idleLine.find("recMs=0.00") != std::string::npos);
     CHECK(idleLine.find("renderFrames=0") != std::string::npos);
     CHECK(idleLine.find("swaps=0") != std::string::npos);
+    CHECK(idleLine.find("inRender=0") != std::string::npos);
 }
 
 int main()

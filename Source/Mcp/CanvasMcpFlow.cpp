@@ -266,8 +266,7 @@ void CanvasMcpLayer::alphiSetTabUnder(juce::Rectangle<int> next)
     if (ghost.w <= 0)
         return;
     juce::Rectangle<int> const area(ghost.x, ghost.y, ghost.w, ghost.h);
-    canvas.repaint(area);
-    if (canvas.editor) canvas.editor->nvgSurface.invalidateArea(canvas.editor->nvgSurface.getLocalArea(&canvas, area));
+    repaintAfterRender(area); // only called from paintAlphi, i.e. inside the render: a direct repaint would be lost
 }
 
 void CanvasMcpLayer::paintAlphi(NVGcontext* nvg)
@@ -307,11 +306,8 @@ void CanvasMcpLayer::paintAlphi(NVGcontext* nvg)
             mcpAlphiTabUnder = tab.underBoxes;
             alphiSetTabUnder(tab.underBoxes ? tabFrame : juce::Rectangle<int> {});
             mcpAlphiTabFrame = tabFrame;
-            if (newUnder) {
-                auto const area = tabFrame.expanded(2);
-                canvas.repaint(area);
-                if (canvas.editor) canvas.editor->nvgSurface.invalidateArea(canvas.editor->nvgSurface.getLocalArea(&canvas, area));
-            }
+            if (newUnder)
+                repaintAfterRender(tabFrame.expanded(2)); // inside the render: posted, so the damage is not lost
             if (!tab.underBoxes)
                 paintAlphiTab(nvg);
             return;
@@ -343,8 +339,7 @@ void CanvasMcpLayer::paintAlphi(NVGcontext* nvg)
     if (mcp::alphiAfterPaint(mcpAlphiRepaint, underBox, mcpAlphiShownSinceMs, gate.frameInRegion, gate.covered)) {
         auto const m = mcp::alphiMotionArea(r, zoom); // F0: grown by 3 design px, so the rounding never cuts his frame
         juce::Rectangle<int> const area(m.x, m.y, m.w, m.h);
-        canvas.repaint(area);
-        if (canvas.editor) canvas.editor->nvgSurface.invalidateArea(canvas.editor->nvgSurface.getLocalArea(&canvas, area));
+        repaintAfterRender(area); // inside the render: posted, so the damage is not lost
     }
     if (gate.covered)
         return;
