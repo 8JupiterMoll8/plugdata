@@ -359,8 +359,7 @@ void CanvasMcpLayer::mouseMove(MouseEvent const& e)
         mcpNoteHover = hoverIdx;
         mcpNoteHoverClose = hoverClose;
         mcpNoteHoverChip = hoverChip;
-        canvas.repaint();
-        if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+        repaintCanvasView();
     }
 }
 
@@ -370,8 +369,7 @@ void CanvasMcpLayer::mouseExit(MouseEvent const& e)
         mcpNoteHover = -1;
         mcpNoteHoverClose = false;
         mcpNoteHoverChip = -1;
-        canvas.repaint();
-        if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+        repaintCanvasView();
     }
 }
 
@@ -456,8 +454,7 @@ bool CanvasMcpLayer::handleNoteClick(Point<int> canvasPt)
                     }
                     mcpPillDrawerMode = 0;
                     mcpPillDrawerFrame = {};
-                    canvas.repaint();
-                    if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+                    repaintCanvasView();
                     return true;
                 }
             } else if (mcpPillDrawerMode == 2) {
@@ -495,8 +492,7 @@ bool CanvasMcpLayer::handleNoteClick(Point<int> canvasPt)
                     switch (idx) {
                     case 0:
                         setSketchToolActive(!isSketchToolActive());
-                        canvas.repaint();
-                        if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+                        repaintCanvasView();
                         return true;
                     case 1:
                         createTextNoteAt(mcpMoodPillActive ? mcpMoodPillPos : juce::Point<int>(panel.getCentreX(), panel.getBottom()));
@@ -511,8 +507,7 @@ bool CanvasMcpLayer::handleNoteClick(Point<int> canvasPt)
                         // Pull keyboard focus to the canvas so Ctrl+V can never be
                         // swallowed by a lingering tape-note editor.
                         canvas.grabKeyboardFocus();
-                        canvas.repaint();
-                        if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+                        repaintCanvasView();
                         return true;
                     case 3:
                         // Melody record: declared intent — sing (no guessing).
@@ -527,8 +522,7 @@ bool CanvasMcpLayer::handleNoteClick(Point<int> canvasPt)
                                     mcpTakeSpawnPos = mcpMoodPillActive ? mcpMoodPillPos : juce::Point<int>(panel.getCentreX(), panel.getBottom() + 170);
                                     br->startVoiceCapture(60, 1);
                                 }
-                                canvas.repaint();
-                                if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+                                repaintCanvasView();
                             }
                         }
                         return true;
@@ -545,8 +539,7 @@ bool CanvasMcpLayer::handleNoteClick(Point<int> canvasPt)
                                     mcpTakeSpawnPos = mcpMoodPillActive ? mcpMoodPillPos : juce::Point<int>(panel.getCentreX(), panel.getBottom() + 170);
                                     br->startVoiceCapture(60, 2);
                                 }
-                                canvas.repaint();
-                                if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+                                repaintCanvasView();
                             }
                         }
                         return true;
@@ -563,8 +556,7 @@ bool CanvasMcpLayer::handleNoteClick(Point<int> canvasPt)
                                     mcpTakeSpawnPos = mcpMoodPillActive ? mcpMoodPillPos : juce::Point<int>(panel.getCentreX(), panel.getBottom() + 170);
                                     br->startMidiCapture(120, "canvas");
                                 }
-                                canvas.repaint();
-                                if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+                                repaintCanvasView();
                             }
                         }
                         return true;
@@ -581,8 +573,7 @@ bool CanvasMcpLayer::handleNoteClick(Point<int> canvasPt)
                 }
                 if (relX >= panel.getWidth() - 238 && relX < panel.getWidth() - 210) {
                     setTextToolActive(!isTextToolActive());
-                    canvas.repaint();
-                    if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+                    repaintCanvasView();
                     return true;
                 }
                 if (relX >= panel.getWidth() - 210 && relX < panel.getWidth() - 182) {
@@ -651,8 +642,7 @@ bool CanvasMcpLayer::handleNoteClick(Point<int> canvasPt)
                 if (i < static_cast<int>(notes.size()))
                     notes.erase(notes.begin() + i);
             });
-            canvas.repaint();
-            if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+            repaintCanvasView();
             return true;
         }
 
@@ -670,8 +660,7 @@ bool CanvasMcpLayer::handleNoteClick(Point<int> canvasPt)
                         undo();
                         mcpNoteHover = -1;
                         mcpNoteHoverChip = -1;
-                        canvas.repaint();
-                        if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+                        repaintCanvasView();
                         return true;
                     }
                     if (chip.prompt == "__reply__") {
@@ -721,21 +710,18 @@ bool CanvasMcpLayer::handleNoteClick(Point<int> canvasPt)
                             }
                             mcpNoteEditIndex = -1;
                             if (mcpNoteEditor) mcpNoteEditor->setVisible(false);
-                            canvas.repaint();
-                            if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+                            repaintCanvasView();
                         };
                         mcpNoteEditor->onEscapeKey = [this] {
                             mcpNoteEditIndex = -1;
                             if (mcpNoteEditor) mcpNoteEditor->setVisible(false);
-                            canvas.repaint();
-                            if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+                            repaintCanvasView();
                         };
                         mcpNoteEditor->onFocusLost = [this] {
                             if (juce::Time::getMillisecondCounter() - mcpNoteOpenedAt < 500) return;
                             mcpNoteEditIndex = -1;
                             if (mcpNoteEditor) mcpNoteEditor->setVisible(false);
-                            canvas.repaint();
-                            if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+                            repaintCanvasView();
                         };
                         mcpNoteEditor->setBounds(juce::roundToInt(tb.getX()),
                                                  juce::roundToInt(tb.getY() + tb.getHeight() + 2.0f),
@@ -748,8 +734,7 @@ bool CanvasMcpLayer::handleNoteClick(Point<int> canvasPt)
                             auto* ed = mcpNoteEditor.get();
                             juce::MessageManager::callAsync([ed] { if (ed) ed->grabKeyboardFocus(); });
                         }
-                        canvas.repaint();
-                        if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+                        repaintCanvasView();
                         return true;
                     }
 
@@ -771,8 +756,7 @@ bool CanvasMcpLayer::handleNoteClick(Point<int> canvasPt)
                     }
                     mcpNoteHover = -1;
                     mcpNoteHoverChip = -1;
-                    canvas.repaint();
-                    if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+                    repaintCanvasView();
                     return true;
                 }
                 curChipX += cw + 4.0f;
@@ -789,8 +773,7 @@ bool CanvasMcpLayer::handleNoteClick(Point<int> canvasPt)
                 if (auto* obj = findObjectByStableId(tid)) canvas.setSelected(obj, true);
             }
         }
-        canvas.repaint();
-        if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+        repaintCanvasView();
         return true;
     }
     return false;

@@ -54,8 +54,7 @@ void CanvasMcpLayer::answerApproval(juce::String const& nonce, bool yes)
 
 void CanvasMcpLayer::repaintApprovals()
 {
-    canvas.repaint();
-    if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+    repaintCanvasView();
 }
 
 void CanvasMcpLayer::ApprovalExpiryTimer::timerCallback()

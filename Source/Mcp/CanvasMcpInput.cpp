@@ -35,8 +35,7 @@ bool CanvasMcpLayer::mouseDownEarly(MouseEvent const& e)
             pasteImageFromClipboard();
         } else {
             mcpImageSlotActive = false;
-            canvas.repaint();
-            if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+            repaintCanvasView();
         }
         return true;
     }
@@ -86,8 +85,7 @@ bool CanvasMcpLayer::mouseDownLeft(MouseEvent const& e)
                 auto const pt = e.getPosition();
                 mcpCurrentStroke.push_back({static_cast<float>(pt.x), static_cast<float>(pt.y), juce::Time::getMillisecondCounterHiRes()});
             }
-            canvas.repaint();
-            if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+            repaintCanvasView();
             return true;
         }
 
@@ -163,8 +161,7 @@ bool CanvasMcpLayer::mouseDownOnGlass(MouseEvent const& e)
                                                 notes[static_cast<size_t>(editIndex)].text = typed;
                                         });
                                     }
-                                    canvas.repaint();
-                                    if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+                                    repaintCanvasView();
                                 };
                                 mcpNoteEditor->onEscapeKey = [this] {
                                     mcpNoteEditIndex = -1;
@@ -213,8 +210,7 @@ bool CanvasMcpLayer::mouseDownRight(MouseEvent const& e)
             mcpSketchAlpha = 1.0f;
             if (mcpSketchFadeTimer) mcpSketchFadeTimer->stopTimer();
             mcpCurrentStroke.clear();
-            canvas.repaint();
-            if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+            repaintCanvasView();
             return true;
         }
     return false;
@@ -227,8 +223,7 @@ bool CanvasMcpLayer::mouseDrag(MouseEvent const& e)
         auto const pt = e.getEventRelativeTo(&canvas).getPosition();
         auto const pdPos = pt - mcpTakeDragOffset - canvas.canvasOrigin;
         if (canvas.pd) canvas.pd->getMcp()->session.setMcpVoiceTakePos(mcpDraggingTakeId, static_cast<float>(pdPos.x), static_cast<float>(pdPos.y));
-        canvas.repaint();
-        if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+        repaintCanvasView();
         return true;
     }
 
@@ -237,8 +232,7 @@ bool CanvasMcpLayer::mouseDrag(MouseEvent const& e)
         auto const pt = e.getEventRelativeTo(&canvas).getPosition();
         auto const pdPos = pt - mcpMidiTakeDragOffset - canvas.canvasOrigin;
         if (canvas.pd) canvas.pd->getMcp()->session.setMcpMidiTakePos(mcpDraggingMidiTakeId, static_cast<float>(pdPos.x), static_cast<float>(pdPos.y));
-        canvas.repaint();
-        if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+        repaintCanvasView();
         return true;
     }
 
@@ -247,8 +241,7 @@ bool CanvasMcpLayer::mouseDrag(MouseEvent const& e)
         auto const pt = e.getEventRelativeTo(&canvas).getPosition();
         auto const pdPos = pt - mcpRefImageDragOffset - canvas.canvasOrigin;
         if (canvas.pd) canvas.pd->getMcp()->session.moveMcpReferenceImage(mcpDraggingRefImageId, static_cast<float>(pdPos.x), static_cast<float>(pdPos.y));
-        canvas.repaint();
-        if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+        repaintCanvasView();
         return true;
     }
 
@@ -278,15 +271,13 @@ bool CanvasMcpLayer::mouseDrag(MouseEvent const& e)
             }
             if (erasedAny) {
                 updateSelectionPill();
-                canvas.repaint();
-                if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+                repaintCanvasView();
             }
             return true;
         }
 
         mcpCurrentStroke.push_back({static_cast<float>(pt.x), static_cast<float>(pt.y), juce::Time::getMillisecondCounterHiRes()});
-        canvas.repaint();
-        if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+        repaintCanvasView();
         return true;
     }
 
@@ -299,8 +290,7 @@ bool CanvasMcpLayer::mouseUp(MouseEvent const& e)
     if (mcpDraggingTakeId.isNotEmpty()) {
         mcpDraggingTakeId.clear();
         canvas.setMouseCursor(juce::MouseCursor::NormalCursor);
-        canvas.repaint();
-        if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+        repaintCanvasView();
         return true;
     }
 
@@ -308,8 +298,7 @@ bool CanvasMcpLayer::mouseUp(MouseEvent const& e)
     if (mcpDraggingMidiTakeId.isNotEmpty()) {
         mcpDraggingMidiTakeId.clear();
         canvas.setMouseCursor(juce::MouseCursor::NormalCursor);
-        canvas.repaint();
-        if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+        repaintCanvasView();
         return true;
     }
 
@@ -317,8 +306,7 @@ bool CanvasMcpLayer::mouseUp(MouseEvent const& e)
     if (mcpDraggingRefImageId.isNotEmpty()) {
         mcpDraggingRefImageId.clear();
         canvas.setMouseCursor(juce::MouseCursor::NormalCursor);
-        canvas.repaint();
-        if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+        repaintCanvasView();
         return true;
     }
 
@@ -352,8 +340,7 @@ bool CanvasMcpLayer::mouseUp(MouseEvent const& e)
         }
         // Ink persists -> anchor the Moodboard Chisel under the fresh bbox.
         updateSelectionPill();
-        canvas.repaint();
-        if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+        repaintCanvasView();
         return true;
     }
 
@@ -398,8 +385,7 @@ bool CanvasMcpLayer::keyPressedForCanvas(KeyPress const& key)
     // Paste slot: Esc cancels the waiting frame.
     if (mcpImageSlotActive && key.getKeyCode() == juce::KeyPress::escapeKey) {
         mcpImageSlotActive = false;
-        canvas.repaint();
-        if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+        repaintCanvasView();
         return true;
     }
 

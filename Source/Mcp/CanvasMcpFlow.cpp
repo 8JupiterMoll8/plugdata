@@ -446,8 +446,7 @@ bool CanvasMcpLayer::handleAlphiClick(juce::Point<int> canvasPt)
         bool const wasOut = mcpAlphiPeek.out();
         auto const peek = mcpAlphiPeek.click(onTab, onFace);
         if (wasOut != mcpAlphiPeek.out()) {
-            canvas.repaint();
-            if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+            repaintCanvasView();
         }
         if (peek.consumed)
             return true;
@@ -482,7 +481,6 @@ bool CanvasMcpLayer::handleAlphiClick(juce::Point<int> canvasPt)
         host->alphiBrake(now);
     else
         canvas.pd->getMcp()->alphiClicked(now);
-    canvas.repaint();
-    if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+    repaintCanvasView();
     return true;
 }

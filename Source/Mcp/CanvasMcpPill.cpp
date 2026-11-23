@@ -176,16 +176,14 @@ void CanvasMcpLayer::updateSelectionPill()
                 mcpPillDrawerMode = 0;
                 mcpPillDrawerFrame = {};
                 mcpPaletteFrame = {};
-                canvas.repaint();
-                if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+                repaintCanvasView();
                 return;
             }
             if (mcpSelectionPill) mcpSelectionPill->setText(juce::String(), false);
             dismissSelectionPill(); // Escape closes and sends nothing (and gives a widget chip's edit mode back)
         };
         mcpSelectionPill->onTextChange = [this] {
-            canvas.repaint();
-            if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+            repaintCanvasView();
         };
         mcpSelectionPill->onFocusLost = [this] {
             // Keep a typed prompt, but if it's empty and drawer is closed get out of the way.
@@ -216,8 +214,7 @@ void CanvasMcpLayer::updateSelectionPill()
         mcpPillAnimator = std::make_unique<SelectionPillAnimator>(this);
     }
     mcpPillAnimator->startTimerHz(mcp::PillAnimTiming::animateHz); // the first tick decides (McpPillMotion.h)
-    canvas.repaint();
-    if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+    repaintCanvasView();
 }
 
 void CanvasMcpLayer::hideSelectionPill()
@@ -232,8 +229,7 @@ void CanvasMcpLayer::hideSelectionPill()
     mcpPaletteFrame = {};
     if (mcpSelectionPill && mcpSelectionPill->isVisible()) {
         mcpSelectionPill->setVisible(false);
-        canvas.repaint();
-        if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+        repaintCanvasView();
     }
 }
 
@@ -357,8 +353,7 @@ void CanvasMcpLayer::parkSelectionPill()
 
     if (mcpSelectionPill) mcpSelectionPill->setText(juce::String(), false);
     dismissSelectionPill();
-    canvas.repaint();
-    if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+    repaintCanvasView();
 }
 
 void CanvasMcpLayer::submitSelectionPill(bool queueForChat)
@@ -376,8 +371,7 @@ void CanvasMcpLayer::submitSelectionPill(bool queueForChat)
         mcpSelectionPill->setText(juce::String(), false);
         // Keep the chisel parked so [↩ Undo] / [🗑 Clear] stay one tap away.
         updateSelectionPill();
-        canvas.repaint();
-        if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+        repaintCanvasView();
         return;
     }
 
@@ -439,8 +433,7 @@ void CanvasMcpLayer::submitSelectionPill(bool queueForChat)
     }
 
     dismissSelectionPill(); // (it gives a widget chip's edit mode back)
-    canvas.repaint();
-    if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+    repaintCanvasView();
 }
 
 // A click on the QUICK / DEEP chip: flip the lane here at once (the chip answers the click), then tell the server by the lane
@@ -455,9 +448,7 @@ void CanvasMcpLayer::togglePillLane()
     bool const deep = !bridge->isPillDeepLane();
     bridge->setPillDeepLane(deep);
     bridge->sendLaneChoice(deep);
-    canvas.repaint();
-    if (canvas.editor)
-        canvas.editor->nvgSurface.invalidateAll();
+    repaintCanvasView();
 }
 
 bool CanvasMcpLayer::SlotPasteKeyListener::keyPressed(const juce::KeyPress& key, juce::Component*)
@@ -478,14 +469,12 @@ bool CanvasMcpLayer::SelectionPillKeyListener::keyPressed(const juce::KeyPress& 
         auto const count = static_cast<int>(canvas->mcpFilteredPaletteIndices.size());
         if (key.getKeyCode() == juce::KeyPress::upKey && count > 0) {
             canvas->mcpPaletteSelectedIndex = (canvas->mcpPaletteSelectedIndex - 1 + count) % count;
-            canvas->canvas.repaint();
-            if (canvas->canvas.editor) canvas->canvas.editor->nvgSurface.invalidateAll();
+            canvas->repaintCanvasView();
             return true;
         }
         if (key.getKeyCode() == juce::KeyPress::downKey && count > 0) {
             canvas->mcpPaletteSelectedIndex = (canvas->mcpPaletteSelectedIndex + 1) % count;
-            canvas->canvas.repaint();
-            if (canvas->canvas.editor) canvas->canvas.editor->nvgSurface.invalidateAll();
+            canvas->repaintCanvasView();
             return true;
         }
         if (key.getKeyCode() == juce::KeyPress::returnKey && !key.getModifiers().isShiftDown() && count > 0) {
@@ -495,8 +484,7 @@ bool CanvasMcpLayer::SelectionPillKeyListener::keyPressed(const juce::KeyPress& 
         if (key.getKeyCode() == juce::KeyPress::escapeKey) {
             canvas->mcpPillDrawerMode = 0;
             canvas->mcpPaletteFrame = {};
-            canvas->canvas.repaint();
-            if (canvas->canvas.editor) canvas->canvas.editor->nvgSurface.invalidateAll();
+            canvas->repaintCanvasView();
             return true;
         }
     }
@@ -588,8 +576,7 @@ void CanvasMcpLayer::showPillLensesMenu()
     } else {
         mcpPillDrawerFrame = {};
     }
-    canvas.repaint();
-    if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+    repaintCanvasView();
 }
 
 void CanvasMcpLayer::configurePillLookAndFeel()
@@ -657,8 +644,7 @@ void CanvasMcpLayer::showPillPalette()
     } else {
         mcpPaletteFrame = {};
     }
-    canvas.repaint();
-    if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+    repaintCanvasView();
 }
 
 void CanvasMcpLayer::triggerPaletteItem(int index)
@@ -686,8 +672,7 @@ void CanvasMcpLayer::triggerPaletteItem(int index)
             mcpSelectionPill->setCaretPosition(newText.length());
             mcpSelectionPill->grabKeyboardFocus();
         }
-        canvas.repaint();
-        if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+        repaintCanvasView();
     }
 }
 

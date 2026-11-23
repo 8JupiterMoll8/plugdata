@@ -170,12 +170,14 @@ public:
 
     void repaintAll() override
     {
+        // What the callers changed (approval chips, the say line and pulse, the flow badge, the pill's lane chip, the monitor
+        // voices) is drawn by the canvas overlay inside each canvas viewport. invalidateAll() redrew the toolbar, tabs and
+        // sidebars with it on every one of those events (lag fix 2026-11-23, #5).
         for (auto* ed : proc->getEditors()) {
             if (auto* pe = dynamic_cast<PluginEditor*>(ed)) {
                 for (auto* c : pe->getCanvases()) {
-                    if (c) c->repaint();
+                    if (c) c->getMcpLayer().repaintCanvasView();
                 }
-                pe->nvgSurface.invalidateAll();
             }
         }
     }

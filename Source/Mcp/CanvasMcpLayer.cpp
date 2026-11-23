@@ -1961,6 +1961,17 @@ bool CanvasMcpLayer::regionTitleCovered(mcp::AiRectF spot, std::vector<Spotlight
     return false;
 }
 
+void CanvasMcpLayer::repaintCanvasView() const
+{
+    // canvas.repaint() already reaches the surface through the viewport's cached-image listener, clipped to the viewport
+    // and only while this canvas is on show. The explicit area is that same rect (the surface keeps one of the two, see
+    // NVGSurface::invalidateArea) and what alphiRepaintView does; it is never the editor: a union with one
+    // invalidateAll() makes the whole window the frame's damage.
+    canvas.repaint();
+    if (canvas.editor && canvas.viewport && canvas.isShowing())
+        canvas.editor->nvgSurface.invalidateArea(canvas.editor->nvgSurface.getLocalArea(canvas.viewport.get(), canvas.viewport->getLocalBounds()));
+}
+
 void CanvasMcpLayer::repaintAfterRender(juce::Rectangle<int> area) const
 {
     // The surface clears its damage when the frame is recorded: a repaint asked from inside the render is lost. Posted, it lands

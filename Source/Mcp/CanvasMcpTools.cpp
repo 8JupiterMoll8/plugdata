@@ -35,8 +35,7 @@ void CanvasMcpLayer::setSketchToolActive(bool active)
     // The chisel's presence follows the pen: arming shows it, dropping it hides
     // it (when the board is empty). Keeps the mode state always visible.
     updateSelectionPill();
-    canvas.repaint();
-    if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+    repaintCanvasView();
 }
 
 void CanvasMcpLayer::setEraserToolActive(bool active)
@@ -48,8 +47,7 @@ void CanvasMcpLayer::setEraserToolActive(bool active)
     }
     canvas.setMouseCursor((active || mcpSketchToolActive) ? MouseCursor::CrosshairCursor : MouseCursor::NormalCursor);
     updateSelectionPill();
-    canvas.repaint();
-    if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+    repaintCanvasView();
 }
 
 void CanvasMcpLayer::setTextToolActive(bool active)
@@ -63,8 +61,7 @@ void CanvasMcpLayer::setTextToolActive(bool active)
         canvas.setMouseCursor(MouseCursor::NormalCursor);
     }
     updateSelectionPill();
-    canvas.repaint();
-    if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+    repaintCanvasView();
 }
 
 bool CanvasMcpLayer::isSketchToolActive() const
@@ -82,15 +79,13 @@ void CanvasMcpLayer::setStudioMode(bool active)
     mcpStudioMode = false;
     setSketchToolActive(false);
     updateSelectionPill();
-    canvas.repaint();
-    if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+    repaintCanvasView();
 }
 
 void CanvasMcpLayer::setStudioInkVisible(bool visible)
 {
     mcpStudioInkVisible = visible;
-    canvas.repaint();
-    if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+    repaintCanvasView();
 }
 
 void CanvasMcpLayer::commitStudioFromCanvas()
@@ -187,8 +182,7 @@ void CanvasMcpLayer::openNoteEditorForIndex(int index)
             }
             mcpNoteEditIndex = -1;
             if (mcpNoteEditor) mcpNoteEditor->setVisible(false);
-            canvas.repaint();
-            if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+            repaintCanvasView();
         };
 
         mcpNoteEditor->onReturnKey = [commit] { commit(); };
@@ -206,8 +200,7 @@ void CanvasMcpLayer::openNoteEditorForIndex(int index)
                         notes[static_cast<size_t>(editIndex)].text = typed;
                 });
             }
-            canvas.repaint();
-            if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+            repaintCanvasView();
         };
         mcpNoteEditor->onEscapeKey = [commit] { commit(); }; // Esc = finish editing
 
@@ -239,8 +232,7 @@ void CanvasMcpLayer::openNoteEditorForIndex(int index)
         }
     });
 
-    canvas.repaint();
-    if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+    repaintCanvasView();
 }
 
 void CanvasMcpLayer::SketchFadeTimer::timerCallback()
@@ -252,8 +244,7 @@ void CanvasMcpLayer::SketchFadeTimer::timerCallback()
         canvas->mcpCompletedStrokes.clear();
         stopTimer();
         // The last tick: the ink is gone and the pill may change with it, one full repaint as before.
-        canvas->canvas.repaint();
-        if (canvas->canvas.editor) canvas->canvas.editor->nvgSurface.invalidateAll();
+        canvas->repaintCanvasView();
         return;
     }
     // While fading (40 Hz for about a second) only the ink changes: repaint its bounds, not the whole editor.
@@ -355,8 +346,7 @@ void CanvasMcpLayer::sendSketchBuild(const juce::String& prompt)
     mcpLastSketchBounds = {};
 
     updateSelectionPill();
-    canvas.repaint();
-    if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+    repaintCanvasView();
 }
 
 void CanvasMcpLayer::undoLastStroke()
@@ -364,8 +354,7 @@ void CanvasMcpLayer::undoLastStroke()
     if (mcpCompletedStrokes.empty()) return;
     mcpCompletedStrokes.pop_back();
     updateSelectionPill();
-    canvas.repaint();
-    if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+    repaintCanvasView();
 }
 
 void CanvasMcpLayer::clearAllInk()
@@ -375,8 +364,7 @@ void CanvasMcpLayer::clearAllInk()
     mcpSketchAlpha = 1.0f;
     if (mcpSketchFadeTimer) mcpSketchFadeTimer->stopTimer();
     updateSelectionPill();
-    canvas.repaint();
-    if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+    repaintCanvasView();
 }
 
 //===----------------------------------------------------------------------===//
@@ -391,8 +379,7 @@ bool CanvasMcpLayer::pasteImageFromClipboard()
         if (mcpImageSlotActive) {
             mcpMoodHint = "Clipboard has no image — copy one, then Ctrl+V here";
             mcpMoodHintUntil = juce::Time::getMillisecondCounter() + 2600;
-            canvas.repaint();
-            if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+            repaintCanvasView();
         }
         return false;
     }
@@ -457,8 +444,7 @@ bool CanvasMcpLayer::pasteImageFromClipboard()
     // In Studio brainstorm mode the drawer owns the pen — keep drawing.
     if (!mcpStudioMode) setSketchToolActive(false);
 
-    canvas.repaint();
-    if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+    repaintCanvasView();
     return true;
 }
 
@@ -478,16 +464,14 @@ bool CanvasMcpLayer::handleVoiceTakeClick(MouseEvent const& e, Point<int> mouseP
         if (relX >= 30 && relX <= 60) {
             // ▶ / ■ audition toggle
             if (br) br->playVoiceTake(take.id, take.wavPath);
-            canvas.repaint();
-            if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+            repaintCanvasView();
             return true;
         }
         if (relX >= b.getWidth() - 30) {
             // ✕ remove (stop audition first if it's this one)
             if (br && br->getPlayingVoiceTakeId() == take.id) br->stopVoiceTake();
             canvas.pd->getMcp()->session.removeMcpVoiceTake(take.id);
-            canvas.repaint();
-            if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+            repaintCanvasView();
             return true;
         }
 
@@ -516,8 +500,7 @@ bool CanvasMcpLayer::handleMidiTakeClick(MouseEvent const& e, Point<int> mousePo
         if (relX >= 26 && relX <= 50) {
             // ▶ / ⏸ audition toggle
             if (br) br->playMidiTake(take.id, take.json);
-            canvas.repaint();
-            if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+            repaintCanvasView();
             return true;
         }
 
@@ -525,8 +508,7 @@ bool CanvasMcpLayer::handleMidiTakeClick(MouseEvent const& e, Point<int> mousePo
             // ✕ remove (stop playback first if it's currently playing)
             if (br && br->getPlayingMidiTakeId() == take.id) br->stopMidiTake();
             canvas.pd->getMcp()->session.removeMcpMidiTake(take.id);
-            canvas.repaint();
-            if (canvas.editor) canvas.editor->nvgSurface.invalidateAll();
+            repaintCanvasView();
             return true;
         }
 
@@ -588,13 +570,11 @@ bool CanvasMcpLayer::handleReferenceImageClick(MouseEvent const& e, Point<int> m
                             break;
                         }
                     }
-                    canvas->repaint();
-                    if (canvas->editor) canvas->editor->nvgSurface.invalidateAll();
+                    canvas->getMcpLayer().repaintCanvasView();
                 } else if (result == 3) {
                     canvas->pd->getMcp()->session.removeMcpReferenceImage(imageId);
                     canvas->getMcpLayer().mcpRefImageCache.erase(imageId.toStdString());
-                    canvas->repaint();
-                    if (canvas->editor) canvas->editor->nvgSurface.invalidateAll();
+                    canvas->getMcpLayer().repaintCanvasView();
                 }
             });
         return true;

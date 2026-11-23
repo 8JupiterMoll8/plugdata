@@ -91,6 +91,10 @@ public:
     // Repaint `area` (canvas component coordinates) once this render is over: a repaint asked from inside a render is lost (the
     // surface clears its damage when the frame is recorded).
     void repaintAfterRender(juce::Rectangle<int> area) const;
+    // Repaint the canvas viewport and nothing else (lag fix 2026-11-23, #5): what the layer's clicks, hovers and animations
+    // change (the pill, chips, notes, ink, Alphi) lives inside it. invalidateAll() redrew the toolbar, tabs and sidebars too.
+    // The check in scripts/test-bridge-safety.sh keeps the whole-editor call out of CanvasMcp*.cpp.
+    void repaintCanvasView() const;
 
     // Writes the overlay bit mask into the settings (lock or edit set) and re-reads them.
     void setOverlayMask(int mask);

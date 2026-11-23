@@ -96,6 +96,16 @@ if [ "$(awk '/^void MCPBridge::pdWidgetCall/ { f = 1 } f && /pd_typedmess\(/ { n
   echo "test-bridge-safety: /pd/widget_call must send in exactly one place (after the floor)" >&2
   exit 1
 fi
+# Lag fix #5 (2026-11-23): the canvas overlay layer never invalidates the WHOLE editor. What its clicks, hovers and animations
+# change lives inside the canvas viewport; invalidateAll() redrew the toolbar, tabs, sidebars and statusbar with it on every
+# event (the damage of one frame is a union: one such call made the whole window the frame). It repaints the viewport through
+# CanvasMcpLayer::repaintCanvasView. A call that really changes something outside the canvas would be listed here with its reason.
+wholeEditor="$(grep -nE "nvgSurface(\.|->)invalidateAll\(" "$root"/Source/Mcp/CanvasMcp*.cpp | grep -v ":\s*//" || true)"
+if [ -n "$wholeEditor" ]; then
+  echo "$wholeEditor" >&2
+  echo "test-bridge-safety: the canvas overlay layer invalidates the whole editor (use repaintCanvasView: the canvas viewport only)" >&2
+  exit 1
+fi
 # Review 2026-11-06: Pd's private struct _inlet is read through the fork's class-checked accessors (pure-data/0004),
 # never through a mirrored layout.
 inletMirror="$(grep -rnE "InletMirror|struct _inlet *\{|i_floatslot|i_symslot|iu_floatsignalvalue" "$root"/Source/Pd "$root"/Source/Mcp | grep -v ":\s*//" || true)"
