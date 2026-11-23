@@ -57,6 +57,19 @@ void queuedAndPopped()
     CHECK(std::strcmp(mcp::widgetEventKindWord(WidgetEventKind::Use), "use") == 0);
     CHECK(std::strcmp(mcp::widgetEventKindWord(WidgetEventKind::No), "no") == 0);
     CHECK(std::strcmp(mcp::widgetEventKindWord(WidgetEventKind::Back), "back") == 0);
+    CHECK(std::strcmp(mcp::widgetEventKindWord(WidgetEventKind::Another), "another") == 0);
+    // another: the proposal row's third answer, the same bounds as the other words
+    CHECK(q.offer("ai.seq", 5, "p5", "another", 4000) == WidgetEventOutcome::Queued);
+    CHECK(q.pop(e) && e.kind == WidgetEventKind::Another && std::strcmp(e.widget, "ai.seq") == 0 && e.rev == 5);
+    CHECK(std::strcmp(e.addr, "p5") == 0); // the pump forwards it as the 5th argument: two boxes of one widget stay two requests
+    // a bass grid and a glitch grid at one rev: two events, told apart by the address (the rate key is per instance)
+    CHECK(q.offer("ai.seq", 9, "p6a", "another", 5000) == WidgetEventOutcome::Queued);
+    CHECK(q.offer("ai.seq", 9, "p6b", "another", 5000) == WidgetEventOutcome::Queued);
+    CHECK(q.pop(e) && std::strcmp(e.addr, "p6a") == 0);
+    CHECK(q.pop(e) && std::strcmp(e.addr, "p6b") == 0);
+    CHECK(!q.pop(e));
+    CHECK(q.offer("ai.seq", 5, "p5", "Another", 4000) == WidgetEventOutcome::UnknownWord);
+    CHECK(q.offer("ai.seq", 5, "p5", "another ", 4000) == WidgetEventOutcome::UnknownWord);
     // rev 0 and the highest rev are numbers like any other
     CHECK(q.offer("ai.draw", 0, "p3", "use", 3000) == WidgetEventOutcome::Queued);
     CHECK(q.offer("ai.draw", 9999999, "p4", "use", 3000) == WidgetEventOutcome::Queued);

@@ -25,7 +25,7 @@
 // The same pump also carries the live widget history (MCPBridgeWidgetState.h): a receiver on each widget's state name, and the
 // `/pd/widget_ask state ...` events it makes after 1 s of quiet (kind `state`: the kind word is free, the event address is the same),
 // and the artist's answers to a proposal (MCPBridgeWidgetEvent.h, capability widget_event): a receiver on `ai-event` and the
-// `/pd/widget_ask <use|no|back> ...` events it makes.
+// `/pd/widget_ask <use|no|back|another> ...` events it makes.
 
 #pragma once
 

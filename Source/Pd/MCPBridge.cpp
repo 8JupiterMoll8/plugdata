@@ -212,8 +212,11 @@ void MCPBridge::pumpWidgetAsks()
             sendReply("/pd/widget_ask", args);
         }
     }
-    // The artist's answers to a proposal (capability widget_event): ONE event each on the existing address, `/pd/widget_ask <use|no|back>
-    // <canvas> <widget> <rev>` (the kind word is free there: no new schema event). The canvas is found the way an ask's is.
+    // The artist's answers to a proposal (capability widget_event): ONE event each on the existing address, `/pd/widget_ask <use|no|back|another>
+    // <canvas> <widget> <rev> <paddr>` (the kind word is free there: no new schema event). The canvas is found the way an ask's is. The 5th
+    // argument is the sending object's address (`p` + hex, validated by the queue: no free text), the token a widget's `end <rev> <paddr>` carries:
+    // with two boxes of one widget (an ai.seq bass and a glitch) at one rev it is all that tells the AI which one was pressed. A server that
+    // reads four arguments ignores it.
     {
         std::vector<mcp::WidgetEvent> answered;
         mcp::WidgetEvent answer;
@@ -232,6 +235,7 @@ void MCPBridge::pumpWidgetAsks()
                 args.add(canvases[at]);
                 args.add(juce::String::fromUTF8(ev.widget));
                 args.add(ev.rev);
+                args.add(juce::String::fromUTF8(ev.addr));
                 sendReply("/pd/widget_ask", args);
             }
         }
@@ -241,7 +245,7 @@ void MCPBridge::pumpWidgetAsks()
         mcp::WidgetEventLogCounts said;
         if (widgetAsk->eventLog.take(widgetAsk->events.takeCounts(), mcpAskNowMs(), said) && processor) {
             juce::StringArray parts;
-            if (said.malformed) parts.add(juce::String(said.malformed) + " without a widget name (ai.<word>), a whole-number rev, an address (p<hex>) and use, no or back");
+            if (said.malformed) parts.add(juce::String(said.malformed) + " without a widget name (ai.<word>), a whole-number rev, an address (p<hex>) and use, no, back or another");
             if (said.full) parts.add(juce::String(said.full) + " while the event queue was full");
             auto const line = "ai-event: not sent to the AI (counted since the last such line, one line per "
                 + juce::String(static_cast<int>(mcp::kWidgetEventLogGapMs / 1000)) + " s at most): " + parts.joinIntoString("; ");

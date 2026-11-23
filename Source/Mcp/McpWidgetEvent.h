@@ -9,18 +9,20 @@
 // scripts/test-bridge-safety.sh).
 //
 // Pd side (MCPBridgeWidgetEvent.h): the bridge binds a receiver to `ai-event` while it serves, the same way it binds `ai-ask`. A message
-//   ai-event <widget> <rev> <paddr> use|no|back
+//   ai-event <widget> <rev> <paddr> use|no|back|another
 //     use   the artist took the proposal (a click on the ghost, the keep chip)
 //     no    the artist refused it (the bag chip, a stroke over the ghost, a clear)
 //     back  the artist took an AI landing back (undo)
+//     another  the artist turned the proposal down AND asks for a fresh one (the proposal row's third button)
 // is parsed by the receiver and handed to WidgetEventQueue::offer. rev = the widget's revision AFTER the action; paddr = the sending
 // object's address as text (`p` and hex digits), which the fork only compares and tells apart per instance, it is never read as a pointer.
 // The receiver runs wherever Pd dispatches (the audio thread too), always under the Pd lock: offer never locks, never allocates and never
 // calls JUCE (scripts/test-bridge-safety.sh greps this file for it); one offer runs at a time. The bridge's message-thread pump pops the
-// events and sends them on the existing event address: /pd/widget_ask <use|no|back> <canvas> <widget> <rev> (the kind word is free there).
+// events and sends them on the existing event address: /pd/widget_ask <use|no|back|another> <canvas> <widget> <rev> <paddr> (the kind word is free
+// there; the address is the instance, so a server can tell two boxes of one widget apart).
 //
 // Bounds: no free text travels. Widget names ai.<lowercase word> (kWidgetAskNameLen), rev a whole number 0..9999999, the address
-// `p[0-9a-f]{1,16}`, the word one of three. At most one event per widget, instance and word per kWidgetEventMinGapMs (a table of
+// `p[0-9a-f]{1,16}`, the word one of four (use, no, back, another). At most one event per widget, instance and word per kWidgetEventMinGapMs (a table of
 // kWidgetEventRateSlots keys, the one used longest ago is reused), and over ALL keys at most kWidgetEventGlobalPerWindow events in any
 // kWidgetEventGlobalWindowMs (a patch that rotates through more addresses than the table holds would otherwise pass every event: each key is
 // evicted before it is asked again); a fixed queue of kWidgetEventQueueSlots (full = dropped and counted, the rate clock and the budget
@@ -46,7 +48,7 @@ constexpr int kWidgetEventGlobalPerWindow = 8;           // events forwarded ove
 constexpr std::int64_t kWidgetEventGlobalWindowMs = 1000; // ... in any window of this length
 constexpr std::int64_t kWidgetEventLogGapMs = 5000;      // a console line for refused events at most this often
 
-enum class WidgetEventKind : int { Use = 0, No = 1, Back = 2 };
+enum class WidgetEventKind : int { Use = 0, No = 1, Back = 2, Another = 3 }; // another: the proposal row's third answer, a no and an ask in one click (2026-11-23)
 enum class WidgetEventOutcome : int { Queued, Malformed, UnknownWord, BadAddress, RateLimited, BudgetLimited, Full };
 
 inline char const* widgetEventKindWord(WidgetEventKind kind)
@@ -55,17 +57,19 @@ inline char const* widgetEventKindWord(WidgetEventKind kind)
     case WidgetEventKind::Use: return "use";
     case WidgetEventKind::No: return "no";
     case WidgetEventKind::Back: return "back";
+    case WidgetEventKind::Another: return "another";
     }
     return "use";
 }
 
-// Exactly use, no or back (lower case, nothing around it).
+// Exactly use, no, back or another (lower case, nothing around it).
 inline bool widgetEventKindParse(char const* word, WidgetEventKind& out)
 {
     if (!word) return false;
     if (std::strcmp(word, "use") == 0) out = WidgetEventKind::Use;
     else if (std::strcmp(word, "no") == 0) out = WidgetEventKind::No;
     else if (std::strcmp(word, "back") == 0) out = WidgetEventKind::Back;
+    else if (std::strcmp(word, "another") == 0) out = WidgetEventKind::Another;
     else return false;
     return true;
 }

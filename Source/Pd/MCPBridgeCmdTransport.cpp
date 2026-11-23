@@ -442,8 +442,8 @@ std::vector<std::string> MCPBridge::capabilityList() const
         // the atoms sent to its in-name the way send_checked sends. The first word is dump, ghost, ghostname or unghost (a floor in C++).
         // Reply /pd/widget_call/reply/<corrId> { widget, listeners, sets:[{rev, at, frames}], truncated, unended[, refused][, error] }.
         "widget_call",
-        // ai_widget plan phase 3: a widget's `ai-event <widget> <rev> <paddr> use|no|back` (what the artist did with a proposal) arrives as the event
-        // /pd/widget_ask <use|no|back> <canvas> <widget> <rev> (MCPBridgeWidgetEvent.h; at most one per widget, instance and word per 500 ms).
+        // ai_widget plan phase 3: a widget's `ai-event <widget> <rev> <paddr> use|no|back|another` (what the artist did with a proposal) arrives as the event
+        // /pd/widget_ask <use|no|back|another> <canvas> <widget> <rev> <paddr> (MCPBridgeWidgetEvent.h; at most one per widget, instance and word per 500 ms).
         "widget_event",
     };
     // P4.1 S2: the v2 listener is up (TCP 127.0.0.1, port and token in the discovery file).

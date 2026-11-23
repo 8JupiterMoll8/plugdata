@@ -8,7 +8,7 @@
 // while the bridge serves (start() / setReplySinkForTests, until stop()), a native CLASS_PD receiver is bound to the Pd name `ai-event`,
 // exactly like the `ai-ask` receiver (MCPBridgeWidgetAsk.h): no canvas object, it coexists with any [r ai-event].
 //
-//   ai-event <widget> <rev> <paddr> use|no|back   ->   /pd/widget_ask <use|no|back> <canvas> <widget> <rev>   (sent by the pump)
+//   ai-event <widget> <rev> <paddr> use|no|back|another   ->   /pd/widget_ask <use|no|back|another> <canvas> <widget> <rev> <paddr>   (sent by the pump)
 //
 // The receiver runs wherever Pd dispatches (the audio thread too), under the Pd lock: it only reads the atoms and calls
 // mcp::WidgetEventQueue::offer (no lock, no allocation, no JUCE: scripts/test-bridge-safety.sh greps this file for it). The address is
