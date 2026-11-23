@@ -246,6 +246,7 @@ private:
     std::vector<Rectangle<int>> invalidRects;
     std::vector<Rectangle<int>> inFlightRects;
     static constexpr size_t maxInvalidRects = 32; // more than this: fall back to the bounding box
+    static constexpr size_t maxRenderPasses = 4;
     std::vector<Rectangle<int>> renderPasses(Rectangle<int> bounds) const;
     Rectangle<int> currentBounds;
     AtomicValue<bool> frameReadyForReplay { false };
