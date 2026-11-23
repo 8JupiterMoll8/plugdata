@@ -8539,14 +8539,14 @@ void runWidgetEventCases(Harness& h, PluginProcessor& processor, MCPBridge& brid
     CHECK(host->pdWait([&] { bound = gensym("ai-event")->s_thing != nullptr; }, 2000));
     CHECK(bound);
 
-    // 1. The three words, as a Lua widget sends them (a list), one event each.
-    for (char const* word : { "use", "no", "back" }) {
+    // 1. The four words, as a Lua widget sends them (a list), one event each; the instance address rides along as the 5th argument.
+    for (char const* word : { "use", "no", "back", "another" }) {
         h.replies.clear();
         sendToAiEvent(host, &s_list, { symAtom("ai.draw"), numAtom(7), symAtom("p55d0c8a3b2a0"), symAtom(word) });
         auto ev = h.replies.waitFor("/pd/widget_ask", 2000);
         CHECK(ev.has_value());
         if (ev) {
-            CHECK(ev->args.size() == 4 && ev->str(0) == word && ev->str(1) == "main" && ev->str(2) == "ai.draw" && ev->num(3) == 7);
+            CHECK(ev->args.size() == 5 && ev->str(0) == word && ev->str(1) == "main" && ev->str(2) == "ai.draw" && ev->num(3) == 7 && ev->str(4) == "p55d0c8a3b2a0");
         } else {
             std::printf("  unread replies: %s\n", h.replies.describe().c_str());
         }
@@ -8556,7 +8556,7 @@ void runWidgetEventCases(Harness& h, PluginProcessor& processor, MCPBridge& brid
     h.replies.clear();
     sendToAiEvent(host, gensym("ai.tap"), { numAtom(3), symAtom("p1"), symAtom("no"), symAtom("and"), symAtom("more") });
     auto tap = h.replies.waitFor("/pd/widget_ask", 2000);
-    CHECK(tap && tap->str(0) == "no" && tap->str(2) == "ai.tap" && tap->num(3) == 3 && tap->args.size() == 4);
+    CHECK(tap && tap->str(0) == "no" && tap->str(2) == "ai.tap" && tap->num(3) == 3 && tap->args.size() == 5 && tap->str(4) == "p1");
 
     // 3. The same word of the same instance again at once (a double click): no event and NOTHING in the console. Another instance has its own budget.
     uint64_t const before = host->consoleSeqNow();
@@ -8579,7 +8579,7 @@ void runWidgetEventCases(Harness& h, PluginProcessor& processor, MCPBridge& brid
     sendToAiEvent(host, &s_float, { numAtom(4) });
     CHECK(!h.replies.waitFor("/pd/widget_ask", 400).has_value());
     CHECK(consoleHas(host, beforeBad, "ai-event: not sent to the AI", 2000));
-    CHECK(consoleHas(host, beforeBad, "use, no or back", 2000));
+    CHECK(consoleHas(host, beforeBad, "use, no, back or another", 2000));
 
     // 5. The receiver is one of the bridge's own: a checked send to `ai-event` is not refused as a stranger binder, and /pd/bound calls it a probe.
     {
