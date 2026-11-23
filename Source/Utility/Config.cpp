@@ -61,7 +61,17 @@ bool ProjectInfo::canUseSemiTransparentWindows()
     return true;
 #endif
 #if !JUCE_MAC || PLUGDATA_STANDALONE
-    return Desktop::canUseSemiTransparentWindows();
+    // MCP-CARRIED(x11-roundtrips): on X11 this asks the X server (XGetSelectionOwner + XGetVisualInfo, synchronous round trips)
+    // and PluginEditor::paint calls it on EVERY frame (perf 2026-11-23: ~10 % of the message thread waiting on X). The answer
+    // (is a compositor running) practically never changes: re-ask at most every 2 s. Message thread only (paint, look and feel).
+    static bool cachedAnswer = false;
+    static uint32 askedAtMs = 0;
+    auto const nowMs = Time::getMillisecondCounter();
+    if (askedAtMs == 0 || nowMs - askedAtMs > 2000) {
+        cachedAnswer = Desktop::canUseSemiTransparentWindows();
+        askedAtMs = nowMs == 0 ? 1 : nowMs;
+    }
+    return cachedAnswer;
 #else
     return Desktop::canUseSemiTransparentWindows();
 #endif
