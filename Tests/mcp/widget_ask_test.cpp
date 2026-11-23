@@ -8,6 +8,7 @@
 //  - rate: at most one ask per widget per 2 s (a hello has its own budget), refused asks are counted, not queued;
 //  - the queue is fixed (no allocation): a full queue drops and counts.
 //  - the chip's focus word (`ai-ask focus <widget> <rev> <ptr>`): a kind of its own, with the pointer and a short budget;
+//  - an ask may carry the asking object's address (`ai-ask <widget> <rev> <paddr>`): kept for the Ask kind, bounded, forwarded as the 5th argument;
 // Build + run: scripts/test-bridge-safety.sh
 #include "../../Source/Mcp/McpWidgetAsk.h"
 
@@ -186,6 +187,36 @@ void focusKind()
     CHECK(q.pop(a) && a.kind == WidgetAskKind::Ask && a.ptr == 0);
 }
 
+// An ask may carry the asking object's address (`ai-ask <widget> <rev> <paddr>`, the shared ask block of the widgets, 2026-11-23b): the queue keeps it for the Ask kind only, bounded, and the pump
+// forwards it as the 5th argument of /pd/widget_ask so the server can tell two boxes of one widget apart (an ai.seq bass and a glitch grid). The receiver checks the shape (widgetCallAddrOk) before
+// it offers; the queue's own guard is the length.
+void askCarriesItsAddress()
+{
+    WidgetAskQueue q;
+    mcp::WidgetAskEvent e;
+    CHECK(q.offer(WidgetAskKind::Ask, "ai.seq", 5, 1000, 0, "p55d0c8a3b2a0") == WidgetAskOutcome::Queued);
+    CHECK(q.pop(e) && e.kind == WidgetAskKind::Ask && e.rev == 5 && std::strcmp(e.widget, "ai.seq") == 0);
+    CHECK(std::strcmp(e.addr, "p55d0c8a3b2a0") == 0);
+    // no address (an older widget, or one whose address the receiver refused): empty, and the ask is the same ask
+    CHECK(q.offer(WidgetAskKind::Ask, "ai.draw", 7, 1000) == WidgetAskOutcome::Queued);
+    CHECK(q.pop(e) && e.addr[0] == 0);
+    CHECK(q.offer(WidgetAskKind::Ask, "ai.knob", 7, 1000, 0, nullptr) == WidgetAskOutcome::Queued);
+    CHECK(q.pop(e) && e.addr[0] == 0);
+    // a hello and a focus keep none, whatever they are given (the pump never sends one for them)
+    CHECK(q.offer(WidgetAskKind::Hello, "ai.tap", 0, 1000, 0, "p1") == WidgetAskOutcome::Queued);
+    CHECK(q.pop(e) && e.kind == WidgetAskKind::Hello && e.addr[0] == 0);
+    CHECK(q.offer(WidgetAskKind::Focus, "ai.tap", 3, 1000, 0x55d0ULL, "p1") == WidgetAskOutcome::Queued);
+    CHECK(q.pop(e) && e.kind == WidgetAskKind::Focus && e.ptr == 0x55d0ULL && e.addr[0] == 0);
+    // a text longer than the room is cut, never overrun (the receiver refuses the wrong shape; the queue bounds the length)
+    CHECK(q.offer(WidgetAskKind::Ask, "ai.paint", 2, 1000, 0, "p0123456789abcdef0123456789") == WidgetAskOutcome::Queued);
+    CHECK(q.pop(e) && static_cast<int>(std::strlen(e.addr)) == mcp::kWidgetAskAddrChars);
+    // the budget is still the widget's, not the box's: a second box of the same widget within the gap is limited as before (documented limit)
+    CHECK(q.offer(WidgetAskKind::Ask, "ai.seq", 5, 20000, 0, "p1") == WidgetAskOutcome::Queued);
+    CHECK(q.offer(WidgetAskKind::Ask, "ai.seq", 5, 20100, 0, "p2") == WidgetAskOutcome::RateLimited);
+    CHECK(q.pop(e) && std::strcmp(e.addr, "p1") == 0);
+    CHECK(!q.pop(e));
+}
+
 void focusPtrText()
 {
     std::uint64_t v = 1;
@@ -252,6 +283,7 @@ int main()
     queueFull();
     inName();
     focusKind();
+    askCarriesItsAddress();
     focusPtrText();
     producerConsumerThreads();
     if (failures) {

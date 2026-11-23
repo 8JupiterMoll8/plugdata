@@ -8,12 +8,12 @@
 // setReplySinkForTests, until stop()), a native CLASS_PD receiver is bound to the Pd name `ai-ask`, the same way the
 // armed control window binds its probe (MCPBridgeControlWindow.h): no canvas object, it coexists with any [r ai-ask].
 //
-//   ai-ask <widget> <rev>    ->  /pd/widget_ask ask   <canvas> <widget> <rev>
+//   ai-ask <widget> <rev> [<paddr>]  ->  /pd/widget_ask ask   <canvas> <widget> <rev> [<paddr>]   (the address of the asking object, `p` + hex, only when the widget sent a well-formed one)
 //   ai-ask hello <widget>    ->  /pd/widget_ask hello <canvas> <widget> 0
 //   ai-ask focus <widget> <rev> <ptr>  ->  no event for the server: the widget's chip "AI..." selects that widget on its canvas and opens the
 //                            selection pill (MCPBridge::focusWidgetPill, MCPBridgeWidgetFocus.h; the pump below waits for the mouse button
 //                            to go up first). The ask itself comes later, from the pill: Enter on no text tells the widget `ask <ptr>`.
-// Anything after the rev is dropped (review M4: no free text from a patch into the AI's prompt).
+// Anything after the rev is dropped (review M4: no free text from a patch into the AI's prompt), except an ask's address in the exact shape widgetCallAddrOk accepts.
 // <canvas> is the tab the widget sits in (mcpWidgetAskCanvases: found by the pump, the message names none), or
 // `main` (the focused tab) when it cannot be told.
 //
@@ -73,7 +73,11 @@ inline void mcpAskOffer(McpAskReceiver* x, t_symbol* head, int argc, t_atom* arg
         return;
     }
     double const rev = (argc >= 1 && argv[0].a_type == A_FLOAT) ? static_cast<double>(argv[0].a_w.w_float) : -1.0;
-    x->queue->offer(mcp::WidgetAskKind::Ask, first, rev, now);
+    // The atom after the rev may be the asking object's address (the shared ask block sends it): kept only in the shape of an instance address, else the ask goes without it
+    char const* addr = nullptr;
+    if (argc >= 2 && argv[1].a_type == A_SYMBOL && argv[1].a_w.w_symbol && mcp::widgetCallAddrOk(argv[1].a_w.w_symbol->s_name))
+        addr = argv[1].a_w.w_symbol->s_name;
+    x->queue->offer(mcp::WidgetAskKind::Ask, first, rev, now, 0, addr);
 }
 
 inline void mcpAskReceiverFree(McpAskReceiver* x)

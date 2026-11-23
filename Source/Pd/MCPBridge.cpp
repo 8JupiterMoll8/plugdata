@@ -209,6 +209,9 @@ void MCPBridge::pumpWidgetAsks()
             args.add(canvases[at]); // the tab the widget sits in (its wire key), else "main": the focused tab, the key every verb takes
             args.add(juce::String::fromUTF8(ev.widget));
             args.add(ev.rev);
+            // An ask may name the box it came from (the 5th argument, `p` + hex, validated by the receiver): with two boxes of one widget it is all that tells the AI which one was asked.
+            // A hello has none, and a server that reads four arguments ignores it.
+            if (ev.kind == mcp::WidgetAskKind::Ask && ev.addr[0] != 0) args.add(juce::String::fromUTF8(ev.addr));
             sendReply("/pd/widget_ask", args);
         }
     }

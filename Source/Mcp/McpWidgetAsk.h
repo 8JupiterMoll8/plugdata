@@ -8,7 +8,9 @@
 // Tests/mcp/widget_ask_test.cpp through scripts/test-bridge-safety.sh).
 //
 // Pd side (MCPBridgeWidgetAsk.h): the bridge binds a receiver to `ai-ask` while it serves. A message
-//   ai-ask <widget> <rev>                the widget's ask chip ("complete it"), rev = the widget's state revision
+//   ai-ask <widget> <rev> [<paddr>]      the widget's ask chip ("complete it"), rev = the widget's state revision; paddr = the asking object's
+//                                        address as text (`p` and hex digits, the token a widget's `end <rev> <paddr>` carries): the widgets of the shared
+//                                        ask block send it, so two boxes of one widget (an ai.seq bass and a glitch grid) are told apart by the server
 //   ai-ask hello <widget>                a widget that was made (or loaded) asks whether anyone hears
 //   ai-ask focus <widget> <rev> <ptr>    the widget's chip ("AI..."): select THIS widget, open the selection pill (the artist then
 //                                        types, or presses Enter on nothing = complete it). ptr = the sending pd-lua object's
@@ -18,7 +20,8 @@
 // time (the Pd lock). The bridge's message-thread pump pops the events and sends /pd/widget_ask.
 //
 // Bounds: widget names ai.<lowercase word> (kWidgetAskNameLen), rev a whole number 0..9999999. No free text travels
-// (review M4: a patch-side text channel into the AI's prompt): anything after the rev is dropped by the receiver. At
+// (review M4: a patch-side text channel into the AI's prompt): anything after the rev is dropped by the receiver, except the address of an ask,
+// which the receiver keeps only in the shape widgetCallAddrOk accepts (`p` + 1..16 lower-case hex digits) and the queue bounds. At
 // most one ask per widget per kWidgetAskMinGapMs (a hello has its own budget); a fixed queue of kWidgetAskQueueSlots
 // (full = dropped and counted).
 
@@ -40,6 +43,7 @@ constexpr std::int64_t kWidgetAskMinGapMs = 2000;
 constexpr std::int64_t kWidgetFocusMinGapMs = 300; // a double press of the chip is one focus
 constexpr int kWidgetAskMaxRev = 9999999;
 constexpr int kWidgetFocusPtrChars = 16; // a 64-bit address as hex digits
+constexpr int kWidgetAskAddrChars = 17;  // an ask's instance address: `p` and 16 hex digits, the terminating NUL not counted (the same token as kWidgetCallAddrChars)
 
 enum class WidgetAskKind : int { Ask = 0, Hello = 1, Focus = 2 };
 enum class WidgetAskOutcome : int { Queued, Malformed, RateLimited, Full };
@@ -49,6 +53,7 @@ struct WidgetAskEvent {
     int rev = 0;
     std::uint64_t ptr = 0; // Focus only: the address of the pd-lua object that sent it
     char widget[kWidgetAskNameLen + 1] = {};
+    char addr[kWidgetAskAddrChars + 1] = {}; // Ask only: the asking object's address as text (`p` + hex), empty when the widget sent none
 };
 
 struct WidgetAskCounts {
@@ -120,7 +125,8 @@ inline bool widgetAskInName(char const* widget, char* out, std::size_t outLen)
 class WidgetAskQueue {
 public:
     // `ptr`: the Focus kind's pointer (a focus without one names no object); the other kinds keep none.
-    WidgetAskOutcome offer(WidgetAskKind kind, char const* widget, double rev, std::int64_t nowMs, std::uint64_t ptr = 0)
+    // `addr`: the Ask kind's instance address as the receiver checked it (widgetCallAddrOk), or null; the other kinds keep none. Cut at kWidgetAskAddrChars, never overrun.
+    WidgetAskOutcome offer(WidgetAskKind kind, char const* widget, double rev, std::int64_t nowMs, std::uint64_t ptr = 0, char const* addr = nullptr)
     {
         bool const wantsRev = kind == WidgetAskKind::Ask || kind == WidgetAskKind::Focus;
         if (!widgetAskNameOk(widget) || (wantsRev && !widgetAskRevOk(rev)) || (kind == WidgetAskKind::Focus && ptr == 0)) {
@@ -145,6 +151,7 @@ public:
         e.rev = wantsRev ? static_cast<int>(rev) : 0;
         e.ptr = kind == WidgetAskKind::Focus ? ptr : 0;
         copyName(e.widget, widget);
+        copyAddr(e.addr, kind == WidgetAskKind::Ask ? addr : nullptr);
         writeIndex.store(head + 1, std::memory_order_release);
 
         if (!slot) slot = claimRateSlot();
@@ -211,6 +218,16 @@ private:
         std::size_t i = 0;
         for (; src[i] && i < static_cast<std::size_t>(kWidgetAskNameLen); ++i)
             dst[i] = src[i];
+        dst[i] = 0;
+    }
+
+    // The address (null or empty = none) into a kWidgetAskAddrChars + 1 buffer, cut at the room. No printf on the dispatch path.
+    static void copyAddr(char* dst, char const* src)
+    {
+        std::size_t i = 0;
+        if (src)
+            for (; src[i] && i < static_cast<std::size_t>(kWidgetAskAddrChars); ++i)
+                dst[i] = src[i];
         dst[i] = 0;
     }
 
