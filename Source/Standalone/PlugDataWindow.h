@@ -533,21 +533,31 @@ public:
         if (hasPendingLinuxMaximisedState)
             return pendingLinuxMaximisedState;
 
-        if (auto* peer = getPeer()) {
-            // MCP-CARRIED(repaint-scope): isMaximised() runs in every editor paint (wantsRoundedCorners); the X11
-            // query is a synchronous round trip, so it is cached for maximisedCacheMs and refreshed on resize.
-            auto const now = Time::getMillisecondCounter();
-            if (!hasCachedLinuxMaximised || now - cachedLinuxMaximisedMs >= maximisedCacheMs) {
-                cachedLinuxMaximised = OSUtils::isLinuxWindowMaximised(peer);
-                cachedLinuxMaximisedMs = now;
-                hasCachedLinuxMaximised = true;
-            }
+        if (getPeer() != nullptr) {
+            // MCP-CARRIED(x11-roundtrips): isMaximised() is read by paint (PlugDataWindow::paint) and its callers;
+            // the X11 query is a synchronous round trip, so paint only reads the cache. It is re-read where the state
+            // changes (resized, maximiseButtonPressed, the pending-state timer clear hasCachedLinuxMaximised and ask
+            // at once) and every 2 s by the editor (refreshMaximisedCache); only a first call, with nothing cached
+            // yet, asks here.
+            if (!hasCachedLinuxMaximised)
+                refreshMaximisedCache();
             return cachedLinuxMaximised;
         } else {
             return isFullScreen();
         }
 #else
         return isFullScreen();
+#endif
+    }
+
+    // MCP-CARRIED(x11-roundtrips): ask the X server whether the window is maximised and cache the answer
+    void refreshMaximisedCache() const
+    {
+#if JUCE_LINUX || JUCE_BSD
+        if (auto* peer = getPeer()) {
+            cachedLinuxMaximised = OSUtils::isLinuxWindowMaximised(peer);
+            hasCachedLinuxMaximised = true;
+        }
 #endif
     }
 
@@ -642,6 +652,7 @@ public:
             _this->hasCachedLinuxMaximised = false;
             if (_this->isMaximised() != before) {
                 if (auto* pluginEditor = dynamic_cast<PluginEditor*>(_this->editor)) {
+                    pluginEditor->refreshRoundedCornersCache(false); // MCP-CARRIED(x11-roundtrips): the window state changed
                     pluginEditor->updateStandaloneWindowControls();
                     pluginEditor->nvgSurface.invalidateAll();
                 }
@@ -892,11 +903,11 @@ public:
 private:
 #if JUCE_LINUX || JUCE_BSD
     bool hasPendingLinuxMaximisedState = false;
-    // MCP-CARRIED(repaint-scope): the cached X11 maximised state (isMaximised)
+    // MCP-CARRIED(repaint-scope): the cached X11 maximised state (isMaximised); maximisedCacheMs is how long after a
+    // resize the state is read once more (X11 may publish _NET_WM_STATE after the resize)
     static constexpr uint32 maximisedCacheMs = 500;
     mutable bool hasCachedLinuxMaximised = false;
     mutable bool cachedLinuxMaximised = false;
-    mutable uint32 cachedLinuxMaximisedMs = 0;
     bool pendingLinuxMaximisedState = false;
     int pendingLinuxMaximisedStateSerial = 0;
 #endif

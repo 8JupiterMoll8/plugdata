@@ -71,6 +71,10 @@ public:
     float getRenderScale() const;
 
     void updateBounds(Rectangle<int> bounds);
+#if JUCE_LINUX || JUCE_BSD
+    // MCP-CARRIED(x11-roundtrips): hand the render thread the editor's (cached) rounded-corner answer again.
+    void updateRoundedCorners();
+#endif
 
     class InvalidationChecker final : public CachedComponentImage {
     public:

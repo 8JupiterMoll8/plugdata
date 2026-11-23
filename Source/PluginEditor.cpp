@@ -671,6 +671,8 @@ void PluginEditor::resized()
     pd->lastUIWidth = getWidth();
     pd->lastUIHeight = getHeight();
 
+    refreshRoundedCornersCache(false); // MCP-CARRIED(x11-roundtrips): maximise / restore / plugin mode arrive as a resize
+
     if (isInPluginMode()) {
         nvgSurface.updateBounds(getLocalBounds());
         updateStandaloneWindowControls();
@@ -2007,15 +2009,44 @@ bool PluginEditor::perform(InvocationInfo const& info)
 
 bool PluginEditor::wantsRoundedCorners() const
 {
+    // MCP-CARRIED(x11-roundtrips): called by paint on every frame. isMaximised() and canUseSemiTransparentWindows() are
+    // synchronous X round trips on X11, so paint only reads the flag refreshRoundedCornersCache() keeps up to date.
+    return roundedCorners.get();
+}
+
+// MCP-CARRIED(x11-roundtrips): what wantsRoundedCorners() used to compute on every call (once per paint)
+bool PluginEditor::computeRoundedCorners() const
+{
     if (!ProjectInfo::isStandalone)
         return false;
 
-    // Since this is called in a paint routine, use reinterpret_cast instead of dynamic_cast for efficiency
-    // For the standalone, the top-level component should always be DocumentWindow derived!
-    if (auto const* window = reinterpret_cast<PlugDataWindow*>(getTopLevelComponent())) {
+    // MCP-CARRIED(x11-roundtrips): for the standalone, the top-level component should always be DocumentWindow derived
+    // once the editor sits in its window; before that (the constructor's first resize) it is the editor itself, hence
+    // dynamic_cast, no longer inside a paint routine.
+    if (auto const* window = dynamic_cast<PlugDataWindow*>(getTopLevelComponent())) {
         return !window->useNativeTitlebar() && !window->isMaximised() && ProjectInfo::canUseSemiTransparentWindows();
     }
     return true;
+}
+
+// MCP-CARRIED(x11-roundtrips): recompute the flag paint reads; the caller says whether to ask the X server again
+void PluginEditor::refreshRoundedCornersCache(bool const rereadWindowState)
+{
+#if JUCE_LINUX || JUCE_BSD
+    if (rereadWindowState && ProjectInfo::isStandalone) {
+        if (auto const* window = dynamic_cast<PlugDataWindow*>(getTopLevelComponent()))
+            window->refreshMaximisedCache();
+    }
+#else
+    ignoreUnused(rereadWindowState);
+#endif
+
+    if (roundedCorners.set(computeRoundedCorners(), Time::getMillisecondCounter())) {
+#if JUCE_LINUX || JUCE_BSD
+        nvgSurface.updateRoundedCorners(); // the render thread cuts the window's bottom corners out of the same answer
+#endif
+        nvgSurface.invalidateAll();
+    }
 }
 
 // At the top-level, always catch all keypresses
@@ -2035,6 +2066,8 @@ bool PluginEditor::keyPressed(KeyPress const& key)
 
 void PluginEditor::parentHierarchyChanged()
 {
+    refreshRoundedCornersCache(true); // MCP-CARRIED(x11-roundtrips)
+
     if (isShowing() || isOnDesktop())
         grabKeyboardFocus();
 }
@@ -2051,6 +2084,9 @@ void PluginEditor::broughtToFront()
 void PluginEditor::timerCallback()
 {
     pd->flushMessageQueue();
+
+    if (roundedCorners.dueForRefresh(Time::getMillisecondCounter())) // MCP-CARRIED(x11-roundtrips): every 2 s
+        refreshRoundedCornersCache(true);
 }
 
 void PluginEditor::lookAndFeelChanged()

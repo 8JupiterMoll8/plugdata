@@ -513,6 +513,14 @@ void NVGSurface::updateBounds(Rectangle<int>)
     invalidateAll();
 }
 
+#if JUCE_LINUX || JUCE_BSD
+void NVGSurface::updateRoundedCorners()
+{
+    // MCP-CARRIED(x11-roundtrips): the editor's answer is cached now, so this is a plain read
+    roundedBottomCorners.store(editor->wantsRoundedCorners());
+}
+#endif
+
 void NVGSurface::resized()
 {
     snapshotEditorSize();

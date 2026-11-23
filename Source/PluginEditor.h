@@ -24,6 +24,7 @@
 #include "Utility/ObjectThemeManager.h"
 #include "NVGSurface.h"
 #include "LookAndFeel.h"
+#include "Mcp/McpRefreshedFlag.h" // MCP-CARRIED(x11-roundtrips)
 
 class ConnectionMessageDisplay;
 class Sidebar;
@@ -129,6 +130,11 @@ public:
     bool perform(InvocationInfo const& info) override;
 
     bool wantsRoundedCorners() const;
+    // MCP-CARRIED(x11-roundtrips): wantsRoundedCorners() reads a cached flag (paint calls it every frame); this
+    // recomputes it (resized, parentHierarchyChanged, a window state change, a 2 s refresh from timerCallback).
+    // rereadWindowState: ask the X server again whether the window is maximised.
+    void refreshRoundedCornersCache(bool rereadWindowState);
+    bool computeRoundedCorners() const;
 
     bool keyPressed(KeyPress const& key) override;
 
@@ -228,6 +234,7 @@ private:
 
     bool isMaximised = false;
     bool isDraggingFile = false;
+    mcp::RefreshedFlag roundedCorners { true }; // MCP-CARRIED(x11-roundtrips)
 
     static inline int numEditors = 0;
 
