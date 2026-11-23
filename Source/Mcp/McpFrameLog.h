@@ -11,7 +11,9 @@
 //   [nvg-frame] inv=<invalidations> rec=<frames recorded> skipped=<ticks that found the last frame pending>
 //               damage=<share of the window the recorded frames redrew, %> recMs=<mean recordFrame ms>
 //               renderFrames=<frames the render thread replayed> swaps=<presents / swapBuffers the render thread did>
-//               inRender=<invalidations asked from inside recordFrame>
+//               inRender=<invalidations asked from inside recordFrame> maxMs=<slowest recordFrame ms>
+//               overwrites=<records over a pending frame: urgent ones and stuck ones> stuck=<of those, frames the
+//               render thread never took, replaced after 250 ms> ticks=<pacer wake-ups = ticks per second>
 //   (swaps above renderFrames are empty presents: the render thread swapped with nothing new to show; inRender above 0
 //   means something still asks for a repaint while the frame is being painted, and recordFrame drops that damage)
 //
@@ -38,6 +40,7 @@ public:
         damageSum += damagePixels;
         boundsSum += boundsPixels;
         recordMsSum += recordMs;
+        recordMsMax = recordMs > recordMsMax ? recordMs : recordMsMax;
         ++recordsSeen;
     }
 
@@ -49,20 +52,25 @@ public:
         auto const skipped = totals.skippedPending - last.skippedPending;
         auto const frames = renderFramesTotal - lastRenderFrames;
         auto const swaps = swapsTotal - lastSwaps;
+        auto const overwrites = totals.overwrites - last.overwrites;
+        auto const stuck = totals.stuck - last.stuck;
+        auto const ticks = totals.ticks - last.ticks;
         double const share = boundsSum > 0.0 ? 100.0 * damageSum / boundsSum : 0.0;
         double const meanMs = recordsSeen > 0 ? recordMsSum / static_cast<double>(recordsSeen) : 0.0;
 
-        char buffer[256];
+        char buffer[320];
         std::snprintf(buffer, sizeof buffer,
-            "[nvg-frame] inv=%llu rec=%llu skipped=%llu damage=%.0f%% recMs=%.2f renderFrames=%llu swaps=%llu inRender=%llu",
+            "[nvg-frame] inv=%llu rec=%llu skipped=%llu damage=%.0f%% recMs=%.2f renderFrames=%llu swaps=%llu inRender=%llu maxMs=%.2f overwrites=%llu stuck=%llu ticks=%llu",
             static_cast<unsigned long long>(inv), static_cast<unsigned long long>(rec),
             static_cast<unsigned long long>(skipped), share, meanMs, static_cast<unsigned long long>(frames),
-            static_cast<unsigned long long>(swaps), static_cast<unsigned long long>(duringRecord));
+            static_cast<unsigned long long>(swaps), static_cast<unsigned long long>(duringRecord), recordMsMax,
+            static_cast<unsigned long long>(overwrites), static_cast<unsigned long long>(stuck),
+            static_cast<unsigned long long>(ticks));
 
         last = totals;
         lastRenderFrames = renderFramesTotal;
         lastSwaps = swapsTotal;
-        damageSum = boundsSum = recordMsSum = 0.0;
+        damageSum = boundsSum = recordMsSum = recordMsMax = 0.0;
         recordsSeen = 0;
         duringRecord = 0;
         return buffer;
@@ -75,6 +83,7 @@ private:
     double damageSum = 0.0;
     double boundsSum = 0.0;
     double recordMsSum = 0.0;
+    double recordMsMax = 0.0;
     std::uint64_t recordsSeen = 0;
     std::uint64_t duringRecord = 0;
 };

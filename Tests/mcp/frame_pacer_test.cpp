@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 static int failures = 0;
 #define CHECK(cond)                                                            \
@@ -46,6 +47,10 @@ struct Sim {
     int recordsWhilePending = 0; // a record that replaced a pending frame
     int nudges = 0;
     int taken = 0;               // frames the render thread took
+    double recordMs = 0.0;       // how long recordFrame takes (the clock moves while it paints)
+    int paintInvalidates = 0;    // invalidations asked from inside the paint of every record
+    int paintInvalidateArmed = 0; // of those, how many asked the owner to arm a wake (they must not)
+    std::vector<double> recordStarts, recordEnds;
 
     void arm(double delay)
     {
@@ -63,8 +68,14 @@ struct Sim {
             ++records;
             if (pending)
                 ++recordsWhilePending;
+            recordStarts.push_back(now);
+            for (int i = 0; i < paintInvalidates; ++i) // paint asks for a repaint: its damage is wiped when the frame ends
+                paintInvalidateArmed += pacer.invalidate(now) >= 0.0 ? 1 : 0;
+            now += recordMs;
+            recordEnds.push_back(now);
             pending = true;
             pendingSince = now;
+            arm(pacer.finishRecord(now, /*damageLeft*/ false));
         }
         if (d.nudgeRender)
             ++nudges;
@@ -228,6 +239,7 @@ static void urgent()
     CHECK(f.action == FramePacer::Action::Record);
     CHECK(f.overwritePending);
     CHECK(!t.pacer.isDirty());
+    t.pacer.finishRecord(6.5, false);
     CHECK(t.pacer.flushNow(7.0, false).action == FramePacer::Action::Idle);
 }
 
@@ -279,6 +291,116 @@ static void slowRenderThread()
     CHECK(f.recordsWhilePending == 0);
 }
 
+static void recordDurationCounts()
+{
+    std::printf("pacer: the interval is measured from the END of a record, so a slow record never runs back to back\n");
+    Sim s;
+    s.recordMs = 20.0; // recordFrame takes longer than the interval
+    for (int i = 0; i < 400; ++i) { // an invalidation every ms for 400 ms
+        s.runUntil(i * 1.0);
+        s.invalidate();
+    }
+    s.runUntil(500.0);
+    CHECK(s.records >= 5);
+    CHECK(s.recordStarts.size() == s.recordEnds.size());
+    double minGap = 1.0e9;
+    for (size_t i = 1; i < s.recordStarts.size(); ++i)
+        minGap = std::min(minGap, s.recordStarts[i] - s.recordEnds[i - 1]);
+    std::printf("  20 ms records, constant invalidations -> %d records, least gap from one end to the next start %.1f ms\n", s.records, minGap);
+    CHECK(minGap >= FramePacer::Config {}.intervalMs - 0.001);
+    CHECK(s.records <= 400 / 36 + 2); // one record per 20 + 16 ms
+}
+
+static void invalidateInsidePaint()
+{
+    std::printf("pacer: an invalidation from inside paint leaves no phantom record (the frame wipes that damage)\n");
+    Sim s;
+    s.paintInvalidates = 3;
+    s.invalidate();
+    s.runUntil(1.0);
+    CHECK(s.records == 1);
+    CHECK(s.pacer.stats().invalidates == 4u);
+    CHECK(s.paintInvalidateArmed == 0); // none of them armed a wake of their own
+    CHECK(!s.pacer.isDirty());          // recordFrame ended with no damage: nothing is wanted any more
+    s.runUntil(1000.0);
+    CHECK(s.records == 1);              // no phantom record 16 ms later, or ever
+    CHECK(s.wakeAt < 0.0);
+
+    // damage that really is left (a frame that could not be recorded keeps its damage) stays dirty and is retried
+    FramePacer p;
+    p.invalidate(0.0);
+    auto const d = p.tick(0.0, false);
+    CHECK(d.action == FramePacer::Action::Record);
+    p.invalidate(1.0); // paint asked again
+    double const wake = p.finishRecord(5.0, /*damageLeft*/ true);
+    CHECK(p.isDirty());
+    CHECK(wake > 0.0 && wake <= FramePacer::Config {}.intervalMs); // looked at again one interval after the end
+    // and the next invalidation does not arm a second wake
+    CHECK(p.invalidate(6.0) < 0.0);
+}
+
+static void retryBacksOff()
+{
+    std::printf("pacer: a render thread that stays busy is polled every 4 ms for 10 skips, then once per interval\n");
+    FramePacer p;
+    p.invalidate(0.0);
+    double t = 100.0; // the interval since the last record is long over
+    std::vector<double> waits;
+    for (int i = 0; i < 22; ++i) { // stays well under the 250 ms stuck limit
+        auto const d = p.tick(t, /*pending*/ true);
+        if (d.action != FramePacer::Action::Wait)
+            break;
+        waits.push_back(d.nextWakeMs);
+        t += d.nextWakeMs;
+    }
+    CHECK(waits.size() == 22);
+    for (size_t i = 0; i < 10; ++i)
+        CHECK(waits[i] == FramePacer::Config {}.retryMs);
+    for (size_t i = 10; i < 20; ++i)
+        CHECK(waits[i] == FramePacer::Config {}.intervalMs);
+
+    // the render thread takes the frame: the streak is over, the next episode starts at 4 ms again
+    auto const rec = p.tick(t, false);
+    CHECK(rec.action == FramePacer::Action::Record);
+    p.finishRecord(t, false);
+    p.invalidate(t + 1.0);
+    auto const first = p.tick(t + 100.0, true);
+    CHECK(first.action == FramePacer::Action::Wait);
+    CHECK(first.nextWakeMs == FramePacer::Config {}.retryMs);
+    CHECK(first.nudgeRender); // a new episode wakes the render thread once more
+
+    // over 200 ms of a stuck-free busy render thread: far fewer polls than at a fixed 4 ms
+    Sim s;
+    s.renderStuck = true;
+    s.pending = true;
+    s.invalidate();
+    s.runUntil(200.0);
+    std::printf("  200 ms with the render thread busy -> %llu pending checks (a fixed 4 ms would be about 50)\n",
+        static_cast<unsigned long long>(s.pacer.stats().skippedPending));
+    CHECK(s.pacer.stats().skippedPending <= 22);
+    CHECK(s.pacer.stats().skippedPending >= 10);
+}
+
+static void stuckCounter()
+{
+    std::printf("pacer: stuck overrides are counted apart from urgent overwrites, and every tick is counted\n");
+    Sim s;
+    s.renderStuck = true;
+    s.invalidate();
+    s.runUntil(1.0);
+    s.invalidateNow(); // urgent over the pending frame
+    s.runUntil(2.0);
+    CHECK(s.pacer.stats().overwrites == 1u);
+    CHECK(s.pacer.stats().stuck == 0u);
+    for (int i = 0; i < 700; ++i) {
+        s.runUntil(2.0 + i);
+        s.invalidate();
+    }
+    CHECK(s.pacer.stats().stuck >= 2u);
+    CHECK(s.pacer.stats().overwrites == 1u + s.pacer.stats().stuck);
+    CHECK(s.pacer.stats().ticks > s.pacer.stats().records);
+}
+
 static void frameLog()
 {
     std::printf("frame log: one line with the counters of the window, then the window starts over\n");
@@ -287,6 +409,9 @@ static void frameLog()
     st.invalidates = 500;
     st.records = 40;
     st.skippedPending = 12;
+    st.overwrites = 3;
+    st.stuck = 1;
+    st.ticks = 77;
     w.addInvalidateDuringRecord(); // an invalidation asked from inside the render (its damage is lost: fix #3)
     w.addInvalidateDuringRecord();
     w.addInvalidateDuringRecord();
@@ -300,6 +425,10 @@ static void frameLog()
     CHECK(line.find("recMs=3.00") != std::string::npos); // (2 + 4) / 2
     CHECK(line.find("renderFrames=38") != std::string::npos);
     CHECK(line.find("swaps=61") != std::string::npos);
+    CHECK(line.find("maxMs=4.00") != std::string::npos);
+    CHECK(line.find("overwrites=3") != std::string::npos);
+    CHECK(line.find("stuck=1") != std::string::npos);
+    CHECK(line.find("ticks=77") != std::string::npos);
     CHECK(line.find("inRender=3") != std::string::npos);
     CHECK(line.rfind("[nvg-frame]", 0) == 0);
     CHECK(line.find('\n') == std::string::npos);
@@ -315,6 +444,10 @@ static void frameLog()
     CHECK(idleLine.find("recMs=0.00") != std::string::npos);
     CHECK(idleLine.find("renderFrames=0") != std::string::npos);
     CHECK(idleLine.find("swaps=0") != std::string::npos);
+    CHECK(idleLine.find("maxMs=0.00") != std::string::npos);
+    CHECK(idleLine.find("overwrites=0") != std::string::npos);
+    CHECK(idleLine.find("stuck=0") != std::string::npos);
+    CHECK(idleLine.find("ticks=0") != std::string::npos);
     CHECK(idleLine.find("inRender=0") != std::string::npos);
 }
 
@@ -328,6 +461,10 @@ int main()
     urgent();
     stuck();
     slowRenderThread();
+    recordDurationCounts();
+    invalidateInsidePaint();
+    retryBacksOff();
+    stuckCounter();
     frameLog();
     if (failures != 0) {
         std::printf("frame_pacer_test: %d failure(s)\n", failures);

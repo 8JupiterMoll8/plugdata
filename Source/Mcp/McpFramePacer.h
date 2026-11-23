@@ -31,6 +31,11 @@
 //    the old behaviour and folds the replaced frame's damage back in, once).
 //  - A frame that stays pending for stuckMs (a render thread that cannot take it: no context, a failed framebuffer)
 //    is replaced like an urgent one, once per stuckMs, so a frame the render thread refuses can never freeze the UI.
+//  - The interval is measured from the END of a record: the owner calls finishRecord() when recordFrame returns, so a
+//    record that takes longer than the interval is not followed by another one at once. An invalidation that arrives
+//    while the record paints (paint asking for a repaint) arms nothing, and when recordFrame ended with no damage
+//    (it wipes what paint added) the pacer is clean again: no phantom record.
+//  - A render thread that stays busy is polled every retryMs for backoffAfterSkips checks, then once per interval.
 
 #include <algorithm>
 #include <cstdint>
@@ -43,6 +48,7 @@ public:
         double intervalMs = 16.0; // the least time between two recorded frames
         double retryMs = 4.0;     // while the render thread holds the last frame, look again after this
         double stuckMs = 250.0;   // a frame pending for this long is treated as stuck and replaced
+        int backoffAfterSkips = 10; // this many consecutive pending checks at retryMs, then one per interval
     };
 
     enum class Action {
@@ -64,6 +70,8 @@ public:
         std::uint64_t records = 0;
         std::uint64_t skippedPending = 0; // ticks that found the last frame still pending and recorded nothing
         std::uint64_t overwrites = 0;     // records that replaced a pending frame (urgent or stuck)
+        std::uint64_t stuck = 0;          // of those, the ones that replaced a frame the render thread never took
+        std::uint64_t ticks = 0;          // times the owner called tick() (wake-ups of the pacer)
     };
 
     FramePacer() = default;
@@ -77,8 +85,8 @@ public:
     {
         ++totals.invalidates;
         dirty = true;
-        if (wakeArmed)
-            return -1.0;
+        if (recording || wakeArmed)
+            return -1.0; // while a record paints, finishRecord() decides whether anything is left to do
         wakeArmed = true;
         return std::max(0.0, lastRecordMs + config.intervalMs - nowMs);
     }
@@ -89,6 +97,8 @@ public:
         ++totals.invalidates;
         dirty = true;
         urgent = true;
+        if (recording)
+            return -1.0;
         wakeArmed = true;
         return 0.0;
     }
@@ -96,11 +106,14 @@ public:
     // The armed wake fired (timer or async update). framePending: the render thread has not taken the last frame.
     Decision tick(double const nowMs, bool const framePending)
     {
+        ++totals.ticks;
         wakeArmed = false;
+        recording = false; // a tick means no record is in progress (a record the owner never finished cannot freeze the pacer)
         Decision d;
 
         if (!dirty) {
             pendingSinceMs = -1.0;
+            skipStreak = 0;
             return d; // Idle
         }
 
@@ -121,13 +134,16 @@ public:
             bool const firstSkip = pendingSinceMs < 0.0;
             if (firstSkip)
                 pendingSinceMs = nowMs;
-            if (nowMs - pendingSinceMs >= config.stuckMs)
+            if (nowMs - pendingSinceMs >= config.stuckMs) {
+                ++totals.stuck;
                 return record(nowMs, true);
+            }
 
             ++totals.skippedPending;
+            ++skipStreak;
             wakeArmed = true;
             d.action = Action::Wait;
-            d.nextWakeMs = config.retryMs;
+            d.nextWakeMs = skipStreak > config.backoffAfterSkips ? config.intervalMs : config.retryMs;
             d.nudgeRender = firstSkip;
             return d;
         }
@@ -144,6 +160,23 @@ public:
         return tick(nowMs, framePending);
     }
 
+    // The owner's recordFrame returned (call it after every Record decision). The interval counts from here. damageLeft:
+    // the surface still holds damage (it could not record: no context yet). Without damage whatever paint asked for
+    // while the frame was recorded is gone with the frame (recordFrame wipes it), so the pacer is clean: no phantom
+    // record. Returns the delay for a wake the owner must arm, or -1 when none is needed.
+    double finishRecord(double const nowMs, bool const damageLeft)
+    {
+        recording = false;
+        lastRecordMs = nowMs;
+        urgent = false;
+        if (!damageLeft)
+            dirty = false;
+        if (!dirty || wakeArmed)
+            return -1.0;
+        wakeArmed = true;
+        return config.intervalMs;
+    }
+
     bool isDirty() const { return dirty; }
     Stats const& stats() const { return totals; }
     Config const& getConfig() const { return config; }
@@ -153,8 +186,10 @@ private:
     {
         dirty = false;
         urgent = false;
+        recording = true; // until finishRecord(): lastRecordMs is stamped when the record ENDS
         lastRecordMs = nowMs;
         pendingSinceMs = -1.0;
+        skipStreak = 0;
         ++totals.records;
 
         Decision d;
@@ -170,6 +205,8 @@ private:
     bool dirty = false;
     bool urgent = false;
     bool wakeArmed = false;
+    bool recording = false;
+    int skipStreak = 0;            // consecutive pending checks of this episode
     double lastRecordMs = -1.0e12; // long ago: the first invalidation records at once
     double pendingSinceMs = -1.0;  // when a tick first saw the same pending frame; < 0 = not waiting on one
 };

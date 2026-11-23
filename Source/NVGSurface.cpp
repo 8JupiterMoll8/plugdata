@@ -631,7 +631,9 @@ void NVGSurface::scheduleRender()
 {
 #if NANOVG_GL_IMPLEMENTATION
     // MCP-CARRIED(frame-pacing): an invalidation only marks the surface dirty; the pacer decides when a frame is
-    // recorded (at most one per 16 ms, never over a frame the render thread still holds).
+    // recorded (at most one per 16 ms, never over a frame the render thread still holds). The pacer is not thread-safe:
+    // like invalidArea, every invalidation is the message thread's.
+    JUCE_ASSERT_MESSAGE_THREAD;
     if (recordingForLog) // PLUGDATA_NVG_FRAME_LOG: asked from inside the render, so recordFrame drops this damage
         frameLogWindow.addInvalidateDuringRecord();
     auto const nowMs = Time::getMillisecondCounterHiRes();
@@ -675,6 +677,9 @@ void NVGSurface::applyPacerDecision(mcp::FramePacer::Decision const& decision)
         // overwritePending (urgent frame, or one the render thread never took): recordFrame still folds the replaced
         // frame's damage back in, exactly once. A normal paced record never finds a pending frame, so it folds nothing.
         recordPacedFrame();
+        // The 16 ms interval counts from the END of the record; damage paint asked for meanwhile died with the frame
+        // (recordFrame wipes it), so no wake is armed for it (see FramePacer::finishRecord).
+        armFramePacer(framePacer.finishRecord(Time::getMillisecondCounterHiRes(), !invalidArea.isEmpty()));
         break;
     case Action::Wait:
         if (decision.nudgeRender)
