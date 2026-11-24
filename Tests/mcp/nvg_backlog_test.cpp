@@ -24,13 +24,19 @@ static int failures = 0;
 using Op = nanovg::Context::ResourceOp;
 using Kind = Op::Kind;
 
+// An image op whose payload is `bytes` long; a create is a square whose width * height * bytes-per-pixel is `bytes`
+// (bytes: 4 * side * side for ARGB, side * side for alpha), as the real nvgCreateImage* / nvgUpdateImage make them.
 static Op image(Kind kind, int id, size_t bytes)
 {
     Op op;
     op.kind = kind;
     op.image = id;
-    op.width = 4;
-    op.height = 4;
+    size_t const pixels = kind == Kind::CreateAlpha ? bytes : bytes / 4;
+    int side = 0;
+    while (static_cast<size_t>(side) * static_cast<size_t>(side) < pixels)
+        ++side;
+    op.width = side;
+    op.height = side;
     op.data.assign(bytes, 0x7f);
     return op;
 }
@@ -62,9 +68,11 @@ static void repeatedUpdatesKeepOnlyTheLast()
         ops.back().data[0] = static_cast<unsigned char>(frame);
         nanovg::compactResourceBacklog(ops); // what publish() does each frame while the consumer is behind
     }
-    CHECK(ops.size() == 2);
-    CHECK(ops[0].kind == Kind::CreateARGB && ops[0].data.empty()); // the create's pixels are superseded
-    CHECK(ops[1].kind == Kind::Update && ops[1].data[0] == static_cast<unsigned char>(999)); // the newest pixels win
+    // The update is folded into the create: one op that creates the texture with the newest pixels (so the backend
+    // builds its mipmaps from them; a create without pixels would leave the mip levels undefined).
+    CHECK(ops.size() == 1);
+    CHECK(ops[0].kind == Kind::CreateARGB && ops[0].data.size() == 64);
+    CHECK(ops[0].data[0] == static_cast<unsigned char>(999)); // the newest pixels win
     CHECK(total(ops) == 64);
 }
 
@@ -102,17 +110,17 @@ static void passIsABoundary()
     std::vector<Op> ops;
     ops.push_back(image(Kind::CreateARGB, 9, 64));
     ops.push_back(image(Kind::Update, 9, 64));
+    ops.back().data[0] = 0x11;
     ops.push_back(pass());
     ops.push_back(image(Kind::Update, 9, 64));
     ops.push_back(image(Kind::Delete, 9, 0));
     nanovg::compactResourceBacklog(ops);
-    // Before the pass: create (pixels superseded) + update. After: the update is useless (deleted), the delete stays
-    // (its create is on the other side of the pass, so the real texture will exist).
-    CHECK(ops.size() == 4);
-    CHECK(ops[0].kind == Kind::CreateARGB && ops[0].data.empty());
-    CHECK(ops[1].kind == Kind::Update && ops[1].data.size() == 64);
-    CHECK(ops[2].kind == Kind::FramebufferPass);
-    CHECK(ops[3].kind == Kind::Delete);
+    // Before the pass: the create, holding the update's pixels (the pass may sample them). After: the update is
+    // useless (deleted), the delete stays (its create is on the other side of the pass, so the real texture will exist).
+    CHECK(ops.size() == 3);
+    CHECK(ops[0].kind == Kind::CreateARGB && ops[0].data.size() == 64 && ops[0].data[0] == 0x11);
+    CHECK(ops[1].kind == Kind::FramebufferPass);
+    CHECK(ops[2].kind == Kind::Delete);
 }
 
 // Order of the survivors is kept, other images are untouched, empty updates go.
@@ -148,8 +156,78 @@ static void stalledRunIsBounded()
         nanovg::compactResourceBacklog(ops);
         peak = std::max(peak, total(ops));
     }
-    CHECK(ops.size() == 16);
+    CHECK(ops.size() == 8); // one create per live image, each holding its newest pixels
     CHECK(peak <= 8 * 256 + 4096 + 256); // never more than the live images (+ one frame of new ops)
+}
+
+// Review 2026-11-24 (must-fix): the first version emptied the create and kept the update. The GL backend generates
+// mipmaps only in nvg__renderCreateTexture, so a NVG_IMAGE_GENERATE_MIPMAPS image ([pic], NVGImage::MipMap) reloaded
+// while the consumer was behind got undefined mip levels. The create must keep pixels: the newest ones, with its flags.
+static void mipmappedCreateKeepsPixels()
+{
+    constexpr int generateMipmaps = 1 << 0; // NVG_IMAGE_GENERATE_MIPMAPS
+    std::vector<Op> ops;
+    ops.push_back(image(Kind::CreateARGB, 21, 64));
+    ops.back().flags = generateMipmaps;
+    ops.push_back(image(Kind::Update, 21, 64));
+    ops.back().data[5] = 0x42;
+    auto const result = nanovg::compactResourceBacklog(ops);
+    CHECK(ops.size() == 1);
+    CHECK(ops[0].kind == Kind::CreateARGB && ops[0].flags == generateMipmaps && ops[0].width == 4 && ops[0].height == 4);
+    CHECK(ops[0].data.size() == 64 && ops[0].data[5] == 0x42);
+    CHECK(result.droppedOps == 1 && result.droppedBytes == 64);
+    CHECK(result.orphanedImages.empty());
+}
+
+// A create that came without pixels (nvgCreateImage*(..., nullptr)) takes the update's pixels the same way; an alpha
+// image counts one byte per pixel.
+static void emptyAndAlphaCreatesTakeTheUpdate()
+{
+    std::vector<Op> ops;
+    ops.push_back(image(Kind::CreateARGB, 30, 64));
+    ops.back().data.clear();
+    ops.push_back(image(Kind::Update, 30, 64));
+    ops.push_back(image(Kind::CreateAlpha, 31, 16));
+    ops.push_back(image(Kind::Update, 31, 16));
+    ops.back().data[0] = 0x09;
+    nanovg::compactResourceBacklog(ops);
+    CHECK(ops.size() == 2);
+    CHECK(ops[0].kind == Kind::CreateARGB && ops[0].image == 30 && ops[0].data.size() == 64);
+    CHECK(ops[1].kind == Kind::CreateAlpha && ops[1].image == 31 && ops[1].data.size() == 16 && ops[1].data[0] == 0x09);
+}
+
+// An update whose size is not the create's (it cannot happen through nvgUpdateImage, which copies width * height *
+// bytes-per-pixel; stay safe) is never folded: the create keeps its own pixels, later updates supersede each other.
+static void oddSizedUpdateIsNotFolded()
+{
+    std::vector<Op> ops;
+    ops.push_back(image(Kind::CreateARGB, 40, 64));
+    ops.back().data[0] = 0x01;
+    ops.push_back(image(Kind::Update, 40, 32));
+    ops.push_back(image(Kind::Update, 40, 32));
+    ops.back().data[0] = 0x02;
+    nanovg::compactResourceBacklog(ops);
+    CHECK(ops.size() == 2);
+    CHECK(ops[0].kind == Kind::CreateARGB && ops[0].data.size() == 64 && ops[0].data[0] == 0x01);
+    CHECK(ops[1].kind == Kind::Update && ops[1].data.size() == 32 && ops[1].data[0] == 0x02);
+}
+
+// Compacting twice changes nothing more, and a create + update + delete of one image leaves nothing behind.
+static void idempotentAndFullyOrphaned()
+{
+    std::vector<Op> ops;
+    ops.push_back(image(Kind::CreateARGB, 50, 64));
+    ops.push_back(image(Kind::Update, 50, 64));
+    ops.push_back(image(Kind::Update, 51, 64)); // an image from before the backlog
+    nanovg::compactResourceBacklog(ops);
+    auto const again = nanovg::compactResourceBacklog(ops);
+    CHECK(again.droppedOps == 0 && again.droppedBytes == 0);
+    CHECK(ops.size() == 2 && ops[0].kind == Kind::CreateARGB && ops[1].kind == Kind::Update && ops[1].image == 51);
+    ops.push_back(image(Kind::Update, 50, 64));
+    ops.push_back(image(Kind::Delete, 50, 0));
+    auto const gone = nanovg::compactResourceBacklog(ops);
+    CHECK(gone.orphanedImages.size() == 1 && gone.orphanedImages[0] == 50);
+    CHECK(ops.size() == 1 && ops[0].kind == Kind::Update && ops[0].image == 51);
 }
 
 int main()
@@ -160,6 +238,10 @@ int main()
     passIsABoundary();
     orderAndOtherImagesKept();
     stalledRunIsBounded();
+    mipmappedCreateKeepsPixels();
+    emptyAndAlphaCreatesTakeTheUpdate();
+    oddSizedUpdateIsNotFolded();
+    idempotentAndFullyOrphaned();
     if (failures) {
         std::printf("nvg_backlog_test: %d failure(s)\n", failures);
         return 1;

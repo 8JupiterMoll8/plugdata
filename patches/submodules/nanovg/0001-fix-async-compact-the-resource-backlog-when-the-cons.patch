@@ -1,4 +1,4 @@
-From 72a3e905ecef309c2dd66ab59fd461523b218010 Mon Sep 17 00:00:00 2001
+From 60f56b603ce3510744f80f07e809b80b698c795a Mon Sep 17 00:00:00 2001
 From: Alphi <alphi@starchaser.local>
 Date: Tue, 24 Nov 2026 19:17:08 +0100
 Subject: [PATCH] fix(async): compact the resource backlog when the consumer is
@@ -10,17 +10,20 @@ performRender released them. When the render thread stopped taking frames
 the backlog grew by one pixel copy per repaint, without bound.
 
 publish() now compacts the backlog when the consumer has not taken the
-previous batch: superseded updates, create pixels superseded by an update,
-empty updates and create..delete pairs go (never across a framebuffer
-pass). The result is what the consumer would have ended with. Adds
-resourceBacklog() counters (ops, bytes, peak, compacted) for the host's
-frame log.
+previous batch: superseded updates, empty updates and create..delete pairs
+go, and an update of an image created in the same stretch is folded into
+its create (never across a framebuffer pass). The create keeps pixels, the
+newest ones: the GL backend builds mipmaps only at create time, so an
+emptied create would leave a mipmapped texture with undefined mip levels.
+Adds resourceBacklog() counters (ops, bytes, peak, compacted) for the
+host's frame log.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
 ---
- src/nanovg_async.cpp |  40 +++++++++++++++
- src/nanovg_async.h   | 119 +++++++++++++++++++++++++++++++++++++++++++
- 2 files changed, 159 insertions(+)
+ src/nanovg_async.cpp |  40 +++++++++++++
+ src/nanovg_async.h   | 135 +++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 175 insertions(+)
 
 diff --git a/src/nanovg_async.cpp b/src/nanovg_async.cpp
 index 0423024..abda010 100644
@@ -99,7 +102,7 @@ index 0423024..abda010 100644
  {
      std::lock_guard<std::mutex> lock(resourceMutex);
 diff --git a/src/nanovg_async.h b/src/nanovg_async.h
-index 3728148..46cd694 100644
+index 3728148..a8de41c 100644
 --- a/src/nanovg_async.h
 +++ b/src/nanovg_async.h
 @@ -68,6 +68,7 @@
@@ -110,7 +113,7 @@ index 3728148..46cd694 100644
  #include <cstdint>
  #include <cstring>
  #include <cstddef>
-@@ -464,6 +465,17 @@ struct Context {
+@@ -464,6 +465,18 @@ struct Context {
      std::vector<ResourceOp> recordingResources;   // producer-only: current frame's ops
      std::vector<ResourceOp> committedResources;    // guarded by `mutex`: published, awaiting the consumer
  
@@ -118,8 +121,9 @@ index 3728148..46cd694 100644
 +    // frame's ops. When it stops taking them (render thread blocked in swap, a size-mismatch early return, a
 +    // paused GL context) every publish used to append its ops -- full pixel copies for each image create/update --
 +    // and nothing released them until the consumer came back: RSS grew without bound while repaints kept
-+    // recording. publish() now compacts the backlog (compactResourceBacklog below), so it is bounded by the LIVE
-+    // images, and counts what it holds (resourceBacklog(), printed by the host's frame log).
++    // recording. publish() now compacts the backlog (compactResourceBacklog below), so its IMAGE ops are bounded by the
++    // LIVE images, and counts what it holds (resourceBacklog(), printed by the host's frame log). Framebuffer passes
++    // and framebuffer create/delete pairs are not compacted: a stalled consumer plus a stream of those still grows.
 +    size_t backlogBytes = 0;
 +    size_t backlogPeakBytes = 0;
 +    uint64_t compactedOps = 0;
@@ -128,7 +132,7 @@ index 3728148..46cd694 100644
      void enqueueResource(ResourceOp&& op);            // producer: stage into the current frame
      void applyResources(std::vector<ResourceOp>& ops); // consumer: create/update/delete on the real ctx
  
-@@ -531,6 +543,113 @@ inline bool performRender(NVGcontext* handle)
+@@ -531,6 +544,128 @@ inline bool performRender(NVGcontext* handle)
  // True if a published-but-not-yet-drawn frame is waiting.
  bool hasPendingFrame(NVGcontext* handle);
  
@@ -159,7 +163,11 @@ index 3728148..46cd694 100644
 +// backlog is applied before the single frame replayed next (older frames were coalesced away), so inside a stretch
 +// with no FramebufferPass (a pass replays drawing that may sample any image: a hard boundary):
 +//  - an Update is superseded by a later Update of the same image (each one uploads the whole image);
-+//  - a Create's pixels are superseded by a later Update (the texture is created empty, the update fills it);
++//  - an Update of an image CREATED in the same stretch is folded into its Create: the create then uploads the newest
++//    pixels and the update goes. Never the other way round (an empty create filled by the update): the GL backend
++//    builds mipmaps only at create time (nvg__renderUpdateTexture has no glGenerateMipmap), so a create without pixels
++//    would leave a NVG_IMAGE_GENERATE_MIPMAPS texture with undefined mip levels. Folded only when the update holds
++//    exactly the create's width * height * bytes-per-pixel; any other size is left as it is;
 +//  - an Update without pixels does nothing (applyResources skips it);
 +//  - an image created AND deleted never has to exist: its create, update and delete all go (orphanedImages). The
 +//    delete of an image created before the backlog stays (its real texture exists).
@@ -182,6 +190,11 @@ index 3728148..46cd694 100644
 +    auto const isCreate = [](Kind const k) {
 +        return k == Kind::CreateARGB || k == Kind::CreateARGBSRGB || k == Kind::CreateAlpha;
 +    };
++    auto const createBytes = [](Context::ResourceOp const& create) {
++        if (create.width <= 0 || create.height <= 0)
++            return static_cast<size_t>(0);
++        return static_cast<size_t>(create.width) * static_cast<size_t>(create.height) * (create.kind == Kind::CreateAlpha ? 1u : 4u);
++    };
 +
 +    for (size_t i = 0; i < ops.size(); ++i) {
 +        auto& op = ops[i];
@@ -199,13 +212,19 @@ index 3728148..46cd694 100644
 +                continue;
 +            }
 +            auto& t = live[op.image];
-+            if (t.lastUpdate >= 0) {
-+                drop[static_cast<size_t>(t.lastUpdate)] = 1;
-+            } else if (t.create >= 0 && !ops[static_cast<size_t>(t.create)].data.empty()) {
++            if (t.create >= 0 && t.lastUpdate < 0) {
 +                auto& create = ops[static_cast<size_t>(t.create)];
-+                result.droppedBytes += create.data.size();
-+                std::vector<unsigned char>().swap(create.data);
++                size_t const want = createBytes(create);
++                if (want != 0 && op.data.size() == want) {
++                    result.droppedBytes += create.data.size(); // the create's own pixels (if any) are superseded
++                    create.data = std::move(op.data);
++                    op.data.clear(); // moved-from: make the op weigh nothing when it is counted below
++                    drop[i] = 1;
++                    continue;
++                }
 +            }
++            if (t.lastUpdate >= 0)
++                drop[static_cast<size_t>(t.lastUpdate)] = 1;
 +            t.lastUpdate = static_cast<long>(i);
 +            continue;
 +        }
