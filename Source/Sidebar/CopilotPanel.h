@@ -342,8 +342,18 @@ public:
         talkViewport.setVisible(newTab == PanelTab::Talk);
         tapesView.setVisible(newTab == PanelTab::Tapes);
         updateTabs();
+        if (newTab == PanelTab::Widgets)
+            rack.refresh(); // rack.json again: a new card shows without a restart
         if (newTab == PanelTab::Talk)
             updateTalkLayout();
+    }
+
+    // The sidebar shows this panel with setVisible(true): with the widgets tab open, read rack.json again. (The rack itself is never
+    // told: a tab switch hides and shows its viewport, not the rack.)
+    void visibilityChanged() override
+    {
+        if (isShowing() && currentTab == PanelTab::Widgets)
+            rack.refresh();
     }
 
     PanelTab getTab() const { return currentTab; }

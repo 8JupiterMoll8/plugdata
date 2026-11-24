@@ -10,9 +10,14 @@
 //  - name: 1..40 characters of [A-Za-z0-9._~-], the first a letter or digit (the card's title and its thumbnail's file name).
 //  - purpose: one line, 1..160 characters, no control characters.
 //  - group: IDEA KIT, RHYTHM, MELODY, SOUND, SYSTEM or BLOCKS (any case). BLOCKS has no built-in card; only this file fills it.
-//  - object: ONE object text (what follows `#X obj 0 0 `): no `;`, no `$`, no line break, at most 200 characters. OR
-//    patch: a whole Pd patch text (several objects and `#X connect` lines), pasted exactly as written on a drag: every statement
-//    (ends at an unescaped `;`) must start with `#X `, `#N canvas ` or `#A `; at most 32 KB. One of the two, never both.
+//  - object: ONE object text (what follows `#X obj 0 0 `): no `;` `,` `$` or backslash, no line break, at most 200 characters. OR
+//    patch: a whole Pd patch text (several objects and `#X connect` lines), pasted exactly as written on a drag; at most 32 KB. One of
+//    the two, never both. The patch is a list of whole lines, one statement each, every line ending with `;` (the drop ends every
+//    line with `;`, so a line break inside a statement would start a second one). Each line is `#X <word>` with the word one of obj
+//    msg text floatatom symbolatom listbox connect restore coords array declare f, or `#N canvas ...` (paired with a later `#X
+//    restore`), or `#A <numbers>` (array data, never first); the first line starts with `#X ` or `#N canvas `. An unescaped `,` is
+//    only the width Pd writes after a box (`, f 20`). An escaped `\;` inside a msg box is fine: it runs only when clicked. The
+//    reasons are in McpRackRules.h.
 //  - override (optional, true): a name equal to a built-in card is skipped, unless this is true: then the card keeps its place and
 //    group and takes this entry's purpose and object/patch.
 // Anything else in the file is ignored. The built-in cards are always shown; the file only adds to them. Limits: 256 KB of
@@ -22,6 +27,7 @@
 #pragma once
 
 #include "McpRackJson.h"
+#include "McpRackRules.h"
 #include "McpWidgetRack.h"
 
 #include <algorithm>
@@ -36,97 +42,6 @@ namespace mcp {
 
 inline constexpr std::size_t kRackFileMaxBytes = 256 * 1024;
 inline constexpr std::size_t kRackFileMaxEntries = 64;
-inline constexpr std::size_t kRackNameMax = 40;
-inline constexpr std::size_t kRackPurposeMax = 160;
-inline constexpr std::size_t kRackObjectMax = 200;
-inline constexpr std::size_t kRackPatchMax = 32 * 1024;
-
-// ---- one entry's rules ----------------------------------------------------------------------------------------------------
-
-inline bool rackIsControl(char const c)
-{
-    return static_cast<unsigned char>(c) < 0x20 || c == 0x7f;
-}
-
-/** "" when `name` is a good card name, else why not. */
-inline std::string rackNameProblem(std::string_view name)
-{
-    if (name.empty())
-        return "the name is empty";
-    if (name.size() > kRackNameMax)
-        return "the name is longer than 40 characters";
-    auto const alnum = [](char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'); };
-    if (!alnum(name.front()))
-        return "the name must start with a letter or a digit";
-    for (char const c : name)
-        if (!alnum(c) && c != '.' && c != '_' && c != '~' && c != '-')
-            return "the name may only use letters, digits and . _ ~ -";
-    return {};
-}
-
-inline std::string rackPurposeProblem(std::string_view purpose)
-{
-    if (purpose.empty())
-        return "the purpose is empty";
-    if (purpose.size() > kRackPurposeMax)
-        return "the purpose is longer than 160 characters";
-    for (char const c : purpose)
-        if (rackIsControl(c))
-            return "the purpose has a control character or a line break";
-    return {};
-}
-
-/** One object text for `#X obj 0 0 <object>;`: no `;` (it would end the statement), no `$`, no line break. */
-inline std::string rackObjectProblem(std::string_view object)
-{
-    if (object.empty())
-        return "the object is empty";
-    if (object.size() > kRackObjectMax)
-        return "the object is longer than 200 characters";
-    for (char const c : object) {
-        if (rackIsControl(c))
-            return "the object has a control character or a line break";
-        if (c == ';' || c == '$')
-            return "the object has a ; or a $ (use patch for more than one object)";
-    }
-    return {};
-}
-
-/** A whole patch text: only Pd's own statements (nothing that would send a message to Pd), each ended by an unescaped `;`. */
-inline std::string rackPatchProblem(std::string_view patch)
-{
-    if (patch.empty())
-        return "the patch is empty";
-    if (patch.size() > kRackPatchMax)
-        return "the patch is longer than 32 KB";
-    for (char const c : patch)
-        if (rackIsControl(c) && c != '\n' && c != '\r' && c != '\t')
-            return "the patch has a control character";
-    auto const trimmed = [](std::string_view t) {
-        auto const first = t.find_first_not_of(" \t\r\n");
-        return first == std::string_view::npos ? std::string_view() : t.substr(first);
-    };
-    std::size_t start = 0;
-    int statements = 0;
-    bool escaped = false;
-    for (std::size_t i = 0; i < patch.size(); ++i) {
-        char const c = patch[i];
-        if (escaped) {
-            escaped = false;
-        } else if (c == '\\') {
-            escaped = true;
-        } else if (c == ';') {
-            auto const st = trimmed(patch.substr(start, i - start));
-            if (st.substr(0, 3) != "#X " && st.substr(0, 10) != "#N canvas " && st.substr(0, 3) != "#A ")
-                return "a statement of the patch does not start with #X, #N canvas or #A";
-            start = i + 1;
-            ++statements;
-        }
-    }
-    if (!trimmed(patch.substr(start)).empty())
-        return "the patch does not end with ;";
-    return statements > 0 ? std::string() : std::string("the patch has no statement");
-}
 
 // ---- the merge --------------------------------------------------------------------------------------------------------------
 
@@ -146,14 +61,13 @@ inline std::vector<RackEntry> rackBuiltIns()
     return out;
 }
 
-/** The built-ins alone, for a file the caller has no text of (a bigger one is handed over cut at 256 KB + 1 and refused by the merge). */
+/** The built-ins alone, for a file the caller has no text of (a bigger one is handed over cut at 256 KB + 1 and refused by the merge).
+ *  No file is the normal state and says nothing; a file that is there but cannot be opened gets one line. */
 inline RackMerge rackBuiltInsOnly(RackFileProblem why)
 {
     RackMerge m { rackBuiltIns(), {} };
-    switch (why) {
-    case RackFileProblem::Missing: m.warnings.push_back("rack.json: not found, only the built-in widgets are shown"); break;
-    case RackFileProblem::Unreadable: m.warnings.push_back("rack.json: could not be read, skipped; only the built-in widgets are shown"); break;
-    }
+    if (why == RackFileProblem::Unreadable)
+        m.warnings.push_back("rack.json: could not be read, skipped; only the built-in widgets are shown");
     return m;
 }
 

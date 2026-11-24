@@ -455,11 +455,13 @@ void sizeCap()
 
 void missingOrUnreadable()
 {
-    for (auto const why : { mcp::RackFileProblem::Missing, mcp::RackFileProblem::Unreadable }) {
-        auto const m = mcp::rackBuiltInsOnly(why);
-        CHECK(builtInsOnly(m));
-        CHECK(m.warnings.size() == 1 && m.warnings[0].rfind("rack.json: ", 0) == 0);
-    }
+    // no file is the normal state: the built-ins and no console line
+    auto const missing = mcp::rackBuiltInsOnly(mcp::RackFileProblem::Missing);
+    CHECK(builtInsOnly(missing) && missing.warnings.empty());
+    // a file that is there but cannot be opened is a problem: one line
+    auto const unreadable = mcp::rackBuiltInsOnly(mcp::RackFileProblem::Unreadable);
+    CHECK(builtInsOnly(unreadable));
+    CHECK(unreadable.warnings.size() == 1 && unreadable.warnings[0].rfind("rack.json: ", 0) == 0);
 }
 
 void nameRules()
@@ -545,6 +547,173 @@ void mutatedStarterNeverCrashes()
     }
 }
 
+// ---- the patch rules (review 2026-11-24): the drop turns every LINE into a statement, `#X` is the target canvas ------------------
+
+std::string jsonString(std::string const& raw)
+{
+    std::string out = "\"";
+    for (char const c : raw) {
+        if (c == '"' || c == '\\') { out += '\\'; out += c; }
+        else if (c == '\n') out += "\\n";
+        else if (c == '\r') out += "\\r";
+        else if (c == '\t') out += "\\t";
+        else out += c;
+    }
+    return out + "\"";
+}
+
+// True when a rack.json entry with this patch text (raw, as Pd would see it) is added with no warning, and kept exactly.
+bool patchAccepted(std::string const& raw)
+{
+    auto const m = mcp::mergeRackFile(file(good("p", "BLOCKS", "\"patch\": " + jsonString(raw))));
+    auto const* e = entryNamed(m, "p");
+    return m.warnings.empty() && e && e->patch == raw;
+}
+
+// True when it is refused: no card, exactly one line that names the entry.
+bool patchRefused(std::string const& raw)
+{
+    auto const m = mcp::mergeRackFile(file(good("p", "BLOCKS", "\"patch\": " + jsonString(raw))));
+    return builtInsOnly(m) && m.warnings.size() == 1 && m.warnings[0].find("entry 1") != std::string::npos;
+}
+
+bool objectRefused(std::string const& raw)
+{
+    auto const m = mcp::mergeRackFile(file(good("o", "BLOCKS", "\"object\": " + jsonString(raw))));
+    return builtInsOnly(m) && m.warnings.size() == 1;
+}
+
+bool objectAccepted(std::string const& raw)
+{
+    auto const m = mcp::mergeRackFile(file(good("o", "BLOCKS", "\"object\": " + jsonString(raw))));
+    auto const* e = entryNamed(m, "o");
+    return m.warnings.empty() && e && e->object == raw;
+}
+
+// Must-fix 1: Patch::translatePatchAsString ends EVERY line with `;`, so a line break inside a statement turns its tail into a new
+// statement that runs on the drop (`pd dsp 1`, `pd-other clear`, ...). Every line must be one whole statement.
+void patchLinesAreWholeStatements()
+{
+    CHECK(patchRefused("#X obj 0 0 f\npd dsp 1;"));                            // the probe
+    CHECK(patchRefused("#X obj 0 0 f\r\npd dsp 1;"));
+    CHECK(patchRefused("#X obj 0 0 f\rpd dsp 1;"));
+    CHECK(patchRefused("#X obj 0 0 foo;\n#X obj 0 0 f\npd-other clear;"));
+    CHECK(patchRefused("#X obj 0 0 f\n#X obj 0 0 g;"));                         // a statement cut by a line break
+    CHECK(patchRefused("#X obj 0 0 f \\\n#X obj 0 0 g;"));                      // a backslash before the break does not join the lines
+    CHECK(patchRefused("#X obj 0 0 a; #X obj 0 0 b;"));                         // two statements on one line: the drop only moves the first
+    CHECK(patchRefused("#X obj 0 0 a;#X obj 0 0 b;"));
+    CHECK(patchRefused("#X obj 0 0 a;\npd dsp 1;"));
+    CHECK(patchRefused("#X obj 0 0 a;\n  pd dsp 1;"));
+    CHECK(patchRefused("#X obj 0 0 a;\n\n;"));
+    CHECK(patchRefused("#X obj 0 0 a"));                                        // no end
+    CHECK(patchRefused("#X obj 0 0 a \\;"));                                    // the only `;` is escaped: no end
+    CHECK(patchRefused("#X obj 0 0 a;\n#X obj 0 0 b"));
+    // fine: blank lines, indentation, CR LF, tabs, a trailing blank, no newline at the very end
+    CHECK(patchAccepted("#X obj 0 0 a;\n#X obj 0 30 b;\n#X connect 0 0 1 0;"));
+    CHECK(patchAccepted("\n\n  #X obj 0 0 a;  \n\t#X obj 0 30 b;\t\n\n   "));
+    CHECK(patchAccepted("#X obj 0 0 a;\r\n#X obj 0 30 b;\r\n"));
+    CHECK(patchAccepted("#X obj 0 0 a;\r#X obj 0 30 b;\r"));
+    // an escaped `;` inside a msg box runs only on the artist's click: allowed
+    CHECK(patchAccepted("#X msg 600 60 \\; pd dsp 1;"));
+    CHECK(patchAccepted("#X msg 0 0 a \\; b \\; c;\n#X obj 0 30 d;"));
+}
+
+// Must-fix 2: `#X` is the canvas the drop lands on, so only the words that build a patch may follow it.
+void patchWordsAreAllowListed()
+{
+    // each allowed word alone (restore needs its canvas, tested below)
+    for (char const* ok : { "#X obj 0 0 a;", "#X msg 0 0 a;", "#X text 0 0 hello;", "#X floatatom 0 0 5 0 0 0 - - - 0;",
+             "#X symbolatom 0 0 10 0 0 0 - - - 0;", "#X listbox 0 0 9 0 0 0 - - - 0;", "#X connect 0 0 1 0;", "#X coords 0 1 100 -1 200 140 1;",
+             "#X array a 10 float 3;", "#X declare -path x;", "#X f 20;" })
+        CHECK(patchAccepted(ok));
+    // what else the canvas answers to is refused: clear (empties the patch), close, save, vis, pop, editmode, ...
+    for (char const* bad : { "#X clear;", "#X menuclose;", "#X menuclose 1;", "#X menusave;", "#X vis 1;", "#X pop;", "#X editmode 1;", "#X dirty 0;",
+             "#X obj;;", "#X objx 0 0 a;", "#X OBJ 0 0 a;", "#X clearx;", "#X  clear;", "#X ;", "#X;", "#X", "#X cut;", "#X selectall;", "#X mouse 1 2 3 4;",
+             "#X relocate x y z;", "#X bang;", "#X loadbang;", "#X dsp 1;", "#X rename x;", "#Xobj 0 0 a;", "#X	clear;" })
+        CHECK(patchRefused(bad));
+    // the comma repeats the target: `f, clear` is `#X obj 0 0 f` then `#X clear`
+    CHECK(patchRefused("#X obj 0 0 f, clear;"));
+    CHECK(patchRefused("#X obj 0 0 f , clear;"));
+    CHECK(patchRefused("#X obj 0 0 f,clear;"));
+    CHECK(patchRefused("#X msg 0 0 a, clear;"));
+    CHECK(patchRefused("#X obj 0 0 a, f 20, clear;"));
+    CHECK(patchRefused("#X obj 0 0 a, f 20 clear;"));
+    CHECK(patchRefused("#X obj 0 0 a, f;"));
+    CHECK(patchRefused("#X obj 0 0 a, f x;"));
+    CHECK(patchRefused("#X obj 0 0 a, f 2x;"));
+    CHECK(patchRefused("#X obj 0 0 a, f -2;"));
+    CHECK(patchRefused("#X obj 0 0 a, fx 20;"));
+    CHECK(patchRefused("#X obj 0 0 a,;"));
+    CHECK(patchRefused("#X obj 0 0 a, , f 20;"));
+    CHECK(patchRefused("#X obj 0 0 a, F 20;"));
+    CHECK(patchRefused("#X obj 0 0 a,\n f 20;"));                              // (also a line break inside a statement)
+    // the width suffix and escaped commas are what Pd itself writes
+    CHECK(patchAccepted("#X obj 0 0 a, f 20;"));
+    CHECK(patchAccepted("#X obj 0 0 a,f 20;"));
+    CHECK(patchAccepted("#X msg 0 0 a \\, b \\; c, f 12;"));
+    CHECK(patchAccepted("#X obj 0 0 expr if(\\$f1 > 0 \\, 1 \\, 0), f 30;"));
+    CHECK(patchAccepted("#X text 0 0 one \\, two;"));
+    // the first statement starts with #X or #N canvas (pastechars ignores anything else)
+    CHECK(patchRefused("#A 0 1 2;"));
+    CHECK(patchRefused("#A 0 1 2;\n#X obj 0 0 a;"));
+    CHECK(patchRefused("pd dsp 1;"));
+    CHECK(patchRefused("#N obj 0 0 a;"));
+    CHECK(patchRefused("#N canvasx 0 0 1 1 a 0;\n#X restore 0 0 pd a;"));
+    CHECK(patchRefused("#N vis 1;"));
+    // array data after an array is plain numbers
+    CHECK(patchAccepted("#X array a 3 float 3;\n#A 0 1 2.5 -3 1e-3;"));
+    CHECK(patchRefused("#X array a 3 float 3;\n#A 0 foo;"));
+    CHECK(patchRefused("#X array a 3 float 3;\n#A foo 1;"));
+    CHECK(patchRefused("#X array a 3 float 3;\n#A 0 1, 2;"));
+    CHECK(patchRefused("#X array a 3 float 3;\n#A;"));
+}
+
+// Must-fix 2: a subpatch's `#N canvas` and `#X restore` pair up, or Pd's canvas stack is left open (or popped too far).
+void patchSubpatchesBalance()
+{
+    CHECK(patchAccepted("#N canvas 0 0 450 300 sub 0;\n#X obj 0 0 a;\n#X restore 10 10 pd sub;"));
+    CHECK(patchAccepted("#X obj 0 0 b;\n#N canvas 0 0 450 300 sub 0;\n#X obj 0 0 a;\n#X restore 10 10 pd sub;\n#X connect 0 0 1 0;"));
+    CHECK(patchAccepted("#N canvas 0 0 450 300 outer 0;\n#N canvas 0 0 450 300 inner 0;\n#X obj 0 0 a;\n#X restore 10 10 pd inner;\n#X restore 10 10 pd outer;"));
+    CHECK(patchAccepted("#N canvas 0 0 450 300 a 0;\n#X restore 0 0 pd a;\n#N canvas 0 0 450 300 b 0;\n#X restore 0 40 pd b;")); // two in a row
+    CHECK(patchRefused("#N canvas 0 0 450 300 sub 0;\n#X obj 0 0 a;"));                                      // never closed
+    CHECK(patchRefused("#N canvas 0 0 450 300 sub 0;"));
+    CHECK(patchRefused("#X restore 10 10 pd sub;"));                                                         // closes nothing
+    CHECK(patchRefused("#X obj 0 0 a;\n#X restore 10 10 pd sub;"));
+    CHECK(patchRefused("#N canvas 0 0 450 300 sub 0;\n#X restore 10 10 pd sub;\n#X restore 10 10 pd sub;")); // one too many
+    CHECK(patchRefused("#X restore 10 10 pd sub;\n#N canvas 0 0 450 300 sub 0;"));                          // the wrong way round
+    CHECK(patchRefused("#N canvas 0 0 450 300 o 0;\n#N canvas 0 0 450 300 i 0;\n#X restore 0 0 pd i;"));
+    // inside a subpatch the same words rule
+    CHECK(patchRefused("#N canvas 0 0 450 300 sub 0;\n#X clear;\n#X restore 10 10 pd sub;"));
+    CHECK(patchRefused("#N canvas 0 0 450 300 sub 0;\npd dsp 1;\n#X restore 10 10 pd sub;"));
+}
+
+// Must-fix 2: an object text becomes `#X obj 0 0 <object>;`: no comma (it repeats the target), no `;` or `$`, no backslash that
+// could escape the closing `;`.
+void objectTextsCannotAddStatements()
+{
+    CHECK(objectRefused("f, clear"));
+    CHECK(objectRefused("f ,clear"));
+    CHECK(objectRefused("f,clear"));
+    CHECK(objectRefused("a, f 20"));
+    CHECK(objectRefused("f \\, clear"));
+    CHECK(objectRefused("foo\\"));                                              // would escape the closing `;`
+    CHECK(objectRefused("f \\; pd dsp 1"));
+    CHECK(objectRefused("a; b"));
+    CHECK(objectRefused("a $1"));
+    CHECK(objectAccepted("ai.midi 240 64"));
+    CHECK(objectAccepted("ai.loop~ {name}"));
+    CHECK(objectAccepted("note 280 14 Inter empty 0 26 26 26 0 246 231 166 1 0 sticky note"));
+    CHECK(objectAccepted("hsl 200 20 0 1 0 0 empty empty gesture 0 -10 0 10 #fcfcfc #dc291f #1a1a1a 0 1"));
+    // a built-in override takes the same rules
+    auto const m = mcp::mergeRackFile(file(
+        "{ \"name\": \"ai.midi\", \"purpose\": \"New words\", \"group\": \"MELODY\", \"object\": \"f, clear\", \"override\": true }"));
+    CHECK(builtInsOnly(m) && m.warnings.size() == 1);
+    CHECK(mcp::rackObjectProblem("f, clear") != "");
+    CHECK(mcp::rackObjectProblem("ai.sketch").empty());
+    // the built-ins themselves pass the object rule they ask of the file
+    for (auto const& w : mcp::kRackWidgets) CHECK(mcp::rackObjectProblem(w.object).empty());
+}
+
 } // namespace
 
 int main()
@@ -567,6 +736,10 @@ int main()
     entryCap();
     sizeCap();
     missingOrUnreadable();
+    patchLinesAreWholeStatements();
+    patchWordsAreAllowListed();
+    patchSubpatchesBalance();
+    objectTextsCannotAddStatements();
     nameRules();
     starterFile();
     mutatedStarterNeverCrashes();

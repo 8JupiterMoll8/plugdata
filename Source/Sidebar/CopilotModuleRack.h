@@ -5,9 +5,10 @@
  //
  // The built-in table is always shown. More cards come from the artist's data file, so a new widget needs no rebuild:
  //   <app data dir>/Abstractions/rack.json   (format and limits: Mcp/McpRackFile.h; a starter: docs/rack.json.example)
- // It is read when the rack is built and again each time the rack is shown (the panel opened, the widgets tab picked): save the
- // file, show the tab, the cards are there. A missing, broken or too big file never hides a built-in; what was skipped and why is
- // one console line each, written again only when the file's problems change.
+ // It is read when the rack is built and again whenever CopilotPanel calls refresh(): when the widgets tab is picked and when the
+ // panel is shown with that tab open (the rack itself gets no visibility call: the panel's viewport is what is hidden and shown).
+ // Save the file, pick the tab, the cards are there. No file says nothing. A broken or too big file never hides a built-in; what
+ // was skipped and why is one console line each, written again only when the file's problems change.
  //
  // A card (design round 2026-11-19, picture P: cream, 1 px ink outline, no colour dots) shows the name, the purpose in up to
  // three lines and, when the file exists, a 56 px thumbnail on the right:
@@ -159,7 +160,8 @@ public:
     static File getThumbsDir() { return ProjectInfo::appDataDir.getChildFile("Abstractions").getChildFile("thumbs"); }
     static File getRackFile() { return ProjectInfo::appDataDir.getChildFile("Abstractions").getChildFile("rack.json"); }
 
-    // Reads rack.json again, rebuilds the cards when the list changed (and sizes the rack to fit), then the thumbnails.
+    // Reads rack.json again, rebuilds the cards when the list changed (and sizes the rack to fit), then the thumbnails. Called by
+    // CopilotPanel (widgets tab picked, panel shown) and once by the constructor.
     void refresh()
     {
         auto merged = readRackFile();
@@ -183,12 +185,6 @@ public:
         auto const dir = getThumbsDir();
         for (auto& card : cards)
             card->loadThumb(dir);
-    }
-
-    void visibilityChanged() override
-    {
-        if (isShowing())
-            refresh();
     }
 
     void resized() override
@@ -233,9 +229,8 @@ private:
     mcp::RackMerge readRackFile()
     {
         auto const file = getRackFile();
-        bool const missing = !file.existsAsFile();
-        auto merged = mcp::rackBuiltInsOnly(mcp::RackFileProblem::Missing);
-        if (!missing) {
+        auto merged = mcp::rackBuiltInsOnly(mcp::RackFileProblem::Missing); // no file: the built-ins, no console line
+        if (file.existsAsFile()) {
             FileInputStream in(file);
             if (in.failedToOpen()) {
                 merged = mcp::rackBuiltInsOnly(mcp::RackFileProblem::Unreadable);
@@ -248,14 +243,9 @@ private:
         }
         if (merged.warnings != lastWarnings) {
             lastWarnings = merged.warnings;
-            for (auto const& line : merged.warnings) {
-                if (!editor || !editor->pd)
-                    break;
-                if (missing)
-                    editor->pd->logMessage(String::fromUTF8(line.c_str())); // no file is the normal state: a note, not a warning
-                else
+            if (editor && editor->pd)
+                for (auto const& line : merged.warnings)
                     editor->pd->logWarning(String::fromUTF8(line.c_str()));
-            }
         }
         return merged;
     }
