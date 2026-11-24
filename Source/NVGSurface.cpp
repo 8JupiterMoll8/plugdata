@@ -717,7 +717,16 @@ void NVGSurface::recordPacedFrame()
 void NVGSurface::emitFrameLog()
 {
     auto const line = frameLogWindow.takeLine(framePacer.stats(), renderedFrames.load(std::memory_order_relaxed), presentedFrames.load(std::memory_order_relaxed));
-    std::fprintf(stderr, "%s win=%p\n", line.c_str(), static_cast<void*>(this));
+    // MCP-CARRIED(host-leak): the async layer's resource backlog (image ops the render thread has not taken yet).
+    // It grows only while the render thread is behind; compaction keeps it bounded (patches/submodules/nanovg/0001).
+    nanovg::ResourceBacklog backlog;
+    if (auto* asyncNvg = nvg.load())
+        backlog = nanovg::resourceBacklog(asyncNvg);
+    constexpr double mb = 1024.0 * 1024.0;
+    std::fprintf(stderr, "%s backlog=%zu/%.1fMB peak=%.1fMB compacted=%llu/%.1fMB win=%p\n", line.c_str(),
+        backlog.ops, static_cast<double>(backlog.bytes) / mb, static_cast<double>(backlog.peakBytes) / mb,
+        static_cast<unsigned long long>(backlog.compactedOps), static_cast<double>(backlog.compactedBytes) / mb,
+        static_cast<void*>(this));
 }
 #endif
 
