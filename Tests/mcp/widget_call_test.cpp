@@ -2,7 +2,7 @@
 // Pd-free (Source/Mcp/McpWidgetCall.h and McpWidgetCallJson.h). `/pd/widget_call <corrId> <widget> <paddr|-> <argc> <atoms...>`
 // binds a collector to the widget's state name for the length of ONE call, sends the atoms to the widget's in-name and answers the
 // frames the widget sent back, cut into sets at each `end`:
-//  - the floor: the first word (after an optional `to <paddr>`) is dump, ghost, ghostn, ghostname or unghost; anything else is refused
+//  - the floor: the first word (after an optional `to <paddr>`) is dump, ghost, ghostn, ghostname, unghost or op (op only addressed); anything else is refused
 //    here (do, clear, flow, beat, ...), the address is `p` and 1..16 lower-case hex digits, nothing else gets through;
 //  - the log: at most 64 frames of at most 32 atoms (the 65th frame and the 33rd atom are cut and flagged `truncated`); a symbol
 //    longer than the room is cut and flagged too; the storage is fixed (nothing is allocated while the collector is bound);
@@ -90,12 +90,36 @@ void addressesAndWords()
     CHECK(!mcp::widgetCallAddrOk("p55d0;"));
     CHECK(!mcp::widgetCallAddrOk("p-1"));
 
-    for (char const* w : { "dump", "ghost", "ghostn", "ghostname", "unghost" })
+    for (char const* w : { "dump", "ghost", "ghostn", "ghostname", "unghost", "op" })
         CHECK(mcp::widgetCallWordOk(w));
     for (char const* w : { "do", "clear", "flow", "beat", "drive", "undo", "back", "reload", "tempo", "set", "float", "list", "to", "askable", "ask",
-                           "focused", "Dump", "dump ", "", "ghosts", "ghostnames", "ghostnx", "Ghostn", "mode", "hold", "feel", "save", "load" })
+                           "focused", "Dump", "dump ", "", "ghosts", "ghostnames", "ghostnx", "Ghostn", "mode", "hold", "feel", "save", "load",
+                           "Op", "ops", "op ", "opdone", "operate", "confirm" })
         CHECK(!mcp::widgetCallWordOk(w));
     CHECK(!mcp::widgetCallWordOk(nullptr));
+}
+
+// Flow control (night/flow-control, 2026-11-25): `op <rev> [confirm] <word> <args...>` is the one word through which Alphi operates a widget while flow is on.
+// The server decides flow, the word table and the approval; the floor here only lets the word through, and only ADDRESSED: an op with no `to <paddr>` would reach
+// every instance of the widget family on that in-name.
+void theOpWordIsAddressedOnly()
+{
+    CHECK(planOf({ sym("op"), num(3), sym("mute"), num(2), num(1) }) == WidgetCallRefusal::OpNeedsAddress);          // no address at all
+    CHECK(planOf({ sym("op"), num(3), sym("confirm"), sym("clear") }) == WidgetCallRefusal::OpNeedsAddress);
+    CHECK(planOf({ sym("op"), num(3), sym("mute"), num(2), num(1) }, "p1f") == WidgetCallRefusal::None);              // the address argument
+    CHECK(planOf({ sym("op"), num(3), sym("mute"), num(2), num(1) }, "-") == WidgetCallRefusal::OpNeedsAddress);      // `-` is no address
+    auto const withTo = std::vector<WidgetCallArg> { sym("to"), sym("p55d0"), sym("op"), num(3), sym("mute"), num(2), num(1) };
+    auto plan = mcp::widgetCallPlan(withTo.data(), static_cast<int>(withTo.size()), "-");
+    CHECK(plan.refusal == WidgetCallRefusal::None && plan.addressInAtoms && plan.bodyStart == 2);                     // `to <paddr> op ...`
+    CHECK(planOf({ sym("to"), sym("p55d0"), sym("op") }) == WidgetCallRefusal::None);                                 // the widget checks the rest (a bare op is stale / shape there)
+    CHECK(planOf({ sym("to"), sym("zz"), sym("op"), num(1), sym("play") }) == WidgetCallRefusal::BadAddress);
+    CHECK(planOf({ sym("Op"), num(3) }, "p1f") == WidgetCallRefusal::Word);                                           // exact word only
+    CHECK(planOf({ sym("operate"), num(3) }, "p1f") == WidgetCallRefusal::Word);
+    // the other four words stay as they were: no address needed
+    CHECK(planOf({ sym("dump") }) == WidgetCallRefusal::None);
+    CHECK(planOf({ sym("ghost"), num(1) }) == WidgetCallRefusal::None);
+    CHECK(std::strlen(mcp::widgetCallRefusalText(WidgetCallRefusal::OpNeedsAddress)) > 10);
+    CHECK(std::strcmp(mcp::widgetCallRefusalText(WidgetCallRefusal::OpNeedsAddress), mcp::widgetCallRefusalText(WidgetCallRefusal::Word)) != 0);
 }
 
 void theFloorAllowsFourWordsAndNothingElse()
@@ -536,6 +560,7 @@ int main()
 {
     addressesAndWords();
     theFloorAllowsFourWordsAndNothingElse();
+    theOpWordIsAddressedOnly();
     theAddressIsPrefixedOrGiven();
     theFloorRefusesBadAtoms();
     aCutNeverSplitsAMultibyteCharacter();
