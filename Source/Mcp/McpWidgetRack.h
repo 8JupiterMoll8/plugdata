@@ -6,19 +6,24 @@
 // The purposes are the gallery's comments (Alphi Ideas/gallery/ai-widgets.gallery.pd), shortened to one line. The widget names are
 // the artist-facing `ai.<word>` names (ai.note is ELSE's [note] sticky note under a name of its own). Names with a `~` map to a
 // plain file name for the optional thumbnail (`ai.loop~` -> `ai.loop_.png`), so a thumbs folder works on every file system.
+//
+// The table below is the base and is always shown. More cards come from the artist's rack.json (Source/Mcp/McpRackFile.h): they are
+// RackEntry values (owned strings) next to the built-ins' RackWidget (string_views of the table), and the group BLOCKS (no built-in,
+// only the file fills it).
 #pragma once
 
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 #include <string_view>
 
 namespace mcp {
 
-enum class RackGroup : std::uint8_t { IdeaKit, Rhythm, Melody, Sound, System };
+enum class RackGroup : std::uint8_t { IdeaKit, Rhythm, Melody, Sound, System, Blocks };
 
-inline constexpr RackGroup kRackGroups[] = { RackGroup::IdeaKit, RackGroup::Rhythm, RackGroup::Melody, RackGroup::Sound, RackGroup::System };
+inline constexpr RackGroup kRackGroups[] = { RackGroup::IdeaKit, RackGroup::Rhythm, RackGroup::Melody, RackGroup::Sound, RackGroup::System, RackGroup::Blocks };
 
 constexpr std::string_view rackGroupTitle(RackGroup g)
 {
@@ -28,8 +33,29 @@ constexpr std::string_view rackGroupTitle(RackGroup g)
     case RackGroup::Melody: return "MELODY";
     case RackGroup::Sound: return "SOUND";
     case RackGroup::System: return "SYSTEM";
+    case RackGroup::Blocks: return "BLOCKS";
     }
     return "";
+}
+
+/** The group a rack.json `group` names (the title, any case); nullopt for anything else. */
+inline std::optional<RackGroup> rackGroupFromTitle(std::string_view text)
+{
+    for (auto const g : kRackGroups) {
+        auto const title = rackGroupTitle(g);
+        if (title.size() != text.size())
+            continue;
+        bool same = true;
+        for (std::size_t i = 0; i < title.size() && same; ++i) {
+            char c = text[i];
+            if (c >= 'a' && c <= 'z')
+                c = static_cast<char>(c - 'a' + 'A');
+            same = (c == title[i]);
+        }
+        if (same)
+            return g;
+    }
+    return std::nullopt;
 }
 
 /** 0xAARRGGBB of the group's dot. */
@@ -41,6 +67,7 @@ constexpr std::uint32_t rackGroupColour(RackGroup g)
     case RackGroup::Melody: return 0xffb388ff;  // violet (the MIDI looper's colour from before the rack)
     case RackGroup::Sound: return 0xff4dd0e1;   // cyan
     case RackGroup::System: return 0xff90a4ae;  // blue grey
+    case RackGroup::Blocks: return 0xff143d9e;  // Bauhaus blue (McpAiStyle.h aiBlue)
     }
     return 0xff90a4ae;
 }
@@ -74,14 +101,52 @@ inline constexpr RackWidget kRackWidgets[] = {
 
 inline constexpr std::size_t kRackWidgetCount = sizeof(kRackWidgets) / sizeof(kRackWidgets[0]);
 
-/** The patch text a drag pastes: `#X obj 0 0 <object>;\n`, with `{name}` replaced by `looperName` (ai.loop~ needs one). */
-inline std::string rackPatchText(RackWidget const& w, std::string_view looperName)
+/** A card of the rack as the panel keeps it: a built-in (copied from the table) or one from rack.json. `patch` (a whole Pd patch
+ *  text, several objects and connections) wins over `object`; a drag of a `patch` entry pastes the text exactly as it is. */
+struct RackEntry {
+    std::string name;
+    std::string purpose;
+    RackGroup group = RackGroup::System;
+    std::string object; // one object text, as RackWidget::object
+    std::string patch;  // empty: the drag creates `object`
+    bool fromFile = false;
+
+    friend bool operator==(RackEntry const& a, RackEntry const& b)
+    {
+        return a.name == b.name && a.purpose == b.purpose && a.group == b.group && a.object == b.object && a.patch == b.patch && a.fromFile == b.fromFile;
+    }
+    friend bool operator!=(RackEntry const& a, RackEntry const& b) { return !(a == b); }
+};
+
+inline RackEntry rackEntryOf(RackWidget const& w)
 {
-    std::string object(w.object);
+    return { std::string(w.name), std::string(w.purpose), w.group, std::string(w.object), std::string(), false };
+}
+
+/** True when a drag needs a free looper name (the object text carries `{name}`). */
+inline bool rackNeedsLooperName(std::string_view object)
+{
+    return object.find("{name}") != std::string_view::npos;
+}
+
+/** The patch text a drag pastes: `#X obj 0 0 <object>;\n`, with `{name}` replaced by `looperName` (ai.loop~ needs one). */
+inline std::string rackPatchText(std::string_view objectText, std::string_view looperName)
+{
+    std::string object(objectText);
     constexpr std::string_view token = "{name}";
     if (auto const at = object.find(token); at != std::string::npos)
         object.replace(at, token.size(), looperName.empty() ? std::string_view("loop1") : looperName);
     return "#X obj 0 0 " + object + ";\n";
+}
+
+inline std::string rackPatchText(RackWidget const& w, std::string_view looperName)
+{
+    return rackPatchText(w.object, looperName);
+}
+
+inline std::string rackPatchText(RackEntry const& e, std::string_view looperName)
+{
+    return e.patch.empty() ? rackPatchText(std::string_view(e.object), looperName) : e.patch;
 }
 
 /** `<name>.png` with every character outside [A-Za-z0-9._-] replaced by `_` ("" for an empty name). */

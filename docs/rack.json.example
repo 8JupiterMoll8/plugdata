@@ -1,0 +1,10 @@
+{ "version": 1,
+  "widgets": [
+    {"name": "ai.seq", "purpose": "A note grid in key; the AI suggests lines", "group": "MELODY", "object": "ai.seq bass"},
+    {"name": "gesture", "purpose": "Record a knob or slider movement into ai.draw", "group": "MELODY", "patch": "#X obj 0 0 ctlin;\n#X obj 0 30 / 127;\n#X obj 0 60 hsl 200 20 0 1 0 0 empty empty gesture 0 -10 0 10 #fcfcfc #dc291f #1a1a1a 0 1;\n#X obj 0 110 ai.draw;\n#X connect 0 0 1 0;\n#X connect 1 0 2 0;\n#X connect 2 0 3 0;"},
+    {"name": "ai.sense8", "purpose": "See 8 sensors live; each lane goes out on its own outlet", "group": "BLOCKS", "patch": "#X obj 0 0 sense.sim;\n#X obj 0 60 ai.sense8 board;\n#X connect 0 0 1 0;"},
+    {"name": "groovebox", "purpose": "Clock, two note grids, bass and glitch, output and rec, wired", "group": "BLOCKS", "patch": "#X obj 0 0 gbx.clock;\n#X obj 130 0 ai.seq bass;\n#X obj 0 280 gbx.bass wired;\n#X obj 620 0 ai.seq glitch;\n#X obj 620 280 gbx.glitch wired;\n#X obj 300 450 gbx.out;\n#X obj 300 620 gbx.rec;\n#X connect 1 1 2 1;\n#X connect 3 1 4 1;\n#X connect 2 0 5 0;\n#X connect 2 1 5 1;\n#X connect 4 0 5 0;\n#X connect 4 1 5 1;\n#X connect 5 0 6 0;\n#X connect 5 1 6 1;"},
+    {"name": "gbx.out", "purpose": "Output with level and master; sound on cables", "group": "BLOCKS", "object": "gbx.out"},
+    {"name": "gbx.rec", "purpose": "Record the output to a WAV, never overwrites", "group": "BLOCKS", "object": "gbx.rec"}
+  ]
+}

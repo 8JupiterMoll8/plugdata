@@ -448,7 +448,7 @@ public:
 
         // 4. The middle: one of the three tab views fills it (the other two are hidden)
         rackViewport.setBounds(bounds);
-        rack.setSize(std::max(10, rackViewport.getMaximumVisibleWidth()), CopilotModuleRack::getContentHeight());
+        rack.setSize(std::max(10, rackViewport.getMaximumVisibleWidth()), rack.getContentHeight());
         talkViewport.setBounds(bounds);
         tapesView.setBounds(bounds);
         updateTalkLayout();
