@@ -1,0 +1,247 @@
+From 72a3e905ecef309c2dd66ab59fd461523b218010 Mon Sep 17 00:00:00 2001
+From: Alphi <alphi@starchaser.local>
+Date: Tue, 24 Nov 2026 19:17:08 +0100
+Subject: [PATCH] fix(async): compact the resource backlog when the consumer is
+ behind
+
+Every published frame moved its image ops (create/update with a full pixel
+copy, delete, framebuffer passes) into committedResources, and only
+performRender released them. When the render thread stopped taking frames
+the backlog grew by one pixel copy per repaint, without bound.
+
+publish() now compacts the backlog when the consumer has not taken the
+previous batch: superseded updates, create pixels superseded by an update,
+empty updates and create..delete pairs go (never across a framebuffer
+pass). The result is what the consumer would have ended with. Adds
+resourceBacklog() counters (ops, bytes, peak, compacted) for the host's
+frame log.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/nanovg_async.cpp |  40 +++++++++++++++
+ src/nanovg_async.h   | 119 +++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 159 insertions(+)
+
+diff --git a/src/nanovg_async.cpp b/src/nanovg_async.cpp
+index 0423024..abda010 100644
+--- a/src/nanovg_async.cpp
++++ b/src/nanovg_async.cpp
+@@ -25,6 +25,7 @@ namespace nanovg {
+ void Context::publish()
+ {
+     CommandBuffer* next = nullptr;
++    std::vector<int> orphanedImages;
+     {
+         std::lock_guard<std::mutex> lock(mutex);
+ 
+@@ -33,10 +34,28 @@ void Context::publish()
+         // still-pending previous frame). Coalescing a frame keeps its resource ops
+         // in `committedResources`, so creates/deletes stay in order and are not lost.
+         if (!recordingResources.empty()) {
++            // The consumer has not taken the last batch (it is behind or stopped): compact, so a backlog that is
++            // never drained stays bounded by the live images instead of holding a pixel copy per repaint.
++            bool const consumerBehind = !committedResources.empty();
++            if (!consumerBehind)
++                backlogBytes = 0;
++            for (auto const& op : recordingResources)
++                backlogBytes += resourceOpBytes(op);
+             committedResources.insert(committedResources.end(),
+                 std::make_move_iterator(recordingResources.begin()),
+                 std::make_move_iterator(recordingResources.end()));
+             recordingResources.clear();
++
++            if (consumerBehind) {
++                auto compaction = compactResourceBacklog(committedResources);
++                compactedOps += compaction.droppedOps;
++                compactedBytes += compaction.droppedBytes;
++                backlogBytes = 0;
++                for (auto const& op : committedResources)
++                    backlogBytes += resourceOpBytes(op);
++                orphanedImages = std::move(compaction.orphanedImages);
++            }
++            backlogPeakBytes = std::max(backlogPeakBytes, backlogBytes);
+         }
+ 
+         if (pending)
+@@ -56,6 +75,14 @@ void Context::publish()
+         ownedBuffers.push_back(next);
+     }
+ 
++    // An image created and deleted inside the backlog never reaches the real context: forget its producer entry
++    // (applyResources' Delete would have). Outside `mutex`: the two locks are never nested.
++    if (!orphanedImages.empty()) {
++        std::lock_guard<std::mutex> lock(resourceMutex);
++        for (int const image : orphanedImages)
++            images.erase(image);
++    }
++
+     next->reset();
+     record = next;
+ }
+@@ -67,6 +94,19 @@ bool hasPendingFrame(NVGcontext* handle)
+     return x->pending != nullptr;
+ }
+ 
++ResourceBacklog resourceBacklog(NVGcontext* handle)
++{
++    auto* x = reinterpret_cast<Context*>(handle);
++    std::lock_guard<std::mutex> lock(x->mutex);
++    ResourceBacklog b;
++    b.ops = x->committedResources.size();
++    b.bytes = x->committedResources.empty() ? 0 : x->backlogBytes;
++    b.peakBytes = x->backlogPeakBytes;
++    b.compactedOps = x->compactedOps;
++    b.compactedBytes = x->compactedBytes;
++    return b;
++}
++
+ int Context::allocateImageId(int const width, int const height, int const bytesPerPixel)
+ {
+     std::lock_guard<std::mutex> lock(resourceMutex);
+diff --git a/src/nanovg_async.h b/src/nanovg_async.h
+index 3728148..46cd694 100644
+--- a/src/nanovg_async.h
++++ b/src/nanovg_async.h
+@@ -68,6 +68,7 @@
+ #ifndef NANOVG_ASYNC_H
+ #define NANOVG_ASYNC_H
+ 
++#include <algorithm>
+ #include <cstdint>
+ #include <cstring>
+ #include <cstddef>
+@@ -464,6 +465,17 @@ struct Context {
+     std::vector<ResourceOp> recordingResources;   // producer-only: current frame's ops
+     std::vector<ResourceOp> committedResources;    // guarded by `mutex`: published, awaiting the consumer
+ 
++    // Backlog of `committedResources` (guarded by `mutex`). While the consumer takes frames the backlog is one
++    // frame's ops. When it stops taking them (render thread blocked in swap, a size-mismatch early return, a
++    // paused GL context) every publish used to append its ops -- full pixel copies for each image create/update --
++    // and nothing released them until the consumer came back: RSS grew without bound while repaints kept
++    // recording. publish() now compacts the backlog (compactResourceBacklog below), so it is bounded by the LIVE
++    // images, and counts what it holds (resourceBacklog(), printed by the host's frame log).
++    size_t backlogBytes = 0;
++    size_t backlogPeakBytes = 0;
++    uint64_t compactedOps = 0;
++    uint64_t compactedBytes = 0;
++
+     void enqueueResource(ResourceOp&& op);            // producer: stage into the current frame
+     void applyResources(std::vector<ResourceOp>& ops); // consumer: create/update/delete on the real ctx
+ 
+@@ -531,6 +543,113 @@ inline bool performRender(NVGcontext* handle)
+ // True if a published-but-not-yet-drawn frame is waiting.
+ bool hasPendingFrame(NVGcontext* handle);
+ 
++// ---------------------------------------------------------------------------
++// Resource backlog (see Context::backlogBytes).
++// ---------------------------------------------------------------------------
++struct ResourceBacklog {
++    size_t ops = 0;             // resource ops published and not yet taken by the consumer
++    size_t bytes = 0;           // their pixel payloads + framebuffer-pass streams
++    size_t peakBytes = 0;       // the largest backlog seen
++    uint64_t compactedOps = 0;  // ops compaction removed (superseded updates, create..delete pairs)
++    uint64_t compactedBytes = 0;
++};
++ResourceBacklog resourceBacklog(NVGcontext* handle);
++
++inline size_t resourceOpBytes(Context::ResourceOp const& op)
++{
++    return op.data.size() + (op.pass ? op.pass->size() : 0);
++}
++
++struct BacklogCompaction {
++    size_t droppedOps = 0;
++    size_t droppedBytes = 0;
++    std::vector<int> orphanedImages; // created AND deleted inside the backlog: the caller erases their `images` entry
++};
++
++// Compact a published-but-unconsumed resource backlog WITHOUT changing what the consumer ends up with. The whole
++// backlog is applied before the single frame replayed next (older frames were coalesced away), so inside a stretch
++// with no FramebufferPass (a pass replays drawing that may sample any image: a hard boundary):
++//  - an Update is superseded by a later Update of the same image (each one uploads the whole image);
++//  - a Create's pixels are superseded by a later Update (the texture is created empty, the update fills it);
++//  - an Update without pixels does nothing (applyResources skips it);
++//  - an image created AND deleted never has to exist: its create, update and delete all go (orphanedImages). The
++//    delete of an image created before the backlog stays (its real texture exists).
++// Framebuffer create/delete ops are left alone. Image ids are never reused (nextImageId only grows), so an id names
++// one image for the whole backlog.
++inline BacklogCompaction compactResourceBacklog(std::vector<Context::ResourceOp>& ops)
++{
++    using Kind = Context::ResourceOp::Kind;
++    BacklogCompaction result;
++    if (ops.empty())
++        return result;
++
++    struct Track {
++        long create = -1;
++        long lastUpdate = -1;
++    };
++    std::unordered_map<int, Track> live;
++    std::vector<char> drop(ops.size(), 0);
++
++    auto const isCreate = [](Kind const k) {
++        return k == Kind::CreateARGB || k == Kind::CreateARGBSRGB || k == Kind::CreateAlpha;
++    };
++
++    for (size_t i = 0; i < ops.size(); ++i) {
++        auto& op = ops[i];
++        if (op.kind == Kind::FramebufferPass) {
++            live.clear();
++            continue;
++        }
++        if (isCreate(op.kind)) {
++            live[op.image] = Track { static_cast<long>(i), -1 };
++            continue;
++        }
++        if (op.kind == Kind::Update) {
++            if (op.data.empty()) {
++                drop[i] = 1;
++                continue;
++            }
++            auto& t = live[op.image];
++            if (t.lastUpdate >= 0) {
++                drop[static_cast<size_t>(t.lastUpdate)] = 1;
++            } else if (t.create >= 0 && !ops[static_cast<size_t>(t.create)].data.empty()) {
++                auto& create = ops[static_cast<size_t>(t.create)];
++                result.droppedBytes += create.data.size();
++                std::vector<unsigned char>().swap(create.data);
++            }
++            t.lastUpdate = static_cast<long>(i);
++            continue;
++        }
++        if (op.kind == Kind::Delete) {
++            auto const it = live.find(op.image);
++            if (it == live.end())
++                continue;
++            if (it->second.lastUpdate >= 0)
++                drop[static_cast<size_t>(it->second.lastUpdate)] = 1;
++            if (it->second.create >= 0) {
++                drop[static_cast<size_t>(it->second.create)] = 1;
++                drop[i] = 1;
++                result.orphanedImages.push_back(op.image);
++            }
++            live.erase(it);
++        }
++    }
++
++    size_t kept = 0;
++    for (size_t i = 0; i < ops.size(); ++i) {
++        if (drop[i]) {
++            ++result.droppedOps;
++            result.droppedBytes += resourceOpBytes(ops[i]);
++            continue;
++        }
++        if (kept != i)
++            ops[kept] = std::move(ops[i]);
++        ++kept;
++    }
++    ops.erase(ops.begin() + static_cast<std::ptrdiff_t>(kept), ops.end());
++    return result;
++}
++
+ void* createFramebuffer(NVGcontext* c, int width, int height, int imageFlags);
+ void deleteFramebuffer(NVGcontext* c, void* framebuffer);
+ void bindFramebuffer(NVGcontext* c, void* framebuffer);
+-- 
+2.34.1
+
