@@ -2,7 +2,7 @@
 // Pd-free (Source/Mcp/McpWidgetCall.h and McpWidgetCallJson.h). `/pd/widget_call <corrId> <widget> <paddr|-> <argc> <atoms...>`
 // binds a collector to the widget's state name for the length of ONE call, sends the atoms to the widget's in-name and answers the
 // frames the widget sent back, cut into sets at each `end`:
-//  - the floor: the first word (after an optional `to <paddr>`) is dump, ghost, ghostname or unghost; anything else is refused
+//  - the floor: the first word (after an optional `to <paddr>`) is dump, ghost, ghostn, ghostname or unghost; anything else is refused
 //    here (do, clear, flow, beat, ...), the address is `p` and 1..16 lower-case hex digits, nothing else gets through;
 //  - the log: at most 64 frames of at most 32 atoms (the 65th frame and the 33rd atom are cut and flagged `truncated`); a symbol
 //    longer than the room is cut and flagged too; the storage is fixed (nothing is allocated while the collector is bound);
@@ -90,10 +90,10 @@ void addressesAndWords()
     CHECK(!mcp::widgetCallAddrOk("p55d0;"));
     CHECK(!mcp::widgetCallAddrOk("p-1"));
 
-    for (char const* w : { "dump", "ghost", "ghostname", "unghost" })
+    for (char const* w : { "dump", "ghost", "ghostn", "ghostname", "unghost" })
         CHECK(mcp::widgetCallWordOk(w));
     for (char const* w : { "do", "clear", "flow", "beat", "drive", "undo", "back", "reload", "tempo", "set", "float", "list", "to", "askable", "ask",
-                           "focused", "Dump", "dump ", "", "ghosts", "ghostnames", "feel", "save", "load" })
+                           "focused", "Dump", "dump ", "", "ghosts", "ghostnames", "ghostnx", "Ghostn", "mode", "hold", "feel", "save", "load" })
         CHECK(!mcp::widgetCallWordOk(w));
     CHECK(!mcp::widgetCallWordOk(nullptr));
 }

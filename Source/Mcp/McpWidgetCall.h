@@ -14,7 +14,7 @@
 // unbound again and the frames it caught are the answer. The collector exists only inside the call: the audio thread never reaches it.
 //
 // This file holds what needs no Pd and no allocation:
-//   - the floor: the first word of the message (after an optional `to <paddr>`) is one of dump, ghost, ghostname, unghost. Anything
+//   - the floor: the first word of the message (after an optional `to <paddr>`) is one of dump, ghost, ghostn (ai-midi's note answer, 2026-11-24), ghostname, unghost. Anything
 //     else (do, clear, flow, beat, ...) is refused here, in C++, whatever the server's own checks say. The address is `p` and 1..16
 //     lower-case hex digits, the way a widget writes its object's address;
 //   - the log: fixed storage for at most 64 frames of at most 32 atoms (the control window's numbers). Recording never locks, never
@@ -60,8 +60,8 @@ inline bool widgetCallAddrOk(char const* s)
 inline bool widgetCallWordOk(char const* word)
 {
     if (!word) return false;
-    return std::strcmp(word, "dump") == 0 || std::strcmp(word, "ghost") == 0 || std::strcmp(word, "ghostname") == 0
-        || std::strcmp(word, "unghost") == 0;
+    return std::strcmp(word, "dump") == 0 || std::strcmp(word, "ghost") == 0 || std::strcmp(word, "ghostn") == 0
+        || std::strcmp(word, "ghostname") == 0 || std::strcmp(word, "unghost") == 0;
 }
 
 // One atom of the request as the handler read it from the OSC message (a number, or a word kept by the caller for the length of the call).
@@ -83,7 +83,7 @@ inline char const* widgetCallRefusalText(WidgetCallRefusal r)
     case WidgetCallRefusal::BadAtom: return "an atom is not allowed (a number must be finite, a word is 1 to 47 bytes of printable characters)";
     case WidgetCallRefusal::BadAddress: return "the address is not p and 1 to 16 lower-case hex digits";
     case WidgetCallRefusal::AddressTwice: return "the address is given twice (as the address argument and as `to <paddr>` in the message)";
-    case WidgetCallRefusal::Word: return "not an allowed widget word (only dump, ghost, ghostname, unghost)";
+    case WidgetCallRefusal::Word: return "not an allowed widget word (only dump, ghost, ghostn, ghostname, unghost)";
     }
     return "refused";
 }
