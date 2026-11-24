@@ -1,0 +1,15 @@
+#N canvas 100 100 560 380 12;
+#X text 20 10 A/B 2: the quarantined gen-euclid (copy gen-euclid.pd_lua next to this patch) with its own clock;
+#X obj 20 50 loadbang;
+#X msg 20 80 bpm 110 \, start;
+#X obj 20 120 gen-euclid 5 8 2;
+#X obj 20 160 t b;
+#X obj 20 200 bng 25 250 50 0 empty empty empty 0 -8 0 10 #fcfcfc #000000 #000000;
+#X floatatom 160 200 5 0 0 0 - - - 0;
+#X connect 1 0 2 0;
+#X connect 2 0 3 0;
+#X connect 3 0 4 0;
+#X connect 4 0 5 0;
+#X connect 3 1 6 0;
+#X msg 300 80 \; pd dsp 1;
+#X connect 1 0 7 0;
