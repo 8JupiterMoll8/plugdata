@@ -1,0 +1,12 @@
+#N canvas 100 100 560 380 12;
+#X text 40 20 LEAK TEST step 1 - gen-euclid alone - no sound;
+#X obj 40 80 gen-euclid 5 16 0;
+#X msg 160 50 stop;
+#X connect 2 0 1 0;
+#X text 300 20 A/B 4: the three boxes of the 15:49 incident run (nothing on the outlets). The MCP started it with set[] bpm 110 + start. This file starts it by loadbang instead.;
+#X obj 300 100 loadbang;
+#X msg 300 130 bpm 110 \, start;
+#X connect 4 0 5 0;
+#X connect 5 0 1 0;
+#X msg 300 170 \; pd dsp 1;
+#X connect 4 0 6 0;

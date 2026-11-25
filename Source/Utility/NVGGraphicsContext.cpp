@@ -351,12 +351,22 @@ void NVGGraphicsContext::clipToImageAlpha(Image const& sourceImage, AffineTransf
         }
 
         Image::BitmapData const bitmapData(singleChannelImage, Image::BitmapData::readOnly);
-        auto const* pixelData = bitmapData.data;
 
         // Create a new Nanovg image from the bitmap data
         int const width = singleChannelImage.getWidth();
         int const height = singleChannelImage.getHeight();
-        auto const image = nanovg::nvgCreateImageARGB_sRGB(nvg, width, height, 0, pixelData);
+        // MCP-CARRIED(host-leak): the ARGB upload reads width*height*4 bytes; the single-channel bitmap has one byte per
+        // pixel (and its own line stride). Expand the alpha into premultiplied white instead of reading past its end.
+        std::vector<uint8> argbPixels(static_cast<size_t>(width) * static_cast<size_t>(height) * 4u);
+        for (int y = 0; y < height; ++y) {
+            auto const* line = bitmapData.getLinePointer(y);
+            auto* out = argbPixels.data() + static_cast<size_t>(y) * static_cast<size_t>(width) * 4u;
+            for (int x = 0; x < width; ++x) {
+                auto const a = line[static_cast<size_t>(x) * static_cast<size_t>(bitmapData.pixelStride)];
+                out[4 * x] = out[4 * x + 1] = out[4 * x + 2] = out[4 * x + 3] = a;
+            }
+        }
+        auto const image = nanovg::nvgCreateImageARGB_sRGB(nvg, width, height, 0, argbPixels.data());
         auto const paint = nanovg::nvgImagePattern(nvg, 0, 0, width, height, 0, image, 1);
 
         nanovg::nvgSave(nvg);

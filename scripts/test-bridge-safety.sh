@@ -8,6 +8,10 @@ for t in bridge_safety_test handoff_test json_escape_test identity_rename_test i
   "${CXX:-g++}" -std=c++17 -Wall -Wextra -Werror -pthread -o "$out/$t" "$root/Tests/mcp/$t.cpp"
   "$out/$t"
 done
+# Host leak 2026-11-24: the nanovg async resource backlog compaction (header-only, C++20 like the submodule; needs
+# Libraries/nanovg checked out with patches/submodules/nanovg applied: scripts/apply-submodule-patches.sh).
+"${CXX:-g++}" -std=c++20 -Wall -Wextra -Werror -pthread -o "$out/nvg_backlog_test" "$root/Tests/mcp/nvg_backlog_test.cpp"
+"$out/nvg_backlog_test"
 # P9 output ceiling: once more at the Release flags (-O3 -DNDEBUG), so the non-finite check is proven optimised too.
 "${CXX:-g++}" -std=c++17 -Wall -Wextra -Werror -pthread -O3 -DNDEBUG -o "$out/output_ceiling_test_release" "$root/Tests/mcp/output_ceiling_test.cpp"
 "$out/output_ceiling_test_release"

@@ -145,6 +145,12 @@ public:
 
     static StringArray wrapTextLikePd(String const& text, int charWidth)
     {
+        // MCP-CARRIED(host-leak): te_width is a signed short that a patch file sets without a check ("#X text 10 10 hi, f -3;").
+        // With a width below 1 the split loop below never shortens `remaining` (substring(negative) is the whole string)
+        // and adds an empty line per turn: the message thread hangs and the array grows ~400 MB/s until the OOM killer.
+        if (charWidth < 1)
+            return StringArray::fromLines(text);
+
         StringArray result;
         auto lines = StringArray::fromLines(text);
         for (auto const& line : lines) {

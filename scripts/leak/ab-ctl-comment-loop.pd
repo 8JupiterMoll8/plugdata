@@ -1,0 +1,2 @@
+#N canvas 100 100 560 220 12;
+#X text 40 20 POSITIVE CONTROL for the tools. This comment has width -3. Before the fix its wrap loop never returns: the main thread hangs and RSS climbs about 400 MB per second. After the fix the patch just opens., f -3;

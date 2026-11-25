@@ -1,0 +1,5 @@
+#N canvas 100 100 420 200 12;
+#X text 20 20 A/B 0: idle baseline (nothing runs);
+#X obj 20 60 loadbang;
+#X msg 20 90 \; pd dsp 1;
+#X connect 1 0 2 0;
