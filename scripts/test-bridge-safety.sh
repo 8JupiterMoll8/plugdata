@@ -10,7 +10,18 @@ for t in bridge_safety_test handoff_test json_escape_test identity_rename_test i
 done
 # Host leak 2026-11-24: the nanovg async resource backlog compaction (header-only, C++20 like the submodule; needs
 # Libraries/nanovg checked out with patches/submodules/nanovg applied: scripts/apply-submodule-patches.sh).
-"${CXX:-g++}" -std=c++20 -Wall -Wextra -Werror -pthread -o "$out/nvg_backlog_test" "$root/Tests/mcp/nvg_backlog_test.cpp"
+# nvg_backlog_test includes the PATCHED nanovg_async.h by a relative path. A fork checkout without the nanovg submodule
+# (the usual case: the build clone holds it) gets a temp tree: the build clone's nanovg at the pinned commit + our patch.
+nvg_src="$root/Tests/mcp/nvg_backlog_test.cpp"
+if [ ! -f "$root/Libraries/nanovg/src/nanovg_async.h" ]; then
+  clone="${PLUGDATA_BUILD_CLONE:-$root/../plugdata-p31-build}"
+  t="$out/nvgtree"; mkdir -p "$t/Tests/mcp" "$t/Libraries"
+  git -C "$clone/Libraries/nanovg" archive --format=tar --prefix=nanovg/ ca35e13d8635334d6752af6b4e015439e5221d4a | tar -x -C "$t/Libraries"
+  (cd "$t/Libraries/nanovg" && git init -q . && git apply "$root"/patches/submodules/nanovg/0001-*.patch)
+  cp "$nvg_src" "$t/Tests/mcp/"
+  nvg_src="$t/Tests/mcp/nvg_backlog_test.cpp"
+fi
+"${CXX:-g++}" -std=c++20 -Wall -Wextra -Werror -pthread -o "$out/nvg_backlog_test" "$nvg_src"
 "$out/nvg_backlog_test"
 # P9 output ceiling: once more at the Release flags (-O3 -DNDEBUG), so the non-finite check is proven optimised too.
 "${CXX:-g++}" -std=c++17 -Wall -Wextra -Werror -pthread -O3 -DNDEBUG -o "$out/output_ceiling_test_release" "$root/Tests/mcp/output_ceiling_test.cpp"
