@@ -86,6 +86,19 @@ void luaChildNames()
     CHECK(!mcp::isWidgetObjectName(nullptr, "ai.dice"));
 }
 
+void targetCarriesTheDock()
+{
+    // the pill's target holds what the chip's focus word asked for; it never changes who the target is
+    mcp::WidgetPillTarget t;
+    CHECK(!t.valid() && !t.dock.docked && !t.dock.hasSubject());
+    t.widget = "ai.midi5";
+    t.luaPtr = 0x55d0;
+    CHECK(t.valid() && !t.dock.docked);
+    t.dock.docked = true;
+    t.dock.w = 432;
+    CHECK(t.valid() && t.dock.docked && t.dock.w == 432);
+}
+
 } // namespace
 
 int main()
@@ -93,6 +106,7 @@ int main()
     enterAndEscape();
     boxNames();
     luaChildNames();
+    targetCarriesTheDock();
     if (failures) {
         std::printf("widget_focus_test: %d failure(s)\n", failures);
         return 1;

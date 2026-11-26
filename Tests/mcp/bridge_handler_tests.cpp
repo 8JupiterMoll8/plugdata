@@ -2615,6 +2615,7 @@ struct Call {
     t_gobj* box = nullptr;
     std::string widget;
     std::uint64_t ptr = 0;
+    mcp::PillDock dock; // the docked pill's strip and subject the focus word carried (docked = false: the old pill)
 };
 std::mutex lock;
 std::vector<Call> calls;
@@ -2749,7 +2750,7 @@ void runWidgetFocusCases(Harness& h, PluginProcessor& processor, MCPBridge& brid
     // Both stand-ins are set while no focus is pending and read only by the pump (the message thread) while one is.
     bridge.setWidgetFocusSinkForTests([](t_canvas* cnv, t_gobj* box, mcp::WidgetPillTarget const& target) {
         std::lock_guard<std::mutex> g(lock);
-        calls.push_back({ cnv, box, target.widget, target.luaPtr });
+        calls.push_back({ cnv, box, target.widget, target.luaPtr, target.dock });
         if (refuse) return false;
         if (refusedFirst > 0) { --refusedFirst; return false; }
         return true;
@@ -2781,6 +2782,35 @@ void runWidgetFocusCases(Harness& h, PluginProcessor& processor, MCPBridge& brid
     {
         auto const c = callsNow();
         CHECK(c.size() == 1 && c[0].box == boxA);
+    }
+
+    // 1c. The docked pill's tail (McpPillDock.h): `<x> <y> <w> <h> subject <text...>` after the pointer reaches the GUI inside the target (the
+    //     strip rect in widget pixels and the first chip's words, Pd's own atoms: 3 is a float, notes a symbol). A tail whose rect is out of
+    //     range leaves the old pill and drops the subject with it; the focus itself still goes through, and the widget is told `focused` as before.
+    sleepMs(350);
+    clearAll();
+    sendToAiAsk(host, &s_list, { symAtom("focus"), symAtom("ai.knob"), numAtom(6), symAtom(hexOf(boxA).c_str()), numAtom(14), numAtom(293), numAtom(432), numAtom(24),
+        symAtom("subject"), numAtom(3), symAtom("notes") });
+    CHECK(waitFor([] { return !callsNow().empty() && !seenNow().empty(); }, 3000));
+    {
+        auto const c = callsNow();
+        CHECK(c.size() == 1);
+        if (c.size() == 1) {
+            CHECK(c[0].box == boxA && c[0].dock.docked && c[0].dock.x == 14 && c[0].dock.y == 293 && c[0].dock.w == 432 && c[0].dock.h == 24);
+            CHECK(std::strcmp(c[0].dock.subject, "3 notes") == 0);
+        }
+        CHECK(seenNow().size() == 1 && seenNow()[0] == "list focused " + hexOf(boxA));
+    }
+    sleepMs(350);
+    clearAll();
+    sendToAiAsk(host, &s_list, { symAtom("focus"), symAtom("ai.knob"), numAtom(6), symAtom(hexOf(boxA).c_str()), numAtom(14), numAtom(293), numAtom(5), numAtom(24),
+        symAtom("subject"), symAtom("3 notes") });
+    CHECK(waitFor([] { return !callsNow().empty() && !seenNow().empty(); }, 3000));
+    {
+        auto const c = callsNow();
+        CHECK(c.size() == 1);
+        if (c.size() == 1)
+            CHECK(c[0].box == boxA && !c[0].dock.docked && !c[0].dock.hasSubject());
     }
 
     // 2. No view takes it: every candidate is offered, nothing is told to the widget.

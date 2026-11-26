@@ -217,6 +217,48 @@ void askCarriesItsAddress()
     CHECK(!q.pop(e));
 }
 
+// The focus word may carry the docked pill's strip and subject (`... <ptr> <x> <y> <w> <h> subject <text...>`, McpPillDock.h): the receiver
+// parses them, the queue keeps them for the Focus kind only and the pump hands them to the pill. Nothing of it reaches the server.
+void focusCarriesTheDock()
+{
+    WidgetAskQueue q;
+    mcp::WidgetAskEvent e;
+    mcp::PillDock dock;
+    dock.docked = true;
+    dock.x = 14;
+    dock.y = 293;
+    dock.w = 432;
+    dock.h = 24;
+    std::strcpy(dock.subject, "3 notes");
+    CHECK(q.offer(WidgetAskKind::Focus, "ai.midi5", 4, 1000, 0x55d0ULL, nullptr, &dock) == WidgetAskOutcome::Queued);
+    CHECK(q.pop(e) && e.kind == WidgetAskKind::Focus && e.ptr == 0x55d0ULL);
+    CHECK(e.dock.docked && e.dock.x == 14 && e.dock.y == 293 && e.dock.w == 432 && e.dock.h == 24);
+    CHECK(std::strcmp(e.dock.subject, "3 notes") == 0);
+    // a focus without a dock (an older widget) is the old focus: not docked, no subject, and the slot holds nothing of the one before
+    CHECK(q.offer(WidgetAskKind::Focus, "ai.midi5", 4, 5000, 0x55d0ULL) == WidgetAskOutcome::Queued);
+    CHECK(q.pop(e) && !e.dock.docked && !e.dock.hasSubject() && e.dock.w == 0);
+    // a dock that did not parse (docked = false) is the same as none
+    mcp::PillDock none;
+    CHECK(q.offer(WidgetAskKind::Focus, "ai.knob", 1, 9000, 0x10ULL, nullptr, &none) == WidgetAskOutcome::Queued);
+    CHECK(q.pop(e) && !e.dock.docked);
+    // an ask or a hello given a dock keeps none (the pump never reads one for them)
+    CHECK(q.offer(WidgetAskKind::Ask, "ai.tap", 2, 12000, 0, nullptr, &dock) == WidgetAskOutcome::Queued);
+    CHECK(q.pop(e) && e.kind == WidgetAskKind::Ask && !e.dock.docked);
+    CHECK(q.offer(WidgetAskKind::Hello, "ai.dice", 0, 12000, 0, nullptr, &dock) == WidgetAskOutcome::Queued);
+    CHECK(q.pop(e) && e.kind == WidgetAskKind::Hello && !e.dock.docked);
+    // a dock never changes the budget or the malformed rules of the focus
+    CHECK(q.offer(WidgetAskKind::Focus, "ai.midi5", 4, 20000, 0x77ULL, nullptr, &dock) == WidgetAskOutcome::Queued);
+    CHECK(q.offer(WidgetAskKind::Focus, "ai.midi5", 4, 20000 + mcp::kWidgetFocusMinGapMs - 1, 0x77ULL, nullptr, &dock) == WidgetAskOutcome::RateLimited);
+    CHECK(q.offer(WidgetAskKind::Focus, "ai.midi5", 4, 30000, 0, nullptr, &dock) == WidgetAskOutcome::Malformed);
+    // the subject is bounded by the type: whatever the parser left, the event copy never overruns
+    mcp::PillDock wide = dock;
+    std::memset(wide.subject, 'x', mcp::kPillSubjectChars);
+    wide.subject[mcp::kPillSubjectChars] = 0;
+    while (q.pop(e)) { }
+    CHECK(q.offer(WidgetAskKind::Focus, "ai.midi5", 4, 40000, 0x78ULL, nullptr, &wide) == WidgetAskOutcome::Queued);
+    CHECK(q.pop(e) && static_cast<int>(std::strlen(e.dock.subject)) == mcp::kPillSubjectChars);
+}
+
 void focusPtrText()
 {
     std::uint64_t v = 1;
@@ -284,6 +326,7 @@ int main()
     inName();
     focusKind();
     askCarriesItsAddress();
+    focusCarriesTheDock();
     focusPtrText();
     producerConsumerThreads();
     if (failures) {
