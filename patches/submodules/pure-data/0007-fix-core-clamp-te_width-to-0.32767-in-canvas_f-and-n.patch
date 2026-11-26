@@ -1,0 +1,56 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Alphi <alphi@starchaser.local>
+Date: Thu, 26 Nov 2026 13:49:45 +0100
+Subject: [PATCH] fix(core): clamp te_width to 0..32767 in canvas_f, and never
+ report a negative width from rtext_charwidth
+
+The "#X f <n>" line of a patch file reaches canvas_f, which stored atom_getfloatarg(0) into the signed short te_width
+unchecked. "f -3" (or "f 40000", which wraps) left a negative width. rtext_formattext (g_rtext.c) takes
+widthlimit_c = rtext_charwidth(x) as the line length: a negative value makes maxindex_c and maxindex_b negative and the
+strncpy that copies the line gets a negative (huge) length: heap overrun, "malloc(): corrupted top size", about 11 s
+after the patch opened (the host leak review's patch ab-ctl-comment-loop.pd). The atom path (g_text.c) already clamps
+its width.
+
+canvas_f: negative or NaN -> 0 (auto width), above SHRT_MAX -> 32767. rtext_charwidth: a negative te_width (set by any
+other writer) reads as 0. Valid widths (0..32767) are unchanged.
+
+Depended on by: the fork's CommentObject / TextObject width handling and every patch with a "f" line on a text, comment
+or object box. Drop it only when upstream Pd clamps te_width in canvas_f itself.
+---
+ src/g_canvas.c | 6 +++++-
+ src/g_rtext.c  | 2 +-
+ 2 files changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/src/g_canvas.c b/src/g_canvas.c
+index 56ebeb6..0a14535 100644
+--- a/src/g_canvas.c
++++ b/src/g_canvas.c
+@@ -2076,7 +2076,11 @@ static void canvas_f(t_canvas *x, t_symbol *s, int argc, t_atom *argv)
+         ;
+     if ((ob = pd_checkobject(&g->g_pd)))
+     {
+-        ob->te_width = atom_getfloatarg(0, argc, argv);
++            /* te_width is a signed short: "f -3" or "f 40000" in a patch file
++            must not leave it negative (rtext_formattext would then take a
++            negative line length and overrun its buffer). 0 means auto. */
++        t_float width = atom_getfloatarg(0, argc, argv);
++        ob->te_width = (width >= 0 ? (width > 32767 ? 32767 : width) : 0);
+         if (glist_isvisible(x))
+         {
+             gobj_vis(g, x, 0);
+diff --git a/src/g_rtext.c b/src/g_rtext.c
+index 3730941..21ce0d2 100644
+--- a/src/g_rtext.c
++++ b/src/g_rtext.c
+@@ -203,7 +203,7 @@ static void rtext_findscreenlocation(t_rtext *x)
+ int rtext_charwidth(t_rtext *x)
+ {
+     if (x->x_text)
+-        return (x->x_text->te_width);
++        return (x->x_text->te_width < 0 ? 0 : x->x_text->te_width);
+     else return (0); /* LATER do we want a width field for drawtext obj? */
+ }
+ 
+-- 
+2.34.1
+
