@@ -105,7 +105,7 @@ bool MCPBridge::widgetAskBound() const
     return widgetAsk && widgetAsk->receiver != nullptr;
 }
 
-bool MCPBridge::focusWidgetPill(std::string const& widget, std::uint64_t ptr)
+bool MCPBridge::focusWidgetPill(std::string const& widget, std::uint64_t ptr, mcp::PillDock const& dock)
 {
     if (!processor || !widgetAsk || ptr == 0) return false;
     std::vector<McpFocusLink> chain;
@@ -116,6 +116,7 @@ bool MCPBridge::focusWidgetPill(std::string const& widget, std::uint64_t ptr)
     mcp::WidgetPillTarget target;
     target.widget = widget;
     target.luaPtr = ptr;
+    target.dock = dock;
     // Innermost first: the canvas that holds the widget shows it when the artist opened it; else the box that holds that canvas on the
     // canvas the artist sees. The links are only compared with what the views hold (a box may be gone by now).
     for (auto const& link : chain) {
@@ -169,6 +170,7 @@ void MCPBridge::pumpWidgetAsks()
         pending.widget = e.widget;
         pending.ptr = e.ptr;
         pending.sinceMs = mcpAskNowMs();
+        pending.dock = e.dock;
     }
     if (widgetAsk->pendingFocus.active) {
         auto& pending = widgetAsk->pendingFocus;
@@ -179,8 +181,9 @@ void MCPBridge::pumpWidgetAsks()
         } else if (!held) {
             auto const widget = pending.widget;
             auto const ptr = pending.ptr;
+            auto const dock = pending.dock;
             pending = {};
-            focusWidgetPill(widget, ptr);
+            focusWidgetPill(widget, ptr, dock);
         }
     }
     if (!events.empty()) {

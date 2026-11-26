@@ -15,6 +15,9 @@
 //   ai-ask focus <widget> <rev> <ptr>    the widget's chip ("AI..."): select THIS widget, open the selection pill (the artist then
 //                                        types, or presses Enter on nothing = complete it). ptr = the sending pd-lua object's
 //                                        address as hex text; the fork only compares it with the boxes of the open patches.
+//   ai-ask focus <widget> <rev> <ptr> <x> <y> <w> <h> [subject <text...>]
+//                                        the same, and the pill opens DOCKED in that widget-local strip (unzoomed px) with the subject as its
+//                                        first chip (McpPillDock.h). A tail that does not parse = the old floating pill.
 // is parsed by the receiver and handed to WidgetAskQueue::offer. The receiver runs wherever Pd dispatches (the audio
 // thread too), always under the Pd lock: offer never locks, never allocates and never calls JUCE; one offer runs at a
 // time (the Pd lock). The bridge's message-thread pump pops the events and sends /pd/widget_ask.
@@ -26,6 +29,8 @@
 // (full = dropped and counted).
 
 #pragma once
+
+#include "McpPillDock.h"
 
 #include <atomic>
 #include <cmath>
@@ -52,6 +57,7 @@ struct WidgetAskEvent {
     WidgetAskKind kind = WidgetAskKind::Ask;
     int rev = 0;
     std::uint64_t ptr = 0; // Focus only: the address of the pd-lua object that sent it
+    PillDock dock;         // Focus only: the strip the pill docks in and its subject chip (docked = false: the old floating pill)
     char widget[kWidgetAskNameLen + 1] = {};
     char addr[kWidgetAskAddrChars + 1] = {}; // Ask only: the asking object's address as text (`p` + hex), empty when the widget sent none
 };
@@ -126,7 +132,9 @@ class WidgetAskQueue {
 public:
     // `ptr`: the Focus kind's pointer (a focus without one names no object); the other kinds keep none.
     // `addr`: the Ask kind's instance address as the receiver checked it (widgetCallAddrOk), or null; the other kinds keep none. Cut at kWidgetAskAddrChars, never overrun.
-    WidgetAskOutcome offer(WidgetAskKind kind, char const* widget, double rev, std::int64_t nowMs, std::uint64_t ptr = 0, char const* addr = nullptr)
+    // `dock`: the Focus kind's docked-pill strip and subject as pillDockParse made them, or null (= the old pill); the other kinds keep none.
+    WidgetAskOutcome offer(WidgetAskKind kind, char const* widget, double rev, std::int64_t nowMs, std::uint64_t ptr = 0, char const* addr = nullptr,
+        PillDock const* dock = nullptr)
     {
         bool const wantsRev = kind == WidgetAskKind::Ask || kind == WidgetAskKind::Focus;
         if (!widgetAskNameOk(widget) || (wantsRev && !widgetAskRevOk(rev)) || (kind == WidgetAskKind::Focus && ptr == 0)) {
@@ -152,6 +160,7 @@ public:
         e.ptr = kind == WidgetAskKind::Focus ? ptr : 0;
         copyName(e.widget, widget);
         copyAddr(e.addr, kind == WidgetAskKind::Ask ? addr : nullptr);
+        copyDock(e.dock, kind == WidgetAskKind::Focus ? dock : nullptr);
         writeIndex.store(head + 1, std::memory_order_release);
 
         if (!slot) slot = claimRateSlot();
@@ -229,6 +238,22 @@ private:
             for (; src[i] && i < static_cast<std::size_t>(kWidgetAskAddrChars); ++i)
                 dst[i] = src[i];
         dst[i] = 0;
+    }
+
+    // The dock (null = none) into the event's slot: field by field, the subject bounded and terminated. No printf on the dispatch path.
+    static void copyDock(PillDock& dst, PillDock const* src)
+    {
+        dst = PillDock {};
+        if (!src || !src->docked) return;
+        dst.docked = true;
+        dst.x = src->x;
+        dst.y = src->y;
+        dst.w = src->w;
+        dst.h = src->h;
+        std::size_t i = 0;
+        for (; src->subject[i] && i < static_cast<std::size_t>(kPillSubjectChars); ++i)
+            dst.subject[i] = src->subject[i];
+        dst.subject[i] = 0;
     }
 
     WidgetAskEvent slots[kWidgetAskQueueSlots];

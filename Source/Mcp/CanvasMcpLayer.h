@@ -266,6 +266,24 @@ public:
         struct _gobj* box = nullptr; // compared only
         mcp::WidgetPillTarget target;
     } mcpWidgetFocus;
+    // The docked pill (night/pill-docked, McpPillDock.h): when the widget's chip sent a strip rect, the pill opens INSIDE that strip of the
+    // widget (white, fully rounded, a dot, the subject chip, then her words), follows the widget on scroll / zoom (the canvas transform) and
+    // on a move (followDockedPill), and grows DOWNWARD when the words wrap (the field is a wrapping column right of the chips), shrinking
+    // back as the text goes. The floating pill is untouched (and has no lane chip / send arrow here: Enter sends).
+    //  - dockedPillTarget: the widget box and its dock when the pill is docked on exactly the one box the chip focused, else false.
+    //  - setPillFieldDocked: the field's mode (wrapping + font) follows the layout; true = docked.
+    //  - layoutDockedPill: frame (mcpSelectionPillFrame) and the field's bounds from the box's place and the wrapped text. True when they changed.
+    //  - relayoutDockedPill: that, from the current selection; a repaint when something moved (text change, a move, the animator).
+    //  - followDockedPill: called from paint: a docked pill whose widget moved is re-laid out right after the frame (async, never inside the render).
+    bool dockedPillTarget(SmallArray<Object*> const& selected, Object*& box, mcp::PillDock& dock) const;
+    void setPillFieldDocked(bool docked);
+    bool layoutDockedPill(Object const& box, mcp::PillDock const& dock);
+    void relayoutDockedPill();
+    void followDockedPill();
+    bool mcpPillDocked = false;             // the field is in its docked mode (wrapping, 12 px) and the frame is the docked one
+    bool mcpPillFollowPending = false;      // a followDockedPill is posted
+    juce::String mcpPillSubject;            // the docked pill's subject chip label ("" = no chip)
+    int mcpPillRowH = 0;                    // the strip's own height: the first row, where the dot and the chip sit centred
     // Enter = live (spawn), Shift+Enter = queue for chat. TextEditor only fires
     // onReturnKey for a PLAIN Return (Shift+Return fails its key comparison), so
     // a KeyListener catches the Shift variant before the editor swallows it.

@@ -599,15 +599,18 @@ bool CanvasMcpLayer::handleNoteClick(Point<int> canvasPt)
 
 
 
-            // The QUICK / DEEP chip (a little wider than it is drawn, so it is easy to hit)
-            if (pillLaneChipRect(panel).expanded(3, 6).contains(canvasPt)) {
-                togglePillLane();
-                return true;
-            }
-            // Right ~32px: ↵ Submit button
-            if (relX >= panel.getWidth() - 32) {
-                submitSelectionPill(false);
-                return true;
+            // The docked pill has no lane chip and no send arrow (Enter sends): a click in it only gives the field the keyboard.
+            if (!mcpPillDocked) {
+                // The QUICK / DEEP chip (a little wider than it is drawn, so it is easy to hit)
+                if (pillLaneChipRect(panel).expanded(3, 6).contains(canvasPt)) {
+                    togglePillLane();
+                    return true;
+                }
+                // Right ~32px: ↵ Submit button
+                if (relX >= panel.getWidth() - 32) {
+                    submitSelectionPill(false);
+                    return true;
+                }
             }
             // Middle: Text field focus!
             mcpSelectionPill->grabKeyboardFocus();

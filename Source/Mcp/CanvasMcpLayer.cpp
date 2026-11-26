@@ -15,6 +15,7 @@
 
 #include "Mcp/CanvasMcpLayer.h"
 #include "Mcp/CanvasMcpAiDraw.h"
+#include "Mcp/CanvasMcpPillDockDraw.h"
 #include "Canvas.h"
 #include "Object.h"
 #include "Connection.h"
@@ -368,7 +369,13 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
             }
         }
 
-        {
+        if (mcpPillDocked) {
+            // Docked in the widget's strip (McpPillDock.h): white, fully rounded, the dot and the subject chip. Drawing only.
+            followDockedPill();
+            NVGScopedState scopedDock(nvg);
+            nanovg::nvgTranslate(nvg, static_cast<float>(panel.getX()), static_cast<float>(panel.getY()));
+            mcpai::drawDockedPill(nvg, w, h, static_cast<float>(mcpPillRowH), mcpPillSubject, isVoiceRec ? voiceLvl : -1.0f);
+        } else {
             // The pill body (design round 2026-11-19, "the pill joins tonight"): cream paper, a 1 px ink frame, ink text, the
             // same look as the input field of the Copilot panel. Drawing only: the keys, the focus and the lanes are untouched.
             // (The ink-mood strip below is dead code, mcpPillSketchMode is never set; it keeps its dark panel.)
@@ -808,8 +815,8 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
             bool const caretBlink = ((juce::Time::getMillisecondCounter() / 530) % 2) == 0;
             if (caretBlink) {
                 NVGScopedState scopedCaret(nvg);
-                float const caretX = panel.getX() + (mcpPillSketchMode ? 96.0f : 38.0f);
-                float const caretY = panel.getY() + panel.getHeight() * 0.5f;
+                float const caretX = mcpPillDocked ? static_cast<float>(mcpSelectionPill->getX()) + 2.0f : panel.getX() + (mcpPillSketchMode ? 96.0f : 38.0f);
+                float const caretY = mcpPillDocked ? panel.getY() + static_cast<float>(mcpPillRowH) * 0.5f : panel.getY() + panel.getHeight() * 0.5f;
                 nanovg::nvgBeginPath(nvg);
                 nanovg::nvgMoveTo(nvg, caretX, caretY - 7.0f);
                 nanovg::nvgLineTo(nvg, caretX, caretY + 7.0f);
@@ -838,11 +845,17 @@ void CanvasMcpLayer::paintOverObjects(NVGcontext* nvg)
             } else if (mcpActiveLens.isNotEmpty()) {
                 hint = "[" + mcpActiveLens.toUpperCase() + "] Ask AI on selection...";
                 nanovg::nvgFillColor(nvg, mcpai::colour(mcp::aiGrey, mcpSelectionPill->hasKeyboardFocus(true) ? 0.6f : 1.0f));
+            } else if (mcpPillDocked) {
+                hint = "say it...";
+                nanovg::nvgFillColor(nvg, mcpai::colour(mcp::aiGrey, mcpSelectionPill->hasKeyboardFocus(true) ? 0.6f : 1.0f));
             } else {
                 hint = "Ask AI on selection... (Enter to mutate, Esc to cancel)";
                 nanovg::nvgFillColor(nvg, mcpai::colour(mcp::aiGrey, mcpSelectionPill->hasKeyboardFocus(true) ? 0.6f : 1.0f));
             }
-            mcpnvg::nvgText(nvg, panel.getX() + (mcpPillSketchMode ? 96.0f : 38.0f), panel.getY() + panel.getHeight() * 0.5f, hint.toRawUTF8(), nullptr);
+            if (mcpPillDocked)
+                mcpnvg::nvgText(nvg, static_cast<float>(mcpSelectionPill->getX()) + 2.0f, panel.getY() + static_cast<float>(mcpPillRowH) * 0.5f, hint.toRawUTF8(), nullptr);
+            else
+                mcpnvg::nvgText(nvg, panel.getX() + (mcpPillSketchMode ? 96.0f : 38.0f), panel.getY() + panel.getHeight() * 0.5f, hint.toRawUTF8(), nullptr);
         }
 
         {

@@ -16,10 +16,13 @@
 //   Enter on no text      "complete it": the selected widget is told `ask <ptr>` and asks as its chip did (`ai-ask <widget> <rev>`,
 //                         the existing /pd/widget_ask path, the note `complete <widget> (rev n)`)
 //   Escape                close, nothing sent
+// A chip may add `<x> <y> <w> <h> [subject <text...>]` to its focus word (McpPillDock.h): the pill then opens DOCKED in the widget's own strip,
+// with the subject as its first chip, and grows downward when the words wrap. Without them the pill floats under the selection as before.
 // A widget that hears no `focused` within a moment (an older fork, a canvas that cannot show the pill) asks at once, as before.
 
 #pragma once
 
+#include "McpPillDock.h"
 #include "McpWidgetState.h"
 
 #include <cstdint>
@@ -84,6 +87,7 @@ inline bool isWidgetObjectName(char const* name, char const* widget)
 struct WidgetPillTarget {
     std::string widget;
     std::uint64_t luaPtr = 0;
+    PillDock dock; // what the chip's focus word asked for: dock the pill in this widget-local strip, with this subject chip (docked = false: the floating pill)
     bool valid() const { return !widget.empty() && luaPtr != 0; }
 };
 

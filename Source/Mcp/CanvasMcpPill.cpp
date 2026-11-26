@@ -24,6 +24,8 @@
 #include "Pd/MCPBridge.h"
 #include "Mcp/McpHost.h"
 #include "Mcp/McpPillMotion.h"
+#include "Mcp/McpPillDock.h"
+#include "Mcp/CanvasMcpPillDockDraw.h"
 
 void CanvasMcpLayer::updateSelectionPill()
 {
@@ -83,6 +85,10 @@ void CanvasMcpLayer::updateSelectionPill()
     int editorW = 0;
 
     bool sketchStrip = false;
+    // The docked pill (McpPillDock.h): the chip of a widget asked for it, and the one selected box is that widget.
+    bool docked = false;
+    Object* dockBox = nullptr;
+    mcp::PillDock dock;
     if (sketchMode) {
         // Prefer the live ink bbox; fall back to the last one so the chisel stays
         // parked after [🗑 Clear]; fall back again to the fresh mood-palette click.
@@ -127,13 +133,23 @@ void CanvasMcpLayer::updateSelectionPill()
             return;
         }
 
-        pillW = 380 + pillLaneChipW; // the prompt field keeps its width; the QUICK / DEEP chip sits before the send arrow
-        pillH = 28;
-        // Position purely in CANVAS content coords (same space as obj->getBounds()).
-        pillX = bounds.getCentreX() - pillW / 2;
-        pillY = bounds.getBottom() + 10;
-        editorX = 30;
-        editorW = pillW - 30 - 32 - pillLaneChipW; // [⚡] ...prompt field... [QUICK|DEEP] [↵]
+        docked = dockedPillTarget(selectedObjects, dockBox, dock);
+        if (docked) {
+            // Docked in the widget's strip: the frame and the field are laid out below, once the field exists (it measures its own wrapped text).
+            auto const origin = dockBox->getBounds().reduced(Object::margin).getPosition();
+            pillX = origin.x + dock.x;
+            pillY = origin.y + dock.y;
+            pillW = dock.w;
+            pillH = dock.h;
+        } else {
+            pillW = 380 + pillLaneChipW; // the prompt field keeps its width; the QUICK / DEEP chip sits before the send arrow
+            pillH = 28;
+            // Position purely in CANVAS content coords (same space as obj->getBounds()).
+            pillX = bounds.getCentreX() - pillW / 2;
+            pillY = bounds.getBottom() + 10;
+            editorX = 30;
+            editorW = pillW - 30 - 32 - pillLaneChipW; // [⚡] ...prompt field... [QUICK|DEEP] [↵]
+        }
     }
 
     mcpSelectionPillFrame = juce::Rectangle<int>(pillX, pillY, pillW, pillH);
@@ -183,6 +199,7 @@ void CanvasMcpLayer::updateSelectionPill()
             dismissSelectionPill(); // Escape closes and sends nothing (and gives a widget chip's edit mode back)
         };
         mcpSelectionPill->onTextChange = [this] {
+            if (mcpPillDocked) relayoutDockedPill(); // the docked pill grows downward as the words wrap, and shrinks back
             repaintCanvasView();
         };
         mcpSelectionPill->onFocusLost = [this] {
@@ -198,7 +215,10 @@ void CanvasMcpLayer::updateSelectionPill()
     // edH = 30 gives generous headroom and descender room so text is never clipped at the bottom.
     int const edH = 30;
     int const edY = pillY + (pillH - edH) / 2;
-    if (sketchStrip) {
+    setPillFieldDocked(docked); // the field's mode and font follow the layout
+    if (docked) {
+        layoutDockedPill(*dockBox, dock); // frame + field bounds from the widget's place and the wrapped text
+    } else if (sketchStrip) {
         // Mood strip: no prompt field. Park the editor off-cells (still "visible"
         // so hiding it can't trigger a focus-loss dismiss).
         mcpSelectionPill->setBounds(pillX - 60, pillY, 1, 1);
@@ -272,6 +292,8 @@ bool CanvasMcpLayer::focusPillOn(Object* object, mcp::WidgetPillTarget const& ta
     mcpPillRequested = true;
     mcpPillDrawerMode = 0;
     mcpPaletteFrame = {};
+    // The focus is known before the pill is laid out: a chip that sent a strip gets the DOCKED pill (dockedPillTarget reads it).
+    mcpWidgetFocus = { true, wasLocked, wasPresentation, object->getPointer(), target };
     updateSelectionPill();
     if (!mcpSelectionPill || !mcpSelectionPill->isVisible()) {
         // nothing to type into: give the canvas its mode back, the widget asks at once (it hears no `focused`)
@@ -523,6 +545,7 @@ void CanvasMcpLayer::SelectionPillAnimator::timerCallback()
     // second while anything was selected). Alphi calm (McpPillMotion.h): and only while one of those moves, on a canvas
     // that is on screen; otherwise the timer drops to a slow look-in (a state check, no repaint).
     auto& layer = *canvas;
+    if (layer.mcpPillDocked) layer.relayoutDockedPill(); // the widget may have been moved: the docked pill goes with it
     mcp::PillAnimInput in;
     in.showing = layer.canvas.isShowing();
     in.moodStrip = layer.mcpPillSketchMode && layer.mcpCompletedStrokes.empty();
@@ -692,6 +715,107 @@ void CanvasMcpLayer::sendPillPrompt(const juce::String& prompt, bool queueForCha
         }
     }
     if (auto* br = canvas.pd->getMcp()->getMCPBridge()) br->sendSelectionPrompt(prompt, targetIds, queueForChat);
+}
+
+// ── The docked pill (McpPillDock.h, CanvasMcpPillDockDraw.h) ────────────────────────────────────────────────────────────
+
+namespace {
+constexpr float dockFieldFontPx = 12.0f;
+constexpr int dockFallbackLineH = 16; // before the field has measured its own line
+} // namespace
+
+bool CanvasMcpLayer::dockedPillTarget(SmallArray<Object*> const& selected, Object*& box, mcp::PillDock& dock) const
+{
+    if (!mcpWidgetFocus.active || !mcpWidgetFocus.target.dock.docked || selected.size() != 1 || !selected[0])
+        return false;
+    if (selected[0]->getPointer() != mcpWidgetFocus.box)
+        return false; // the artist selected something else: the pill is the plain one again
+    box = selected[0];
+    dock = mcpWidgetFocus.target.dock;
+    return true;
+}
+
+void CanvasMcpLayer::setPillFieldDocked(bool docked)
+{
+    if (!mcpSelectionPill || mcpPillDocked == docked)
+        return;
+    mcpPillDocked = docked;
+    // Docked: the field is a wrapping column right of the chips (the pill grows downward with it); the floating pill keeps its one line.
+    auto const font = juce::Font("Inter", docked ? dockFieldFontPx : 13.0f, juce::Font::plain);
+    mcpSelectionPill->setMultiLine(docked, docked);
+    mcpSelectionPill->setScrollbarsShown(!docked);
+    mcpSelectionPill->setReturnKeyStartsNewLine(false);
+    mcpSelectionPill->setFont(font);
+    mcpSelectionPill->applyFontToAllText(font);
+    mcpSelectionPill->setIndents(2, 0);
+}
+
+bool CanvasMcpLayer::layoutDockedPill(Object const& box, mcp::PillDock const& dock)
+{
+    if (!mcpSelectionPill)
+        return false;
+    mcpPillSubject = juce::String::fromUTF8(dock.subject);
+    mcpPillRowH = dock.h;
+    int chipsW = 0;
+    if (mcpPillSubject.isNotEmpty()) {
+        int const w = mcp::pillSubjectChipWidth(mcpai::dockSubjectTextWidth(mcpPillSubject));
+        chipsW = mcp::pillChipsWidth(1, &w);
+    }
+    // The widget's content origin: its component minus the object margin (where the widget's own pixels start), in the canvas's own
+    // coordinates; the canvas transform makes the zoom and the scroll.
+    auto const origin = box.getBounds().reduced(Object::margin).getPosition();
+    auto& field = *mcpSelectionPill;
+    // One line of the field's font, as the field itself measures it (the caret's height); the field's width first, so the text wraps as it will.
+    int const lineH = field.getCaretRectangleForCharIndex(0).getHeight() > 0 ? field.getCaretRectangleForCharIndex(0).getHeight() : dockFallbackLineH;
+    auto const first = mcp::pillDockLayout(origin.x, origin.y, dock, chipsW, lineH, lineH);
+    auto const before = field.getBounds();
+    field.setBounds(first.editor.x, first.editor.y, first.editor.w, first.editor.h);
+    int textH = 0;
+    if (field.getTotalNumChars() > 0)
+        textH = field.getCaretRectangleForCharIndex(field.getTotalNumChars()).getBottom() - field.getCaretRectangleForCharIndex(0).getY();
+    auto const l = mcp::pillDockLayout(origin.x, origin.y, dock, chipsW, textH, lineH);
+    field.setBounds(l.editor.x, l.editor.y, l.editor.w, l.editor.h);
+    auto const frame = juce::Rectangle<int>(l.frame.x, l.frame.y, l.frame.w, l.frame.h);
+    bool const changed = frame != mcpSelectionPillFrame || field.getBounds() != before;
+    mcpSelectionPillFrame = frame;
+    return changed;
+}
+
+void CanvasMcpLayer::relayoutDockedPill()
+{
+    if (!mcpPillDocked || !mcpSelectionPill || !mcpSelectionPill->isVisible())
+        return;
+    auto const selected = canvas.getSelectionOfType<Object>();
+    Object* box = nullptr;
+    mcp::PillDock dock;
+    if (!dockedPillTarget(selected, box, dock) || !box)
+        return;
+    if (layoutDockedPill(*box, dock))
+        repaintCanvasView();
+}
+
+// Paint-time check (message thread): a docked pill whose widget moved since the last layout is laid out again right after this frame. Never
+// inside the render: a layout sets component bounds.
+void CanvasMcpLayer::followDockedPill()
+{
+    if (!mcpPillDocked || mcpPillFollowPending || !mcpSelectionPill || !mcpSelectionPill->isVisible())
+        return;
+    auto const selected = canvas.getSelectionOfType<Object>();
+    Object* box = nullptr;
+    mcp::PillDock dock;
+    if (!dockedPillTarget(selected, box, dock))
+        return;
+    auto const origin = box->getBounds().reduced(Object::margin).getPosition();
+    if (origin.x + dock.x == mcpSelectionPillFrame.getX() && origin.y + dock.y == mcpSelectionPillFrame.getY())
+        return;
+    mcpPillFollowPending = true;
+    juce::MessageManager::callAsync([safe = juce::Component::SafePointer<Canvas>(&canvas)] {
+        if (!safe)
+            return;
+        auto& layer = safe->getMcpLayer();
+        layer.mcpPillFollowPending = false;
+        layer.relayoutDockedPill();
+    });
 }
 
 // ── The pill's answer line (McpPillAnswer.h) ─────────────────────────────────────────────────────────────────────────

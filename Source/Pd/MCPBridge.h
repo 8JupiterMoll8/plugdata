@@ -507,10 +507,11 @@ public:
     // The widget chip's shortcut to the selection pill (Source/Mcp/McpWidgetFocus.h), all on the message thread:
     //  - focusWidgetPill: the pd-lua object at `ptr` (what `ai-ask focus <widget> <rev> <ptr>` named) is found in the open patches, the first
     //    view that shows it (or the box that holds it) selects it and opens the pill, and the widget is told `focused <ptr>`. False: not found
-    //    or no view could take it (nothing is told: the widget then asks at once, as its chip did before the pill).
+    //    or no view could take it (nothing is told: the widget then asks at once, as its chip did before the pill). `dock` (the focus word's optional
+    //    `<x> <y> <w> <h> [subject <text...>]` tail, McpPillDock.h): the pill opens docked in that widget-local strip with the subject as its first chip.
     //  - widgetTargetOfBox: the askable ai.* widget a box is (or holds), with its pd-lua object's address; invalid when it is none.
     //  - askWidget: Enter on no text: the widget is told `ask <ptr>` and asks as its chip did (`ai-ask <widget> <rev>`). False: nobody listens.
-    bool focusWidgetPill(std::string const& widget, std::uint64_t ptr);
+    bool focusWidgetPill(std::string const& widget, std::uint64_t ptr, mcp::PillDock const& dock = {});
     mcp::WidgetPillTarget widgetTargetOfBox(t_gobj* box);
     bool askWidget(mcp::WidgetPillTarget const& target);
     // Tests: replaces the GUI in focusWidgetPill (empty = the real one).

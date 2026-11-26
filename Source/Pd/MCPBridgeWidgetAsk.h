@@ -10,9 +10,10 @@
 //
 //   ai-ask <widget> <rev> [<paddr>]  ->  /pd/widget_ask ask   <canvas> <widget> <rev> [<paddr>]   (the address of the asking object, `p` + hex, only when the widget sent a well-formed one)
 //   ai-ask hello <widget>    ->  /pd/widget_ask hello <canvas> <widget> 0
-//   ai-ask focus <widget> <rev> <ptr>  ->  no event for the server: the widget's chip "AI..." selects that widget on its canvas and opens the
+//   ai-ask focus <widget> <rev> <ptr> [<x> <y> <w> <h> [subject <text...>]]  ->  no event for the server: the widget's chip "AI..." selects that widget on its canvas and opens the
 //                            selection pill (MCPBridge::focusWidgetPill, MCPBridgeWidgetFocus.h; the pump below waits for the mouse button
 //                            to go up first). The ask itself comes later, from the pill: Enter on no text tells the widget `ask <ptr>`.
+//                            The optional tail docks the pill in the widget's strip with a subject chip (McpPillDock.h).
 // Anything after the rev is dropped (review M4: no free text from a patch into the AI's prompt), except an ask's address in the exact shape widgetCallAddrOk accepts.
 // <canvas> is the tab the widget sits in (mcpWidgetAskCanvases: found by the pump, the message names none), or
 // `main` (the focused tab) when it cannot be told.
@@ -52,6 +53,8 @@ inline std::int64_t mcpAskNowMs()
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
+inline constexpr int kMcpDockAtoms = 16; // atoms of a focus word's tail that are read: the rect, `subject` and the words a 24-character label can hold
+
 // `head` = the first word (a widget name, or "hello"); argv = the atoms after it.
 inline void mcpAskOffer(McpAskReceiver* x, t_symbol* head, int argc, t_atom* argv)
 {
@@ -69,7 +72,20 @@ inline void mcpAskOffer(McpAskReceiver* x, t_symbol* head, int argc, t_atom* arg
         double const rev = (argc >= 2 && argv[1].a_type == A_FLOAT) ? static_cast<double>(argv[1].a_w.w_float) : -1.0;
         std::uint64_t ptr = 0;
         if (argc >= 3 && argv[2].a_type == A_SYMBOL && argv[2].a_w.w_symbol) mcp::widgetFocusPtrParse(argv[2].a_w.w_symbol->s_name, ptr);
-        x->queue->offer(mcp::WidgetAskKind::Focus, widget, rev, now, ptr);
+        // the docked pill's tail after the pointer: <x> <y> <w> <h> [subject <text...>] (McpPillDock.h); one that does not parse leaves the old pill
+        mcp::DockAtom tail[kMcpDockAtoms];
+        int tailN = 0;
+        for (int i = 3; i < argc && tailN < kMcpDockAtoms; ++i, ++tailN) {
+            if (argv[i].a_type == A_FLOAT) {
+                tail[tailN].type = mcp::DockAtom::Type::Float;
+                tail[tailN].num = static_cast<double>(argv[i].a_w.w_float);
+            } else if (argv[i].a_type == A_SYMBOL && argv[i].a_w.w_symbol) {
+                tail[tailN].type = mcp::DockAtom::Type::Symbol;
+                tail[tailN].sym = argv[i].a_w.w_symbol->s_name;
+            }
+        }
+        mcp::PillDock const dock = mcp::pillDockParse(tailN, tail);
+        x->queue->offer(mcp::WidgetAskKind::Focus, widget, rev, now, ptr, nullptr, &dock);
         return;
     }
     double const rev = (argc >= 1 && argv[0].a_type == A_FLOAT) ? static_cast<double>(argv[0].a_w.w_float) : -1.0;
@@ -159,6 +175,7 @@ struct McpWidgetAskState {
         std::string widget;
         std::uint64_t ptr = 0;
         std::int64_t sinceMs = 0;
+        mcp::PillDock dock; // the strip and subject the chip asked for (docked = false: the floating pill)
     } pendingFocus;
     // Tests: stands in for the GUI (McpGuiHost::focusWidgetPill); it is told the canvas and box each candidate view would select.
     std::function<bool(t_canvas*, t_gobj*, mcp::WidgetPillTarget const&)> focusSinkForTests;
